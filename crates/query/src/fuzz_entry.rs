@@ -77,10 +77,7 @@ pub fn fuzz_query_expr(data: &[u8]) {
         return;
     };
 
-    let ctx = EvalContext {
-        now_ns: FUZZ_NOW_NS,
-        cancel: CancelToken::new(),
-    };
+    let ctx = EvalContext::new(FUZZ_NOW_NS, CancelToken::new());
     let schema = batch_all.schema();
     let text_cow = String::from_utf8_lossy(data);
     let text = text_cow.as_ref();
@@ -162,7 +159,14 @@ fn eval_and_check(expr: &Expr, batch: &Batch, ctx: &EvalContext) {
 
     let before = res.size();
     match eval_expr(expr, batch, ctx, Some(&mut res)) {
-        Ok(col) => assert_eq!(res.size(), before + col.memory_bytes()),
+        Ok(col) => {
+            let expected = if batch.columns().iter().any(|c| Arc::ptr_eq(c, &col)) {
+                0
+            } else {
+                col.memory_bytes()
+            };
+            assert_eq!(res.size(), before + expected);
+        }
         Err(_) => assert_eq!(res.size(), before),
     }
 
@@ -536,10 +540,7 @@ pub fn fuzz_sql(data: &[u8]) {
     let pool = GlobalPool::standalone(FUZZ_SQL_POOL_LIMIT);
     let ctx = ExecContext {
         pool: Arc::clone(&pool),
-        eval: EvalContext {
-            now_ns: FUZZ_NOW_NS,
-            cancel: CancelToken::new(),
-        },
+        eval: EvalContext::new(FUZZ_NOW_NS, CancelToken::new()),
         spill: Arc::clone(&env.spill),
         workers: Arc::clone(&env.workers),
         batch_size: 16,
@@ -943,10 +944,7 @@ pub(crate) mod tests {
         let pool = GlobalPool::standalone(FUZZ_SQL_POOL_LIMIT);
         let ctx = ExecContext {
             pool,
-            eval: EvalContext {
-                now_ns: FUZZ_NOW_NS,
-                cancel: CancelToken::new(),
-            },
+            eval: EvalContext::new(FUZZ_NOW_NS, CancelToken::new()),
             spill: Arc::clone(&env.spill),
             workers: Arc::clone(&env.workers),
             batch_size: 16,
@@ -975,10 +973,7 @@ pub(crate) mod tests {
     fn valid_seeds_exercise_engines() {
         let (batch_all, batch_masked) = try_build_fuzz_batches().expect("fuzz batches");
         let schema = batch_all.schema();
-        let ctx = EvalContext {
-            now_ns: FUZZ_NOW_NS,
-            cancel: CancelToken::new(),
-        };
+        let ctx = EvalContext::new(FUZZ_NOW_NS, CancelToken::new());
 
         for (name, text) in SEEDS {
             match *name {

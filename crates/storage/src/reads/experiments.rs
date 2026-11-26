@@ -1,7 +1,7 @@
 //! Native query engine implementations of `experiment_scores`, `experiment_traces`,
 //! and `experiment_score_means` (D-J-13, D-J-26).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +11,7 @@ use cetra_core::names::metadata_key;
 use cetra_core::schema::{scores, traces};
 use cetra_query::exec::hash_agg::execute_hash_agg;
 use cetra_query::exec::{
-    AggExpr, AggFunc, CollectSink, HashAggSpec, ScanSource, ScanSpec, TimeRangeHint,
+    AggExpr, AggFunc, CollectSink, HashAggSpec, MapProjection, ScanSource, ScanSpec, TimeRangeHint,
     run_pipeline as exec_run_pipeline,
 };
 use cetra_query::{BinaryOp, Expr, QueryError};
@@ -146,7 +146,7 @@ pub async fn experiment_scores(
 
     let spec = ScanSpec {
         projection: Some(proj_indices),
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns: Some(min_ns),
             max_ns: None,
@@ -289,12 +289,14 @@ pub async fn experiment_traces(
         proj_indices.push(idx);
     }
 
+    let mut map_projections = BTreeMap::new();
+    map_projections.insert(
+        traces::METADATA.to_owned(),
+        MapProjection::Keys(BTreeSet::from([metadata_key::EXPERIMENT_ID.to_owned()])),
+    );
     let spec = ScanSpec {
         projection: Some(proj_indices),
-        map_keys: vec![(
-            traces::METADATA.to_owned(),
-            metadata_key::EXPERIMENT_ID.to_owned(),
-        )],
+        map_projections,
         time_range: TimeRangeHint {
             min_ns: Some(min_ns),
             max_ns: None,
@@ -463,7 +465,7 @@ pub async fn experiment_score_means(
 
     let spec = ScanSpec {
         projection: Some(proj_indices),
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns: Some(min_ns),
             max_ns: None,

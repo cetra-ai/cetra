@@ -2,10 +2,10 @@
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use cetra_column::{
-    Bitmap, Column, ColumnError, DataType, FlatColumn, FlatData, Interval, Reservation,
-    ScalarValue, Utf8Data,
+    Bitmap, Column, ColumnError, DataType, FlatColumn, FlatData, Reservation, ScalarValue, Utf8Data,
 };
 use serde_json::Value as JsonValue;
 use serde_json_path::JsonPath;
@@ -22,6 +22,7 @@ use crate::fn_time::{format_date_days, format_timestamp_ns};
 use crate::ir::{EvalContext, ScalarFn};
 
 const CANCEL_CHECK_MASK: usize = 1023;
+const JSON_DOM_MULTIPLIER: usize = 6;
 
 /// Concatenates two list columns element-wise (`||` on `List(T)`).
 ///
@@ -60,9 +61,21 @@ pub fn eval_misc_fn(
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
+    pool: Option<&mut Reservation>,
+) -> Result<Column, QueryError> {
+    let refs: Vec<&Column> = args.iter().collect();
+    eval_misc_fn_refs(func, &refs, len, active, ctx, pool)
+}
+
+pub(crate) fn eval_misc_fn_refs(
+    func: ScalarFn,
+    args: &[&Column],
+    len: usize,
+    active: Option<&Bitmap>,
+    ctx: &EvalContext,
     mut pool: Option<&mut Reservation>,
 ) -> Result<Column, QueryError> {
-    for arg in args {
+    for &arg in args {
         if arg.len() != len {
             return Err(ColumnError::InvalidBatch {
                 reason: "column length mismatch",
@@ -125,7 +138,7 @@ fn all_inactive(active: Option<&Bitmap>) -> bool {
 
 fn eval_misc_fn_inner(
     func: ScalarFn,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -293,7 +306,7 @@ fn eval_list_concat_inner(
 // Math functions
 // ---------------------------------------------------------------------------
 
-fn expect_arity(func: ScalarFn, args: &[Column], expected: usize) -> Result<(), QueryError> {
+fn expect_arity(func: ScalarFn, args: &[&Column], expected: usize) -> Result<(), QueryError> {
     if args.len() != expected {
         return Err(QueryError::failed(format!(
             "{} expects {expected} arguments, got {}",
@@ -305,7 +318,7 @@ fn expect_arity(func: ScalarFn, args: &[Column], expected: usize) -> Result<(), 
 }
 
 fn eval_abs(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -313,7 +326,7 @@ fn eval_abs(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(ScalarFn::Abs, args, 1)?;
-    let arg = &args[0];
+    let arg = args[0];
     let dt = arg.data_type();
     if all_inactive(active) || matches!(dt, DataType::Null) {
         return Ok(null_const(dt, len));
@@ -392,7 +405,7 @@ fn eval_abs(
 }
 
 fn eval_round(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -402,8 +415,8 @@ fn eval_round(
     if args.is_empty() || args.len() > 2 {
         return Err(QueryError::failed("round expects 1 or 2 arguments"));
     }
-    let val_col = &args[0];
-    let dp_col = args.get(1);
+    let val_col = args[0];
+    let dp_col = args.get(1).copied();
     let val_dt = val_col.data_type();
     if let Some(dp) = dp_col
         && !matches!(dp.data_type(), DataType::I64 | DataType::Null)
@@ -547,7 +560,7 @@ fn round_i64(v: i64, dp: i64) -> Result<i64, QueryError> {
 
 fn eval_floor_ceil(
     func: ScalarFn,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -555,7 +568,7 @@ fn eval_floor_ceil(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(func, args, 1)?;
-    let arg = &args[0];
+    let arg = args[0];
     let dt = arg.data_type();
     if all_inactive(active) || matches!(dt, DataType::Null) {
         return Ok(null_const(dt, len));
@@ -620,7 +633,7 @@ fn read_as_f64(col: &Column, row: usize) -> Result<Option<f64>, QueryError> {
 
 fn eval_unary_f64_math(
     func: ScalarFn,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -628,7 +641,7 @@ fn eval_unary_f64_math(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(func, args, 1)?;
-    let arg = &args[0];
+    let arg = args[0];
     let dt = arg.data_type();
     if !matches!(dt, DataType::F64 | DataType::I64 | DataType::Null) {
         return Err(QueryError::failed(format!(
@@ -666,7 +679,7 @@ fn eval_unary_f64_math(
 }
 
 fn eval_power(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -674,8 +687,8 @@ fn eval_power(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(ScalarFn::Power, args, 2)?;
-    let base_col = &args[0];
-    let exp_col = &args[1];
+    let base_col = args[0];
+    let exp_col = args[1];
     if !matches!(
         base_col.data_type(),
         DataType::F64 | DataType::I64 | DataType::Null
@@ -714,7 +727,7 @@ fn eval_power(
 
 fn eval_float_pred(
     func: ScalarFn,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -722,7 +735,7 @@ fn eval_float_pred(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(func, args, 1)?;
-    let arg = &args[0];
+    let arg = args[0];
     if !matches!(
         arg.data_type(),
         DataType::F64 | DataType::I64 | DataType::Null
@@ -765,9 +778,9 @@ fn eval_float_pred(
 // Null helpers: Coalesce, Nullif, Greatest, Least
 // ---------------------------------------------------------------------------
 
-fn unify_common_type(func: ScalarFn, args: &[Column]) -> Result<DataType, QueryError> {
+fn unify_common_type(func: ScalarFn, args: &[&Column]) -> Result<DataType, QueryError> {
     let mut resolved: Option<DataType> = None;
-    for arg in args {
+    for &arg in args {
         let dt = arg.data_type();
         if matches!(dt, DataType::Null) {
             continue;
@@ -806,7 +819,7 @@ fn unify_common_type(func: ScalarFn, args: &[Column]) -> Result<DataType, QueryE
 }
 
 fn eval_coalesce(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -834,14 +847,18 @@ fn eval_coalesce(
             sources.push(None);
             continue;
         }
-        let found = args.iter().find(|c| !c.is_null(row)).map(|c| (c, row));
+        let found = args
+            .iter()
+            .copied()
+            .find(|c| !c.is_null(row))
+            .map(|c| (c, row));
         sources.push(found);
     }
     build_flat_from_sources(&out_dt, &sources, pool, ctx, before)
 }
 
 fn eval_nullif(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -849,8 +866,8 @@ fn eval_nullif(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(ScalarFn::Nullif, args, 2)?;
-    let a = &args[0];
-    let b = &args[1];
+    let a = args[0];
+    let b = args[1];
     let out_dt = unify_common_type(ScalarFn::Nullif, args)?;
     let a_dt = a.data_type();
     if all_inactive(active) || matches!(a_dt, DataType::Null) {
@@ -888,7 +905,7 @@ fn eval_nullif(
 
 fn eval_extremum(
     func: ScalarFn,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -926,7 +943,7 @@ fn eval_extremum(
             continue;
         }
         let mut best: Option<(&Column, usize)> = None;
-        for arg in args {
+        for &arg in args {
             if arg.is_null(row) {
                 continue;
             }
@@ -959,7 +976,7 @@ fn validate_list_arg(dt: &DataType, fn_name: &str) -> Result<Option<DataType>, Q
 }
 
 fn eval_array_has(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -967,8 +984,8 @@ fn eval_array_has(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(ScalarFn::ArrayHas, args, 2)?;
-    let list_col = &args[0];
-    let elem_col = &args[1];
+    let list_col = args[0];
+    let elem_col = args[1];
     let item_dt = validate_list_arg(&list_col.data_type(), "array_has")?;
     let elem_dt = elem_col.data_type();
     if let Some(ref it) = item_dt
@@ -1018,7 +1035,7 @@ fn eval_array_has(
 }
 
 fn eval_array_has_all(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1026,8 +1043,8 @@ fn eval_array_has_all(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(ScalarFn::ArrayHasAll, args, 2)?;
-    let list_col = &args[0];
-    let sub_col = &args[1];
+    let list_col = args[0];
+    let sub_col = args[1];
     let l_item = validate_list_arg(&list_col.data_type(), "array_has_all")?;
     let r_item = validate_list_arg(&sub_col.data_type(), "array_has_all")?;
     if let (Some(lt), Some(rt)) = (&l_item, &r_item)
@@ -1075,7 +1092,7 @@ fn eval_array_has_all(
 }
 
 fn eval_array_length(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1085,8 +1102,8 @@ fn eval_array_length(
     if args.is_empty() || args.len() > 2 {
         return Err(QueryError::failed("array_length expects 1 or 2 arguments"));
     }
-    let list_col = &args[0];
-    let dim_col = args.get(1);
+    let list_col = args[0];
+    let dim_col = args.get(1).copied();
     let item_dt = validate_list_arg(&list_col.data_type(), "array_length")?;
     if let Some(dc) = dim_col
         && !matches!(dc.data_type(), DataType::I64 | DataType::Null)
@@ -1133,7 +1150,7 @@ fn eval_array_length(
 }
 
 fn eval_array_element(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1141,8 +1158,8 @@ fn eval_array_element(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(ScalarFn::ArrayElement, args, 2)?;
-    let list_col = &args[0];
-    let idx_col = &args[1];
+    let list_col = args[0];
+    let idx_col = args[1];
     let item_dt = validate_list_arg(&list_col.data_type(), "array_element")?;
     if !matches!(idx_col.data_type(), DataType::I64 | DataType::Null) {
         return Err(QueryError::failed("array_element index must be integer"));
@@ -1190,7 +1207,7 @@ fn eval_array_element(
 }
 
 fn eval_array_to_string(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1202,9 +1219,9 @@ fn eval_array_to_string(
             "array_to_string expects 2 or 3 arguments",
         ));
     }
-    let list_col = &args[0];
-    let delim_col = &args[1];
-    let null_str_col = args.get(2);
+    let list_col = args[0];
+    let delim_col = args[1];
+    let null_str_col = args.get(2).copied();
     let item_dt = validate_list_arg(&list_col.data_type(), "array_to_string")?;
     if !matches!(delim_col.data_type(), DataType::Utf8 | DataType::Null) {
         return Err(QueryError::failed(
@@ -1567,7 +1584,7 @@ fn append_scalar_formatted(sv: &ScalarValue, out: &mut String) -> Result<(), Que
 }
 
 fn eval_array_distinct(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1575,7 +1592,7 @@ fn eval_array_distinct(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(ScalarFn::ArrayDistinct, args, 1)?;
-    let list_col = &args[0];
+    let list_col = args[0];
     let dt = list_col.data_type();
     let Some(item_dt) = validate_list_arg(&dt, "array_distinct")? else {
         return Ok(null_const(DataType::Null, len));
@@ -1648,7 +1665,7 @@ enum DistinctKey<'a> {
     I64(i64),
     F64(u64),
     Decimal(i128),
-    Interval(Interval),
+    Interval(i128),
     Str(&'a str),
     Bytes(&'a [u8]),
 }
@@ -1667,7 +1684,9 @@ fn elem_distinct_key<'a>(elem: ElemRef<'a>, dt: &DataType) -> Option<DistinctKey
         DataType::Decimal128 { .. } => elem.read_decimal().map(|(v, _)| DistinctKey::Decimal(v)),
         DataType::TimestampNs { .. } => elem.read_timestamp().map(DistinctKey::I64),
         DataType::Date => elem.read_date().map(|d| DistinctKey::I64(i64::from(d))),
-        DataType::Interval => elem.read_interval().map(DistinctKey::Interval),
+        DataType::Interval => elem
+            .read_interval()
+            .map(|iv| DistinctKey::Interval(iv.canonical_key())),
         DataType::Utf8 => elem.read_str().map(DistinctKey::Str),
         DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16 => {
             elem.read_bytes().map(DistinctKey::Bytes)
@@ -1774,7 +1793,7 @@ fn collect_distinct_elems<'a>(
 
 fn eval_map_extract(
     keys_only: bool,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1787,7 +1806,7 @@ fn eval_map_extract(
         ScalarFn::MapValues
     };
     expect_arity(fn_sym, args, 1)?;
-    let map_col = &args[0];
+    let map_col = args[0];
     let dt = map_col.data_type();
     if !matches!(dt, DataType::MapUtf8 | DataType::Null) {
         return Err(QueryError::failed(format!(
@@ -2043,7 +2062,7 @@ fn write_json_result(
 
 fn eval_json_get(
     as_text: bool,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -2056,8 +2075,8 @@ fn eval_json_get(
         ScalarFn::JsonGet
     };
     expect_arity(fn_sym, args, 2)?;
-    let json_col = &args[0];
-    let key_col = &args[1];
+    let json_col = args[0];
+    let key_col = args[1];
     if !matches!(json_col.data_type(), DataType::Utf8 | DataType::Null) {
         return Err(QueryError::failed(format!(
             "{} requires string JSON input",
@@ -2083,7 +2102,7 @@ fn eval_json_get(
     let const_parsed: Option<Option<JsonValue>> = match json_col {
         Column::Const { value, .. } => match value {
             ScalarValue::Utf8(s) => {
-                try_reserve(pool, s.len())?;
+                try_reserve(pool, s.len().saturating_mul(JSON_DOM_MULTIPLIER))?;
                 Some(serde_json::from_str::<JsonValue>(s).ok())
             }
             _ => Some(None),
@@ -2107,7 +2126,7 @@ fn eval_json_get(
                 Some(opt) => opt.as_ref(),
                 None => match read_str(json_col, row) {
                     Some(s) => {
-                        dom_reserved = s.len();
+                        dom_reserved = s.len().saturating_mul(JSON_DOM_MULTIPLIER);
                         try_reserve(pool, dom_reserved)?;
                         parsed_owned = serde_json::from_str::<JsonValue>(s).ok();
                         parsed_owned.as_ref()
@@ -2163,7 +2182,7 @@ fn eval_json_get(
 
 fn eval_json_extract(
     as_text: bool,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -2176,8 +2195,8 @@ fn eval_json_extract(
         ScalarFn::JsonExtract
     };
     expect_arity(fn_sym, args, 2)?;
-    let json_col = &args[0];
-    let path_col = &args[1];
+    let json_col = args[0];
+    let path_col = args[1];
     if !matches!(json_col.data_type(), DataType::Utf8 | DataType::Null) {
         return Err(QueryError::failed(format!(
             "{} requires string JSON input",
@@ -2194,19 +2213,41 @@ fn eval_json_extract(
         || all_inactive(active)
         || matches!(json_col.data_type(), DataType::Null)
         || matches!(path_col.data_type(), DataType::Null)
+        || matches!(
+            json_col,
+            Column::Const {
+                value: ScalarValue::Null(_),
+                ..
+            }
+        )
+        || matches!(
+            path_col,
+            Column::Const {
+                value: ScalarValue::Null(_),
+                ..
+            }
+        )
     {
         return Ok(null_const(DataType::Utf8, len));
     }
 
+    let cached_const_path: Option<Arc<JsonPath>> = match path_col {
+        Column::Const {
+            value: ScalarValue::Utf8(p),
+            ..
+        } => Some(ctx.cache.get_or_insert_json_path(p, || {
+            JsonPath::parse(p).map_err(|_| QueryError::failed("invalid JSONPath expression"))
+        })?),
+        _ => None,
+    };
+    let mut last_dyn_path: Option<(&str, Arc<JsonPath>)> = None;
+
     try_reserve(pool, checked_varlen_bytes(len, 0, true)?)?;
-    let path_is_const = matches!(path_col, Column::Const { .. });
-    let mut cached_const_path: Option<JsonPath> = None;
-    let mut last_dyn_path: Option<(&str, JsonPath)> = None;
 
     let const_parsed: Option<Option<JsonValue>> = match json_col {
         Column::Const { value, .. } => match value {
             ScalarValue::Utf8(s) => {
-                try_reserve(pool, s.len())?;
+                try_reserve(pool, s.len().saturating_mul(JSON_DOM_MULTIPLIER))?;
                 Some(serde_json::from_str::<JsonValue>(s).ok())
             }
             _ => Some(None),
@@ -2223,35 +2264,28 @@ fn eval_json_extract(
         if (row & CANCEL_CHECK_MASK) == 0 {
             check_cancel(ctx, pool, before)?;
         }
-        if is_active(active, row)
-            && let Some(path_str) = read_str(path_col, row)
-        {
-            let compiled_path: &JsonPath = if path_is_const {
-                if let Some(ref p) = cached_const_path {
-                    p
-                } else {
-                    let parsed = JsonPath::parse(path_str)
-                        .map_err(|_| QueryError::failed("invalid JSONPath expression"))?;
-                    cached_const_path = Some(parsed);
-                    match cached_const_path.as_ref() {
-                        Some(p) => p,
-                        None => {
-                            return Err(QueryError::failed("invalid JSONPath expression"));
-                        }
-                    }
-                }
+        if is_active(active, row) {
+            let compiled_path: Arc<JsonPath> = if let Some(p) = &cached_const_path {
+                Arc::clone(p)
             } else {
-                let hit = matches!(last_dyn_path.as_ref(), Some((prev, _)) if *prev == path_str);
-                if !hit {
-                    let parsed = JsonPath::parse(path_str)
-                        .map_err(|_| QueryError::failed("invalid JSONPath expression"))?;
-                    last_dyn_path = Some((path_str, parsed));
-                }
-                match last_dyn_path.as_ref() {
-                    Some((_, p)) => p,
-                    None => {
-                        return Err(QueryError::failed("invalid JSONPath expression"));
-                    }
+                let Some(path_str) = read_str(path_col, row) else {
+                    let end = u32::try_from(bytes.len()).map_err(|_| ColumnError::Overflow {
+                        reason: "utf8 byte length exceeds u32::MAX",
+                    })?;
+                    offsets.push(end);
+                    continue;
+                };
+                if let Some((prev, p)) = &last_dyn_path
+                    && *prev == path_str
+                {
+                    Arc::clone(p)
+                } else {
+                    let parsed = ctx.cache.get_or_insert_json_path(path_str, || {
+                        JsonPath::parse(path_str)
+                            .map_err(|_| QueryError::failed("invalid JSONPath expression"))
+                    })?;
+                    last_dyn_path = Some((path_str, Arc::clone(&parsed)));
+                    parsed
                 }
             };
 
@@ -2261,7 +2295,7 @@ fn eval_json_extract(
                 Some(opt) => opt.as_ref(),
                 None => match read_str(json_col, row) {
                     Some(s) => {
-                        dom_reserved = s.len();
+                        dom_reserved = s.len().saturating_mul(JSON_DOM_MULTIPLIER);
                         try_reserve(pool, dom_reserved)?;
                         parsed_owned = serde_json::from_str::<JsonValue>(s).ok();
                         parsed_owned.as_ref()
@@ -2272,13 +2306,13 @@ fn eval_json_extract(
 
             if let Some(root) = val_ref {
                 let nodes = compiled_path.query(root).all();
-                match nodes.as_slice() {
-                    [] => {}
-                    [one] => {
-                        if write_json_result(one, as_text, &mut bytes, pool)? {
-                            let _ = nulls.set(row, true);
-                        }
-                    }
+                let nodes_bytes = nodes.len().saturating_mul(size_of::<&JsonValue>());
+                if nodes_bytes > 0 {
+                    try_reserve(pool, nodes_bytes)?;
+                }
+                let write_res = match nodes.as_slice() {
+                    [] => Ok(false),
+                    [one] => write_json_result(one, as_text, &mut bytes, pool),
                     many => {
                         let mut writer = JsonBudgetWriter {
                             bytes: &mut bytes,
@@ -2286,12 +2320,23 @@ fn eval_json_extract(
                             err: None,
                         };
                         if serde_json::to_writer(&mut writer, many).is_err() {
-                            return Err(writer.err.take().unwrap_or_else(|| {
-                                QueryError::failed("json serialization failed")
-                            }));
+                            Err(writer
+                                .err
+                                .take()
+                                .unwrap_or_else(|| QueryError::failed("json serialization failed")))
+                        } else {
+                            Ok(true)
                         }
-                        let _ = nulls.set(row, true);
                     }
+                };
+                drop(nodes);
+                if nodes_bytes > 0
+                    && let Some(res) = pool.as_deref_mut()
+                {
+                    res.shrink(nodes_bytes);
+                }
+                if write_res? {
+                    let _ = nulls.set(row, true);
                 }
             }
 
@@ -2455,7 +2500,10 @@ fn elems_equal(a: ElemRef<'_>, b: ElemRef<'_>) -> Result<bool, QueryError> {
             Ok(a.read_timestamp() == b.read_timestamp())
         }
         (DataType::Date, DataType::Date) => Ok(a.read_date() == b.read_date()),
-        (DataType::Interval, DataType::Interval) => Ok(a.read_interval() == b.read_interval()),
+        (DataType::Interval, DataType::Interval) => {
+            Ok(a.read_interval().map(|iv| iv.canonical_key())
+                == b.read_interval().map(|iv| iv.canonical_key()))
+        }
         (DataType::Utf8, DataType::Utf8) => Ok(a.read_str() == b.read_str()),
         (
             DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16,
@@ -2518,7 +2566,7 @@ fn compare_elems(a: ElemRef<'_>, b: ElemRef<'_>) -> Result<Ordering, QueryError>
         }
         (DataType::Date, DataType::Date) => Ok(a.read_date().cmp(&b.read_date())),
         (DataType::Interval, DataType::Interval) => match (a.read_interval(), b.read_interval()) {
-            (Some(x), Some(y)) => Ok((x.months, x.days, x.nanos).cmp(&(y.months, y.days, y.nanos))),
+            (Some(x), Some(y)) => Ok(x.canonical_key().cmp(&y.canonical_key())),
             _ => Err(QueryError::failed("invalid interval comparison")),
         },
         (DataType::Utf8, DataType::Utf8) => Ok(a.read_str().cmp(&b.read_str())),
@@ -2551,10 +2599,7 @@ mod tests {
     use super::*;
 
     fn ctx() -> EvalContext {
-        EvalContext {
-            now_ns: 1_700_000_000_000_000_000,
-            cancel: CancelToken::new(),
-        }
+        EvalContext::new(1_700_000_000_000_000_000, CancelToken::new())
     }
 
     fn i64_col(vals: &[Option<i64>]) -> Column {
@@ -3447,10 +3492,7 @@ mod tests {
         assert_eq!(collect_strs(&nested_ats), vec![Some("1,2,3".into())]);
 
         // Cancellation returns Cancelled and rolls back Reservation
-        let cancelled = EvalContext {
-            now_ns: 0,
-            cancel: CancelToken::new(),
-        };
+        let cancelled = EvalContext::new(0, CancelToken::new());
         cancelled.cancel.cancel();
         let pool = GlobalPool::standalone(1 << 20);
         let mut res = pool.register("cancel", false);
@@ -3628,10 +3670,7 @@ mod tests {
         assert_eq!(dist_res.size(), 0);
 
         // CancelToken inside list_ref_has_all and collect_distinct_elems
-        let cancelled = EvalContext {
-            now_ns: 0,
-            cancel: CancelToken::new(),
-        };
+        let cancelled = EvalContext::new(0, CancelToken::new());
         cancelled.cancel.cancel();
         assert!(matches!(
             eval_misc_fn(
@@ -3683,5 +3722,53 @@ mod tests {
             QueryError::TooLarge
         ));
         assert_eq!(ats_res.size(), 0);
+    }
+
+    #[test]
+    fn json_dom_multiplier_oom_and_canonical_interval_distinct() {
+        // 100-byte JSON payload requires 600 bytes DOM pre-reserve (6x multiplier); 300-byte pool must OOM.
+        let payload = format!(r#"{{"k":"{}"}}"#, "a".repeat(90));
+        let json_col = Column::try_new_const(ScalarValue::Utf8(payload), 1).unwrap();
+        let path_col = Column::try_new_const(ScalarValue::Utf8("$.k".into()), 1).unwrap();
+        let pool = GlobalPool::standalone(300);
+        let mut res = pool.register("json_dom_6x", false);
+        let err = eval_misc_fn(
+            ScalarFn::JsonExtract,
+            &[json_col, path_col],
+            1,
+            None,
+            &ctx(),
+            Some(&mut res),
+        )
+        .unwrap_err();
+        assert!(matches!(err, QueryError::TooLarge));
+        assert_eq!(res.size(), 0);
+
+        // array_distinct deduplicates canonical Intervals (1 month == 30 days)
+        let iv_list = Column::try_new_const(
+            ScalarValue::List {
+                item_type: DataType::Interval,
+                values: vec![
+                    ScalarValue::Interval(cetra_column::Interval {
+                        months: 1,
+                        days: 0,
+                        nanos: 0,
+                    }),
+                    ScalarValue::Interval(cetra_column::Interval {
+                        months: 0,
+                        days: 30,
+                        nanos: 0,
+                    }),
+                ],
+            },
+            1,
+        )
+        .unwrap();
+        let distinct =
+            eval_misc_fn(ScalarFn::ArrayDistinct, &[iv_list], 1, None, &ctx(), None).unwrap();
+        let ScalarValue::List { values, .. } = distinct.get_scalar(0).unwrap() else {
+            panic!("expected List");
+        };
+        assert_eq!(values.len(), 1);
     }
 }

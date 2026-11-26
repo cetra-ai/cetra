@@ -618,10 +618,7 @@ impl SqlEngineContext {
     fn make_exec_ctx(&self, pool: Arc<ScopedPool>, cancel: CancelToken) -> ExecContext {
         ExecContext {
             pool,
-            eval: EvalContext {
-                now_ns: current_time_ns(),
-                cancel,
-            },
+            eval: EvalContext::new(current_time_ns(), cancel),
             spill: Arc::clone(&self.spill),
             workers: Arc::clone(&self.workers),
             batch_size: self.batch_size,
@@ -932,9 +929,11 @@ pub(crate) fn map_query_error(err: QueryError) -> RunError {
         QueryError::TooLarge => RunError::TooLarge,
         QueryError::Cancelled => RunError::Timeout,
         QueryError::Failed(msg) => RunError::Failed(msg),
-        err @ (QueryError::Column(_) | QueryError::Internal(_) | QueryError::Busy) => {
-            RunError::Internal(EngineError::from_query(&err))
-        }
+        err @ (QueryError::Column(_)
+        | QueryError::CorruptData(_)
+        | QueryError::StorageIo(_)
+        | QueryError::Internal(_)
+        | QueryError::Busy) => RunError::Internal(EngineError::from_query(&err)),
     }
 }
 

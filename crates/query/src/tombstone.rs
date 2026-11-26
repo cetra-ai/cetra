@@ -7,7 +7,9 @@ use std::fmt;
 
 use cetra_column::{Batch, DataType, Reservation, ScalarValue, Schema};
 
-use crate::eval::{eval_filter, pool_size, reconcile_output, rollback_to, try_reserve};
+use crate::eval::{
+    bitmap_mem_bytes, eval_filter, pool_size, reconcile_output, rollback_to, try_reserve,
+};
 use crate::{BinaryOp, EvalContext, Expr, QueryError, UnaryOp};
 
 const COL_TRACE_ID: &str = "trace_id";
@@ -172,6 +174,10 @@ pub fn filter_uncovered(
     if let Some(res) = pool.as_deref_mut() {
         res.shrink(covered_bytes);
     }
+    if let Err(err) = try_reserve(&mut pool, bitmap_mem_bytes(batch.raw_len())) {
+        rollback_to(&mut pool, before);
+        return Err(err);
+    }
     let out = match batch.filter_mask(&keep) {
         Ok(b) => b,
         Err(err) => {
@@ -282,10 +288,7 @@ mod tests {
     use crate::eval::eval_expr;
 
     fn ctx() -> EvalContext {
-        EvalContext {
-            now_ns: 0,
-            cancel: CancelToken::new(),
-        }
+        EvalContext::new(0, CancelToken::new())
     }
 
     fn tid(b: u8) -> [u8; 16] {

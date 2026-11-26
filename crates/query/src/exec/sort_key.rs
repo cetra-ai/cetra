@@ -1,5 +1,6 @@
 //! Total-order `SortKey` and row comparison across all `Column` encodings and sortable `DataType`s.
 
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 
 use cetra_column::{Column, DataType};
@@ -35,10 +36,22 @@ pub fn compare_rows_across(
     b: usize,
     keys: &[SortKey],
 ) -> Ordering {
+    compare_rows_across_borrowed(cols_a, a, cols_b, b, keys)
+}
+
+pub(crate) fn compare_rows_across_borrowed<A: Borrow<Column>, B: Borrow<Column>>(
+    cols_a: &[A],
+    a: usize,
+    cols_b: &[B],
+    b: usize,
+    keys: &[SortKey],
+) -> Ordering {
     for (idx, key) in keys.iter().enumerate() {
         let (Some(col_a), Some(col_b)) = (cols_a.get(idx), cols_b.get(idx)) else {
             continue;
         };
+        let col_a = col_a.borrow();
+        let col_b = col_b.borrow();
         let null_a = col_a.is_null(a);
         let null_b = col_b.is_null(b);
         match (null_a, null_b) {

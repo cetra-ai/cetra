@@ -95,6 +95,8 @@ impl EngineError {
     pub(crate) fn from_query(err: &cetra_query::QueryError) -> Self {
         let kind = match err {
             cetra_query::QueryError::TooLarge => EngineErrorKind::ResourcesExhausted,
+            cetra_query::QueryError::CorruptData(_) => EngineErrorKind::Parquet,
+            cetra_query::QueryError::StorageIo(_) => EngineErrorKind::ObjectStore,
             cetra_query::QueryError::Internal(msg) if msg == "corrupt parquet file" => {
                 EngineErrorKind::Parquet
             }

@@ -162,7 +162,7 @@ pub async fn score_list(
 
     let spec = ScanSpec {
         projection: None,
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns,
             max_ns,
@@ -279,7 +279,7 @@ pub async fn latest_scores(
 
     let spec = ScanSpec {
         projection: Some(proj_indices),
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns: ctx.visible_from,
             max_ns: None,
@@ -453,7 +453,7 @@ pub async fn scores_by_id(
 
     let spec = ScanSpec {
         projection: None,
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns: ctx.visible_from,
             max_ns: None,
@@ -549,7 +549,7 @@ pub async fn score_name_counts(
 
     let spec = ScanSpec {
         projection: Some(proj_indices),
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns: Some(min_ns),
             max_ns,

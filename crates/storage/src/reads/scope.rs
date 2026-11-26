@@ -1,6 +1,7 @@
 //! List-query scoping: time windows, `visible_from`, `around`, default & strict exclusions,
 //! full-text search, `trace_id_semi_join`, and `sessions_from_traces`.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use cetra_column::{DataType, Field, ScalarValue, Schema};
@@ -9,8 +10,9 @@ use cetra_core::schema::{spans, traces};
 use cetra_query::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join};
 use cetra_query::exec::streaming::{FilterOp, ProjectOp};
 use cetra_query::exec::{
-    AggExpr, AggFunc, ExecContext, HashAgg, HashAggSpec, IdLookupHint, PartitionStream, ScanSource,
-    ScanSpec, SortKey, SubstringHint, TimeRangeHint, run_pipeline as exec_run_pipeline,
+    AggExpr, AggFunc, ExecContext, HashAgg, HashAggSpec, IdLookupHint, MapProjection,
+    PartitionStream, ScanSource, ScanSpec, SortKey, SubstringHint, TimeRangeHint,
+    run_pipeline as exec_run_pipeline,
 };
 use cetra_query::{BinaryOp, CastMode, Expr, FilterView, QueryError, ScalarFn, UnaryOp};
 
@@ -119,17 +121,17 @@ fn scoped_spec_for_table(
     )?;
     filters.extend(exclusions);
 
-    let mut map_keys = Vec::new();
+    let mut map_projections = BTreeMap::new();
     if !scope.include_experiments {
-        map_keys.push((
+        map_projections.insert(
             meta_col_name.to_owned(),
-            metadata_key::EXPERIMENT_ID.to_owned(),
-        ));
+            MapProjection::Keys(BTreeSet::from([metadata_key::EXPERIMENT_ID.to_owned()])),
+        );
     }
 
     Ok(ScanSpec {
         projection: None,
-        map_keys,
+        map_projections,
         time_range: TimeRangeHint {
             min_ns,
             max_ns,
@@ -254,12 +256,14 @@ pub(crate) fn strict_exclusions_spans(
         });
     }
 
+    let mut map_projections = BTreeMap::new();
+    map_projections.insert(
+        traces::METADATA.to_owned(),
+        MapProjection::Keys(BTreeSet::from([metadata_key::EXPERIMENT_ID.to_owned()])),
+    );
     let spec = ScanSpec {
         projection: Some(vec![trace_id_idx]),
-        map_keys: vec![(
-            traces::METADATA.to_owned(),
-            metadata_key::EXPERIMENT_ID.to_owned(),
-        )],
+        map_projections,
         time_range: TimeRangeHint {
             min_ns: ctx.visible_from,
             max_ns: None,
@@ -609,7 +613,7 @@ pub(crate) fn search_predicate(
 
     let spec = ScanSpec {
         projection: Some(vec![trace_id_idx]),
-        map_keys: Vec::new(),
+        map_projections: BTreeMap::new(),
         time_range: TimeRangeHint {
             min_ns: Some(min_ns),
             max_ns,
@@ -617,7 +621,11 @@ pub(crate) fn search_predicate(
         },
         id_lookups: Vec::new(),
         filters,
-        substrings,
+        substrings: if substrings.is_empty() {
+            Vec::new()
+        } else {
+            vec![substrings]
+        },
         sort_hints: Vec::new(),
         limit: None,
     };

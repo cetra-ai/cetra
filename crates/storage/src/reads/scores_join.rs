@@ -253,7 +253,7 @@ fn latest_score_stream(params: &LatestScoreParams<'_>) -> Result<LatestScoreStre
 
     let scan_spec = ScanSpec {
         projection: Some(scan_indices),
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns: ctx.visible_from,
             max_ns: None,

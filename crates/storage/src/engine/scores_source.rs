@@ -209,7 +209,7 @@ impl ScanSource for ScoresSource {
         // Push ONLY `created_at` bounds + `created_at`-only filters below LWW dedup.
         let inner_spec = ScanSpec {
             projection: Some(scan_indices),
-            map_keys: spec.map_keys.clone(),
+            map_projections: spec.map_projections.clone(),
             time_range: TimeRangeHint {
                 min_ns: effective_bounds.min,
                 max_ns: effective_bounds.max,
@@ -308,7 +308,7 @@ impl ScanSource for ScoresSource {
             post_filters,
             projection: scan_to_output,
             remaining: spec.limit,
-            now_ns: ctx.eval.now_ns,
+            eval: ctx.eval.clone(),
             prev_score_id: None,
             done: false,
         };
@@ -365,7 +365,7 @@ struct ScoresDedupStream {
     post_filters: Vec<Expr>,
     projection: Option<Vec<usize>>,
     remaining: Option<usize>,
-    now_ns: i64,
+    eval: EvalContext,
     prev_score_id: Option<String>,
     done: bool,
 }
@@ -377,10 +377,7 @@ impl PartitionStream for ScoresDedupStream {
         mut res: Option<&mut Reservation>,
     ) -> Result<Option<Batch>, QueryError> {
         let before = res.as_ref().map_or(0, |r| r.size());
-        let eval_ctx = EvalContext {
-            now_ns: self.now_ns,
-            cancel: cancel.clone(),
-        };
+        let eval_ctx = self.eval.with_cancel(cancel.clone());
 
         while !self.done {
             if cancel.is_cancelled() {

@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use cetra_column::{
     Batch, BinaryData, Bitmap, Column, ColumnError, DataType, EventItem, EventsData, FlatColumn,
@@ -16,24 +17,32 @@ use crate::ir::{BinaryOp, CastMode, EvalContext, Expr, ScalarFn, UnaryOp};
 const CANCEL_CHECK_MASK: usize = 1023;
 const NS_PER_DAY: i64 = 86_400_000_000_000;
 
-/// Evaluates `expr` over `batch`, always returning a `Column` of length `batch.raw_len()`.
+/// Evaluates `expr` over `batch`, always returning an `Arc<Column>` of length `batch.raw_len()`.
 ///
 /// Active rows under `batch.selection()` are exact, and inactive rows never fault. Callers
 /// must respect `batch.selection()`: zero-copy fast paths (such as `Expr::Column`,
-/// `Expr::Literal`, and UTC timestamp retagging) may leave existing or constant values in
-/// inactive slots rather than canonical nulls. On `Ok(col)`, `pool` is reconciled to
-/// `before + col.memory_bytes()`; on `Err(_)`, `pool` is rolled back to `before`.
+/// `Expr::Literal`, and identity `CAST`) may leave existing or constant values in
+/// inactive slots rather than canonical nulls.
+///
+/// `Reservation` postcondition: on `Ok(col)`, if `col` is `Arc::ptr_eq` to a column in `batch`
+/// (zero-copy `Expr::Column` or identity `CAST`), `pool` is restored to `before` (0 newly
+/// allocated bytes); otherwise `pool` is reconciled to `before + col.memory_bytes()`. On `Err(_)`,
+/// `pool` is rolled back to `before`.
 pub fn eval_expr(
     expr: &Expr,
     batch: &Batch,
     ctx: &EvalContext,
     mut pool: Option<&mut Reservation>,
-) -> Result<Column, QueryError> {
+) -> Result<Arc<Column>, QueryError> {
     let before = pool_size(&pool);
     let res = eval_expr_root(expr, batch, ctx, pool.as_deref_mut());
     match res {
         Ok(col) => {
-            reconcile_output(&mut pool, before, col.memory_bytes())?;
+            if batch.columns().iter().any(|c| Arc::ptr_eq(c, &col)) {
+                rollback_to(&mut pool, before);
+            } else {
+                reconcile_output(&mut pool, before, col.memory_bytes())?;
+            }
             Ok(col)
         }
         Err(err) => {
@@ -107,7 +116,7 @@ fn eval_expr_root(
     batch: &Batch,
     ctx: &EvalContext,
     mut pool: Option<&mut Reservation>,
-) -> Result<Column, QueryError> {
+) -> Result<Arc<Column>, QueryError> {
     let before = pool_size(&pool);
     check_cancel(ctx, &mut pool, before)?;
     let active = selection_active_bitmap(batch, &mut pool)?;
@@ -141,25 +150,25 @@ pub(crate) fn eval_expr_masked(
     active: Option<&Bitmap>,
     ctx: &EvalContext,
     mut pool: Option<&mut Reservation>,
-) -> Result<Column, QueryError> {
+) -> Result<Arc<Column>, QueryError> {
     let before = pool_size(&pool);
     check_cancel(ctx, &mut pool, before)?;
 
     let raw_len = batch.raw_len();
     if active.is_some_and(Bitmap::all_zeros) {
-        let out = Column::Const {
+        let out = Arc::new(Column::Const {
             value: ScalarValue::Null(expr.data_type()),
             len: raw_len,
-        };
+        });
         reconcile_output(&mut pool, before, out.memory_bytes())?;
         return Ok(out);
     }
 
-    let res = match expr {
+    let res: Result<Arc<Column>, QueryError> = match expr {
         Expr::Column {
             index, data_type, ..
         } => {
-            let col = batch.column(*index).ok_or(ColumnError::InvalidBatch {
+            let col = batch.column_arc(*index).ok_or(ColumnError::InvalidBatch {
                 reason: "column index out of bounds",
             })?;
             if col.data_type() != *data_type {
@@ -168,13 +177,12 @@ pub(crate) fn eval_expr_masked(
                 }
                 .into());
             }
-            try_reserve(&mut pool, col.memory_bytes())?;
-            Ok(col.clone())
+            Ok(Arc::clone(col))
         }
         Expr::Literal(val) => {
             try_reserve(&mut pool, val.heap_bytes())?;
             let col = Column::try_new_const(val.clone(), raw_len)?;
-            Ok(col)
+            Ok(Arc::new(col))
         }
         Expr::Unary {
             op,
@@ -188,7 +196,8 @@ pub(crate) fn eval_expr_masked(
             active,
             ctx,
             pool.as_deref_mut(),
-        ),
+        )
+        .map(Arc::new),
         Expr::Binary {
             left,
             op,
@@ -203,7 +212,8 @@ pub(crate) fn eval_expr_masked(
             active,
             ctx,
             pool.as_deref_mut(),
-        ),
+        )
+        .map(Arc::new),
         Expr::Cast {
             expr: inner,
             target,
@@ -231,7 +241,8 @@ pub(crate) fn eval_expr_masked(
             active,
             ctx,
             pool.as_deref_mut(),
-        ),
+        )
+        .map(Arc::new),
         Expr::InList {
             expr: inner,
             list,
@@ -245,7 +256,8 @@ pub(crate) fn eval_expr_masked(
             active,
             ctx,
             pool.as_deref_mut(),
-        ),
+        )
+        .map(Arc::new),
         Expr::Case {
             operand,
             when_then,
@@ -260,12 +272,13 @@ pub(crate) fn eval_expr_masked(
             active,
             ctx,
             pool.as_deref_mut(),
-        ),
+        )
+        .map(Arc::new),
         Expr::MapIndex { map, key } => {
-            eval_map_index(map, key, batch, active, ctx, pool.as_deref_mut())
+            eval_map_index(map, key, batch, active, ctx, pool.as_deref_mut()).map(Arc::new)
         }
         Expr::MakeArray { elems, item_type } => {
-            eval_make_array(elems, item_type, batch, active, ctx, pool.as_deref_mut())
+            eval_make_array(elems, item_type, batch, active, ctx, pool.as_deref_mut()).map(Arc::new)
         }
         Expr::Like {
             expr: inner,
@@ -286,15 +299,31 @@ pub(crate) fn eval_expr_masked(
                 ctx,
                 pool.as_deref_mut(),
             )
+            .map(Arc::new)
         }
-        Expr::Call { func, args, .. } => {
-            eval_call(*func, args, batch, active, ctx, pool.as_deref_mut())
-        }
+        Expr::Call {
+            func,
+            args,
+            data_type,
+        } => eval_call(
+            *func,
+            args,
+            data_type,
+            batch,
+            active,
+            ctx,
+            pool.as_deref_mut(),
+        )
+        .map(Arc::new),
     };
 
     match res {
         Ok(col) => {
-            reconcile_output(&mut pool, before, col.memory_bytes())?;
+            if batch.columns().iter().any(|c| Arc::ptr_eq(c, &col)) {
+                rollback_to(&mut pool, before);
+            } else {
+                reconcile_output(&mut pool, before, col.memory_bytes())?;
+            }
             Ok(col)
         }
         Err(err) => {
@@ -905,14 +934,119 @@ pub(crate) fn list_ref_elem(lref: ListRef<'_>, idx: usize) -> ElemRef<'_> {
 // Core expression implementations
 // ---------------------------------------------------------------------------
 
-fn eval_call(
-    func: ScalarFn,
+fn coalesce_types_compatible(expected: &DataType, actual: &DataType) -> bool {
+    if expected == actual || matches!(actual, DataType::Null) {
+        return true;
+    }
+    match (expected, actual) {
+        (DataType::TimestampNs { .. }, DataType::TimestampNs { .. }) => true,
+        (DataType::List(a), DataType::List(b)) => coalesce_types_compatible(a, b),
+        _ => false,
+    }
+}
+
+fn eval_coalesce_lazy(
     args: &[Expr],
+    data_type: &DataType,
     batch: &Batch,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
     mut pool: Option<&mut Reservation>,
 ) -> Result<Column, QueryError> {
+    if args.is_empty() {
+        return Err(QueryError::failed("coalesce expects at least 1 argument"));
+    }
+    data_type.validate(MAX_NESTING_DEPTH)?;
+    let before = pool_size(&pool);
+    let raw_len = batch.raw_len();
+
+    if matches!(data_type, DataType::Null) || active.is_some_and(Bitmap::all_zeros) {
+        return Ok(Column::Const {
+            value: ScalarValue::Null(data_type.clone()),
+            len: raw_len,
+        });
+    }
+
+    let bm_bytes = bitmap_mem_bytes(raw_len);
+    let row_source_bytes =
+        checked_fixed_bytes(raw_len, size_of::<Option<(usize, usize)>>(), false)?;
+    try_reserve(
+        &mut pool,
+        bm_bytes
+            .checked_add(row_source_bytes)
+            .ok_or(QueryError::TooLarge)?,
+    )?;
+
+    let mut remaining = active.cloned().unwrap_or_else(|| Bitmap::new_ones(raw_len));
+    let mut arg_cols: Vec<Arc<Column>> = Vec::with_capacity(args.len());
+    let mut row_source: Vec<Option<(usize, usize)>> = vec![None; raw_len];
+
+    for arg in args {
+        if remaining.all_zeros() {
+            break;
+        }
+        check_cancel(ctx, &mut pool, before)?;
+        let before_arg = pool_size(&pool);
+        let col = eval_expr_masked(arg, batch, Some(&remaining), ctx, pool.as_deref_mut())?;
+        if !coalesce_types_compatible(data_type, &col.data_type()) {
+            drop(col);
+            rollback_to(&mut pool, before_arg);
+            return Err(QueryError::failed(
+                "coalesce arguments must share a common type",
+            ));
+        }
+
+        let col_idx = arg_cols.len();
+        let mut any_won = false;
+        for (row, slot) in row_source.iter_mut().enumerate() {
+            if (row & CANCEL_CHECK_MASK) == 0 {
+                check_cancel(ctx, &mut pool, before)?;
+            }
+            if remaining.get(row) && !col.is_null(row) {
+                *slot = Some((col_idx, row));
+                let _ = remaining.set(row, false);
+                any_won = true;
+            }
+        }
+        if any_won {
+            arg_cols.push(col);
+        } else {
+            drop(col);
+            rollback_to(&mut pool, before_arg);
+        }
+    }
+
+    drop(remaining);
+    if let Some(res) = pool.as_deref_mut() {
+        res.shrink(bm_bytes.min(res.size().saturating_sub(before)));
+    }
+
+    build_flat_from_fn(
+        data_type,
+        raw_len,
+        |row| match row_source[row] {
+            Some((ci, r)) if !arg_cols[ci].is_null(r) => ElemRef::Col(&arg_cols[ci], r),
+            _ => ElemRef::Null,
+        },
+        &mut pool,
+        ctx,
+        before,
+    )
+}
+
+fn eval_call(
+    func: ScalarFn,
+    args: &[Expr],
+    data_type: &DataType,
+    batch: &Batch,
+    active: Option<&Bitmap>,
+    ctx: &EvalContext,
+    mut pool: Option<&mut Reservation>,
+) -> Result<Column, QueryError> {
+    if matches!(func, ScalarFn::Coalesce) {
+        return eval_coalesce_lazy(args, data_type, batch, active, ctx, pool);
+    }
+
     let mut arg_cols = Vec::with_capacity(args.len());
     for arg in args {
         arg_cols.push(eval_expr_masked(
@@ -923,6 +1057,7 @@ fn eval_call(
             pool.as_deref_mut(),
         )?);
     }
+    let refs: Vec<&Column> = arg_cols.iter().map(Arc::as_ref).collect();
     let len = batch.raw_len();
     match func {
         ScalarFn::Lower
@@ -944,14 +1079,14 @@ fn eval_call(
         | ScalarFn::RegexpLike
         | ScalarFn::RegexpExtract
         | ScalarFn::Encode => {
-            crate::fn_string::eval_string_fn(func, &arg_cols, len, active, ctx, pool)
+            crate::fn_string::eval_string_fn_refs(func, &refs, len, active, ctx, pool)
         }
         ScalarFn::Now
         | ScalarFn::DateTrunc
         | ScalarFn::DateBin
         | ScalarFn::Extract
         | ScalarFn::ToTimestamp => {
-            crate::fn_time::eval_time_fn(func, &arg_cols, len, active, ctx, pool)
+            crate::fn_time::eval_time_fn_refs(func, &refs, len, active, ctx, pool)
         }
         ScalarFn::Abs
         | ScalarFn::Round
@@ -979,7 +1114,7 @@ fn eval_call(
         | ScalarFn::JsonGetText
         | ScalarFn::JsonExtract
         | ScalarFn::JsonExtractText => {
-            crate::fn_misc::eval_misc_fn(func, &arg_cols, len, active, ctx, pool)
+            crate::fn_misc::eval_misc_fn_refs(func, &refs, len, active, ctx, pool)
         }
     }
 }
@@ -1003,7 +1138,7 @@ fn eval_timestamp_interval(
         DataType::TimestampNs { utc } => *utc,
         _ => match (lcol.data_type(), rcol.data_type()) {
             (DataType::TimestampNs { utc }, _) | (_, DataType::TimestampNs { utc }) => utc,
-            _ => true,
+            _ => false,
         },
     };
     if matches!(lcol.data_type(), DataType::Null) || matches!(rcol.data_type(), DataType::Null) {
@@ -1012,13 +1147,28 @@ fn eval_timestamp_interval(
             len: raw_len,
         });
     }
-    let (ts_col, iv_col, subtract) = match (lcol.data_type(), rcol.data_type(), op) {
-        (DataType::TimestampNs { .. }, DataType::Interval, BinaryOp::Add) => (lcol, rcol, false),
-        (DataType::TimestampNs { .. }, DataType::Interval, BinaryOp::Sub) => (lcol, rcol, true),
-        (DataType::Interval, DataType::TimestampNs { .. }, BinaryOp::Add) => (rcol, lcol, false),
+    enum BaseKind {
+        TsLeft,
+        TsRight,
+        DateLeft,
+        DateRight,
+    }
+    let (base_kind, iv_col, subtract) = match (lcol.data_type(), rcol.data_type(), op) {
+        (DataType::TimestampNs { .. }, DataType::Interval, BinaryOp::Add) => {
+            (BaseKind::TsLeft, rcol, false)
+        }
+        (DataType::TimestampNs { .. }, DataType::Interval, BinaryOp::Sub) => {
+            (BaseKind::TsLeft, rcol, true)
+        }
+        (DataType::Interval, DataType::TimestampNs { .. }, BinaryOp::Add) => {
+            (BaseKind::TsRight, lcol, false)
+        }
+        (DataType::Date, DataType::Interval, BinaryOp::Add) => (BaseKind::DateLeft, rcol, false),
+        (DataType::Date, DataType::Interval, BinaryOp::Sub) => (BaseKind::DateLeft, rcol, true),
+        (DataType::Interval, DataType::Date, BinaryOp::Add) => (BaseKind::DateRight, lcol, false),
         _ => {
             return Err(QueryError::failed(
-                "unsupported timestamp and interval arithmetic",
+                "unsupported timestamp/date and interval arithmetic",
             ));
         }
     };
@@ -1033,7 +1183,27 @@ fn eval_timestamp_interval(
         if !is_active(active, row) {
             continue;
         }
-        if let (Some(ts), Some(iv)) = (read_timestamp(ts_col, row), read_interval(iv_col, row)) {
+        let base_ns = match base_kind {
+            BaseKind::TsLeft => read_timestamp(lcol, row),
+            BaseKind::TsRight => read_timestamp(rcol, row),
+            BaseKind::DateLeft => match read_date(lcol, row) {
+                Some(d) => Some(
+                    i64::from(d)
+                        .checked_mul(NS_PER_DAY)
+                        .ok_or_else(|| QueryError::failed("date to timestamp overflow"))?,
+                ),
+                None => None,
+            },
+            BaseKind::DateRight => match read_date(rcol, row) {
+                Some(d) => Some(
+                    i64::from(d)
+                        .checked_mul(NS_PER_DAY)
+                        .ok_or_else(|| QueryError::failed("date to timestamp overflow"))?,
+                ),
+                None => None,
+            },
+        };
+        if let (Some(ts), Some(iv)) = (base_ns, read_interval(iv_col, row)) {
             *slot = crate::fn_time::add_interval(ts, iv, subtract)?;
             let _ = nulls.set(row, true);
         }
@@ -1042,6 +1212,129 @@ fn eval_timestamp_interval(
         FlatData::TimestampNs { values: vals, utc },
         Some(nulls),
     )?))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "internal temporal arithmetic helper preserves operands, target type, mask, ctx, pool"
+)]
+fn eval_temporal_arith(
+    op: BinaryOp,
+    lcol: &Column,
+    rcol: &Column,
+    data_type: &DataType,
+    raw_len: usize,
+    active: Option<&Bitmap>,
+    ctx: &EvalContext,
+    pool: &mut Option<&mut Reservation>,
+) -> Result<Column, QueryError> {
+    let before = pool_size(pool);
+    if matches!(lcol.data_type(), DataType::Null) || matches!(rcol.data_type(), DataType::Null) {
+        return Ok(Column::Const {
+            value: ScalarValue::Null(data_type.clone()),
+            len: raw_len,
+        });
+    }
+    match (lcol.data_type(), rcol.data_type(), op) {
+        (DataType::TimestampNs { .. }, DataType::TimestampNs { .. }, BinaryOp::Sub) => {
+            try_reserve(
+                pool,
+                checked_fixed_bytes(raw_len, size_of::<Interval>(), true)?,
+            )?;
+            let mut vals = vec![Interval::default(); raw_len];
+            let mut nulls = Bitmap::new_zeroed(raw_len);
+            for (row, slot) in vals.iter_mut().enumerate() {
+                if (row & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(ctx, pool, before)?;
+                }
+                if !is_active(active, row) {
+                    continue;
+                }
+                if let (Some(a), Some(b)) = (read_timestamp(lcol, row), read_timestamp(rcol, row)) {
+                    let nanos = a
+                        .checked_sub(b)
+                        .ok_or_else(|| QueryError::failed("timestamp subtraction overflow"))?;
+                    *slot = Interval {
+                        months: 0,
+                        days: 0,
+                        nanos,
+                    };
+                    let _ = nulls.set(row, true);
+                }
+            }
+            Ok(Column::Flat(FlatColumn::try_new(
+                FlatData::Interval(vals),
+                Some(nulls),
+            )?))
+        }
+        (DataType::Date, DataType::Date, BinaryOp::Sub) => {
+            try_reserve(pool, checked_fixed_bytes(raw_len, 8, true)?)?;
+            let mut vals = vec![0i64; raw_len];
+            let mut nulls = Bitmap::new_zeroed(raw_len);
+            for (row, slot) in vals.iter_mut().enumerate() {
+                if (row & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(ctx, pool, before)?;
+                }
+                if !is_active(active, row) {
+                    continue;
+                }
+                if let (Some(a), Some(b)) = (read_date(lcol, row), read_date(rcol, row)) {
+                    *slot = i64::from(a) - i64::from(b);
+                    let _ = nulls.set(row, true);
+                }
+            }
+            Ok(Column::Flat(FlatColumn::try_new(
+                FlatData::I64(vals),
+                Some(nulls),
+            )?))
+        }
+        (DataType::Interval, DataType::Interval, BinaryOp::Add | BinaryOp::Sub) => {
+            try_reserve(
+                pool,
+                checked_fixed_bytes(raw_len, size_of::<Interval>(), true)?,
+            )?;
+            let mut vals = vec![Interval::default(); raw_len];
+            let mut nulls = Bitmap::new_zeroed(raw_len);
+            let is_add = matches!(op, BinaryOp::Add);
+            for (row, slot) in vals.iter_mut().enumerate() {
+                if (row & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(ctx, pool, before)?;
+                }
+                if !is_active(active, row) {
+                    continue;
+                }
+                if let (Some(a), Some(b)) = (read_interval(lcol, row), read_interval(rcol, row)) {
+                    let (months, days, nanos) = if is_add {
+                        (
+                            a.months.checked_add(b.months),
+                            a.days.checked_add(b.days),
+                            a.nanos.checked_add(b.nanos),
+                        )
+                    } else {
+                        (
+                            a.months.checked_sub(b.months),
+                            a.days.checked_sub(b.days),
+                            a.nanos.checked_sub(b.nanos),
+                        )
+                    };
+                    *slot = Interval {
+                        months: months
+                            .ok_or_else(|| QueryError::failed("interval arithmetic overflow"))?,
+                        days: days
+                            .ok_or_else(|| QueryError::failed("interval arithmetic overflow"))?,
+                        nanos: nanos
+                            .ok_or_else(|| QueryError::failed("interval arithmetic overflow"))?,
+                    };
+                    let _ = nulls.set(row, true);
+                }
+            }
+            Ok(Column::Flat(FlatColumn::try_new(
+                FlatData::Interval(vals),
+                Some(nulls),
+            )?))
+        }
+        _ => Err(QueryError::failed("unsupported temporal arithmetic")),
+    }
 }
 
 pub(crate) fn bitmap_mem_bytes(len: usize) -> usize {
@@ -1092,7 +1385,7 @@ fn eval_unary(
                 });
             }
             if active.is_none()
-                && let Column::Const { value, len } = &child
+                && let Column::Const { value, len } = &*child
             {
                 let out_val = match value {
                     ScalarValue::Bool(b) => ScalarValue::Bool(!b),
@@ -1327,9 +1620,9 @@ fn eval_binary(
         BinaryOp::ArrayContains => {
             let lcol = eval_expr_masked(left, batch, active, ctx, pool.as_deref_mut())?;
             let rcol = eval_expr_masked(right, batch, active, ctx, pool.as_deref_mut())?;
-            crate::fn_misc::eval_misc_fn(
+            crate::fn_misc::eval_misc_fn_refs(
                 ScalarFn::ArrayHasAll,
-                &[lcol, rcol],
+                &[lcol.as_ref(), rcol.as_ref()],
                 batch.raw_len(),
                 active,
                 ctx,
@@ -1358,12 +1651,43 @@ fn eval_binary(
             let rdt = right.data_type();
             if matches!(
                 (&ldt, &rdt),
-                (DataType::TimestampNs { .. }, DataType::Interval)
-                    | (DataType::Interval, DataType::TimestampNs { .. })
+                (
+                    DataType::TimestampNs { .. } | DataType::Date,
+                    DataType::Interval
+                ) | (
+                    DataType::Interval,
+                    DataType::TimestampNs { .. } | DataType::Date
+                )
             ) {
                 let lcol = eval_expr_masked(left, batch, active, ctx, pool.as_deref_mut())?;
                 let rcol = eval_expr_masked(right, batch, active, ctx, pool.as_deref_mut())?;
                 return eval_timestamp_interval(
+                    op,
+                    &lcol,
+                    &rcol,
+                    data_type,
+                    batch.raw_len(),
+                    active,
+                    ctx,
+                    &mut pool,
+                );
+            }
+            if matches!(
+                (&ldt, &rdt, op),
+                (
+                    DataType::TimestampNs { .. },
+                    DataType::TimestampNs { .. },
+                    BinaryOp::Sub
+                ) | (DataType::Date, DataType::Date, BinaryOp::Sub)
+                    | (
+                        DataType::Interval,
+                        DataType::Interval,
+                        BinaryOp::Add | BinaryOp::Sub
+                    )
+            ) {
+                let lcol = eval_expr_masked(left, batch, active, ctx, pool.as_deref_mut())?;
+                let rcol = eval_expr_masked(right, batch, active, ctx, pool.as_deref_mut())?;
+                return eval_temporal_arith(
                     op,
                     &lcol,
                     &rcol,
@@ -1628,15 +1952,25 @@ fn compare_row(lcol: &Column, rcol: &Column, row: usize) -> Result<Ordering, Que
                 _ => Err(QueryError::failed("invalid decimal comparison")),
             }
         }
+        (DataType::Decimal128 { scale, .. }, DataType::I64) => {
+            match (read_decimal(lcol, row), read_i64(rcol, row)) {
+                (Some(a), Some(b)) => compare_decimals(a, scale, i128::from(b), 0),
+                _ => Err(QueryError::failed("invalid decimal comparison")),
+            }
+        }
+        (DataType::I64, DataType::Decimal128 { scale, .. }) => {
+            match (read_i64(lcol, row), read_decimal(rcol, row)) {
+                (Some(a), Some(b)) => compare_decimals(i128::from(a), 0, b, scale),
+                _ => Err(QueryError::failed("invalid decimal comparison")),
+            }
+        }
         (DataType::TimestampNs { .. }, DataType::TimestampNs { .. }) => {
             Ok(read_timestamp(lcol, row).cmp(&read_timestamp(rcol, row)))
         }
         (DataType::Date, DataType::Date) => Ok(read_date(lcol, row).cmp(&read_date(rcol, row))),
         (DataType::Interval, DataType::Interval) => {
             match (read_interval(lcol, row), read_interval(rcol, row)) {
-                (Some(a), Some(b)) => {
-                    Ok((a.months, a.days, a.nanos).cmp(&(b.months, b.days, b.nanos)))
-                }
+                (Some(a), Some(b)) => Ok(a.canonical_key().cmp(&b.canonical_key())),
                 _ => Err(QueryError::failed("invalid interval comparison")),
             }
         }
@@ -1753,12 +2087,28 @@ fn compare_scalars(a: &ScalarValue, b: &ScalarValue) -> Result<Ordering, QueryEr
                 ..
             },
         ) => compare_decimals(*x, *sx, *y, *sy),
+        (
+            ScalarValue::Decimal128 {
+                value: x,
+                scale: sx,
+                ..
+            },
+            ScalarValue::I64(y),
+        ) => compare_decimals(*x, *sx, i128::from(*y), 0),
+        (
+            ScalarValue::I64(x),
+            ScalarValue::Decimal128 {
+                value: y,
+                scale: sy,
+                ..
+            },
+        ) => compare_decimals(i128::from(*x), 0, *y, *sy),
         (ScalarValue::TimestampNs { value: x, .. }, ScalarValue::TimestampNs { value: y, .. }) => {
             Ok(x.cmp(y))
         }
         (ScalarValue::Date(x), ScalarValue::Date(y)) => Ok(x.cmp(y)),
         (ScalarValue::Interval(x), ScalarValue::Interval(y)) => {
-            Ok((x.months, x.days, x.nanos).cmp(&(y.months, y.days, y.nanos)))
+            Ok(x.canonical_key().cmp(&y.canonical_key()))
         }
         (ScalarValue::Utf8(x), ScalarValue::Utf8(y)) => Ok(x.cmp(y)),
         (ScalarValue::Binary(x), ScalarValue::Binary(y)) => Ok(x.cmp(y)),
@@ -2094,7 +2444,7 @@ fn eval_between(
     build_bool_column(raw_len, vals, Some(nulls))
 }
 
-enum LiteralSet {
+pub(crate) enum LiteralSet {
     Bool(HashSet<bool>),
     I64(HashSet<i64>),
     F64(HashSet<u64>),
@@ -2103,9 +2453,22 @@ enum LiteralSet {
     Bytes(HashSet<Vec<u8>>),
     TimestampNs(HashSet<i64>),
     Date(HashSet<i32>),
+    Interval(HashSet<i128>),
 }
 
 impl LiteralSet {
+    pub(crate) fn estimated_bytes(&self) -> usize {
+        match self {
+            Self::Bool(s) => s.len().saturating_mul(16),
+            Self::I64(s) | Self::TimestampNs(s) => s.len().saturating_mul(16),
+            Self::F64(s) => s.len().saturating_mul(16),
+            Self::Decimal128(s) | Self::Interval(s) => s.len().saturating_mul(24),
+            Self::Date(s) => s.len().saturating_mul(12),
+            Self::Utf8(s) => s.iter().map(|v| size_of::<String>() + v.len() + 8).sum(),
+            Self::Bytes(s) => s.iter().map(|v| size_of::<Vec<u8>>() + v.len() + 8).sum(),
+        }
+    }
+
     fn from_literals(lhs_type: &DataType, list: &[Expr]) -> Option<(Self, bool)> {
         let mut has_null = false;
         let mut scalars = Vec::with_capacity(list.len());
@@ -2215,6 +2578,16 @@ impl LiteralSet {
                 }
                 Self::Date(s)
             }
+            DataType::Interval => {
+                let mut s = HashSet::with_capacity(scalars.len());
+                for sv in scalars {
+                    let ScalarValue::Interval(iv) = sv else {
+                        return None;
+                    };
+                    s.insert(iv.canonical_key());
+                }
+                Self::Interval(s)
+            }
             _ => return None,
         };
         Some((set, has_null))
@@ -2230,6 +2603,7 @@ impl LiteralSet {
             Self::Bytes(s) => read_bytes(col, row).map(|v| s.contains(v)),
             Self::TimestampNs(s) => read_timestamp(col, row).map(|v| s.contains(&v)),
             Self::Date(s) => read_date(col, row).map(|v| s.contains(&v)),
+            Self::Interval(s) => read_interval(col, row).map(|iv| s.contains(&iv.canonical_key())),
         }
     }
 }
@@ -2279,7 +2653,11 @@ fn eval_in_list(
         });
     }
 
-    if let Some((set, has_null)) = LiteralSet::from_literals(&lhs_dt, list) {
+    if let Some(cached) = ctx
+        .cache
+        .get_or_insert_in_list(&lhs_dt, list, || LiteralSet::from_literals(&lhs_dt, list))
+    {
+        let (set, has_null) = cached.as_ref();
         try_reserve(&mut pool, checked_bool_bytes(raw_len, true)?)?;
         let mut vals = Bitmap::new_zeroed(raw_len);
         let mut nulls = Bitmap::new_zeroed(raw_len);
@@ -2298,7 +2676,7 @@ fn eval_in_list(
                         let _ = vals.set(row, true);
                     }
                 }
-                Some(false) if !has_null => {
+                Some(false) if !*has_null => {
                     let _ = nulls.set(row, true);
                     if negated {
                         let _ = vals.set(row, true);
@@ -2396,7 +2774,7 @@ fn eval_case(
             .ok_or(QueryError::TooLarge)?,
     )?;
     let mut remaining = active.cloned().unwrap_or_else(|| Bitmap::new_ones(raw_len));
-    let mut branch_cols: Vec<Column> = Vec::with_capacity(when_then.len() + 1);
+    let mut branch_cols: Vec<Arc<Column>> = Vec::with_capacity(when_then.len() + 1);
     let mut row_source: Vec<Option<(usize, usize)>> = vec![None; raw_len];
 
     for (when_ex, then_ex) in when_then {
@@ -3434,7 +3812,7 @@ fn eval_cast(
     active: Option<&Bitmap>,
     ctx: &EvalContext,
     mut pool: Option<&mut Reservation>,
-) -> Result<Column, QueryError> {
+) -> Result<Arc<Column>, QueryError> {
     let before = pool_size(&pool);
     target.validate(MAX_NESTING_DEPTH)?;
     let raw_len = batch.raw_len();
@@ -3447,17 +3825,17 @@ fn eval_cast(
     }
 
     if let (DataType::TimestampNs { .. }, DataType::TimestampNs { utc }) = (&src_dt, target) {
-        return retag_timestamp_utc(src, *utc, &mut pool);
+        return retag_timestamp_utc(&src, *utc, &mut pool).map(Arc::new);
     }
 
     if matches!(src_dt, DataType::Null) || matches!(target, DataType::Null) {
-        return Ok(Column::Const {
+        return Ok(Arc::new(Column::Const {
             value: ScalarValue::Null(target.clone()),
             len: raw_len,
-        });
+        }));
     }
 
-    match (&src_dt, target) {
+    let out = match (&src_dt, target) {
         (DataType::I64, DataType::F64) => {
             cast_fixed(raw_len, active, ctx, &mut pool, before, |row| {
                 Ok(read_i64(&src, row).map(|v| v as f64))
@@ -4065,11 +4443,12 @@ fn eval_cast(
             cast_to_utf8(&src, &src_dt, mode, raw_len, active, ctx, &mut pool, before)
         }
         _ => Err(QueryError::failed("unsupported cast")),
-    }
+    };
+    out.map(Arc::new)
 }
 
 fn retag_timestamp_utc(
-    src: Column,
+    src: &Column,
     utc: bool,
     pool: &mut Option<&mut Reservation>,
 ) -> Result<Column, QueryError> {
@@ -4077,7 +4456,7 @@ fn retag_timestamp_utc(
     retag_timestamp_utc_inner(src, utc)
 }
 
-fn retag_timestamp_utc_inner(src: Column, utc: bool) -> Result<Column, QueryError> {
+fn retag_timestamp_utc_inner(src: &Column, utc: bool) -> Result<Column, QueryError> {
     match src {
         Column::Flat(fc) => {
             let nulls = fc.nulls().cloned();
@@ -4095,18 +4474,20 @@ fn retag_timestamp_utc_inner(src: Column, utc: bool) -> Result<Column, QueryErro
         }
         Column::Const { value, len } => {
             let new_val = match value {
-                ScalarValue::TimestampNs { value, .. } => ScalarValue::TimestampNs { value, utc },
+                ScalarValue::TimestampNs { value, .. } => {
+                    ScalarValue::TimestampNs { value: *value, utc }
+                }
                 ScalarValue::Null(_) => ScalarValue::Null(DataType::TimestampNs { utc }),
                 _ => return Err(QueryError::failed("expected timestamp scalar")),
             };
             Ok(Column::Const {
                 value: new_val,
-                len,
+                len: *len,
             })
         }
         Column::Dict(d) => {
             let Column::Flat(new_vals) =
-                retag_timestamp_utc_inner(Column::Flat(d.values().clone()), utc)?
+                retag_timestamp_utc_inner(&Column::Flat(d.values().clone()), utc)?
             else {
                 return Err(QueryError::failed("expected flat dict values"));
             };
@@ -4118,7 +4499,7 @@ fn retag_timestamp_utc_inner(src: Column, utc: bool) -> Result<Column, QueryErro
         }
         Column::Rle(r) => {
             let Column::Flat(new_vals) =
-                retag_timestamp_utc_inner(Column::Flat(r.values().clone()), utc)?
+                retag_timestamp_utc_inner(&Column::Flat(r.values().clone()), utc)?
             else {
                 return Err(QueryError::failed("expected flat rle values"));
             };
@@ -4318,20 +4699,28 @@ fn i64_to_decimal(v: i64, precision: u8, scale: i8) -> Result<i128, QueryError> 
     check_decimal_bounds(scaled, precision)
 }
 
-fn f64_to_decimal(v: f64, precision: u8, scale: i8) -> Result<i128, QueryError> {
+pub(crate) fn f64_to_decimal(v: f64, precision: u8, scale: i8) -> Result<i128, QueryError> {
     if !v.is_finite() {
         return Err(QueryError::failed(
             "cannot cast non-finite float to decimal",
         ));
     }
-    let scaled = (v * 10f64.powi(i32::from(scale))).round();
-    if !scaled.is_finite() || scaled.abs() >= 10f64.powi(i32::from(precision)) {
+    if precision == 0 || precision > 38 {
+        return Err(QueryError::failed("decimal precision out of range"));
+    }
+    if v == 0.0 {
+        return Ok(0);
+    }
+    let max_exp = i32::from(precision) - i32::from(scale) + 1;
+    if v.abs() >= 10f64.powi(max_exp) {
         return Err(QueryError::failed("float out of range for decimal"));
     }
-    if scaled <= (i128::MIN as f64) || scaled >= (i128::MAX as f64) {
-        return Err(QueryError::failed("decimal overflow"));
+    let min_exp = -i32::from(scale) - 2;
+    if v.abs() < 10f64.powi(min_exp) {
+        return Ok(0);
     }
-    check_decimal_bounds(scaled as i128, precision)
+    let s = format!("{v}");
+    parse_decimal_str(&s, precision, scale)
 }
 
 fn decimal_to_i64(v: i128, scale: i8) -> Option<i64> {
@@ -4440,24 +4829,36 @@ fn parse_decimal_str(text: &str, precision: u8, scale: i8) -> Result<i128, Query
             }
         }
     } else {
-        let denom = 10u128
-            .checked_pow(u32::from(scale.unsigned_abs()))
-            .ok_or_else(|| QueryError::failed("decimal scale overflow"))?;
-        let int_mag = if int_trimmed.is_empty() {
-            0u128
-        } else {
-            int_trimmed
-                .parse::<u128>()
-                .map_err(|_| QueryError::failed("decimal string overflow"))?
-        };
-        let mut q = int_mag / denom;
-        let r = int_mag % denom;
-        if r >= denom.div_ceil(2) {
-            q = q
-                .checked_add(1)
-                .ok_or_else(|| QueryError::failed("decimal overflow"))?;
+        let neg_scale = usize::from(scale.unsigned_abs());
+        if u32::try_from(neg_scale)
+            .ok()
+            .and_then(|exp| 10u128.checked_pow(exp))
+            .is_none()
+        {
+            return Err(QueryError::failed("decimal scale overflow"));
         }
-        q
+        if int_trimmed.len() < neg_scale {
+            0u128
+        } else if int_trimmed.len() == neg_scale {
+            if int_trimmed.as_bytes()[0] >= b'5' {
+                1u128
+            } else {
+                0u128
+            }
+        } else {
+            let split = int_trimmed.len() - neg_scale;
+            let kept_int = &int_trimmed[..split];
+            let round_up = int_trimmed.as_bytes()[split] >= b'5';
+            let q = kept_int
+                .parse::<u128>()
+                .map_err(|_| QueryError::failed("decimal string overflow"))?;
+            if round_up {
+                q.checked_add(1)
+                    .ok_or_else(|| QueryError::failed("decimal overflow"))?
+            } else {
+                q
+            }
+        }
     };
 
     let signed = signed_from_u128(neg, mag)?;
@@ -4509,10 +4910,7 @@ mod tests {
     use super::*;
 
     fn ctx() -> EvalContext {
-        EvalContext {
-            now_ns: 1_700_000_000_000_000_000,
-            cancel: CancelToken::new(),
-        }
+        EvalContext::new(1_700_000_000_000_000_000, CancelToken::new())
     }
 
     fn bool_vec(col: &Column) -> Vec<Option<bool>> {
@@ -5242,10 +5640,7 @@ mod tests {
         assert!(miss_out.is_null(1));
 
         // 4. CancelToken abort
-        let cancelled_ctx = EvalContext {
-            now_ns: 0,
-            cancel: CancelToken::new(),
-        };
+        let cancelled_ctx = EvalContext::new(0, CancelToken::new());
         cancelled_ctx.cancel.cancel();
         let cancel_err = eval_expr(&case_expr, &batch, &cancelled_ctx, None).unwrap_err();
         assert!(matches!(cancel_err, QueryError::Cancelled));
@@ -5623,20 +6018,31 @@ mod tests {
             Batch::try_new_all(Arc::clone(&schema), vec![x_col, ts_col, s_col, fb_col], n).unwrap();
 
         let tiny_pool = GlobalPool::standalone(col_bytes / 2);
-        let mut tiny_res = tiny_pool.register("col_clone_oom", false);
+        let mut tiny_res = tiny_pool.register("col_zero_copy", false);
         let col_expr = Expr::Column {
             index: 0,
             name: "x".into(),
             data_type: DataType::I64,
         };
+        let zero_copy_col = eval_expr(&col_expr, &batch, &ctx(), Some(&mut tiny_res)).unwrap();
+        assert!(Arc::ptr_eq(&zero_copy_col, batch.column_arc(0).unwrap()));
+        assert_eq!(tiny_res.size(), 0);
+
+        // Allocating binary expression under tight pool still fails with TooLarge and rolls back.
+        let alloc_expr = Expr::Binary {
+            left: Box::new(col_expr),
+            op: BinaryOp::Add,
+            right: Box::new(Expr::Literal(ScalarValue::I64(1))),
+            data_type: DataType::I64,
+        };
         assert!(matches!(
-            eval_expr(&col_expr, &batch, &ctx(), Some(&mut tiny_res)).unwrap_err(),
+            eval_expr(&alloc_expr, &batch, &ctx(), Some(&mut tiny_res)).unwrap_err(),
             QueryError::TooLarge
         ));
         assert_eq!(tiny_res.size(), 0);
 
-        // retag_timestamp_utc needs peak 2 * ts_bytes while cloning values.
-        let retag_pool = GlobalPool::standalone(ts_bytes + ts_bytes / 2);
+        // retag_timestamp_utc now sees zero-copy src, so peak is 1 * ts_bytes.
+        let retag_pool = GlobalPool::standalone(ts_bytes / 2);
         let mut retag_res = retag_pool.register("retag_oom", false);
         let retag_expr = Expr::Cast {
             expr: Box::new(Expr::Column {
@@ -5652,6 +6058,11 @@ mod tests {
             QueryError::TooLarge
         ));
         assert_eq!(retag_res.size(), 0);
+
+        let retag_fit_pool = GlobalPool::standalone(ts_bytes + ts_bytes / 2);
+        let mut retag_fit_res = retag_fit_pool.register("retag_fit", false);
+        let retagged = eval_expr(&retag_expr, &batch, &ctx(), Some(&mut retag_fit_res)).unwrap();
+        assert_eq!(retag_fit_res.size(), retagged.memory_bytes());
 
         // Blocker 3d & Blocker 4: cast_to_utf8, Utf8 -> Binary, FixedBytes8 -> Binary OOM rollback.
         let cast_pool = GlobalPool::standalone(256);
@@ -5694,10 +6105,7 @@ mod tests {
         }
 
         // Major 6: CancelToken aborts empty InList, Utf8->Binary, FixedBytes8->Binary, cast_to_utf8.
-        let cancelled = EvalContext {
-            now_ns: 0,
-            cancel: CancelToken::new(),
-        };
+        let cancelled = EvalContext::new(0, CancelToken::new());
         cancelled.cancel.cancel();
         let masked = batch
             .with_selection(Selection::Mask(Bitmap::new_ones(n)))
@@ -5920,5 +6328,478 @@ mod tests {
                 QueryError::Failed(_)
             ));
         }
+    }
+
+    #[test]
+    fn zero_copy_column_eval_returns_ptr_eq_and_reserves_zero_bytes() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("a", DataType::I64, false),
+            Field::new("b", DataType::Utf8, false),
+        ])
+        .unwrap();
+        let batch = Batch::try_new_all(
+            schema,
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![1, 2, 3]), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(["alpha", "beta", "gamma"]).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            3,
+        )
+        .unwrap();
+
+        let expr = Expr::Column {
+            index: 1,
+            name: "b".to_owned(),
+            data_type: DataType::Utf8,
+        };
+        let pool = GlobalPool::standalone(64);
+        let mut res = pool.register("zero_copy", false);
+        res.try_grow(32).unwrap();
+        let before = res.size();
+
+        let out = eval_expr(&expr, &batch, &ctx(), Some(&mut res)).unwrap();
+        assert!(Arc::ptr_eq(&out, batch.column_arc(1).unwrap()));
+        assert_eq!(res.size(), before);
+
+        let mask = Bitmap::from_bools(&[true, false, true]);
+        let masked_out =
+            eval_expr_masked(&expr, &batch, Some(&mask), &ctx(), Some(&mut res)).unwrap();
+        assert!(Arc::ptr_eq(&masked_out, batch.column_arc(1).unwrap()));
+        assert_eq!(res.size(), before);
+    }
+
+    #[test]
+    fn coalesce_short_circuits_lazily_per_row() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("a", DataType::I64, true),
+            Field::new("b", DataType::I64, false),
+        ])
+        .unwrap();
+        let batch = Batch::try_new_all(
+            schema,
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::I64(vec![10, 0, 30]),
+                        Some(Bitmap::from_bools(&[true, false, true])),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![0, 5, 0]), None).unwrap()),
+            ],
+            3,
+        )
+        .unwrap();
+
+        let div_by_b = Expr::Binary {
+            left: Box::new(Expr::Literal(ScalarValue::I64(100))),
+            op: BinaryOp::Div,
+            right: Box::new(Expr::Column {
+                index: 1,
+                name: "b".to_owned(),
+                data_type: DataType::I64,
+            }),
+            data_type: DataType::I64,
+        };
+        let expr = Expr::Call {
+            func: ScalarFn::Coalesce,
+            args: vec![
+                Expr::Column {
+                    index: 0,
+                    name: "a".to_owned(),
+                    data_type: DataType::I64,
+                },
+                div_by_b,
+            ],
+            data_type: DataType::I64,
+        };
+        let out = eval_expr(&expr, &batch, &ctx(), None).unwrap();
+        assert_eq!(out.get_scalar(0).unwrap(), ScalarValue::I64(10));
+        assert_eq!(out.get_scalar(1).unwrap(), ScalarValue::I64(20));
+        assert_eq!(out.get_scalar(2).unwrap(), ScalarValue::I64(30));
+
+        // When first argument is completely non-null, remaining arguments (even 1/0) never evaluate.
+        let all_non_null = Expr::Call {
+            func: ScalarFn::Coalesce,
+            args: vec![
+                Expr::Literal(ScalarValue::I64(7)),
+                Expr::Binary {
+                    left: Box::new(Expr::Literal(ScalarValue::I64(1))),
+                    op: BinaryOp::Div,
+                    right: Box::new(Expr::Literal(ScalarValue::I64(0))),
+                    data_type: DataType::I64,
+                },
+            ],
+            data_type: DataType::I64,
+        };
+        let fast = eval_expr(&all_non_null, &batch, &ctx(), None).unwrap();
+        assert_eq!(fast.get_scalar(0).unwrap(), ScalarValue::I64(7));
+        assert_eq!(fast.get_scalar(1).unwrap(), ScalarValue::I64(7));
+        assert_eq!(fast.get_scalar(2).unwrap(), ScalarValue::I64(7));
+    }
+
+    #[test]
+    fn f64_to_decimal_accuracy_negative_scale_and_bounds() {
+        assert_eq!(f64_to_decimal(0.1, 10, 2).unwrap(), 10);
+        assert_eq!(f64_to_decimal(0.125, 10, 2).unwrap(), 13);
+        assert_eq!(f64_to_decimal(-0.125, 10, 2).unwrap(), -13);
+        assert_eq!(f64_to_decimal(0.0, 10, 2).unwrap(), 0);
+        assert_eq!(f64_to_decimal(-0.0, 10, 2).unwrap(), 0);
+        assert_eq!(f64_to_decimal(1e-10, 10, 2).unwrap(), 0);
+        assert_eq!(f64_to_decimal(1234.0, 4, -2).unwrap(), 12);
+        assert_eq!(f64_to_decimal(1250.0, 4, -2).unwrap(), 13);
+        assert!(matches!(
+            f64_to_decimal(1e20, 10, 2),
+            Err(QueryError::Failed(_))
+        ));
+        assert!(matches!(
+            f64_to_decimal(f64::NAN, 10, 2),
+            Err(QueryError::Failed(_))
+        ));
+        assert!(matches!(
+            f64_to_decimal(f64::INFINITY, 10, 2),
+            Err(QueryError::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn decimal128_and_i64_un_narrowed_comparison_and_canonical_interval() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new(
+                "d",
+                DataType::Decimal128 {
+                    precision: 30,
+                    scale: 10,
+                },
+                false,
+            ),
+            Field::new("i", DataType::I64, false),
+            Field::new("iv", DataType::Interval, false),
+        ])
+        .unwrap();
+        let batch = Batch::try_new_all(
+            schema,
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Decimal128 {
+                            precision: 30,
+                            scale: 10,
+                            values: vec![1_000_000_000_000, 1_000_000_000_001],
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![100, 100]), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Interval(vec![
+                            Interval {
+                                months: 1,
+                                days: 0,
+                                nanos: 0,
+                            },
+                            Interval {
+                                months: 0,
+                                days: 30,
+                                nanos: 0,
+                            },
+                        ]),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            2,
+        )
+        .unwrap();
+
+        let eq_expr = Expr::Binary {
+            left: Box::new(Expr::Column {
+                index: 0,
+                name: "d".to_owned(),
+                data_type: DataType::Decimal128 {
+                    precision: 30,
+                    scale: 10,
+                },
+            }),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Column {
+                index: 1,
+                name: "i".to_owned(),
+                data_type: DataType::I64,
+            }),
+            data_type: DataType::Bool,
+        };
+        let eq_out = eval_expr(&eq_expr, &batch, &ctx(), None).unwrap();
+        assert_eq!(eq_out.get_scalar(0).unwrap(), ScalarValue::Bool(true));
+        assert_eq!(eq_out.get_scalar(1).unwrap(), ScalarValue::Bool(false));
+
+        let gt_expr = Expr::Binary {
+            left: Box::new(Expr::Column {
+                index: 0,
+                name: "d".to_owned(),
+                data_type: DataType::Decimal128 {
+                    precision: 30,
+                    scale: 10,
+                },
+            }),
+            op: BinaryOp::Gt,
+            right: Box::new(Expr::Column {
+                index: 1,
+                name: "i".to_owned(),
+                data_type: DataType::I64,
+            }),
+            data_type: DataType::Bool,
+        };
+        let gt_out = eval_expr(&gt_expr, &batch, &ctx(), None).unwrap();
+        assert_eq!(gt_out.get_scalar(0).unwrap(), ScalarValue::Bool(false));
+        assert_eq!(gt_out.get_scalar(1).unwrap(), ScalarValue::Bool(true));
+
+        let iv_in = Expr::InList {
+            expr: Box::new(Expr::Column {
+                index: 2,
+                name: "iv".to_owned(),
+                data_type: DataType::Interval,
+            }),
+            list: vec![Expr::Literal(ScalarValue::Interval(Interval {
+                months: 0,
+                days: 30,
+                nanos: 0,
+            }))],
+            negated: false,
+            redacted: false,
+        };
+        let iv_out = eval_expr(&iv_in, &batch, &ctx(), None).unwrap();
+        assert_eq!(iv_out.get_scalar(0).unwrap(), ScalarValue::Bool(true));
+        assert_eq!(iv_out.get_scalar(1).unwrap(), ScalarValue::Bool(true));
+    }
+
+    #[test]
+    fn temporal_arithmetic_date_interval_and_negation() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("ts", DataType::timestamp_utc(), false),
+            Field::new("d1", DataType::Date, false),
+            Field::new("d2", DataType::Date, false),
+            Field::new("iv", DataType::Interval, false),
+        ])
+        .unwrap();
+        let batch = Batch::try_new_all(
+            schema,
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: vec![2000, 500],
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::Date(vec![10, 0]), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::Date(vec![7, 3]), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Interval(vec![
+                            Interval {
+                                months: 0,
+                                days: 2,
+                                nanos: 500,
+                            },
+                            Interval {
+                                months: 0,
+                                days: 1,
+                                nanos: 100,
+                            },
+                        ]),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            2,
+        )
+        .unwrap();
+
+        let ts_col = Expr::Column {
+            index: 0,
+            name: "ts".to_owned(),
+            data_type: DataType::timestamp_utc(),
+        };
+        let d1_col = Expr::Column {
+            index: 1,
+            name: "d1".to_owned(),
+            data_type: DataType::Date,
+        };
+        let d2_col = Expr::Column {
+            index: 2,
+            name: "d2".to_owned(),
+            data_type: DataType::Date,
+        };
+        let iv_col = Expr::Column {
+            index: 3,
+            name: "iv".to_owned(),
+            data_type: DataType::Interval,
+        };
+
+        let ts_diff = Expr::Binary {
+            left: Box::new(ts_col),
+            op: BinaryOp::Sub,
+            right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
+                value: 500,
+                utc: true,
+            })),
+            data_type: DataType::Interval,
+        };
+        let ts_diff_out = eval_expr(&ts_diff, &batch, &ctx(), None).unwrap();
+        assert_eq!(
+            ts_diff_out.get_scalar(0).unwrap(),
+            ScalarValue::Interval(Interval {
+                months: 0,
+                days: 0,
+                nanos: 1500,
+            })
+        );
+
+        let date_diff = Expr::Binary {
+            left: Box::new(d1_col.clone()),
+            op: BinaryOp::Sub,
+            right: Box::new(d2_col),
+            data_type: DataType::I64,
+        };
+        let date_diff_out = eval_expr(&date_diff, &batch, &ctx(), None).unwrap();
+        assert_eq!(date_diff_out.get_scalar(0).unwrap(), ScalarValue::I64(3));
+        assert_eq!(date_diff_out.get_scalar(1).unwrap(), ScalarValue::I64(-3));
+
+        let date_plus_iv = Expr::Binary {
+            left: Box::new(d1_col),
+            op: BinaryOp::Add,
+            right: Box::new(iv_col.clone()),
+            data_type: DataType::TimestampNs { utc: false },
+        };
+        let dpi_out = eval_expr(&date_plus_iv, &batch, &ctx(), None).unwrap();
+        assert_eq!(
+            dpi_out.get_scalar(0).unwrap(),
+            ScalarValue::TimestampNs {
+                value: 12 * 86_400_000_000_000 + 500,
+                utc: false,
+            }
+        );
+
+        let neg_iv = Expr::Unary {
+            op: UnaryOp::Neg,
+            expr: Box::new(iv_col),
+            data_type: DataType::Interval,
+        };
+        let neg_out = eval_expr(&neg_iv, &batch, &ctx(), None).unwrap();
+        assert_eq!(
+            neg_out.get_scalar(0).unwrap(),
+            ScalarValue::Interval(Interval {
+                months: 0,
+                days: -2,
+                nanos: -500,
+            })
+        );
+    }
+
+    #[test]
+    fn eval_cache_shares_via_with_cancel_caps_entries_and_is_redacted() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("s", DataType::Utf8, false),
+            Field::new("i", DataType::I64, false),
+        ])
+        .unwrap();
+        let batch = Batch::try_new_all(
+            schema,
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(["secret_needle", "other"]).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![10, 99]), None).unwrap()),
+            ],
+            2,
+        )
+        .unwrap();
+
+        let shared_ctx = EvalContext::new(0, CancelToken::new());
+        let child_ctx = shared_ctx.with_cancel(CancelToken::new());
+
+        let s_col = Expr::Column {
+            index: 0,
+            name: "s".to_owned(),
+            data_type: DataType::Utf8,
+        };
+        let i_col = Expr::Column {
+            index: 1,
+            name: "i".to_owned(),
+            data_type: DataType::I64,
+        };
+
+        // Populate LIKE and IN list (>= 4 items) via child_ctx, verify shared_ctx sees them
+        for idx in 0..270usize {
+            let pat = format!("%secret_needle_{idx}%");
+            let like_expr = Expr::Like {
+                expr: Box::new(s_col.clone()),
+                pattern: Box::new(Expr::Literal(ScalarValue::Utf8(pat))),
+                escape: Some('\\'),
+                case_insensitive: false,
+                negated: false,
+            };
+            let _ = eval_expr(&like_expr, &batch, &child_ctx, None).unwrap();
+        }
+        let (like_cnt, _, _, _, total_bytes) = shared_ctx.cache.stats();
+        assert_eq!(like_cnt, 256);
+        assert!(total_bytes > 0);
+        assert!(total_bytes <= 4 * 1024 * 1024);
+        let dbg = format!("{:?}", shared_ctx.cache);
+        assert!(
+            !dbg.contains("secret_needle"),
+            "redacted Debug leaked: {dbg}"
+        );
+
+        let in_a = Expr::InList {
+            expr: Box::new(i_col.clone()),
+            list: vec![
+                Expr::Literal(ScalarValue::I64(10)),
+                Expr::Literal(ScalarValue::I64(20)),
+                Expr::Literal(ScalarValue::I64(30)),
+                Expr::Literal(ScalarValue::I64(40)),
+            ],
+            negated: false,
+            redacted: false,
+        };
+        let in_b = Expr::InList {
+            expr: Box::new(i_col),
+            list: vec![
+                Expr::Literal(ScalarValue::I64(1)),
+                Expr::Literal(ScalarValue::I64(2)),
+                Expr::Literal(ScalarValue::I64(3)),
+                Expr::Literal(ScalarValue::I64(4)),
+            ],
+            negated: false,
+            redacted: false,
+        };
+        let out_a = eval_expr(&in_a, &batch, &child_ctx, None).unwrap();
+        let out_b = eval_expr(&in_b, &batch, &child_ctx, None).unwrap();
+        assert_eq!(out_a.get_scalar(0).unwrap(), ScalarValue::Bool(true));
+        assert_eq!(out_b.get_scalar(0).unwrap(), ScalarValue::Bool(false));
+        let (_, _, _, in_list_cnt, _) = shared_ctx.cache.stats();
+        assert_eq!(in_list_cnt, 2);
     }
 }

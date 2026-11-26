@@ -440,10 +440,7 @@ mod tests {
         let pool = GlobalPool::standalone(1024 * 1024);
         let ctx = ExecContext {
             pool: Arc::clone(&pool),
-            eval: EvalContext {
-                now_ns: 0,
-                cancel: CancelToken::new(),
-            },
+            eval: EvalContext::new(0, CancelToken::new()),
             spill: Arc::new(SpillManager::with_fixed_cap(
                 dir.path().to_path_buf(),
                 1024 * 1024,

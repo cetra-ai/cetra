@@ -192,16 +192,14 @@ mod tests {
                 data_type: DataType::timestamp_utc(),
             },
         );
-        let eval_ctx = EvalContext {
-            now_ns: 0,
-            cancel: CancelToken::new(),
-        };
+        let eval_ctx = EvalContext::new(0, CancelToken::new());
         let out_col = eval_expr(&expr, &batch, &eval_ctx, None).expect("eval");
         let out_schema =
             Schema::try_new_arc(vec![Field::new(BUCKET, DataType::timestamp_utc(), false)])
                 .expect("out schema");
-        let out_batch = Batch::try_new(out_schema, vec![out_col], ts_vals.len(), Selection::All)
-            .expect("out batch");
+        let out_batch =
+            Batch::try_new_shared(out_schema, vec![out_col], ts_vals.len(), Selection::All)
+                .expect("out batch");
         let c = out_batch.column(0).expect("col");
         assert_eq!(time_at(&out_batch, c, 0).expect("0"), 0);
         assert_eq!(time_at(&out_batch, c, 1).expect("1"), 0);

@@ -223,10 +223,7 @@ pub fn coerce_param_value(
     }
     let schema = Schema::try_new_arc(Vec::new())?;
     let batch = Batch::try_new_all(schema, Vec::new(), 1)?;
-    let ctx = EvalContext {
-        now_ns: 0,
-        cancel: CancelToken::new(),
-    };
+    let ctx = EvalContext::new(0, CancelToken::new());
     let cast_expr = Expr::Cast {
         expr: Box::new(Expr::Literal(param.value.clone())),
         target: target.clone(),

@@ -6686,10 +6686,7 @@ fn eval_const_scalar(expr: &Expr) -> Result<ScalarValue, QueryError> {
     }
     let schema = Schema::try_new_arc(Vec::new())?;
     let batch = Batch::try_new_all(schema, Vec::new(), 1)?;
-    let eval_ctx = EvalContext {
-        now_ns: 0,
-        cancel: CancelToken::new(),
-    };
+    let eval_ctx = EvalContext::new(0, CancelToken::new());
     let col = eval_expr(expr, &batch, &eval_ctx, None)?;
     Ok(col.get_scalar(0)?)
 }

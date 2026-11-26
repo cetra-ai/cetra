@@ -701,6 +701,18 @@ pub fn eval_time_fn(
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
+    pool: Option<&mut Reservation>,
+) -> Result<Column, QueryError> {
+    let refs: Vec<&Column> = args.iter().collect();
+    eval_time_fn_refs(func, &refs, len, active, ctx, pool)
+}
+
+pub(crate) fn eval_time_fn_refs(
+    func: ScalarFn,
+    args: &[&Column],
+    len: usize,
+    active: Option<&Bitmap>,
+    ctx: &EvalContext,
     mut pool: Option<&mut Reservation>,
 ) -> Result<Column, QueryError> {
     let before = pool_size(&pool);
@@ -718,7 +730,7 @@ pub fn eval_time_fn(
 
 fn eval_time_fn_inner(
     func: ScalarFn,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -734,7 +746,7 @@ fn eval_time_fn_inner(
         }
         .into());
     }
-    for col in args {
+    for &col in args {
         if col.len() != len {
             return Err(ColumnError::InvalidBatch {
                 reason: "argument column length mismatch",
@@ -754,7 +766,7 @@ fn eval_time_fn_inner(
 }
 
 fn eval_now(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -805,14 +817,14 @@ fn eval_now(
 }
 
 fn eval_date_trunc(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
     pool: &mut Option<&mut Reservation>,
     before: usize,
 ) -> Result<Column, QueryError> {
-    let [unit_col, ts_col] = args else {
+    let &[unit_col, ts_col] = args else {
         return Err(QueryError::failed("date_trunc expects 2 arguments"));
     };
     let utc = match ts_col.data_type() {
@@ -917,14 +929,14 @@ fn bin_timestamp_ns(src_ns: i64, stride_ns: i64, origin_ns: i64) -> Result<i64, 
 }
 
 fn eval_date_bin(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
     pool: &mut Option<&mut Reservation>,
     before: usize,
 ) -> Result<Column, QueryError> {
-    let (stride_col, src_col, origin_col) = match args {
+    let (stride_col, src_col, origin_col) = match *args {
         [stride, src] => (stride, src, None),
         [stride, src, origin] => (stride, src, Some(origin)),
         _ => return Err(QueryError::failed("date_bin expects 2 or 3 arguments")),
@@ -1092,14 +1104,14 @@ fn extract_from_interval(iv: Interval, field: ExtractField) -> Result<i64, Query
 }
 
 fn eval_extract(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
     pool: &mut Option<&mut Reservation>,
     before: usize,
 ) -> Result<Column, QueryError> {
-    let [field_col, src_col] = args else {
+    let &[field_col, src_col] = args else {
         return Err(QueryError::failed("extract expects 2 arguments"));
     };
 
@@ -1220,14 +1232,14 @@ fn eval_extract(
 }
 
 fn eval_to_timestamp(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
     pool: &mut Option<&mut Reservation>,
     before: usize,
 ) -> Result<Column, QueryError> {
-    let [val_col] = args else {
+    let &[val_col] = args else {
         return Err(QueryError::failed("to_timestamp expects 1 argument"));
     };
     let dt = val_col.data_type();
@@ -1306,10 +1318,7 @@ mod tests {
     use cetra_column::{CancelToken, DictColumn, GlobalPool, RleColumn, Utf8Data};
 
     fn ctx_at(now_ns: i64) -> EvalContext {
-        EvalContext {
-            now_ns,
-            cancel: CancelToken::new(),
-        }
+        EvalContext::new(now_ns, CancelToken::new())
     }
 
     #[test]

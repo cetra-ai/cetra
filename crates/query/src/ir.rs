@@ -1,11 +1,19 @@
 //! Typed expression IR and runtime evaluation context.
 
-use std::collections::BTreeSet;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use cetra_column::{CancelToken, DataType, ScalarValue};
+use regex::Regex;
+use serde_json_path::JsonPath;
 
 use crate::error::QueryError;
+use crate::eval::{LiteralSet, f64_canonical_bits};
+use crate::fn_string::LikeMatcher;
 
 /// Binary operators in [`Expr`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,174 +415,266 @@ impl Expr {
     }
 
     /// Formats a privacy-safe plan summary (respecting `redacted: true` on `InList`, formatting `"{expr} IN (<{n} redacted>)"`).
+    ///
+    /// Implemented iteratively so arbitrarily deep `Expr::Binary` spines never overflow the stack.
     pub fn fmt_plan(&self) -> String {
-        match self {
-            Self::Column { name, .. } => name.clone(),
-            Self::Literal(v) => fmt_scalar_safe(v),
-            Self::Unary { op, expr, .. } => match op {
-                UnaryOp::Not => format!("NOT ({})", expr.fmt_plan()),
-                UnaryOp::Neg => format!("-({})", expr.fmt_plan()),
-                UnaryOp::IsNull => format!("{} IS NULL", expr.fmt_plan()),
-                UnaryOp::IsNotNull => format!("{} IS NOT NULL", expr.fmt_plan()),
-                UnaryOp::IsTrue => format!("{} IS TRUE", expr.fmt_plan()),
-                UnaryOp::IsFalse => format!("{} IS FALSE", expr.fmt_plan()),
-                UnaryOp::IsNotTrue => format!("{} IS NOT TRUE", expr.fmt_plan()),
-                UnaryOp::IsNotFalse => format!("{} IS NOT FALSE", expr.fmt_plan()),
-            },
-            Self::Binary {
-                left, op, right, ..
-            } => format!("({} {} {})", left.fmt_plan(), op.symbol(), right.fmt_plan()),
-            Self::Cast { expr, target, mode } => {
-                let kw = match mode {
-                    CastMode::Strict => "CAST",
-                    CastMode::Try => "TRY_CAST",
-                };
-                format!("{kw}({} AS {})", expr.fmt_plan(), target.display_name())
-            }
-            Self::Between {
-                expr,
-                low,
-                high,
-                negated,
-            } => {
-                let op = if *negated { "NOT BETWEEN" } else { "BETWEEN" };
-                format!(
-                    "{} {op} {} AND {}",
-                    expr.fmt_plan(),
-                    low.fmt_plan(),
-                    high.fmt_plan()
-                )
-            }
-            Self::InList {
-                expr,
-                list,
-                negated,
-                redacted,
-            } => {
-                let op = if *negated { "NOT IN" } else { "IN" };
-                if *redacted {
-                    format!("{} {op} (<{} redacted>)", expr.fmt_plan(), list.len())
-                } else {
-                    let items: Vec<String> = list.iter().map(Self::fmt_plan).collect();
-                    format!("{} {op} ({})", expr.fmt_plan(), items.join(", "))
+        enum FmtOp<'a> {
+            Lit(&'static str),
+            Owned(String),
+            Node(&'a Expr),
+            CommaSep(&'a [Expr]),
+            WhenThen(&'a [(Expr, Expr)]),
+        }
+
+        let mut out = String::new();
+        let mut stack = vec![FmtOp::Node(self)];
+        while let Some(op) = stack.pop() {
+            match op {
+                FmtOp::Lit(s) => out.push_str(s),
+                FmtOp::Owned(s) => out.push_str(&s),
+                FmtOp::CommaSep(slice) => {
+                    if let Some((first, rest)) = slice.split_first() {
+                        if !rest.is_empty() {
+                            stack.push(FmtOp::CommaSep(rest));
+                            stack.push(FmtOp::Lit(", "));
+                        }
+                        stack.push(FmtOp::Node(first));
+                    }
                 }
-            }
-            Self::Like {
-                expr,
-                pattern,
-                escape,
-                case_insensitive,
-                negated,
-            } => {
-                let not = if *negated { "NOT " } else { "" };
-                let kw = if *case_insensitive { "ILIKE" } else { "LIKE" };
-                match escape {
-                    Some(_) => format!(
-                        "{} {not}{kw} {} ESCAPE <char>",
-                        expr.fmt_plan(),
-                        pattern.fmt_plan()
-                    ),
-                    None => format!("{} {not}{kw} {}", expr.fmt_plan(), pattern.fmt_plan()),
+                FmtOp::WhenThen(slice) => {
+                    if let Some(((w, t), rest)) = slice.split_first() {
+                        if !rest.is_empty() {
+                            stack.push(FmtOp::WhenThen(rest));
+                        }
+                        stack.push(FmtOp::Node(t));
+                        stack.push(FmtOp::Lit(" THEN "));
+                        stack.push(FmtOp::Node(w));
+                        stack.push(FmtOp::Lit(" WHEN "));
+                    }
                 }
-            }
-            Self::Case {
-                operand,
-                when_then,
-                else_expr,
-                ..
-            } => {
-                let mut out = String::from("CASE");
-                if let Some(op) = operand {
-                    out.push(' ');
-                    out.push_str(&op.fmt_plan());
-                }
-                for (w, t) in when_then {
-                    out.push_str(" WHEN ");
-                    out.push_str(&w.fmt_plan());
-                    out.push_str(" THEN ");
-                    out.push_str(&t.fmt_plan());
-                }
-                if let Some(el) = else_expr {
-                    out.push_str(" ELSE ");
-                    out.push_str(&el.fmt_plan());
-                }
-                out.push_str(" END");
-                out
-            }
-            Self::MapIndex { map, key } => {
-                format!("{}[{}]", map.fmt_plan(), key.fmt_plan())
-            }
-            Self::MakeArray { elems, .. } => {
-                let items: Vec<String> = elems.iter().map(Self::fmt_plan).collect();
-                format!("[{}]", items.join(", "))
-            }
-            Self::Call { func, args, .. } => {
-                let items: Vec<String> = args.iter().map(Self::fmt_plan).collect();
-                format!("{}({})", func.name(), items.join(", "))
+                FmtOp::Node(node) => match node {
+                    Self::Column { name, .. } => out.push_str(name),
+                    Self::Literal(v) => out.push_str(&fmt_scalar_safe(v)),
+                    Self::Unary { op, expr, .. } => match op {
+                        UnaryOp::Not => {
+                            stack.push(FmtOp::Lit(")"));
+                            stack.push(FmtOp::Node(expr));
+                            stack.push(FmtOp::Lit("NOT ("));
+                        }
+                        UnaryOp::Neg => {
+                            stack.push(FmtOp::Lit(")"));
+                            stack.push(FmtOp::Node(expr));
+                            stack.push(FmtOp::Lit("-("));
+                        }
+                        UnaryOp::IsNull => {
+                            stack.push(FmtOp::Lit(" IS NULL"));
+                            stack.push(FmtOp::Node(expr));
+                        }
+                        UnaryOp::IsNotNull => {
+                            stack.push(FmtOp::Lit(" IS NOT NULL"));
+                            stack.push(FmtOp::Node(expr));
+                        }
+                        UnaryOp::IsTrue => {
+                            stack.push(FmtOp::Lit(" IS TRUE"));
+                            stack.push(FmtOp::Node(expr));
+                        }
+                        UnaryOp::IsFalse => {
+                            stack.push(FmtOp::Lit(" IS FALSE"));
+                            stack.push(FmtOp::Node(expr));
+                        }
+                        UnaryOp::IsNotTrue => {
+                            stack.push(FmtOp::Lit(" IS NOT TRUE"));
+                            stack.push(FmtOp::Node(expr));
+                        }
+                        UnaryOp::IsNotFalse => {
+                            stack.push(FmtOp::Lit(" IS NOT FALSE"));
+                            stack.push(FmtOp::Node(expr));
+                        }
+                    },
+                    Self::Binary {
+                        left, op, right, ..
+                    } => {
+                        stack.push(FmtOp::Lit(")"));
+                        stack.push(FmtOp::Node(right));
+                        stack.push(FmtOp::Lit(" "));
+                        stack.push(FmtOp::Lit(op.symbol()));
+                        stack.push(FmtOp::Lit(" "));
+                        stack.push(FmtOp::Node(left));
+                        stack.push(FmtOp::Lit("("));
+                    }
+                    Self::Cast { expr, target, mode } => {
+                        let kw = match mode {
+                            CastMode::Strict => "CAST(",
+                            CastMode::Try => "TRY_CAST(",
+                        };
+                        stack.push(FmtOp::Lit(")"));
+                        stack.push(FmtOp::Lit(target.display_name()));
+                        stack.push(FmtOp::Lit(" AS "));
+                        stack.push(FmtOp::Node(expr));
+                        stack.push(FmtOp::Lit(kw));
+                    }
+                    Self::Between {
+                        expr,
+                        low,
+                        high,
+                        negated,
+                    } => {
+                        let op = if *negated {
+                            " NOT BETWEEN "
+                        } else {
+                            " BETWEEN "
+                        };
+                        stack.push(FmtOp::Node(high));
+                        stack.push(FmtOp::Lit(" AND "));
+                        stack.push(FmtOp::Node(low));
+                        stack.push(FmtOp::Lit(op));
+                        stack.push(FmtOp::Node(expr));
+                    }
+                    Self::InList {
+                        expr,
+                        list,
+                        negated,
+                        redacted,
+                    } => {
+                        let op = if *negated { " NOT IN (" } else { " IN (" };
+                        if *redacted {
+                            stack.push(FmtOp::Lit(")"));
+                            stack.push(FmtOp::Owned(format!("<{} redacted>", list.len())));
+                            stack.push(FmtOp::Lit(op));
+                            stack.push(FmtOp::Node(expr));
+                        } else {
+                            stack.push(FmtOp::Lit(")"));
+                            stack.push(FmtOp::CommaSep(list));
+                            stack.push(FmtOp::Lit(op));
+                            stack.push(FmtOp::Node(expr));
+                        }
+                    }
+                    Self::Like {
+                        expr,
+                        pattern,
+                        escape,
+                        case_insensitive,
+                        negated,
+                    } => {
+                        let kw = match (*negated, *case_insensitive) {
+                            (false, false) => " LIKE ",
+                            (false, true) => " ILIKE ",
+                            (true, false) => " NOT LIKE ",
+                            (true, true) => " NOT ILIKE ",
+                        };
+                        if escape.is_some() {
+                            stack.push(FmtOp::Lit(" ESCAPE <char>"));
+                        }
+                        stack.push(FmtOp::Node(pattern));
+                        stack.push(FmtOp::Lit(kw));
+                        stack.push(FmtOp::Node(expr));
+                    }
+                    Self::Case {
+                        operand,
+                        when_then,
+                        else_expr,
+                        ..
+                    } => {
+                        stack.push(FmtOp::Lit(" END"));
+                        if let Some(el) = else_expr {
+                            stack.push(FmtOp::Node(el));
+                            stack.push(FmtOp::Lit(" ELSE "));
+                        }
+                        stack.push(FmtOp::WhenThen(when_then));
+                        if let Some(op) = operand {
+                            stack.push(FmtOp::Node(op));
+                            stack.push(FmtOp::Lit(" "));
+                        }
+                        stack.push(FmtOp::Lit("CASE"));
+                    }
+                    Self::MapIndex { map, key } => {
+                        stack.push(FmtOp::Lit("]"));
+                        stack.push(FmtOp::Node(key));
+                        stack.push(FmtOp::Lit("["));
+                        stack.push(FmtOp::Node(map));
+                    }
+                    Self::MakeArray { elems, .. } => {
+                        stack.push(FmtOp::Lit("]"));
+                        stack.push(FmtOp::CommaSep(elems));
+                        stack.push(FmtOp::Lit("["));
+                    }
+                    Self::Call { func, args, .. } => {
+                        stack.push(FmtOp::Lit(")"));
+                        stack.push(FmtOp::CommaSep(args));
+                        stack.push(FmtOp::Lit("("));
+                        stack.push(FmtOp::Lit(func.name()));
+                    }
+                },
             }
         }
+        out
     }
 
     /// Collects every column index referenced anywhere in this expression into `out`.
+    ///
+    /// Implemented iteratively so arbitrarily deep `Expr::Binary` spines never overflow the stack.
     pub fn referenced_columns(&self, out: &mut BTreeSet<usize>) {
-        match self {
-            Self::Column { index, .. } => {
-                out.insert(*index);
-            }
-            Self::Literal(_) => {}
-            Self::Unary { expr, .. } | Self::Cast { expr, .. } => {
-                expr.referenced_columns(out);
-            }
-            Self::Binary { left, right, .. } => {
-                left.referenced_columns(out);
-                right.referenced_columns(out);
-            }
-            Self::Between {
-                expr, low, high, ..
-            } => {
-                expr.referenced_columns(out);
-                low.referenced_columns(out);
-                high.referenced_columns(out);
-            }
-            Self::InList { expr, list, .. } => {
-                expr.referenced_columns(out);
-                for item in list {
-                    item.referenced_columns(out);
+        let mut stack = vec![self];
+        while let Some(node) = stack.pop() {
+            match node {
+                Self::Column { index, .. } => {
+                    out.insert(*index);
                 }
-            }
-            Self::Like { expr, pattern, .. } => {
-                expr.referenced_columns(out);
-                pattern.referenced_columns(out);
-            }
-            Self::Case {
-                operand,
-                when_then,
-                else_expr,
-                ..
-            } => {
-                if let Some(op) = operand {
-                    op.referenced_columns(out);
+                Self::Literal(_) => {}
+                Self::Unary { expr, .. } | Self::Cast { expr, .. } => {
+                    stack.push(expr);
                 }
-                for (w, t) in when_then {
-                    w.referenced_columns(out);
-                    t.referenced_columns(out);
+                Self::Binary { left, right, .. } => {
+                    stack.push(right);
+                    stack.push(left);
                 }
-                if let Some(el) = else_expr {
-                    el.referenced_columns(out);
+                Self::Between {
+                    expr, low, high, ..
+                } => {
+                    stack.push(high);
+                    stack.push(low);
+                    stack.push(expr);
                 }
-            }
-            Self::MapIndex { map, key } => {
-                map.referenced_columns(out);
-                key.referenced_columns(out);
-            }
-            Self::MakeArray { elems, .. } => {
-                for elem in elems {
-                    elem.referenced_columns(out);
+                Self::InList { expr, list, .. } => {
+                    for item in list {
+                        stack.push(item);
+                    }
+                    stack.push(expr);
                 }
-            }
-            Self::Call { args, .. } => {
-                for arg in args {
-                    arg.referenced_columns(out);
+                Self::Like { expr, pattern, .. } => {
+                    stack.push(pattern);
+                    stack.push(expr);
+                }
+                Self::Case {
+                    operand,
+                    when_then,
+                    else_expr,
+                    ..
+                } => {
+                    if let Some(el) = else_expr {
+                        stack.push(el);
+                    }
+                    for (w, t) in when_then {
+                        stack.push(t);
+                        stack.push(w);
+                    }
+                    if let Some(op) = operand {
+                        stack.push(op);
+                    }
+                }
+                Self::MapIndex { map, key } => {
+                    stack.push(key);
+                    stack.push(map);
+                }
+                Self::MakeArray { elems, .. } => {
+                    for elem in elems {
+                        stack.push(elem);
+                    }
+                }
+                Self::Call { args, .. } => {
+                    for arg in args {
+                        stack.push(arg);
+                    }
                 }
             }
         }
@@ -582,144 +682,322 @@ impl Expr {
 
     /// Rewrites every [`Expr::Column`] index according to `map`, preserving `name` and `data_type`.
     /// Returns [`QueryError::Internal`] if a referenced column index is out of bounds or mapped to `None`.
+    ///
+    /// Implemented iteratively so arbitrarily deep `Expr::Binary` spines never overflow the stack.
     pub fn remap_columns(&self, map: &[Option<usize>]) -> Result<Self, QueryError> {
-        match self {
-            Self::Column {
-                index,
-                name,
-                data_type,
-            } => {
-                let new_index = map.get(*index).copied().flatten().ok_or_else(|| {
-                    QueryError::internal(format!("column index {index} is not in remap table"))
-                })?;
-                Ok(Self::Column {
-                    index: new_index,
-                    name: name.clone(),
-                    data_type: data_type.clone(),
-                })
-            }
-            Self::Literal(v) => Ok(Self::Literal(v.clone())),
-            Self::Unary {
-                op,
-                expr,
-                data_type,
-            } => Ok(Self::Unary {
-                op: *op,
-                expr: Box::new(expr.remap_columns(map)?),
-                data_type: data_type.clone(),
-            }),
-            Self::Binary {
-                left,
-                op,
-                right,
-                data_type,
-            } => Ok(Self::Binary {
-                left: Box::new(left.remap_columns(map)?),
-                op: *op,
-                right: Box::new(right.remap_columns(map)?),
-                data_type: data_type.clone(),
-            }),
-            Self::Cast { expr, target, mode } => Ok(Self::Cast {
-                expr: Box::new(expr.remap_columns(map)?),
-                target: target.clone(),
-                mode: *mode,
-            }),
-            Self::Between {
-                expr,
-                low,
-                high,
-                negated,
-            } => Ok(Self::Between {
-                expr: Box::new(expr.remap_columns(map)?),
-                low: Box::new(low.remap_columns(map)?),
-                high: Box::new(high.remap_columns(map)?),
-                negated: *negated,
-            }),
-            Self::InList {
-                expr,
-                list,
-                negated,
-                redacted,
-            } => {
-                let mut mapped_list = Vec::with_capacity(list.len());
-                for item in list {
-                    mapped_list.push(item.remap_columns(map)?);
+        enum RemapTask<'a> {
+            Visit(&'a Expr),
+            BuildUnary(UnaryOp, DataType),
+            BuildBinary(BinaryOp, DataType),
+            BuildCast(DataType, CastMode),
+            BuildBetween(bool),
+            BuildInList(usize, bool, bool),
+            BuildLike(Option<char>, bool, bool),
+            BuildCase {
+                has_operand: bool,
+                when_then_len: usize,
+                has_else: bool,
+                data_type: DataType,
+            },
+            BuildMapIndex,
+            BuildMakeArray(usize, DataType),
+            BuildCall(ScalarFn, usize, DataType),
+        }
+
+        let mut tasks = vec![RemapTask::Visit(self)];
+        let mut results: Vec<Self> = Vec::new();
+
+        while let Some(task) = tasks.pop() {
+            match task {
+                RemapTask::Visit(node) => match node {
+                    Self::Column {
+                        index,
+                        name,
+                        data_type,
+                    } => {
+                        let new_index = map.get(*index).copied().flatten().ok_or_else(|| {
+                            QueryError::internal(format!(
+                                "column index {index} is not in remap table"
+                            ))
+                        })?;
+                        results.push(Self::Column {
+                            index: new_index,
+                            name: name.clone(),
+                            data_type: data_type.clone(),
+                        });
+                    }
+                    Self::Literal(v) => results.push(Self::Literal(v.clone())),
+                    Self::Unary {
+                        op,
+                        expr,
+                        data_type,
+                    } => {
+                        tasks.push(RemapTask::BuildUnary(*op, data_type.clone()));
+                        tasks.push(RemapTask::Visit(expr));
+                    }
+                    Self::Binary {
+                        left,
+                        op,
+                        right,
+                        data_type,
+                    } => {
+                        tasks.push(RemapTask::BuildBinary(*op, data_type.clone()));
+                        tasks.push(RemapTask::Visit(right));
+                        tasks.push(RemapTask::Visit(left));
+                    }
+                    Self::Cast { expr, target, mode } => {
+                        tasks.push(RemapTask::BuildCast(target.clone(), *mode));
+                        tasks.push(RemapTask::Visit(expr));
+                    }
+                    Self::Between {
+                        expr,
+                        low,
+                        high,
+                        negated,
+                    } => {
+                        tasks.push(RemapTask::BuildBetween(*negated));
+                        tasks.push(RemapTask::Visit(high));
+                        tasks.push(RemapTask::Visit(low));
+                        tasks.push(RemapTask::Visit(expr));
+                    }
+                    Self::InList {
+                        expr,
+                        list,
+                        negated,
+                        redacted,
+                    } => {
+                        tasks.push(RemapTask::BuildInList(list.len(), *negated, *redacted));
+                        for item in list.iter().rev() {
+                            tasks.push(RemapTask::Visit(item));
+                        }
+                        tasks.push(RemapTask::Visit(expr));
+                    }
+                    Self::Like {
+                        expr,
+                        pattern,
+                        escape,
+                        case_insensitive,
+                        negated,
+                    } => {
+                        tasks.push(RemapTask::BuildLike(*escape, *case_insensitive, *negated));
+                        tasks.push(RemapTask::Visit(pattern));
+                        tasks.push(RemapTask::Visit(expr));
+                    }
+                    Self::Case {
+                        operand,
+                        when_then,
+                        else_expr,
+                        data_type,
+                    } => {
+                        tasks.push(RemapTask::BuildCase {
+                            has_operand: operand.is_some(),
+                            when_then_len: when_then.len(),
+                            has_else: else_expr.is_some(),
+                            data_type: data_type.clone(),
+                        });
+                        if let Some(el) = else_expr {
+                            tasks.push(RemapTask::Visit(el));
+                        }
+                        for (w, t) in when_then.iter().rev() {
+                            tasks.push(RemapTask::Visit(t));
+                            tasks.push(RemapTask::Visit(w));
+                        }
+                        if let Some(op) = operand {
+                            tasks.push(RemapTask::Visit(op));
+                        }
+                    }
+                    Self::MapIndex { map: m, key } => {
+                        tasks.push(RemapTask::BuildMapIndex);
+                        tasks.push(RemapTask::Visit(key));
+                        tasks.push(RemapTask::Visit(m));
+                    }
+                    Self::MakeArray { elems, item_type } => {
+                        tasks.push(RemapTask::BuildMakeArray(elems.len(), item_type.clone()));
+                        for elem in elems.iter().rev() {
+                            tasks.push(RemapTask::Visit(elem));
+                        }
+                    }
+                    Self::Call {
+                        func,
+                        args,
+                        data_type,
+                    } => {
+                        tasks.push(RemapTask::BuildCall(*func, args.len(), data_type.clone()));
+                        for arg in args.iter().rev() {
+                            tasks.push(RemapTask::Visit(arg));
+                        }
+                    }
+                },
+                RemapTask::BuildUnary(op, data_type) => {
+                    let expr = results
+                        .pop()
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    results.push(Self::Unary {
+                        op,
+                        expr: Box::new(expr),
+                        data_type,
+                    });
                 }
-                Ok(Self::InList {
-                    expr: Box::new(expr.remap_columns(map)?),
-                    list: mapped_list,
-                    negated: *negated,
-                    redacted: *redacted,
-                })
-            }
-            Self::Like {
-                expr,
-                pattern,
-                escape,
-                case_insensitive,
-                negated,
-            } => Ok(Self::Like {
-                expr: Box::new(expr.remap_columns(map)?),
-                pattern: Box::new(pattern.remap_columns(map)?),
-                escape: *escape,
-                case_insensitive: *case_insensitive,
-                negated: *negated,
-            }),
-            Self::Case {
-                operand,
-                when_then,
-                else_expr,
-                data_type,
-            } => {
-                let mapped_op = match operand {
-                    Some(op) => Some(Box::new(op.remap_columns(map)?)),
-                    None => None,
-                };
-                let mut mapped_wt = Vec::with_capacity(when_then.len());
-                for (w, t) in when_then {
-                    mapped_wt.push((w.remap_columns(map)?, t.remap_columns(map)?));
+                RemapTask::BuildBinary(op, data_type) => {
+                    let right = results
+                        .pop()
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    let left = results
+                        .pop()
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    results.push(Self::Binary {
+                        left: Box::new(left),
+                        op,
+                        right: Box::new(right),
+                        data_type,
+                    });
                 }
-                let mapped_else = match else_expr {
-                    Some(el) => Some(Box::new(el.remap_columns(map)?)),
-                    None => None,
-                };
-                Ok(Self::Case {
-                    operand: mapped_op,
-                    when_then: mapped_wt,
-                    else_expr: mapped_else,
-                    data_type: data_type.clone(),
-                })
-            }
-            Self::MapIndex { map: m, key } => Ok(Self::MapIndex {
-                map: Box::new(m.remap_columns(map)?),
-                key: Box::new(key.remap_columns(map)?),
-            }),
-            Self::MakeArray { elems, item_type } => {
-                let mut mapped_elems = Vec::with_capacity(elems.len());
-                for elem in elems {
-                    mapped_elems.push(elem.remap_columns(map)?);
+                RemapTask::BuildCast(target, mode) => {
+                    let expr = results
+                        .pop()
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    results.push(Self::Cast {
+                        expr: Box::new(expr),
+                        target,
+                        mode,
+                    });
                 }
-                Ok(Self::MakeArray {
-                    elems: mapped_elems,
-                    item_type: item_type.clone(),
-                })
-            }
-            Self::Call {
-                func,
-                args,
-                data_type,
-            } => {
-                let mut mapped_args = Vec::with_capacity(args.len());
-                for arg in args {
-                    mapped_args.push(arg.remap_columns(map)?);
+                RemapTask::BuildBetween(negated) => {
+                    let high = results
+                        .pop()
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    let low = results
+                        .pop()
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    let expr = results
+                        .pop()
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    results.push(Self::Between {
+                        expr: Box::new(expr),
+                        low: Box::new(low),
+                        high: Box::new(high),
+                        negated,
+                    });
                 }
-                Ok(Self::Call {
-                    func: *func,
-                    args: mapped_args,
-                    data_type: data_type.clone(),
-                })
+                RemapTask::BuildInList(len, negated, redacted) => {
+                    let start = results
+                        .len()
+                        .checked_sub(len + 1)
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    let mut drained = results.drain(start..);
+                    let expr = drained
+                        .next()
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    let list = drained.collect();
+                    results.push(Self::InList {
+                        expr: Box::new(expr),
+                        list,
+                        negated,
+                        redacted,
+                    });
+                }
+                RemapTask::BuildLike(escape, case_insensitive, negated) => {
+                    let pattern = results
+                        .pop()
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    let expr = results
+                        .pop()
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    results.push(Self::Like {
+                        expr: Box::new(expr),
+                        pattern: Box::new(pattern),
+                        escape,
+                        case_insensitive,
+                        negated,
+                    });
+                }
+                RemapTask::BuildCase {
+                    has_operand,
+                    when_then_len,
+                    has_else,
+                    data_type,
+                } => {
+                    let needed = usize::from(has_operand)
+                        + when_then_len.saturating_mul(2)
+                        + usize::from(has_else);
+                    let start = results
+                        .len()
+                        .checked_sub(needed)
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    let mut drained = results.drain(start..);
+                    let operand = if has_operand {
+                        Some(Box::new(drained.next().ok_or_else(|| {
+                            QueryError::internal("remap stack underflow")
+                        })?))
+                    } else {
+                        None
+                    };
+                    let mut when_then = Vec::with_capacity(when_then_len);
+                    for _ in 0..when_then_len {
+                        let w = drained
+                            .next()
+                            .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                        let t = drained
+                            .next()
+                            .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                        when_then.push((w, t));
+                    }
+                    let else_expr = if has_else {
+                        Some(Box::new(drained.next().ok_or_else(|| {
+                            QueryError::internal("remap stack underflow")
+                        })?))
+                    } else {
+                        None
+                    };
+                    drop(drained);
+                    results.push(Self::Case {
+                        operand,
+                        when_then,
+                        else_expr,
+                        data_type,
+                    });
+                }
+                RemapTask::BuildMapIndex => {
+                    let key = results
+                        .pop()
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    let m = results
+                        .pop()
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    results.push(Self::MapIndex {
+                        map: Box::new(m),
+                        key: Box::new(key),
+                    });
+                }
+                RemapTask::BuildMakeArray(len, item_type) => {
+                    let start = results
+                        .len()
+                        .checked_sub(len)
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    let elems = results.drain(start..).collect();
+                    results.push(Self::MakeArray { elems, item_type });
+                }
+                RemapTask::BuildCall(func, len, data_type) => {
+                    let start = results
+                        .len()
+                        .checked_sub(len)
+                        .ok_or_else(|| QueryError::internal("remap stack underflow"))?;
+                    let args = results.drain(start..).collect();
+                    results.push(Self::Call {
+                        func,
+                        args,
+                        data_type,
+                    });
+                }
             }
         }
+
+        if results.len() != 1 {
+            return Err(QueryError::internal("remap stack did not produce one root"));
+        }
+        results
+            .pop()
+            .ok_or_else(|| QueryError::internal("remap stack empty"))
     }
 }
 
@@ -758,123 +1036,543 @@ impl fmt::Display for Expr {
 
 impl fmt::Debug for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Column {
-                index,
-                name,
-                data_type,
-            } => f
-                .debug_struct("Column")
-                .field("index", index)
-                .field("name", name)
-                .field("data_type", data_type)
-                .finish(),
-            Self::Literal(v) => f.debug_tuple("Literal").field(v).finish(),
-            Self::Unary {
-                op,
-                expr,
-                data_type,
-            } => f
-                .debug_struct("Unary")
-                .field("op", op)
-                .field("expr", expr)
-                .field("data_type", data_type)
-                .finish(),
-            Self::Binary {
-                left,
-                op,
-                right,
-                data_type,
-            } => f
-                .debug_struct("Binary")
-                .field("left", left)
-                .field("op", op)
-                .field("right", right)
-                .field("data_type", data_type)
-                .finish(),
-            Self::Cast { expr, target, mode } => f
-                .debug_struct("Cast")
-                .field("expr", expr)
-                .field("target", target)
-                .field("mode", mode)
-                .finish(),
-            Self::Between {
-                expr,
-                low,
-                high,
-                negated,
-            } => f
-                .debug_struct("Between")
-                .field("expr", expr)
-                .field("low", low)
-                .field("high", high)
-                .field("negated", negated)
-                .finish(),
-            Self::InList {
-                expr,
-                list,
-                negated,
-                redacted,
-            } => {
-                let mut ds = f.debug_struct("InList");
-                ds.field("expr", expr);
-                if *redacted {
-                    let placeholder = format!("<{} redacted>", list.len());
-                    ds.field("list", &placeholder);
-                } else {
-                    ds.field("list", list);
-                }
-                ds.field("negated", negated)
-                    .field("redacted", redacted)
-                    .finish()
-            }
-            Self::Like {
-                expr,
-                pattern,
-                escape,
-                case_insensitive,
-                negated,
-            } => f
-                .debug_struct("Like")
-                .field("expr", expr)
-                .field("pattern", pattern)
-                .field("escape", &escape.is_some())
-                .field("case_insensitive", case_insensitive)
-                .field("negated", negated)
-                .finish(),
-            Self::Case {
-                operand,
-                when_then,
-                else_expr,
-                data_type,
-            } => f
-                .debug_struct("Case")
-                .field("operand", operand)
-                .field("when_then", when_then)
-                .field("else_expr", else_expr)
-                .field("data_type", data_type)
-                .finish(),
-            Self::MapIndex { map, key } => f
-                .debug_struct("MapIndex")
-                .field("map", map)
-                .field("key", key)
-                .finish(),
-            Self::MakeArray { elems, item_type } => f
-                .debug_struct("MakeArray")
-                .field("elems", elems)
-                .field("item_type", item_type)
-                .finish(),
-            Self::Call {
-                func,
-                args,
-                data_type,
-            } => f
-                .debug_struct("Call")
-                .field("func", func)
-                .field("args", args)
-                .field("data_type", data_type)
-                .finish(),
+        enum DbgOp<'a> {
+            Str(&'static str),
+            Owned(String),
+            Node(&'a Expr),
+            NodeSlice(&'a [Expr]),
+            WhenThen(&'a [(Expr, Expr)]),
+            Debug(&'a dyn fmt::Debug),
+            Bool(bool),
         }
+
+        let mut stack = vec![DbgOp::Node(self)];
+        while let Some(op) = stack.pop() {
+            match op {
+                DbgOp::Str(s) => f.write_str(s)?,
+                DbgOp::Owned(s) => f.write_str(&s)?,
+                DbgOp::Debug(d) => fmt::Debug::fmt(d, f)?,
+                DbgOp::Bool(b) => fmt::Debug::fmt(&b, f)?,
+                DbgOp::NodeSlice(slice) => {
+                    if let Some((first, rest)) = slice.split_first() {
+                        if !rest.is_empty() {
+                            stack.push(DbgOp::NodeSlice(rest));
+                            stack.push(DbgOp::Str(", "));
+                        }
+                        stack.push(DbgOp::Node(first));
+                    }
+                }
+                DbgOp::WhenThen(slice) => {
+                    if let Some(((w, t), rest)) = slice.split_first() {
+                        if !rest.is_empty() {
+                            stack.push(DbgOp::WhenThen(rest));
+                            stack.push(DbgOp::Str(", "));
+                        }
+                        stack.push(DbgOp::Str(")"));
+                        stack.push(DbgOp::Node(t));
+                        stack.push(DbgOp::Str(", "));
+                        stack.push(DbgOp::Node(w));
+                        stack.push(DbgOp::Str("("));
+                    }
+                }
+                DbgOp::Node(node) => match node {
+                    Self::Column {
+                        index,
+                        name,
+                        data_type,
+                    } => f
+                        .debug_struct("Column")
+                        .field("index", index)
+                        .field("name", name)
+                        .field("data_type", data_type)
+                        .finish()?,
+                    Self::Literal(v) => f.debug_tuple("Literal").field(v).finish()?,
+                    Self::Unary {
+                        op,
+                        expr,
+                        data_type,
+                    } => {
+                        stack.push(DbgOp::Str(" }"));
+                        stack.push(DbgOp::Debug(data_type));
+                        stack.push(DbgOp::Str(", data_type: "));
+                        stack.push(DbgOp::Node(expr));
+                        stack.push(DbgOp::Str(", expr: "));
+                        stack.push(DbgOp::Debug(op));
+                        stack.push(DbgOp::Str("Unary { op: "));
+                    }
+                    Self::Binary {
+                        left,
+                        op,
+                        right,
+                        data_type,
+                    } => {
+                        stack.push(DbgOp::Str(" }"));
+                        stack.push(DbgOp::Debug(data_type));
+                        stack.push(DbgOp::Str(", data_type: "));
+                        stack.push(DbgOp::Node(right));
+                        stack.push(DbgOp::Str(", right: "));
+                        stack.push(DbgOp::Debug(op));
+                        stack.push(DbgOp::Str(", op: "));
+                        stack.push(DbgOp::Node(left));
+                        stack.push(DbgOp::Str("Binary { left: "));
+                    }
+                    Self::Cast { expr, target, mode } => {
+                        stack.push(DbgOp::Str(" }"));
+                        stack.push(DbgOp::Debug(mode));
+                        stack.push(DbgOp::Str(", mode: "));
+                        stack.push(DbgOp::Debug(target));
+                        stack.push(DbgOp::Str(", target: "));
+                        stack.push(DbgOp::Node(expr));
+                        stack.push(DbgOp::Str("Cast { expr: "));
+                    }
+                    Self::Between {
+                        expr,
+                        low,
+                        high,
+                        negated,
+                    } => {
+                        stack.push(DbgOp::Str(" }"));
+                        stack.push(DbgOp::Bool(*negated));
+                        stack.push(DbgOp::Str(", negated: "));
+                        stack.push(DbgOp::Node(high));
+                        stack.push(DbgOp::Str(", high: "));
+                        stack.push(DbgOp::Node(low));
+                        stack.push(DbgOp::Str(", low: "));
+                        stack.push(DbgOp::Node(expr));
+                        stack.push(DbgOp::Str("Between { expr: "));
+                    }
+                    Self::InList {
+                        expr,
+                        list,
+                        negated,
+                        redacted,
+                    } => {
+                        stack.push(DbgOp::Str(" }"));
+                        stack.push(DbgOp::Bool(*redacted));
+                        stack.push(DbgOp::Str(", redacted: "));
+                        stack.push(DbgOp::Bool(*negated));
+                        stack.push(DbgOp::Str(", negated: "));
+                        if *redacted {
+                            stack.push(DbgOp::Owned(format!("\"<{} redacted>\"", list.len())));
+                            stack.push(DbgOp::Str(", list: "));
+                        } else {
+                            stack.push(DbgOp::Str("]"));
+                            stack.push(DbgOp::NodeSlice(list));
+                            stack.push(DbgOp::Str(", list: ["));
+                        }
+                        stack.push(DbgOp::Node(expr));
+                        stack.push(DbgOp::Str("InList { expr: "));
+                    }
+                    Self::Like {
+                        expr,
+                        pattern,
+                        escape,
+                        case_insensitive,
+                        negated,
+                    } => {
+                        stack.push(DbgOp::Str(" }"));
+                        stack.push(DbgOp::Bool(*negated));
+                        stack.push(DbgOp::Str(", negated: "));
+                        stack.push(DbgOp::Bool(*case_insensitive));
+                        stack.push(DbgOp::Str(", case_insensitive: "));
+                        stack.push(DbgOp::Bool(escape.is_some()));
+                        stack.push(DbgOp::Str(", escape: "));
+                        stack.push(DbgOp::Node(pattern));
+                        stack.push(DbgOp::Str(", pattern: "));
+                        stack.push(DbgOp::Node(expr));
+                        stack.push(DbgOp::Str("Like { expr: "));
+                    }
+                    Self::Case {
+                        operand,
+                        when_then,
+                        else_expr,
+                        data_type,
+                    } => {
+                        stack.push(DbgOp::Str(" }"));
+                        stack.push(DbgOp::Debug(data_type));
+                        stack.push(DbgOp::Str(", data_type: "));
+                        match else_expr {
+                            Some(el) => {
+                                stack.push(DbgOp::Str(")"));
+                                stack.push(DbgOp::Node(el));
+                                stack.push(DbgOp::Str(", else_expr: Some("));
+                            }
+                            None => stack.push(DbgOp::Str(", else_expr: None")),
+                        }
+                        stack.push(DbgOp::Str("]"));
+                        stack.push(DbgOp::WhenThen(when_then));
+                        stack.push(DbgOp::Str(", when_then: ["));
+                        match operand {
+                            Some(op) => {
+                                stack.push(DbgOp::Str(")"));
+                                stack.push(DbgOp::Node(op));
+                                stack.push(DbgOp::Str("Case { operand: Some("));
+                            }
+                            None => stack.push(DbgOp::Str("Case { operand: None")),
+                        }
+                    }
+                    Self::MapIndex { map, key } => {
+                        stack.push(DbgOp::Str(" }"));
+                        stack.push(DbgOp::Node(key));
+                        stack.push(DbgOp::Str(", key: "));
+                        stack.push(DbgOp::Node(map));
+                        stack.push(DbgOp::Str("MapIndex { map: "));
+                    }
+                    Self::MakeArray { elems, item_type } => {
+                        stack.push(DbgOp::Str(" }"));
+                        stack.push(DbgOp::Debug(item_type));
+                        stack.push(DbgOp::Str("], item_type: "));
+                        stack.push(DbgOp::NodeSlice(elems));
+                        stack.push(DbgOp::Str("MakeArray { elems: ["));
+                    }
+                    Self::Call {
+                        func,
+                        args,
+                        data_type,
+                    } => {
+                        stack.push(DbgOp::Str(" }"));
+                        stack.push(DbgOp::Debug(data_type));
+                        stack.push(DbgOp::Str("], data_type: "));
+                        stack.push(DbgOp::NodeSlice(args));
+                        stack.push(DbgOp::Str(", args: ["));
+                        stack.push(DbgOp::Debug(func));
+                        stack.push(DbgOp::Str("Call { func: "));
+                    }
+                },
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Maximum number of cached entries per sub-cache in [`EvalCache`].
+pub const MAX_CACHE_ENTRIES: usize = 256;
+/// Global byte cap across all 4 sub-caches in [`EvalCache`] (`4 MiB`).
+pub const MAX_CACHE_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Hash, PartialEq, Eq)]
+struct LikeCacheKey {
+    pattern: String,
+    escape: Option<char>,
+    case_insensitive: bool,
+}
+
+struct InListCacheEntry {
+    lhs_type: DataType,
+    literals: Vec<ScalarValue>,
+    set: Arc<(LiteralSet, bool)>,
+}
+
+#[derive(Default)]
+struct InListCache {
+    buckets: HashMap<u64, Vec<InListCacheEntry>>,
+    entries: usize,
+}
+
+/// Thread-safe, per-query bounded cache for compiled LIKE patterns, regexes, JSONPath queries,
+/// and `IN` literal sets (`list.len() >= 4`), capped at [`MAX_CACHE_ENTRIES`] per sub-cache
+/// and [`MAX_CACHE_BYTES`] globally.
+#[derive(Default)]
+pub struct EvalCache {
+    like: Mutex<HashMap<LikeCacheKey, Arc<LikeMatcher>>>,
+    regex: Mutex<HashMap<(String, String), Arc<Regex>>>,
+    json_path: Mutex<HashMap<String, Arc<JsonPath>>>,
+    in_list: Mutex<InListCache>,
+    total_bytes: AtomicUsize,
+}
+
+impl fmt::Debug for EvalCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let like_entries = self.like.lock().map_or(0, |m| m.len());
+        let regex_entries = self.regex.lock().map_or(0, |m| m.len());
+        let json_path_entries = self.json_path.lock().map_or(0, |m| m.len());
+        let in_list_entries = self.in_list.lock().map_or(0, |m| m.entries);
+        f.debug_struct("EvalCache")
+            .field("like_entries", &like_entries)
+            .field("regex_entries", &regex_entries)
+            .field("json_path_entries", &json_path_entries)
+            .field("in_list_entries", &in_list_entries)
+            .field("total_bytes", &self.total_bytes.load(Ordering::Acquire))
+            .finish()
+    }
+}
+
+fn try_reserve_cache_bytes(counter: &AtomicUsize, bytes: usize) -> bool {
+    let mut cur = counter.load(Ordering::Acquire);
+    loop {
+        let Some(next) = cur.checked_add(bytes) else {
+            return false;
+        };
+        if next > MAX_CACHE_BYTES {
+            return false;
+        }
+        match counter.compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(actual) => cur = actual,
+        }
+    }
+}
+
+fn hash_scalar_canonical(h: &mut impl Hasher, sv: &ScalarValue) {
+    std::mem::discriminant(sv).hash(h);
+    match sv {
+        ScalarValue::Null(dt) => dt.hash(h),
+        ScalarValue::Bool(b) => b.hash(h),
+        ScalarValue::I64(v) => v.hash(h),
+        ScalarValue::F64(v) => f64_canonical_bits(*v).hash(h),
+        ScalarValue::Decimal128 {
+            value,
+            precision,
+            scale,
+        } => {
+            value.hash(h);
+            precision.hash(h);
+            scale.hash(h);
+        }
+        ScalarValue::TimestampNs { value, utc } => {
+            value.hash(h);
+            utc.hash(h);
+        }
+        ScalarValue::Date(d) => d.hash(h),
+        ScalarValue::Interval(iv) => iv.hash(h),
+        ScalarValue::Utf8(s) => s.hash(h),
+        ScalarValue::Binary(b) => b.hash(h),
+        ScalarValue::FixedBytes8(b) => b.hash(h),
+        ScalarValue::FixedBytes16(b) => b.hash(h),
+        ScalarValue::List { item_type, values } => {
+            item_type.hash(h);
+            values.len().hash(h);
+            for v in values {
+                hash_scalar_canonical(h, v);
+            }
+        }
+        ScalarValue::MapUtf8(m) => m.hash(h),
+        ScalarValue::Events(e) => {
+            e.len().hash(h);
+            for ev in e {
+                ev.time.hash(h);
+                ev.name.hash(h);
+                ev.attributes.hash(h);
+            }
+        }
+        ScalarValue::Links(l) => {
+            l.len().hash(h);
+            for lk in l {
+                lk.trace_id.hash(h);
+                lk.span_id.hash(h);
+                lk.attributes.hash(h);
+            }
+        }
+    }
+}
+
+fn hash_in_list(lhs_type: &DataType, list: &[Expr]) -> Option<u64> {
+    let mut h = DefaultHasher::new();
+    lhs_type.hash(&mut h);
+    list.len().hash(&mut h);
+    for item in list {
+        let Expr::Literal(sv) = item else {
+            return None;
+        };
+        hash_scalar_canonical(&mut h, sv);
+    }
+    Some(h.finish())
+}
+
+impl EvalCache {
+    pub(crate) fn get_or_insert_like(
+        &self,
+        pattern: &str,
+        escape: Option<char>,
+        case_insensitive: bool,
+        compile: impl FnOnce() -> Result<LikeMatcher, QueryError>,
+    ) -> Result<Arc<LikeMatcher>, QueryError> {
+        let lookup_key = LikeCacheKey {
+            pattern: pattern.to_owned(),
+            escape,
+            case_insensitive,
+        };
+        if let Some(hit) = self
+            .like
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&lookup_key)
+        {
+            return Ok(Arc::clone(hit));
+        }
+
+        let compiled = Arc::new(compile()?);
+        let entry_bytes = size_of::<LikeCacheKey>() + pattern.len() + compiled.estimated_bytes();
+
+        let mut map = self.like.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(hit) = map.get(&lookup_key) {
+            return Ok(Arc::clone(hit));
+        }
+        if map.len() < MAX_CACHE_ENTRIES && try_reserve_cache_bytes(&self.total_bytes, entry_bytes)
+        {
+            map.insert(lookup_key, Arc::clone(&compiled));
+        }
+        Ok(compiled)
+    }
+
+    pub(crate) fn get_or_insert_regex(
+        &self,
+        pat: &str,
+        flags: &str,
+        compile: impl FnOnce() -> Result<Regex, QueryError>,
+    ) -> Result<Arc<Regex>, QueryError> {
+        let lookup_key = (pat.to_owned(), flags.to_owned());
+        if let Some(hit) = self
+            .regex
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&lookup_key)
+        {
+            return Ok(Arc::clone(hit));
+        }
+
+        let compiled = Arc::new(compile()?);
+        let entry_bytes = size_of::<(String, String)>()
+            + pat.len()
+            + flags.len()
+            + size_of::<Regex>()
+            + pat.len().saturating_mul(16).max(512);
+
+        let mut map = self.regex.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(hit) = map.get(&lookup_key) {
+            return Ok(Arc::clone(hit));
+        }
+        if map.len() < MAX_CACHE_ENTRIES && try_reserve_cache_bytes(&self.total_bytes, entry_bytes)
+        {
+            map.insert(lookup_key, Arc::clone(&compiled));
+        }
+        Ok(compiled)
+    }
+
+    pub(crate) fn get_or_insert_json_path(
+        &self,
+        path: &str,
+        compile: impl FnOnce() -> Result<JsonPath, QueryError>,
+    ) -> Result<Arc<JsonPath>, QueryError> {
+        if let Some(hit) = self
+            .json_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(path)
+        {
+            return Ok(Arc::clone(hit));
+        }
+
+        let compiled = Arc::new(compile()?);
+        let entry_bytes = size_of::<String>()
+            + path.len()
+            + size_of::<JsonPath>()
+            + path.len().saturating_mul(8).max(256);
+
+        let mut map = self
+            .json_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(hit) = map.get(path) {
+            return Ok(Arc::clone(hit));
+        }
+        if map.len() < MAX_CACHE_ENTRIES && try_reserve_cache_bytes(&self.total_bytes, entry_bytes)
+        {
+            map.insert(path.to_owned(), Arc::clone(&compiled));
+        }
+        Ok(compiled)
+    }
+
+    pub(crate) fn get_or_insert_in_list(
+        &self,
+        lhs_type: &DataType,
+        list: &[Expr],
+        build: impl FnOnce() -> Option<(LiteralSet, bool)>,
+    ) -> Option<Arc<(LiteralSet, bool)>> {
+        if list.len() < 4 {
+            return build().map(Arc::new);
+        }
+        let hash = hash_in_list(lhs_type, list)?;
+        {
+            let guard = self.in_list.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(bucket) = guard.buckets.get(&hash)
+                && let Some(hit) = bucket.iter().find(|entry| {
+                    entry.lhs_type == *lhs_type
+                        && entry.literals.len() == list.len()
+                        && entry
+                            .literals
+                            .iter()
+                            .zip(list)
+                            .all(|(a, b)| matches!(b, Expr::Literal(sb) if a.semantic_eq(sb)))
+                })
+            {
+                return Some(Arc::clone(&hit.set));
+            }
+        }
+
+        let built = Arc::new(build()?);
+        let literals: Vec<ScalarValue> = list
+            .iter()
+            .filter_map(|e| match e {
+                Expr::Literal(sv) => Some(sv.clone()),
+                _ => None,
+            })
+            .collect();
+        if literals.len() != list.len() {
+            return Some(built);
+        }
+        let literals_bytes: usize = literals
+            .iter()
+            .map(|sv| size_of::<ScalarValue>() + sv.heap_bytes())
+            .sum();
+        let entry_bytes =
+            size_of::<InListCacheEntry>() + literals_bytes + built.0.estimated_bytes();
+
+        let mut guard = self.in_list.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(bucket) = guard.buckets.get(&hash)
+            && let Some(hit) = bucket.iter().find(|entry| {
+                entry.lhs_type == *lhs_type
+                    && entry.literals.len() == literals.len()
+                    && entry
+                        .literals
+                        .iter()
+                        .zip(&literals)
+                        .all(|(a, b)| a.semantic_eq(b))
+            })
+        {
+            return Some(Arc::clone(&hit.set));
+        }
+        if guard.entries < MAX_CACHE_ENTRIES
+            && try_reserve_cache_bytes(&self.total_bytes, entry_bytes)
+        {
+            guard.entries += 1;
+            guard
+                .buckets
+                .entry(hash)
+                .or_default()
+                .push(InListCacheEntry {
+                    lhs_type: lhs_type.clone(),
+                    literals,
+                    set: Arc::clone(&built),
+                });
+        }
+        Some(built)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stats(&self) -> (usize, usize, usize, usize, usize) {
+        let like_entries = self.like.lock().map_or(0, |m| m.len());
+        let regex_entries = self.regex.lock().map_or(0, |m| m.len());
+        let json_path_entries = self.json_path.lock().map_or(0, |m| m.len());
+        let in_list_entries = self.in_list.lock().map_or(0, |m| m.entries);
+        let total_bytes = self.total_bytes.load(Ordering::Acquire);
+        (
+            like_entries,
+            regex_entries,
+            json_path_entries,
+            in_list_entries,
+            total_bytes,
+        )
     }
 }
 
@@ -885,6 +1583,28 @@ pub struct EvalContext {
     pub now_ns: i64,
     /// Cooperative cancellation flag.
     pub cancel: CancelToken,
+    /// Per-query bounded cache shared across worker partitions.
+    pub cache: Arc<EvalCache>,
+}
+
+impl EvalContext {
+    /// Creates a new [`EvalContext`] with a fresh per-query [`EvalCache`].
+    pub fn new(now_ns: i64, cancel: CancelToken) -> Self {
+        Self {
+            now_ns,
+            cancel,
+            cache: Arc::new(EvalCache::default()),
+        }
+    }
+
+    /// Returns a copy of `self` with `cancel`, sharing the same `now_ns` and `Arc<EvalCache>`.
+    pub fn with_cancel(&self, cancel: CancelToken) -> Self {
+        Self {
+            now_ns: self.now_ns,
+            cancel,
+            cache: Arc::clone(&self.cache),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -985,5 +1705,47 @@ mod tests {
             expr.remap_columns(&bad_map),
             Err(QueryError::Internal(_))
         ));
+    }
+
+    #[test]
+    fn deep_binary_spine_walkers_do_not_overflow_stack() {
+        let depth = 5000usize;
+        let mut expr = Expr::Binary {
+            left: Box::new(Expr::Column {
+                index: 0,
+                name: "a".to_owned(),
+                data_type: DataType::I64,
+            }),
+            op: BinaryOp::Add,
+            right: Box::new(Expr::Column {
+                index: 1,
+                name: "b".to_owned(),
+                data_type: DataType::I64,
+            }),
+            data_type: DataType::I64,
+        };
+        for i in 0..depth {
+            let rhs = Expr::Literal(ScalarValue::I64(i as i64));
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::Add,
+                right: Box::new(rhs),
+                data_type: DataType::I64,
+            };
+        }
+
+        let plan_text = expr.fmt_plan();
+        assert!(!plan_text.is_empty());
+        let debug_text = format!("{expr:?}");
+        assert!(debug_text.contains("Binary"));
+
+        let mut refs = BTreeSet::new();
+        expr.referenced_columns(&mut refs);
+        assert_eq!(refs.into_iter().collect::<Vec<_>>(), vec![0, 1]);
+
+        let remapped = expr.remap_columns(&[Some(10), Some(20)]).unwrap();
+        let mut new_refs = BTreeSet::new();
+        remapped.referenced_columns(&mut new_refs);
+        assert_eq!(new_refs.into_iter().collect::<Vec<_>>(), vec![10, 20]);
     }
 }

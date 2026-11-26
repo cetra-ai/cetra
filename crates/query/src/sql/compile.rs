@@ -1,12 +1,12 @@
 //! Compiles an optimized Shape B [`LogicalPlan`] into M3 push pipelines and
 //! formats privacy-safe physical plans for `EXPLAIN`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{self, Write as _};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
-use cetra_column::{Batch, CancelToken, Column, Reservation, Schema};
+use cetra_column::{Batch, CancelToken, Column, Reservation, Schema, Selection};
 
 use crate::error::QueryError;
 use crate::eval::{build_flat_from_sources, eval_expr};
@@ -14,7 +14,7 @@ use crate::exec::hash_agg::{HashAggSpec, execute_hash_agg_streams};
 use crate::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join};
 use crate::exec::pipeline::{ControlFlow, ExecContext, PushOperator, run_pipeline};
 use crate::exec::sort_window::{ExternalSort, eval_window_group};
-use crate::exec::source::{BatchSource, PartitionStream, ScanSource, ScanSpec};
+use crate::exec::source::{BatchSource, MapProjection, PartitionStream, ScanSource, ScanSpec};
 use crate::exec::streaming::{FilterOp, LimitOp, ProjectOp, TopKSink, UnionSource, UnnestOp};
 use crate::ir::Expr;
 
@@ -185,11 +185,11 @@ fn compile_stage(
             };
             let spec = ScanSpec {
                 projection: projection.clone(),
-                map_keys: map_keys.clone(),
+                map_projections: map_keys_to_projections(map_keys),
                 time_range: *time_range,
                 id_lookups: id_lookups.clone(),
                 filters: filters.clone(),
-                substrings: substrings.clone(),
+                substrings: substrings.iter().map(|s| vec![s.clone()]).collect(),
                 sort_hints: Vec::new(),
                 limit: *limit,
             };
@@ -571,7 +571,7 @@ fn compile_values(
     let mut res = ctx.pool.register("values", false);
 
     let built = (|| -> Result<Batch, QueryError> {
-        let mut cols = Vec::with_capacity(schema.len());
+        let mut cols: Vec<Arc<Column>> = Vec::with_capacity(schema.len());
         for (col_idx, field) in schema.fields().iter().enumerate() {
             if ctx.eval.cancel.is_cancelled() {
                 return Err(QueryError::Cancelled);
@@ -593,7 +593,13 @@ fn compile_values(
             }
             let sources: Vec<Option<(&Column, usize)>> = row_cols
                 .iter()
-                .map(|c| if c.is_null(0) { None } else { Some((c, 0)) })
+                .map(|c| {
+                    if c.is_null(0) {
+                        None
+                    } else {
+                        Some((c.as_ref(), 0))
+                    }
+                })
                 .collect();
             let before = res.size();
             let flat = build_flat_from_sources(
@@ -603,9 +609,14 @@ fn compile_values(
                 &ctx.eval,
                 before,
             )?;
-            cols.push(flat);
+            cols.push(Arc::new(flat));
         }
-        Ok(Batch::try_new_all(Arc::clone(schema), cols, rows.len())?)
+        Ok(Batch::try_new_shared(
+            Arc::clone(schema),
+            cols,
+            rows.len(),
+            Selection::All,
+        )?)
     })();
 
     res.free();
@@ -1066,11 +1077,11 @@ fn fmt_physical_node(plan: &LogicalPlan, sources: &SqlSources, depth: usize, out
         } => {
             let spec = ScanSpec {
                 projection: projection.clone(),
-                map_keys: map_keys.clone(),
+                map_projections: map_keys_to_projections(map_keys),
                 time_range: *time_range,
                 id_lookups: id_lookups.clone(),
                 filters: filters.clone(),
-                substrings: substrings.clone(),
+                substrings: substrings.iter().map(|s| vec![s.clone()]).collect(),
                 sort_hints: Vec::new(),
                 limit: *limit,
             };
@@ -1294,6 +1305,21 @@ fn fmt_physical_node(plan: &LogicalPlan, sources: &SqlSources, depth: usize, out
     }
 }
 
+fn map_keys_to_projections(map_keys: &[(String, String)]) -> BTreeMap<String, MapProjection> {
+    let mut out: BTreeMap<String, MapProjection> = BTreeMap::new();
+    for (col, key) in map_keys {
+        let mut set = BTreeSet::new();
+        set.insert(key.clone());
+        match out.get_mut(col) {
+            Some(existing) => existing.merge(MapProjection::Keys(set)),
+            None => {
+                out.insert(col.clone(), MapProjection::Keys(set));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use cetra_column::{
@@ -1312,10 +1338,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ExecContext {
             pool: GlobalPool::standalone(cap),
-            eval: crate::ir::EvalContext {
-                now_ns: 0,
-                cancel: CancelToken::new(),
-            },
+            eval: crate::ir::EvalContext::new(0, CancelToken::new()),
             spill: Arc::new(SpillManager::with_fixed_cap(
                 dir.path().to_path_buf(),
                 1024 * 1024,

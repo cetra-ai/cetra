@@ -14,8 +14,8 @@ use cetra_core::schema::{spans, traces};
 use cetra_query::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join};
 use cetra_query::exec::streaming::{LimitOp, ProjectOp};
 use cetra_query::exec::{
-    CollectSink, ControlFlow, ExecContext, IdLookupHint, PartitionStream, PushSink, ScanSource,
-    ScanSpec, TimeRangeHint, run_pipeline as exec_run_pipeline,
+    CollectSink, ControlFlow, ExecContext, IdLookupHint, MapProjection, PartitionStream, PushSink,
+    ScanSource, ScanSpec, TimeRangeHint, run_pipeline as exec_run_pipeline,
 };
 use cetra_query::{BinaryOp, Expr, FilterView, QueryError, UnaryOp};
 
@@ -298,7 +298,7 @@ pub async fn user_deletion_scope(
 
     let spec = ScanSpec {
         projection: Some(vec![tid_idx, sid_idx]),
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns: ctx.visible_from,
             max_ns: None,
@@ -408,12 +408,16 @@ pub async fn eval_trace_ids(
         });
     }
 
+    let mut map_projections = BTreeMap::new();
+    map_projections.insert(
+        spans::METADATA.to_owned(),
+        MapProjection::Keys(BTreeSet::from([
+            metadata_key::EVAL_TARGET_TRACE_ID.to_owned()
+        ])),
+    );
     let spec = ScanSpec {
         projection: Some(vec![tid_idx, meta_idx]),
-        map_keys: vec![(
-            spans::METADATA.to_owned(),
-            metadata_key::EVAL_TARGET_TRACE_ID.to_owned(),
-        )],
+        map_projections,
         time_range: TimeRangeHint {
             min_ns: ctx.visible_from,
             max_ns: None,
@@ -533,7 +537,7 @@ pub async fn session_ids_of_traces(
 
     let spec = ScanSpec {
         projection: Some(vec![tid_idx, sid_idx]),
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns: ctx.visible_from,
             max_ns: None,

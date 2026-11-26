@@ -664,9 +664,12 @@ fn bind_distinct(
 ) -> Result<Expr, InvalidQuery> {
     let l = bind_node(left_ast, resolver, depth + 1)?;
     let r = bind_node(right_ast, resolver, depth + 1)?;
-    let common = coerce_comparison_pair(&l, &r, pos)?;
-    let left = coerce_expr(l, &common, pos)?;
-    let right = coerce_expr(r, &common, pos)?;
+    let (left, right) = if decimal_comparison_overflows(&l.data_type(), &r.data_type()) {
+        (l, r)
+    } else {
+        let common = coerce_comparison_pair(&l, &r, pos)?;
+        (coerce_expr(l, &common, pos)?, coerce_expr(r, &common, pos)?)
+    };
     Ok(Expr::Binary {
         left: Box::new(left),
         op,
@@ -731,9 +734,12 @@ fn bind_binary_op(
                 BinaryOperator::GtEq => BinaryOp::GtEq,
                 _ => BinaryOp::Eq,
             };
-            let common = coerce_comparison_pair(&l, &r, pos)?;
-            let left = coerce_expr(l, &common, pos)?;
-            let right = coerce_expr(r, &common, pos)?;
+            let (left, right) = if decimal_comparison_overflows(&l.data_type(), &r.data_type()) {
+                (l, r)
+            } else {
+                let common = coerce_comparison_pair(&l, &r, pos)?;
+                (coerce_expr(l, &common, pos)?, coerce_expr(r, &common, pos)?)
+            };
             Ok(Expr::Binary {
                 left: Box::new(left),
                 op: bin_op,
@@ -818,6 +824,87 @@ fn bind_arith_binary(
                 "cannot subtract timestamp from interval",
                 pos,
             ));
+        }
+        (DataType::TimestampNs { .. }, DataType::TimestampNs { .. }, BinaryOp::Sub) => {
+            return Ok(Expr::Binary {
+                left: Box::new(l),
+                op: BinaryOp::Sub,
+                right: Box::new(r),
+                data_type: DataType::Interval,
+            });
+        }
+        (DataType::Date, DataType::Interval, BinaryOp::Add | BinaryOp::Sub)
+        | (DataType::Interval, DataType::Date, BinaryOp::Add) => {
+            return Ok(Expr::Binary {
+                left: Box::new(l),
+                op: bin_op,
+                right: Box::new(r),
+                data_type: DataType::TimestampNs { utc: false },
+            });
+        }
+        (DataType::Interval, DataType::Date, BinaryOp::Sub) => {
+            return Err(InvalidQuery::new("cannot subtract date from interval", pos));
+        }
+        (DataType::Date, DataType::Null, BinaryOp::Add | BinaryOp::Sub) => {
+            let right = coerce_expr(r, &DataType::Interval, pos)?;
+            return Ok(Expr::Binary {
+                left: Box::new(l),
+                op: bin_op,
+                right: Box::new(right),
+                data_type: DataType::TimestampNs { utc: false },
+            });
+        }
+        (DataType::Null, DataType::Date, BinaryOp::Add) => {
+            let left = coerce_expr(l, &DataType::Interval, pos)?;
+            return Ok(Expr::Binary {
+                left: Box::new(left),
+                op: bin_op,
+                right: Box::new(r),
+                data_type: DataType::TimestampNs { utc: false },
+            });
+        }
+        (DataType::Null, DataType::Date, BinaryOp::Sub) => {
+            let left = coerce_expr(l, &DataType::Date, pos)?;
+            return Ok(Expr::Binary {
+                left: Box::new(left),
+                op: BinaryOp::Sub,
+                right: Box::new(r),
+                data_type: DataType::I64,
+            });
+        }
+        (DataType::Date, DataType::Date, BinaryOp::Sub) => {
+            return Ok(Expr::Binary {
+                left: Box::new(l),
+                op: BinaryOp::Sub,
+                right: Box::new(r),
+                data_type: DataType::I64,
+            });
+        }
+        (DataType::Interval, DataType::Interval, BinaryOp::Add | BinaryOp::Sub) => {
+            return Ok(Expr::Binary {
+                left: Box::new(l),
+                op: bin_op,
+                right: Box::new(r),
+                data_type: DataType::Interval,
+            });
+        }
+        (DataType::Interval, DataType::Null, BinaryOp::Add | BinaryOp::Sub) => {
+            let right = coerce_expr(r, &DataType::Interval, pos)?;
+            return Ok(Expr::Binary {
+                left: Box::new(l),
+                op: bin_op,
+                right: Box::new(right),
+                data_type: DataType::Interval,
+            });
+        }
+        (DataType::Null, DataType::Interval, BinaryOp::Add | BinaryOp::Sub) => {
+            let left = coerce_expr(l, &DataType::Interval, pos)?;
+            return Ok(Expr::Binary {
+                left: Box::new(left),
+                op: bin_op,
+                right: Box::new(r),
+                data_type: DataType::Interval,
+            });
         }
         _ => {}
     }
@@ -2237,6 +2324,36 @@ pub(crate) fn coerce_common_many(
     Ok(cur)
 }
 
+fn decimal_pair_spec(p1: u8, s1: i8, p2: u8, s2: i8) -> (u8, i8, bool) {
+    let int_digits = (i16::from(p1) - i16::from(s1)).max(i16::from(p2) - i16::from(s2));
+    let scale = i16::from(s1).max(i16::from(s2));
+    let raw_prec = int_digits + scale;
+    let clamped = raw_prec > i16::from(MAX_DECIMAL_PRECISION);
+    let precision = raw_prec.clamp(1, i16::from(MAX_DECIMAL_PRECISION)) as u8;
+    let scale = scale.clamp(-(i16::from(precision)), i16::from(precision)) as i8;
+    (precision, scale, clamped)
+}
+
+fn decimal_comparison_overflows(a: &DataType, b: &DataType) -> bool {
+    match (a, b) {
+        (
+            DataType::Decimal128 {
+                precision: p1,
+                scale: s1,
+            },
+            DataType::Decimal128 {
+                precision: p2,
+                scale: s2,
+            },
+        ) => decimal_pair_spec(*p1, *s1, *p2, *s2).2,
+        (DataType::Decimal128 { precision, scale }, DataType::I64)
+        | (DataType::I64, DataType::Decimal128 { precision, scale }) => {
+            decimal_pair_spec(*precision, *scale, 19, 0).2
+        }
+        _ => false,
+    }
+}
+
 fn coerce_common_types(
     a: &DataType,
     b: &DataType,
@@ -2253,10 +2370,13 @@ fn coerce_common_types(
         }
         (DataType::I64, DataType::F64) | (DataType::F64, DataType::I64) => Ok(DataType::F64),
         (DataType::Decimal128 { precision, scale }, DataType::I64)
-        | (DataType::I64, DataType::Decimal128 { precision, scale }) => Ok(DataType::Decimal128 {
-            precision: *precision,
-            scale: *scale,
-        }),
+        | (DataType::I64, DataType::Decimal128 { precision, scale }) => {
+            let (p, s, _) = decimal_pair_spec(*precision, *scale, 19, 0);
+            Ok(DataType::Decimal128 {
+                precision: p,
+                scale: s,
+            })
+        }
         (DataType::Decimal128 { .. }, DataType::F64)
         | (DataType::F64, DataType::Decimal128 { .. }) => Ok(DataType::F64),
         (
@@ -2268,10 +2388,13 @@ fn coerce_common_types(
                 precision: p2,
                 scale: s2,
             },
-        ) => Ok(DataType::Decimal128 {
-            precision: (*p1).max(*p2).min(MAX_DECIMAL_PRECISION),
-            scale: (*s1).max(*s2),
-        }),
+        ) => {
+            let (p, s, _) = decimal_pair_spec(*p1, *s1, *p2, *s2);
+            Ok(DataType::Decimal128 {
+                precision: p,
+                scale: s,
+            })
+        }
         (DataType::TimestampNs { utc: u1 }, DataType::TimestampNs { utc: u2 }) => {
             Ok(DataType::TimestampNs { utc: *u1 || *u2 })
         }
@@ -2319,10 +2442,13 @@ fn coerce_numeric_pair(
         | (DataType::I64, DataType::F64)
         | (DataType::F64, DataType::I64) => Ok(DataType::F64),
         (DataType::Decimal128 { precision, scale }, DataType::I64)
-        | (DataType::I64, DataType::Decimal128 { precision, scale }) => Ok(DataType::Decimal128 {
-            precision: *precision,
-            scale: *scale,
-        }),
+        | (DataType::I64, DataType::Decimal128 { precision, scale }) => {
+            let (p, s, _) = decimal_pair_spec(*precision, *scale, 19, 0);
+            Ok(DataType::Decimal128 {
+                precision: p,
+                scale: s,
+            })
+        }
         (DataType::Decimal128 { .. }, DataType::F64)
         | (DataType::F64, DataType::Decimal128 { .. }) => Ok(DataType::F64),
         (
@@ -2334,10 +2460,13 @@ fn coerce_numeric_pair(
                 precision: p2,
                 scale: s2,
             },
-        ) => Ok(DataType::Decimal128 {
-            precision: (*p1).max(*p2).min(MAX_DECIMAL_PRECISION),
-            scale: (*s1).max(*s2),
-        }),
+        ) => {
+            let (p, s, _) = decimal_pair_spec(*p1, *s1, *p2, *s2);
+            Ok(DataType::Decimal128 {
+                precision: p,
+                scale: s,
+            })
+        }
         _ => Err(InvalidQuery::new(
             format!(
                 "arithmetic requires numeric operands, got `{}` and `{}`",
@@ -2813,7 +2942,7 @@ mod tests {
             (
                 "dec + 1",
                 DataType::Decimal128 {
-                    precision: 18,
+                    precision: 23,
                     scale: 4,
                 },
             ),
@@ -2953,10 +3082,7 @@ mod tests {
             Selection::All,
         )
         .unwrap();
-        let ctx = EvalContext {
-            now_ns: start_ns,
-            cancel: CancelToken::new(),
-        };
+        let ctx = EvalContext::new(start_ns, CancelToken::new());
 
         let exprs = [
             ("[1, 2] @> [1.0]", DataType::Bool),
@@ -3180,5 +3306,115 @@ mod tests {
         let plan_str = bound.fmt_plan();
         assert!(plan_str.contains("lower(name)"), "{plan_str}");
         assert!(plan_str.contains("meta[<utf8:3>]"), "{plan_str}");
+    }
+
+    #[test]
+    fn decimal_widening_overflow_comparison_and_temporal_arith_bind() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new(
+                "d10_2",
+                DataType::Decimal128 {
+                    precision: 10,
+                    scale: 2,
+                },
+                false,
+            ),
+            Field::new(
+                "d12_4",
+                DataType::Decimal128 {
+                    precision: 12,
+                    scale: 4,
+                },
+                false,
+            ),
+            Field::new(
+                "d30_20",
+                DataType::Decimal128 {
+                    precision: 30,
+                    scale: 20,
+                },
+                false,
+            ),
+            Field::new("i", DataType::I64, false),
+            Field::new("ts", DataType::timestamp_utc(), false),
+            Field::new("d", DataType::Date, false),
+            Field::new("iv", DataType::Interval, false),
+        ])
+        .unwrap();
+
+        let sum_dec = parse_and_bind("d10_2 + d12_4", &schema).unwrap();
+        assert_eq!(
+            sum_dec.data_type(),
+            DataType::Decimal128 {
+                precision: 12,
+                scale: 4,
+            }
+        );
+
+        let sum_i64 = parse_and_bind("d10_2 + i", &schema).unwrap();
+        assert_eq!(
+            sum_i64.data_type(),
+            DataType::Decimal128 {
+                precision: 21,
+                scale: 2,
+            }
+        );
+
+        // (30 - 20).max(19) + 20 = 39 > 38: comparison leaves operands un-narrowed.
+        let cmp_wide = parse_and_bind("d30_20 = i", &schema).unwrap();
+        let Expr::Binary { left, right, .. } = cmp_wide else {
+            panic!("expected Binary");
+        };
+        assert_eq!(
+            left.data_type(),
+            DataType::Decimal128 {
+                precision: 30,
+                scale: 20,
+            }
+        );
+        assert_eq!(right.data_type(), DataType::I64);
+
+        // Temporal arithmetic & NULL coercions
+        assert_eq!(
+            parse_and_bind("ts - ts", &schema).unwrap().data_type(),
+            DataType::Interval
+        );
+        assert_eq!(
+            parse_and_bind("d + iv", &schema).unwrap().data_type(),
+            DataType::TimestampNs { utc: false }
+        );
+        assert_eq!(
+            parse_and_bind("iv + d", &schema).unwrap().data_type(),
+            DataType::TimestampNs { utc: false }
+        );
+        assert_eq!(
+            parse_and_bind("d - iv", &schema).unwrap().data_type(),
+            DataType::TimestampNs { utc: false }
+        );
+        assert_eq!(
+            parse_and_bind("d - d", &schema).unwrap().data_type(),
+            DataType::I64
+        );
+        assert_eq!(
+            parse_and_bind("iv + iv", &schema).unwrap().data_type(),
+            DataType::Interval
+        );
+        assert_eq!(
+            parse_and_bind("-iv", &schema).unwrap().data_type(),
+            DataType::Interval
+        );
+        assert_eq!(
+            parse_and_bind("d + NULL", &schema).unwrap().data_type(),
+            DataType::TimestampNs { utc: false }
+        );
+        assert_eq!(
+            parse_and_bind("NULL + d", &schema).unwrap().data_type(),
+            DataType::TimestampNs { utc: false }
+        );
+        assert_eq!(
+            parse_and_bind("NULL - d", &schema).unwrap().data_type(),
+            DataType::I64
+        );
+        assert!(parse_and_bind("iv - d", &schema).is_err());
     }
 }

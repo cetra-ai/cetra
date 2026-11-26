@@ -12,8 +12,9 @@ use cetra_column::{
 use cetra_core::schema::{spans, traces};
 use cetra_query::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join};
 use cetra_query::exec::{
-    AggExpr, AggFunc, ControlFlow, DdSketch, ExecContext, HashAgg, HashAggSpec, PartitionStream,
-    PushSink, ScanSource, ScanSpec, run_pipeline as exec_run_pipeline,
+    AggExpr, AggFunc, ControlFlow, DdSketch, ExecContext, HashAgg, HashAggSpec, MapProjection,
+    PartitionStream, PushSink, ScanSource, ScanSpec, collect_expr_map_projections,
+    run_pipeline as exec_run_pipeline,
 };
 use cetra_query::{CompiledFilter, Expr, FilterView, QueryError};
 
@@ -999,7 +1000,9 @@ fn open_facets_streams(
         } = &search_pred
         {
             spec.filters.push(s_expr.clone());
-            spec.substrings.extend(substrings.iter().cloned());
+            if !substrings.is_empty() {
+                spec.substrings.push(substrings.clone());
+            }
         }
 
         let (source, raw_schema, view_schema) = match view {
@@ -1119,34 +1122,35 @@ fn open_facets_streams(
     } = &search_pred
     {
         spec.filters.push(s_expr.clone());
-        spec.substrings.extend(substrings.iter().cloned());
+        if !substrings.is_empty() {
+            spec.substrings.push(substrings.clone());
+        }
     }
 
-    let keys_cols: BTreeSet<&str> = fields
-        .iter()
-        .filter_map(|f| match f {
-            ParsedField::Keys(c) => Some(*c),
-            _ => None,
-        })
-        .collect();
+    for filter_expr in &spec.filters {
+        collect_expr_map_projections(filter_expr, &raw_schema, &mut spec.map_projections);
+    }
 
     let mut needed = BTreeSet::new();
     for field in fields {
         match field {
-            ParsedField::Values(c)
-            | ParsedField::Bool(c)
-            | ParsedField::List(c)
-            | ParsedField::Keys(c) => {
+            ParsedField::Values(c) | ParsedField::Bool(c) | ParsedField::List(c) => {
                 needed.insert(col_index(&raw_schema, c)?);
+            }
+            ParsedField::Keys(c) => {
+                needed.insert(col_index(&raw_schema, c)?);
+                spec.map_projections
+                    .entry((*c).to_owned())
+                    .and_modify(|existing| existing.merge(MapProjection::KeysOnly))
+                    .or_insert(MapProjection::KeysOnly);
             }
             ParsedField::MapValue(c, key) => {
                 needed.insert(col_index(&raw_schema, c)?);
-                if !keys_cols.contains(*c) {
-                    let pair = ((*c).to_owned(), key.clone());
-                    if !spec.map_keys.contains(&pair) {
-                        spec.map_keys.push(pair);
-                    }
-                }
+                let proj = MapProjection::Keys(BTreeSet::from([key.clone()]));
+                spec.map_projections
+                    .entry((*c).to_owned())
+                    .and_modify(|existing| existing.merge(proj.clone()))
+                    .or_insert(proj);
             }
             ParsedField::Number(c) => {
                 if *c == DURATION_MS {
@@ -1168,9 +1172,6 @@ fn open_facets_streams(
             }
         }
     }
-
-    spec.map_keys
-        .retain(|(col, _)| !keys_cols.contains(col.as_str()));
 
     if matches!(search_pred, SearchPredicate::Traces { .. }) {
         needed.insert(col_index(&raw_schema, traces::TRACE_ID)?);

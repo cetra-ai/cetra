@@ -617,10 +617,7 @@ mod tests {
         let before = res.size();
         reconcile_res(Some(&mut res), before, batch.memory_bytes()).unwrap();
 
-        let ctx = EvalContext {
-            now_ns: 0,
-            cancel: CancelToken::new(),
-        };
+        let ctx = EvalContext::new(0, CancelToken::new());
         let out = apply_tombstones_and_filters(batch, None, &filters, &ctx, Some(&mut res), before)
             .unwrap();
         assert_eq!(res.size(), before + out.memory_bytes());
@@ -685,10 +682,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let ctx = ExecContext {
                 pool: GlobalPool::standalone(cap),
-                eval: EvalContext {
-                    now_ns: 0,
-                    cancel: CancelToken::new(),
-                },
+                eval: EvalContext::new(0, CancelToken::new()),
                 spill: Arc::new(SpillManager::with_fixed_cap(
                     dir.path().to_path_buf(),
                     spill_cap,
@@ -1067,10 +1061,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let cancel_ctx = ExecContext {
                 pool: Arc::clone(&scoped),
-                eval: EvalContext {
-                    now_ns: 0,
-                    cancel: CancelToken::new(),
-                },
+                eval: EvalContext::new(0, CancelToken::new()),
                 spill: Arc::new(SpillManager::with_fixed_cap(
                     dir.path().to_path_buf(),
                     16 * 1024 * 1024,

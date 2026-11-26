@@ -247,10 +247,8 @@ pub(crate) fn drop_covered_batch(
     batch: &cetra_column::Batch,
     predicate: &cetra_query::Expr,
 ) -> Result<cetra_column::Batch, cetra_query::QueryError> {
-    let ctx = cetra_query::EvalContext {
-        now_ns: crate::catalog::now_ns(),
-        cancel: cetra_column::CancelToken::new(),
-    };
+    let ctx =
+        cetra_query::EvalContext::new(crate::catalog::now_ns(), cetra_column::CancelToken::new());
     let filtered = cetra_query::tombstone::filter_uncovered(batch, predicate, &ctx, None)?;
     Ok(filtered.compact(None)?)
 }
@@ -374,10 +372,7 @@ mod tests {
 
     /// The predicate's value for every row of `batch`: `None` is a null.
     fn values_of(predicate: &Expr, batch: &Batch) -> Vec<Option<bool>> {
-        let ctx = EvalContext {
-            now_ns: crate::catalog::now_ns(),
-            cancel: CancelToken::new(),
-        };
+        let ctx = EvalContext::new(crate::catalog::now_ns(), CancelToken::new());
         let col = eval_expr(predicate, batch, &ctx, None).unwrap();
         (0..batch.num_rows())
             .map(|row| match col.get_scalar(row).unwrap() {

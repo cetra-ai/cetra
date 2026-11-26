@@ -1153,7 +1153,7 @@ fn compute_user_scores(
 
     let score_spec = ScanSpec {
         projection: Some(scan_indices),
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns: ctx.visible_from,
             max_ns: None,

@@ -52,10 +52,7 @@ impl ConstFolder {
     fn new() -> Result<Self, QueryError> {
         let empty = Schema::try_new_arc(Vec::new())?;
         let batch = Batch::try_new_all(empty, Vec::new(), 1)?;
-        let eval_ctx = EvalContext {
-            now_ns: 0,
-            cancel: CancelToken::new(),
-        };
+        let eval_ctx = EvalContext::new(0, CancelToken::new());
         Ok(Self { batch, eval_ctx })
     }
 

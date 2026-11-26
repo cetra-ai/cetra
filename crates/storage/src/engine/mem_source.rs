@@ -139,7 +139,7 @@ impl ScanSource for MemtableSource {
                     deletions: Arc::clone(&self.deletions),
                     filters: spec.filters.clone(),
                     projection: spec.projection.clone(),
-                    now_ns: ctx.eval.now_ns,
+                    eval: ctx.eval.clone(),
                 }) as Box<dyn PartitionStream>
             })
             .collect();
@@ -171,7 +171,7 @@ struct MemPartitionStream {
     deletions: Arc<[Arc<PendingDeletion>]>,
     filters: Vec<Expr>,
     projection: Option<Vec<usize>>,
-    now_ns: i64,
+    eval: EvalContext,
 }
 
 impl PartitionStream for MemPartitionStream {
@@ -181,10 +181,7 @@ impl PartitionStream for MemPartitionStream {
         mut res: Option<&mut Reservation>,
     ) -> Result<Option<Batch>, QueryError> {
         let before = res.as_ref().map_or(0, |r| r.size());
-        let eval_ctx = EvalContext {
-            now_ns: self.now_ns,
-            cancel: cancel.clone(),
-        };
+        let eval_ctx = self.eval.with_cancel(cancel.clone());
 
         while self.cursor < self.batches.len() {
             if cancel.is_cancelled() {
@@ -322,10 +319,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         ExecContext {
             pool: GlobalPool::standalone(cap),
-            eval: EvalContext {
-                now_ns: 0,
-                cancel: CancelToken::new(),
-            },
+            eval: EvalContext::new(0, CancelToken::new()),
             spill: Arc::new(SpillManager::with_fixed_cap(dir.keep(), 1024 * 1024)),
             workers: Arc::new(WorkerPool::new(2).unwrap()),
             batch_size: 8192,

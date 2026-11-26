@@ -558,10 +558,7 @@ async fn holds_covered(
     let _cancel_guard = super::CancelOnDrop(cancel.clone());
     let exec_ctx = ExecContext {
         pool: Arc::clone(&scoped_pool),
-        eval: EvalContext {
-            now_ns: now_ns(),
-            cancel: cancel.clone(),
-        },
+        eval: EvalContext::new(now_ns(), cancel.clone()),
         spill: Arc::new(SpillManager::with_fixed_cap(PathBuf::new(), 0)),
         workers: Arc::clone(&workers),
         batch_size: ctx.batch_size,

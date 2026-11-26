@@ -948,22 +948,6 @@ fn check_decimal_bounds(val: i128, precision: u8) -> Result<i128, QueryError> {
     Ok(val)
 }
 
-fn f64_to_decimal(v: f64, precision: u8, scale: i8) -> Result<i128, QueryError> {
-    if !v.is_finite() {
-        return Err(QueryError::failed(
-            "cannot convert non-finite float to decimal",
-        ));
-    }
-    let scaled = (v * 10f64.powi(i32::from(scale))).round();
-    if !scaled.is_finite() || scaled.abs() >= 10f64.powi(i32::from(precision)) {
-        return Err(QueryError::failed("float out of range for decimal"));
-    }
-    if scaled <= (i128::MIN as f64) || scaled >= (i128::MAX as f64) {
-        return Err(QueryError::failed("decimal overflow"));
-    }
-    check_decimal_bounds(scaled as i128, precision)
-}
-
 fn i64_to_decimal(v: i64, precision: u8, scale: i8) -> Result<i128, QueryError> {
     let scaled = if scale >= 0 {
         let factor = 10i128
@@ -2405,7 +2389,7 @@ fn read_cost_decimal_value(col: &Column, row: usize, dt: &DataType) -> Result<i1
         DataType::F64 => {
             let v = read_f64(col, row)
                 .ok_or_else(|| QueryError::internal("expected f64 value for SumCostDecimal"))?;
-            f64_to_decimal(v, COST_DECIMAL_PRECISION, COST_DECIMAL_SCALE)
+            eval::f64_to_decimal(v, COST_DECIMAL_PRECISION, COST_DECIMAL_SCALE)
         }
         DataType::I64 => {
             let v = read_i64(col, row)
@@ -3755,7 +3739,7 @@ pub fn execute_hash_agg_streams(
 
 enum EvalCol {
     Borrowed(usize),
-    Owned(Column),
+    Owned(Arc<Column>),
 }
 
 struct EvaluatedBatchInputs {
@@ -4967,10 +4951,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ExecContext {
             pool: GlobalPool::standalone(cap),
-            eval: EvalContext {
-                now_ns: 0,
-                cancel: CancelToken::new(),
-            },
+            eval: EvalContext::new(0, CancelToken::new()),
             spill: Arc::new(SpillManager::with_fixed_cap(
                 dir.path().to_path_buf(),
                 16 * 1024 * 1024,

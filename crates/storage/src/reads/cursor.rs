@@ -714,10 +714,7 @@ mod tests {
         assert_eq!(cur.tie, vec!["s1".to_owned(), "t2".to_owned()]);
 
         let pred = after_expr(&cur, &schema, "start_time", &["span_id", "trace_id"]).expect("pred");
-        let eval_ctx = EvalContext {
-            now_ns: 0,
-            cancel: CancelToken::new(),
-        };
+        let eval_ctx = EvalContext::new(0, CancelToken::new());
         let mask = eval_filter(&pred, &batch, &eval_ctx, None).expect("eval");
         // Active indices: 0 -> false, 2 -> false, 3 -> true (200, s1, t1 < t2), 4 -> true (NULL)
         assert!(!mask.get(0));

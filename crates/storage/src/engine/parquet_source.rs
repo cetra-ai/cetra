@@ -207,7 +207,7 @@ impl ScanSource for ParquetSource {
                     runtime: self.runtime.clone(),
                     plan: Arc::clone(&plan),
                     batch_size,
-                    now_ns: ctx.eval.now_ns,
+                    eval: ctx.eval.clone(),
                     active_file: None,
                 }) as Box<dyn PartitionStream>
             })
@@ -4398,7 +4398,7 @@ struct ParquetPartitionStream {
     runtime: tokio::runtime::Handle,
     plan: Arc<ScanPlan>,
     batch_size: usize,
-    now_ns: i64,
+    eval: EvalContext,
     active_file: Option<ActiveFileState>,
 }
 
@@ -4632,10 +4632,7 @@ impl PartitionStream for ParquetPartitionStream {
         mut res: Option<&mut Reservation>,
     ) -> Result<Option<Batch>, QueryError> {
         let before = res.as_deref().map_or(0, Reservation::size);
-        let eval_ctx = EvalContext {
-            now_ns: self.now_ns,
-            cancel: cancel.clone(),
-        };
+        let eval_ctx = self.eval.with_cancel(cancel.clone());
 
         loop {
             if cancel.is_cancelled() {
@@ -5148,10 +5145,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         ExecContext {
             pool: GlobalPool::standalone(cap),
-            eval: EvalContext {
-                now_ns: 0,
-                cancel: CancelToken::new(),
-            },
+            eval: EvalContext::new(0, CancelToken::new()),
             spill: Arc::new(SpillManager::with_fixed_cap(dir.keep(), 1024 * 1024)),
             workers: Arc::new(WorkerPool::new(2).expect("worker pool")),
             batch_size: 8192,

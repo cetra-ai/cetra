@@ -293,7 +293,7 @@ fn evaluate_owned_keys(
     batch: &Batch,
     eval_ctx: &EvalContext,
     mut res: Option<&mut Reservation>,
-) -> Result<Vec<Option<Column>>, QueryError> {
+) -> Result<Vec<Option<Arc<Column>>>, QueryError> {
     let before = res.as_ref().map_or(0, |r| r.size());
     let mut out = Vec::with_capacity(evals.len());
     for ev in evals {
@@ -333,7 +333,7 @@ fn evaluate_owned_keys(
 fn resolve_key_refs<'a>(
     evals: &[KeyEval],
     batch: &'a Batch,
-    computed: &'a [Option<Column>],
+    computed: &'a [Option<Arc<Column>>],
 ) -> Result<Vec<&'a Column>, QueryError> {
     let mut refs = Vec::with_capacity(evals.len());
     for (k, ev) in evals.iter().enumerate() {
@@ -347,7 +347,7 @@ fn resolve_key_refs<'a>(
             KeyEval::Computed(_) => {
                 let col = computed
                     .get(k)
-                    .and_then(Option::as_ref)
+                    .and_then(Option::as_deref)
                     .ok_or_else(|| QueryError::internal("missing computed join key column"))?;
                 refs.push(col);
             }
@@ -670,7 +670,7 @@ fn keys_equal(
 
 struct BuildTable {
     batches: Vec<Batch>,
-    computed_keys: Vec<Vec<Option<Column>>>,
+    computed_keys: Vec<Vec<Option<Arc<Column>>>>,
     row_locs: Vec<(u32, u32)>,
     row_hashes: Vec<u64>,
     buckets: Vec<u32>,
@@ -730,7 +730,7 @@ impl BuildTable {
 
     fn populate_from_buffers(
         batches: Vec<Batch>,
-        computed_keys: Vec<Vec<Option<Column>>>,
+        computed_keys: Vec<Vec<Option<Arc<Column>>>>,
         cfg: &BuildTableConfig<'_>,
         cancel: &CancelToken,
     ) -> Result<Self, QueryError> {
@@ -954,7 +954,7 @@ fn partition_batch_into_writers(
 
 fn spill_buffered_batches(
     batches: &mut Vec<Batch>,
-    computed_keys: &mut Vec<Vec<Option<Column>>>,
+    computed_keys: &mut Vec<Vec<Option<Arc<Column>>>>,
     key_evals: &[KeyEval],
     sink: &mut PartitionSink<'_>,
     build_res: &mut Reservation,
@@ -966,7 +966,7 @@ fn spill_buffered_batches(
         let key_bytes: usize = comp
             .iter()
             .filter_map(Option::as_ref)
-            .map(Column::memory_bytes)
+            .map(|c| c.memory_bytes())
             .sum();
         let krefs = resolve_key_refs(key_evals, &batch, &comp)?;
         let _ = partition_batch_into_writers(&batch, &krefs, sink)?;
@@ -1261,7 +1261,7 @@ struct BuildRightState {
     right_streams: VecDeque<Box<dyn PartitionStream>>,
     left_streams: Option<VecDeque<Box<dyn PartitionStream>>>,
     buffered_batches: Vec<Batch>,
-    buffered_computed_keys: Vec<Vec<Option<Column>>>,
+    buffered_computed_keys: Vec<Vec<Option<Arc<Column>>>>,
     buffered_rows: usize,
     max_batch_bytes: usize,
     spilled: bool,
@@ -1294,7 +1294,7 @@ struct SpillTasksState {
 
 struct ProbeBatchState {
     batch: Batch,
-    key_cols: Vec<Option<Column>>,
+    key_cols: Vec<Option<Arc<Column>>>,
     next_row: usize,
     active_bucket_next: Option<u32>,
     active_hash: u64,
@@ -1328,12 +1328,14 @@ struct EmitUnmatchedBuildState {
     remaining_tasks: Option<Vec<PartitionTask>>,
 }
 
+type ComputedKeyCols = Vec<Option<Arc<Column>>>;
+
 struct RepartitionInput {
     next_depth: usize,
     frame_budget: usize,
     buffered_batches: Vec<Batch>,
-    buffered_keys: Vec<Vec<Option<Column>>>,
-    cur_batch: Option<(Batch, Option<Vec<Option<Column>>>)>,
+    buffered_keys: Vec<ComputedKeyCols>,
+    cur_batch: Option<(Batch, Option<ComputedKeyCols>)>,
     build_reader: Option<SpillReader>,
     build_file: SpillFile,
     probe_file: SpillFile,
@@ -1362,13 +1364,10 @@ impl HashJoinStream {
     }
 
     fn eval_ctx(&self, cancel: &CancelToken) -> EvalContext {
-        EvalContext {
-            now_ns: self.ctx.eval.now_ns,
-            cancel: if cancel.is_cancelled() {
-                cancel.clone()
-            } else {
-                self.ctx.eval.cancel.clone()
-            },
+        if cancel.is_cancelled() {
+            self.ctx.eval.with_cancel(cancel.clone())
+        } else {
+            self.ctx.eval.clone()
         }
     }
 
@@ -1771,7 +1770,7 @@ impl HashJoinStream {
             let nn_key_bytes: usize = non_null_keys
                 .iter()
                 .filter_map(Option::as_ref)
-                .map(Column::memory_bytes)
+                .map(|c| c.memory_bytes())
                 .sum();
             let needed = nn_bytes.saturating_add(nn_key_bytes);
 
@@ -2288,7 +2287,7 @@ impl HashJoinStream {
                     let mut buffered_keys = Vec::new();
                     let mut buffered_rows = 0usize;
                     let mut max_batch_bytes = 0usize;
-                    let mut overflow_cur: Option<(Batch, Option<Vec<Option<Column>>>)> = None;
+                    let mut overflow_cur: Option<(Batch, Option<ComputedKeyCols>)> = None;
 
                     while let Some(batch) = reader.next_batch(Some(&mut self.pull_res))? {
                         self.check_cancel(cancel)?;
@@ -2316,7 +2315,7 @@ impl HashJoinStream {
                             key_cols_eval
                                 .iter()
                                 .filter_map(Option::as_ref)
-                                .map(Column::memory_bytes)
+                                .map(|c| c.memory_bytes())
                                 .sum(),
                         );
                         self.scratch_res.free();
@@ -2998,10 +2997,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ExecContext {
             pool: GlobalPool::standalone(cap),
-            eval: EvalContext {
-                now_ns: 0,
-                cancel: CancelToken::new(),
-            },
+            eval: EvalContext::new(0, CancelToken::new()),
             spill: Arc::new(SpillManager::with_fixed_cap(
                 dir.path().to_path_buf(),
                 spill_cap,

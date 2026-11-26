@@ -190,10 +190,7 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
     let workers = ctx.qe_runtime.workers().map_err(CompactionError::from)?;
     let cancel = CancelToken::new();
     let _cancel_guard = super::CancelOnDrop(cancel.clone());
-    let eval_ctx = EvalContext {
-        now_ns: crate::catalog::now_ns(),
-        cancel: cancel.clone(),
-    };
+    let eval_ctx = EvalContext::new(crate::catalog::now_ns(), cancel.clone());
     let exec_ctx = ExecContext {
         pool: Arc::clone(&scoped_pool),
         eval: eval_ctx.clone(),

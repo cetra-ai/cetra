@@ -200,7 +200,9 @@ pub async fn filter_span_targets(
                     SearchPredicate::None => {}
                     SearchPredicate::Spans { filter, substrings } => {
                         spec.filters.push(filter);
-                        spec.substrings.extend(substrings);
+                        if !substrings.is_empty() {
+                            spec.substrings.push(substrings);
+                        }
                     }
                     SearchPredicate::Traces { .. } => {
                         return Err(QueryError::internal("unexpected trace search on spans"));
@@ -646,7 +648,7 @@ fn span_scan_sync(
 
     let spec = ScanSpec {
         projection: Some(vec![trace_idx, span_idx]),
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns: ctx.visible_from,
             max_ns: None,

@@ -59,6 +59,12 @@ pub enum QueryError {
     /// Unexpected internal, I/O, or worker panic error (`500`).
     #[error("internal query error: {0}")]
     Internal(String),
+    /// Corrupt or truncated data encountered during query execution (`500`).
+    #[error("corrupt data: {0}")]
+    CorruptData(String),
+    /// Storage I/O or object-store failure encountered during query execution (`500`).
+    #[error("storage read error: {0}")]
+    StorageIo(String),
     /// Column invariant or internal error (never `ColumnError::MemoryLimit`, which converts to `TooLarge`).
     #[error("column error: {0}")]
     Column(ColumnError),
@@ -68,6 +74,7 @@ impl From<ColumnError> for QueryError {
     fn from(err: ColumnError) -> Self {
         match err {
             ColumnError::MemoryLimit { .. } => Self::TooLarge,
+            ColumnError::Overflow { reason } => Self::Failed(reason.to_owned()),
             other => Self::Column(other),
         }
     }
@@ -120,5 +127,26 @@ mod tests {
         };
         assert_eq!(msg.len(), MESSAGE_CAP - 1);
         assert_eq!(msg, prefix);
+    }
+
+    #[test]
+    fn column_overflow_maps_to_failed_and_typed_storage_errors_display() {
+        let err = QueryError::from(ColumnError::Overflow {
+            reason: "list offset overflow",
+        });
+        assert!(matches!(err, QueryError::Failed(ref m) if m == "list offset overflow"));
+
+        let mem = QueryError::from(ColumnError::MemoryLimit {
+            requested: 100,
+            limit: 10,
+            kind: cetra_column::MemoryLimitKind::QueryCap,
+        });
+        assert!(matches!(mem, QueryError::TooLarge));
+
+        let corrupt = QueryError::CorruptData("bad footer".to_owned());
+        assert_eq!(corrupt.to_string(), "corrupt data: bad footer");
+
+        let io_err = QueryError::StorageIo("timeout".to_owned());
+        assert_eq!(io_err.to_string(), "storage read error: timeout");
     }
 }

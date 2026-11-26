@@ -313,7 +313,7 @@ fn eval_llm_latency_p95(
 
     let spec = ScanSpec {
         projection: Some(vec![trace_id_idx, duration_idx]),
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns: ctx.visible_from,
             max_ns: None,
@@ -446,7 +446,7 @@ fn eval_score_value(
 
     let spec = ScanSpec {
         projection: Some(vec![trace_id_idx, val_idx]),
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns: Some(min_ns),
             max_ns: window.to().checked_sub(1),
@@ -549,7 +549,7 @@ fn eval_score_count(
 
     let spec = ScanSpec {
         projection: Some(vec![created_idx]),
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns: Some(min_ns),
             max_ns: window.to().checked_sub(1),

@@ -277,7 +277,7 @@ impl TracesSource {
 
         let file_spec = ScanSpec {
             projection: Some(input_indices.clone()),
-            map_keys: Vec::new(),
+            map_projections: BTreeMap::new(),
             time_range: TimeRangeHint {
                 min_ns: padded.min,
                 max_ns: padded.max,
@@ -354,7 +354,7 @@ impl TracesSource {
                     batches,
                     input_indices: input_indices.clone(),
                     filters: partial_filters_input.clone(),
-                    now_ns: ctx.eval.now_ns,
+                    eval: ctx.eval.clone(),
                 }));
             }
         }
@@ -442,7 +442,7 @@ impl TracesSource {
             post_filters,
             projection: merged_to_output,
             remaining: limit,
-            now_ns: ctx.eval.now_ns,
+            eval: ctx.eval.clone(),
             active_input: None,
             current_trace_id: None,
             budget_bytes,
@@ -1139,7 +1139,7 @@ struct MemPartialsStream {
     batches: VecDeque<MemBatch>,
     input_indices: Vec<usize>,
     filters: Vec<Expr>,
-    now_ns: i64,
+    eval: EvalContext,
 }
 
 impl PartitionStream for MemPartialsStream {
@@ -1149,10 +1149,7 @@ impl PartitionStream for MemPartialsStream {
         mut res: Option<&mut Reservation>,
     ) -> Result<Option<Batch>, QueryError> {
         let before = res.as_ref().map_or(0, |r| r.size());
-        let eval_ctx = EvalContext {
-            now_ns: self.now_ns,
-            cancel: cancel.clone(),
-        };
+        let eval_ctx = self.eval.with_cancel(cancel.clone());
 
         while let Some(mem_batch) = self.batches.pop_front() {
             if cancel.is_cancelled() {
@@ -1219,7 +1216,7 @@ struct NativeTraceMergeStream {
     post_filters: Vec<Expr>,
     projection: Option<Vec<usize>>,
     remaining: Option<usize>,
-    now_ns: i64,
+    eval: EvalContext,
     active_input: Option<(Batch, usize)>,
     current_trace_id: Option<[u8; 16]>,
     budget_bytes: usize,
@@ -1335,10 +1332,7 @@ impl PartitionStream for NativeTraceMergeStream {
         mut res: Option<&mut Reservation>,
     ) -> Result<Option<Batch>, QueryError> {
         let before = res.as_ref().map_or(0, |r| r.size());
-        let eval_ctx = EvalContext {
-            now_ns: self.now_ns,
-            cancel: cancel.clone(),
-        };
+        let eval_ctx = self.eval.with_cancel(cancel.clone());
 
         loop {
             if cancel.is_cancelled() {

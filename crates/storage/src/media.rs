@@ -311,10 +311,7 @@ impl MediaGc {
             let spill = Arc::new(SpillManager::with_fixed_cap(PathBuf::new(), 0));
             let exec_ctx = ExecContext {
                 pool,
-                eval: EvalContext {
-                    now_ns: now_ns(),
-                    cancel,
-                },
+                eval: EvalContext::new(now_ns(), cancel),
                 spill,
                 workers,
                 batch_size: DEFAULT_BATCH_SIZE,

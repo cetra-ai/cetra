@@ -36,7 +36,7 @@ fn eval_extra_sort_keys(
     batch: &Batch,
     eval_ctx: &EvalContext,
     res: &mut Reservation,
-) -> Result<Vec<Option<Column>>, QueryError> {
+) -> Result<Vec<Option<Arc<Column>>>, QueryError> {
     let mut out = Vec::with_capacity(keys.len());
     for key in keys {
         match &key.expr {
@@ -67,12 +67,12 @@ fn eval_extra_sort_keys(
 fn resolve_key_col_refs<'a>(
     keys: &[SortKey],
     batch: &'a Batch,
-    extra_keys: &'a [Option<Column>],
+    extra_keys: &'a [Option<Arc<Column>>],
 ) -> Result<Vec<&'a Column>, QueryError> {
     let mut refs = Vec::with_capacity(keys.len());
     for (idx, key) in keys.iter().enumerate() {
         if let Some(Some(col)) = extra_keys.get(idx) {
-            refs.push(col);
+            refs.push(col.as_ref());
         } else if let Expr::Column { index, .. } = &key.expr {
             let col = batch.column(*index).ok_or(ColumnError::InvalidBatch {
                 reason: "sort key column index out of bounds",
@@ -212,7 +212,7 @@ fn write_batch_framed(
 
 struct BufferedBatch {
     batch: Batch,
-    extra_keys: Vec<Option<Column>>,
+    extra_keys: Vec<Option<Arc<Column>>>,
 }
 
 /// Spillable external sort sink implementing [`PushSink`] and bounded-FD multi-pass k-way merge.
@@ -659,10 +659,7 @@ impl InMemorySortedStream {
             .max(1)
             .min(self.ctx.batch_size.max(1));
         let batch_refs: Vec<&Batch> = self.buffered.iter().map(|b| &b.batch).collect();
-        let eval_ctx = EvalContext {
-            now_ns: self.ctx.eval.now_ns,
-            cancel: cancel.clone(),
-        };
+        let eval_ctx = self.ctx.eval.with_cancel(cancel.clone());
 
         for chunk in self.refs[self.cursor..].chunks(rows_per_chunk) {
             if cancel.is_cancelled() {
@@ -722,10 +719,7 @@ impl PartitionStream for InMemorySortedStream {
         let end = (self.cursor + max_rows).min(self.refs.len());
         let is_last = end == self.refs.len();
 
-        let eval_ctx = EvalContext {
-            now_ns: self.ctx.eval.now_ns,
-            cancel: cancel.clone(),
-        };
+        let eval_ctx = self.ctx.eval.with_cancel(cancel.clone());
 
         let chunk_res = {
             let batch_refs: Vec<&Batch> = self.buffered.iter().map(|b| &b.batch).collect();
@@ -795,9 +789,9 @@ enum CursorSource {
 struct RunCursor {
     source: CursorSource,
     keys: Vec<SortKey>,
-    now_ns: i64,
+    eval: EvalContext,
     current_batch: Option<Batch>,
-    extra_keys: Vec<Option<Column>>,
+    extra_keys: Vec<Option<Arc<Column>>>,
     row: usize,
     res: Reservation,
 }
@@ -806,13 +800,13 @@ impl RunCursor {
     fn from_reader(
         reader: SpillReader,
         keys: Vec<SortKey>,
-        now_ns: i64,
+        eval: EvalContext,
         pool: &Arc<ScopedPool>,
     ) -> Self {
         Self {
             source: CursorSource::Spill(reader),
             keys,
-            now_ns,
+            eval,
             current_batch: None,
             extra_keys: Vec::new(),
             row: 0,
@@ -823,13 +817,13 @@ impl RunCursor {
     fn from_stream(
         stream: Box<dyn PartitionStream>,
         keys: Vec<SortKey>,
-        now_ns: i64,
+        eval: EvalContext,
         pool: &Arc<ScopedPool>,
     ) -> Self {
         Self {
             source: CursorSource::Stream(stream),
             keys,
-            now_ns,
+            eval,
             current_batch: None,
             extra_keys: Vec::new(),
             row: 0,
@@ -871,10 +865,7 @@ impl RunCursor {
                 }
                 batch = compacted;
             }
-            let eval_ctx = EvalContext {
-                now_ns: self.now_ns,
-                cancel: cancel.clone(),
-            };
+            let eval_ctx = self.eval.with_cancel(cancel.clone());
             let extra = eval_extra_sort_keys(&self.keys, &batch, &eval_ctx, &mut self.res)?;
             self.current_batch = Some(batch);
             self.extra_keys = extra;
@@ -1019,7 +1010,7 @@ fn merge_spill_passes(
             cursors.push(RunCursor::from_reader(
                 reader,
                 keys.to_vec(),
-                ctx.eval.now_ns,
+                ctx.eval.clone(),
                 &ctx.pool,
             ));
         }
@@ -1136,7 +1127,7 @@ impl MergeStream {
             cursors.push(RunCursor::from_reader(
                 reader,
                 keys.to_vec(),
-                ctx.eval.now_ns,
+                ctx.eval.clone(),
                 &ctx.pool,
             ));
         }
@@ -1171,7 +1162,7 @@ impl MergeStream {
             cursors.push(RunCursor::from_stream(
                 stream,
                 keys.to_vec(),
-                ctx.eval.now_ns,
+                ctx.eval.clone(),
                 &ctx.pool,
             ));
         }
@@ -1257,10 +1248,7 @@ impl PartitionStream for MergeStream {
         }
 
         let row_cap = self.max_output_rows.min(remaining_limit);
-        let eval_ctx = EvalContext {
-            now_ns: self.ctx.eval.now_ns,
-            cancel: cancel.clone(),
-        };
+        let eval_ctx = self.ctx.eval.with_cancel(cancel.clone());
 
         let mut picked: Vec<(u32, u32)> = Vec::new();
         let mut est_picked_bytes = 0usize;
@@ -1770,10 +1758,7 @@ impl WindowStream {
         let first_keys = eval_extra_sort_keys(
             &part_sort_keys,
             &first,
-            &EvalContext {
-                now_ns: self.ctx.eval.now_ns,
-                cancel: cancel.clone(),
-            },
+            &self.ctx.eval.with_cancel(cancel.clone()),
             &mut self.res,
         )?;
         let n_first = first.num_rows();
@@ -1807,10 +1792,7 @@ impl WindowStream {
             let next_keys = eval_extra_sort_keys(
                 &part_sort_keys,
                 &next_b,
-                &EvalContext {
-                    now_ns: self.ctx.eval.now_ns,
-                    cancel: cancel.clone(),
-                },
+                &self.ctx.eval.with_cancel(cancel.clone()),
                 &mut self.res,
             )?;
 
@@ -1884,10 +1866,7 @@ impl WindowStream {
         if n == 0 {
             return Ok(());
         }
-        let eval_ctx = EvalContext {
-            now_ns: self.ctx.eval.now_ns,
-            cancel: cancel.clone(),
-        };
+        let eval_ctx = self.ctx.eval.with_cancel(cancel.clone());
         let base_bytes = self.current_held_bytes(part_batch.memory_bytes());
         self.res.resize(base_bytes)?;
 
@@ -2071,7 +2050,7 @@ fn compute_peers(order_refs: &[&Column], order_by: &[SortKey], n: usize) -> Peer
 
 enum ColAccess<'a> {
     Borrowed(&'a Column),
-    Owned(Column),
+    Owned(Arc<Column>),
 }
 
 impl ColAccess<'_> {
@@ -2995,10 +2974,7 @@ mod tests {
     fn test_ctx(dir: &std::path::Path, pool_cap: usize, spill_cap: u64) -> ExecContext {
         ExecContext {
             pool: GlobalPool::standalone(pool_cap),
-            eval: EvalContext {
-                now_ns: 0,
-                cancel: CancelToken::new(),
-            },
+            eval: EvalContext::new(0, CancelToken::new()),
             spill: Arc::new(SpillManager::with_fixed_cap(dir.to_path_buf(), spill_cap)),
             workers: Arc::new(WorkerPool::new(2).unwrap()),
             batch_size: 8192,

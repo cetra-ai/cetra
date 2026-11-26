@@ -527,10 +527,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ExecContext {
             pool: GlobalPool::standalone(cap),
-            eval: EvalContext {
-                now_ns: 1_767_225_600_000_000_000,
-                cancel: CancelToken::new(),
-            },
+            eval: EvalContext::new(1_767_225_600_000_000_000, CancelToken::new()),
             spill: Arc::new(SpillManager::with_fixed_cap(
                 dir.path().to_path_buf(),
                 1024 * 1024,

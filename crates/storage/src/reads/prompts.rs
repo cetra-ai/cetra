@@ -235,7 +235,7 @@ pub async fn prompt_metrics(
 
             let span_spec = ScanSpec {
                 projection: Some(proj_indices),
-                map_keys: Vec::new(),
+                map_projections: Default::default(),
                 time_range: TimeRangeHint {
                     min_ns: Some(min_ns),
                     max_ns,
@@ -772,7 +772,7 @@ fn open_live_scores(
 
     let spec = ScanSpec {
         projection: Some(proj_indices),
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns: Some(min_ns),
             max_ns: None,

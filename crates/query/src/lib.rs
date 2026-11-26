@@ -27,7 +27,7 @@ pub use filter::{
     FilterView, MAX_SCORE_NAMES, ParsedFilter, filter_planning_schema, like_pattern,
     parse_filter_ast,
 };
-pub use ir::{BinaryOp, CastMode, EvalContext, Expr, ScalarFn, UnaryOp};
+pub use ir::{BinaryOp, CastMode, EvalCache, EvalContext, Expr, ScalarFn, UnaryOp};
 pub use text::{
     DENIED_FUNCTIONS, FILTER_LIMITS, PARSER_RECURSION_LIMIT, SQL_LIMITS, TextKind, TextLimits,
 };

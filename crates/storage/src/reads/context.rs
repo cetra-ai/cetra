@@ -400,10 +400,7 @@ impl EngineContext {
         let metrics = ExecMetrics::new();
         let exec_ctx = ExecContext {
             pool,
-            eval: EvalContext {
-                now_ns: crate::catalog::now_ns(),
-                cancel: cancel.clone(),
-            },
+            eval: EvalContext::new(crate::catalog::now_ns(), cancel.clone()),
             spill: Arc::clone(&self.runtime.spill),
             workers,
             batch_size: DEFAULT_BATCH_SIZE,
@@ -533,9 +530,11 @@ pub(crate) fn query_err_to_run(err: QueryError) -> RunError {
         }),
         QueryError::InvalidRequest(msg) => RunError::InvalidRequest(msg),
         QueryError::Failed(msg) => RunError::Failed(msg),
-        err @ (QueryError::Column(_) | QueryError::Internal(_) | QueryError::Busy) => {
-            RunError::Internal(EngineError::from_query(&err))
-        }
+        err @ (QueryError::Column(_)
+        | QueryError::CorruptData(_)
+        | QueryError::StorageIo(_)
+        | QueryError::Internal(_)
+        | QueryError::Busy) => RunError::Internal(EngineError::from_query(&err)),
     }
 }
 

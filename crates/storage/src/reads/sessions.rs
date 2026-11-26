@@ -429,7 +429,7 @@ fn load_root_payloads(
 
     let span_spec = ScanSpec {
         projection: Some(proj_indices),
-        map_keys: Vec::new(),
+        map_projections: Default::default(),
         time_range: TimeRangeHint {
             min_ns: ctx.visible_from,
             max_ns: None,

@@ -10,8 +10,9 @@ use cetra_core::enums::{ScoreSource, ScoreTargetKind};
 use cetra_core::schema::{scores, spans, traces};
 use cetra_query::exec::streaming::{FilterOp, ProjectOp, UnnestOp};
 use cetra_query::exec::{
-    AggExpr, AggFunc, ExecContext, HashAgg, HashAggSpec, PartitionStream, PushOperator, ScanSource,
-    ScanSpec, TimeRangeHint, run_pipeline as exec_run_pipeline,
+    AggExpr, AggFunc, ExecContext, HashAgg, HashAggSpec, MapProjection, PartitionStream,
+    PushOperator, ScanSource, ScanSpec, TimeRangeHint, collect_expr_map_projections,
+    run_pipeline as exec_run_pipeline,
 };
 use cetra_query::{BinaryOp, CompiledFilter, Expr, FilterView, QueryError, UnaryOp};
 
@@ -789,8 +790,11 @@ fn prepare_widget_streams(
                     width.is_some(),
                     true,
                     false,
-                    &mut spec.map_keys,
+                    &mut spec.map_projections,
                 )?;
+                for f in &spec.filters {
+                    collect_expr_map_projections(f, &raw_schema, &mut spec.map_projections);
+                }
                 spec.projection = Some(needed);
                 let proj_schema = ctx
                     .traces
@@ -812,7 +816,7 @@ fn prepare_widget_streams(
             }
             let mut spec = ScanSpec {
                 projection: None,
-                map_keys: Vec::new(),
+                map_projections: BTreeMap::new(),
                 time_range: TimeRangeHint {
                     min_ns: Some(min_ns),
                     max_ns: window.to().checked_sub(1),
@@ -887,8 +891,11 @@ fn prepare_widget_streams(
                     width.is_some(),
                     false,
                     need_semi_join,
-                    &mut spec.map_keys,
+                    &mut spec.map_projections,
                 )?;
+                for f in &spec.filters {
+                    collect_expr_map_projections(f, &raw_schema, &mut spec.map_projections);
+                }
                 spec.projection = Some(needed);
                 let proj_schema = ctx
                     .spans
@@ -925,7 +932,7 @@ fn prepare_widget_streams(
             }
             let mut spec = ScanSpec {
                 projection: None,
-                map_keys: Vec::new(),
+                map_projections: BTreeMap::new(),
                 time_range: TimeRangeHint {
                     min_ns: Some(min_ns),
                     max_ns: window.to().checked_sub(1),
@@ -984,8 +991,11 @@ fn prepare_widget_streams(
                 width.is_some(),
                 false,
                 need_semi_join,
-                &mut spec.map_keys,
+                &mut spec.map_projections,
             )?;
+            for f in &spec.filters {
+                collect_expr_map_projections(f, &raw_schema, &mut spec.map_projections);
+            }
             spec.projection = Some(needed);
             let proj_schema = ctx
                 .scores
@@ -1135,7 +1145,7 @@ fn collect_needed_raw_cols(
     need_time: bool,
     is_traces: bool,
     need_trace_id: bool,
-    map_keys: &mut Vec<(String, String)>,
+    map_projections: &mut BTreeMap<String, MapProjection>,
 ) -> Result<Vec<usize>, RunError> {
     let mut names = BTreeSet::new();
     if need_time {
@@ -1146,14 +1156,14 @@ fn collect_needed_raw_cols(
     }
     for m in &plan.measures {
         if let Some(f) = &m.field {
-            add_field_cols(f, is_traces, &mut names, map_keys)?;
+            add_field_cols(f, is_traces, &mut names, map_projections)?;
         }
     }
     for c in filters.conditions.iter().flatten() {
         collect_expr_cols(&c.expr, is_traces, &mut names)?;
     }
     if let Some(g) = &plan.group {
-        add_field_cols(&g.field, is_traces, &mut names, map_keys)?;
+        add_field_cols(&g.field, is_traces, &mut names, map_projections)?;
     }
     if names.is_empty() {
         names.insert(time_column(plan.source).to_owned());
@@ -1169,14 +1179,15 @@ fn add_field_cols(
     field: &str,
     is_traces: bool,
     names: &mut BTreeSet<String>,
-    map_keys: &mut Vec<(String, String)>,
+    map_projections: &mut BTreeMap<String, MapProjection>,
 ) -> Result<(), RunError> {
     if let Some((col_name, key)) = parse_map_field(field) {
         names.insert(col_name.to_owned());
-        let pair = (col_name.to_owned(), key.to_owned());
-        if !map_keys.contains(&pair) {
-            map_keys.push(pair);
-        }
+        let proj = MapProjection::Keys(BTreeSet::from([key.to_owned()]));
+        map_projections
+            .entry(col_name.to_owned())
+            .and_modify(|existing| existing.merge(proj.clone()))
+            .or_insert(proj);
         return Ok(());
     }
     if is_traces && field == DURATION_NS {

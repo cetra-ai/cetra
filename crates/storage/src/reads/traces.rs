@@ -995,7 +995,9 @@ async fn run_span_list_attempt(
                     SearchPredicate::None => {}
                     SearchPredicate::Spans { filter, substrings } => {
                         spec.filters.push(filter);
-                        spec.substrings.extend(substrings);
+                        if !substrings.is_empty() {
+                            spec.substrings.push(substrings);
+                        }
                     }
                     SearchPredicate::Traces { .. } => {
                         return Err(QueryError::internal(
@@ -1294,7 +1296,7 @@ pub(crate) async fn trace_detail_limited(
             }
             let t_spec = ScanSpec {
                 projection: None,
-                map_keys: Vec::new(),
+                map_projections: Default::default(),
                 time_range: TimeRangeHint {
                     min_ns: ctx_c.visible_from,
                     max_ns: None,
@@ -1347,7 +1349,7 @@ pub(crate) async fn trace_detail_limited(
             }
             let s_spec = ScanSpec {
                 projection: Some(s_proj),
-                map_keys: Vec::new(),
+                map_projections: Default::default(),
                 time_range: TimeRangeHint {
                     min_ns: ctx_c.visible_from,
                     max_ns: None,
@@ -1457,7 +1459,7 @@ pub async fn span_detail(
             }
             let spec = ScanSpec {
                 projection: None,
-                map_keys: Vec::new(),
+                map_projections: Default::default(),
                 time_range: TimeRangeHint {
                     min_ns: ctx_c.visible_from,
                     max_ns: None,
@@ -1574,7 +1576,7 @@ pub async fn trace_spans(
             }
             let req_spec = ScanSpec {
                 projection: None,
-                map_keys: Vec::new(),
+                map_projections: Default::default(),
                 time_range: TimeRangeHint {
                     min_ns: ctx_c.visible_from,
                     max_ns: None,
@@ -1628,7 +1630,7 @@ pub async fn trace_spans(
             }
             let early_spec = ScanSpec {
                 projection: None,
-                map_keys: Vec::new(),
+                map_projections: Default::default(),
                 time_range: TimeRangeHint {
                     min_ns: ctx_c.visible_from,
                     max_ns: None,
