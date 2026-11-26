@@ -233,6 +233,12 @@ impl SqlEngineContext {
         self
     }
 
+    /// Shares the process-wide coordinator slot semaphore from [`crate::QeRuntime`].
+    pub(crate) fn with_coordinator_slots(mut self, slots: Arc<Semaphore>) -> Self {
+        self.coordinator_slots = slots;
+        self
+    }
+
     /// Sets admission memory limits `(initial, cap, wait)` for SQL queries without a pre-admitted pool.
     #[cfg(test)]
     pub(crate) fn with_memory_limits(
@@ -734,7 +740,7 @@ fn run_export_producer(
             cfg.parquet_rows,
             cfg.parquet_bytes,
         ) {
-            Ok(exp) => Some(exp),
+            Ok(exp) => Some(exp.with_chunk_bytes(cfg.chunk_bytes)),
             Err(err) => {
                 drop(stream);
                 let _ = init_tx.send(Err(map_query_error_and_report(err, cfg.suspects.as_ref())));
@@ -855,14 +861,14 @@ fn drive_export_loop(
                     return Err(QueryError::internal("missing parquet exporter"));
                 };
                 // Transfer batch memory ownership into ParquetBatchExporter, then release pull_res.
-                let pushed = exp.push_batch(batch);
+                let pushed = exp.push_batch(batch, Some(&mut pull_res));
                 pull_res.free();
                 match pushed {
                     Ok(chunks) => {
                         let mut closed = false;
                         for chunk in chunks {
                             if !chunk.is_empty()
-                                && tx.blocking_send(Ok(Bytes::from(chunk))).is_err()
+                                && (cancel.is_cancelled() || tx.blocking_send(Ok(chunk)).is_err())
                             {
                                 closed = true;
                                 break;
@@ -889,9 +895,11 @@ fn drive_export_loop(
     }
 
     if let Some(exp) = parquet_exporter {
-        let tail = exp.finish()?;
-        if !tail.is_empty() {
-            let _ = tx.blocking_send(Ok(Bytes::from(tail)));
+        for chunk in exp.finish()? {
+            if !chunk.is_empty() && (cancel.is_cancelled() || tx.blocking_send(Ok(chunk)).is_err())
+            {
+                break;
+            }
         }
     }
     Ok(())
@@ -947,7 +955,8 @@ mod tests {
     use object_store::memory::InMemory;
 
     use super::*;
-    use crate::engine::metadata_cache::MetadataCache;
+    use crate::deletion::ProjectMemSnapshot;
+    use crate::file_format::FileMetadataCache;
     use crate::memtable::Memtable;
     use crate::verify::VerifyQueue;
     use crate::wal::Table;
@@ -956,7 +965,7 @@ mod tests {
         let rt = tokio::runtime::Handle::current();
         let store = Arc::new(InMemory::new());
         let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap();
-        let cache = Arc::new(MetadataCache::new(0));
+        let cache = Arc::new(FileMetadataCache::new(0));
         let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
         let spans_mt = Memtable::new(Table::Spans).snapshot();
         let scores_mt = Memtable::new(Table::Scores).snapshot();
@@ -976,7 +985,7 @@ mod tests {
                 Arc::clone(&store) as _,
                 project,
                 Vec::new(),
-                spans_mt,
+                ProjectMemSnapshot::empty(),
                 0,
                 Arc::from([]),
                 Arc::clone(&cache),

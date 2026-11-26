@@ -747,6 +747,27 @@ impl UnionSource {
         }
         Ok(Self { schema, sources })
     }
+    fn effective_child_spec<'a>(
+        &self,
+        src: &Arc<dyn ScanSource>,
+        spec: &'a ScanSpec,
+    ) -> std::borrow::Cow<'a, ScanSpec> {
+        let child_full_schema = src.schema();
+        let names_differ = child_full_schema
+            .fields()
+            .iter()
+            .zip(self.schema.fields())
+            .any(|(c, u)| c.name != u.name);
+        if names_differ {
+            std::borrow::Cow::Owned(remap_scan_spec_hints(
+                spec,
+                &self.schema,
+                &child_full_schema,
+            ))
+        } else {
+            std::borrow::Cow::Borrowed(spec)
+        }
+    }
 }
 
 impl ScanSource for UnionSource {
@@ -769,25 +790,10 @@ impl ScanSource for UnionSource {
         let target_proj_schema = self.projected_schema(spec)?;
         let mut all_parts: Vec<Box<dyn PartitionStream>> = Vec::new();
         for src in &self.sources {
-            let child_full_schema = src.schema();
-            let names_differ = child_full_schema
-                .fields()
-                .iter()
-                .zip(self.schema.fields())
-                .any(|(c, u)| c.name != u.name);
-            let remapped = if names_differ {
-                Some(remap_scan_spec_hints(
-                    spec,
-                    &self.schema,
-                    &child_full_schema,
-                ))
-            } else {
-                None
-            };
-            let effective_spec = remapped.as_ref().unwrap_or(spec);
-            let child_proj_schema = src.projected_schema(effective_spec)?;
+            let effective_spec = self.effective_child_spec(src, spec);
+            let child_proj_schema = src.projected_schema(effective_spec.as_ref())?;
             let needs_retag = child_proj_schema.as_ref() != target_proj_schema.as_ref();
-            for part in src.open_partitions(effective_spec, ctx)? {
+            for part in src.open_partitions(effective_spec.as_ref(), ctx)? {
                 if needs_retag {
                     all_parts.push(Box::new(RetagPartitionStream {
                         inner: part,
@@ -818,8 +824,16 @@ impl ScanSource for UnionSource {
             .collect())
     }
 
-    fn explain_summary(&self, _spec: &ScanSpec) -> String {
-        format!("UnionSource(sources={})", self.sources.len())
+    fn explain_summary(&self, spec: &ScanSpec) -> String {
+        let children: Vec<String> = self
+            .sources
+            .iter()
+            .map(|src| {
+                let effective = self.effective_child_spec(src, spec);
+                src.explain_summary(effective.as_ref())
+            })
+            .collect();
+        format!("UnionSource([{}])", children.join(", "))
     }
 }
 

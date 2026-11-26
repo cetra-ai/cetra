@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::mem::size_of;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cetra_column::{
     Batch, Bitmap, CancelToken, Column, ColumnError, DataType, FlatColumn, FlatData, MapData,
@@ -15,25 +16,24 @@ use cetra_core::schema::traces;
 use cetra_query::exec::sort_window::ExternalSort;
 use cetra_query::exec::streaming::TopKSink;
 use cetra_query::exec::{
-    ExecContext, IdLookupHint, PartitionStream, ScanSource, ScanSpec, SortKey, TimeRangeHint,
-    run_pipeline,
+    ControlFlow, ExecContext, IdLookupHint, PartitionStream, PushSink, ScanSource, ScanSpec,
+    SortKey, TimeRangeHint, run_pipeline,
 };
 use cetra_query::{BinaryOp, EvalContext, Expr, QueryError, eval_filter};
 use chrono::NaiveDate;
 use object_store::ObjectStore;
 
 use crate::catalog::{FileMeta, FileTable};
-use crate::deletion::{PendingDeletion, applicable};
+use crate::deletion::{PendingDeletion, ProjectMemSnapshot, applicable};
+use crate::file_format::{FileMetadataCache, open_table_source};
 use crate::memtable::{MemBatch, MemSnapshot};
 use crate::partials::MergeColumns;
 use crate::verify::Suspects;
 
-use super::metadata_cache::MetadataCache;
-use super::parquet_source::ParquetSource;
 use super::{
-    BufferedBatchStream, DAY_NS, TimeBounds, apply_tombstones_and_filters, cap_partitions,
-    day_of_ns, extract_time_bounds, read_bool_at, read_fixed16_at, read_str_at, reconcile_res,
-    rollback_res,
+    BufferedBatchStream, DAY_NS, HashPartitionedSortSink, TimeBounds, apply_tombstones_and_filters,
+    cap_partitions, claim_shared_limit, day_of_ns, extract_time_bounds, read_bool_at,
+    read_fixed16_at, read_str_at, reconcile_res, rollback_res, transfer_or_grow,
 };
 
 const MERGE_CHUNK_ROWS: usize = 1024;
@@ -72,10 +72,10 @@ pub(crate) struct TracesSource {
     project: ProjectId,
     schema: Arc<Schema>,
     files: Vec<Arc<FileMeta>>,
-    spans_mem: Arc<MemSnapshot>,
+    spans_mem: ProjectMemSnapshot,
     lookback: i64,
     deletions: Arc<[Arc<PendingDeletion>]>,
-    metadata_cache: Arc<MetadataCache>,
+    metadata_cache: Arc<FileMetadataCache>,
     suspects: Suspects,
     runtime: tokio::runtime::Handle,
     list_mode: Option<TraceListMode>,
@@ -90,6 +90,7 @@ impl std::fmt::Debug for TracesSource {
         };
         let mem_batches: usize = self
             .spans_mem
+            .as_snapshot()
             .partitions
             .iter()
             .filter(|(key, _)| key.project == self.project)
@@ -120,19 +121,17 @@ struct RangeScanArgs<'a> {
 impl TracesSource {
     /// Creates a [`TracesSource`] over `files` and pre-filtered `spans_mem` for `project`.
     ///
-    /// # Invariant
-    /// `spans_mem` MUST already be filtered by `deletion::project_snapshot(Table::Spans, ...)`
-    /// (respecting `project`, `keep_from`, and span-level `user_id`/`ingest_time` tombstones)
-    /// so cached memtable partials exclude covered spans.
+    /// `spans_mem` is enforced at compile time via [`ProjectMemSnapshot`] to have been projected
+    /// by `deletion::project_snapshot(Table::Spans, ...)` (`QE-M16`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         store: Arc<dyn ObjectStore>,
         project: ProjectId,
         files: Vec<Arc<FileMeta>>,
-        spans_mem: Arc<MemSnapshot>,
+        spans_mem: ProjectMemSnapshot,
         lookback: i64,
         deletions: Arc<[Arc<PendingDeletion>]>,
-        metadata_cache: Arc<MetadataCache>,
+        metadata_cache: Arc<FileMetadataCache>,
         suspects: Suspects,
         runtime: tokio::runtime::Handle,
     ) -> Result<Self, QueryError> {
@@ -192,7 +191,7 @@ impl TracesSource {
     fn data_bounds(&self, bounds: TimeBounds) -> Option<(i64, i64)> {
         let active_files: Vec<&Arc<FileMeta>> = self.files.iter().filter(|f| f.rows > 0).collect();
         let mut mem_batches: Vec<&MemBatch> = Vec::new();
-        for (key, batches) in &self.spans_mem.partitions {
+        for (key, batches) in &self.spans_mem.as_snapshot().partitions {
             if key.project == self.project {
                 for b in batches {
                     if b.batch.num_rows() > 0 {
@@ -217,11 +216,11 @@ impl TracesSource {
         Some((bounds.min.unwrap_or(min), bounds.max.unwrap_or(max)))
     }
 
-    fn open_range_stream(
+    fn open_range_streams(
         &self,
         args: RangeScanArgs<'_>,
         ctx: &ExecContext,
-    ) -> Result<Option<Box<dyn PartitionStream>>, QueryError> {
+    ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
         let RangeScanArgs {
             bounds,
             around_ns,
@@ -232,12 +231,12 @@ impl TracesSource {
             limit,
         } = args;
         if bounds.contradicts() || limit == Some(0) {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         if let Some(ids) = &trace_ids
             && ids.is_empty()
         {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
         let padded = padded_bounds(bounds, self.lookback);
@@ -311,7 +310,7 @@ impl TracesSource {
 
         let mut partial_streams: Vec<Box<dyn PartitionStream>> = Vec::new();
         if !clean_files.is_empty() {
-            let parquet_src = ParquetSource::new(
+            let parquet_src = open_table_source(
                 Arc::clone(&self.store),
                 FileTable::Traces,
                 Arc::clone(&self.schema),
@@ -324,7 +323,7 @@ impl TracesSource {
             partial_streams.extend(parquet_src.open_partitions(&file_spec, ctx)?);
         }
         for (pending, group_files) in gated.into_values() {
-            let parquet_src = ParquetSource::new(
+            let parquet_src = open_table_source(
                 Arc::clone(&self.store),
                 FileTable::Traces,
                 Arc::clone(&self.schema),
@@ -338,7 +337,7 @@ impl TracesSource {
         }
 
         // Lazily stream memtable spans into cached partials (projected to `input_indices`).
-        let mem_batches = select_mem_batches(&self.spans_mem, self.project, padded);
+        let mem_batches = select_mem_batches(self.spans_mem.as_snapshot(), self.project, padded);
         if !mem_batches.is_empty() {
             let slots = ctx.target_partitions.max(1).min(mem_batches.len());
             let mut grouped: Vec<VecDeque<MemBatch>> =
@@ -360,10 +359,11 @@ impl TracesSource {
         }
 
         if partial_streams.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
-        let capped = cap_partitions(partial_streams, ctx.target_partitions.max(1));
+        let target_partitions = ctx.target_partitions.max(1);
+        let capped = cap_partitions(partial_streams, target_partitions);
         let trace_id_input_idx = input_schema
             .index_of(traces::TRACE_ID)
             .ok_or_else(|| QueryError::internal("trace_id missing from merge input schema"))?;
@@ -377,23 +377,48 @@ impl TracesSource {
             nulls_first: false,
         }];
 
-        let sort_schema = Arc::clone(&input_schema);
-        let sort_keys_for_sink = sort_keys.clone();
-        let ctx_for_sink = ctx.clone();
-        let sinks = run_pipeline(
-            ctx,
-            capped,
-            |_| Ok(Vec::new()),
-            move |_| {
-                Ok(ExternalSort::new(
-                    Arc::clone(&sort_schema),
-                    sort_keys_for_sink.clone(),
-                    None,
-                    ctx_for_sink.clone(),
-                ))
-            },
-        )?;
-        let sorted_partials = ExternalSort::merge_sinks(sinks, input_schema, sort_keys, None, ctx)?;
+        let sorted_streams: Vec<Box<dyn PartitionStream>> = if target_partitions == 1 {
+            let sort_schema = Arc::clone(&input_schema);
+            let sort_keys_for_sink = sort_keys.clone();
+            let ctx_for_sink = ctx.clone();
+            let sinks = run_pipeline(
+                ctx,
+                capped,
+                |_| Ok(Vec::new()),
+                move |_| {
+                    Ok(ExternalSort::new(
+                        Arc::clone(&sort_schema),
+                        sort_keys_for_sink.clone(),
+                        None,
+                        ctx_for_sink.clone(),
+                    ))
+                },
+            )?;
+            vec![ExternalSort::merge_sinks(
+                sinks,
+                input_schema,
+                sort_keys,
+                None,
+                ctx,
+            )?]
+        } else {
+            let part_schema = Arc::clone(&input_schema);
+            let ctx_for_sink = ctx.clone();
+            let sinks = run_pipeline(
+                ctx,
+                capped,
+                |_| Ok(Vec::new()),
+                move |_| {
+                    Ok(HashPartitionedSortSink::new(
+                        Arc::clone(&part_schema),
+                        trace_id_input_idx,
+                        target_partitions,
+                        ctx_for_sink.clone(),
+                    ))
+                },
+            )?;
+            HashPartitionedSortSink::into_partition_streams(sinks, &input_schema, &sort_keys, ctx)?
+        };
 
         // Prepare post-merge filter remapping and final projection indices.
         let mut full_to_merged: Vec<Option<usize>> = vec![None; self.schema.len()];
@@ -426,29 +451,37 @@ impl TracesSource {
             .index_of(traces::START_TIME)
             .ok_or_else(|| QueryError::internal("start_time missing from merged schema"))?;
 
-        let budget_bytes = (ctx.pool.spill_share() / 4).max(4096);
-        let max_traces_per_chunk = (ctx.pool.cap() / 4096).clamp(8, MERGE_CHUNK_ROWS);
+        let active_p = sorted_streams.len().max(1);
+        let budget_bytes = (ctx.pool.spill_share() / (4 * active_p)).max(4096);
+        let max_traces_per_chunk = (ctx.pool.cap() / (4096 * active_p)).clamp(8, MERGE_CHUNK_ROWS);
+        let shared_limit = limit.map(|l| Arc::new(AtomicUsize::new(l)));
 
-        Ok(Some(Box::new(NativeTraceMergeStream {
-            input: sorted_partials,
-            input_res: ctx.pool.register("trace_merge_in", false),
-            merger: NativeTraceMerger::new(merge_columns, &self.schema)?,
-            merger_res: ctx.pool.register("trace_merger", false),
-            scratch_res: ctx.pool.register("trace_merge_scratch", false),
-            merge_columns: merge_columns.clone(),
-            full_schema: Arc::clone(&self.schema),
-            merged_start_idx,
-            bounds,
-            post_filters,
-            projection: merged_to_output,
-            remaining: limit,
-            eval: ctx.eval.clone(),
-            active_input: None,
-            current_trace_id: None,
-            budget_bytes,
-            max_traces_per_chunk,
-            done: false,
-        })))
+        let streams = sorted_streams
+            .into_iter()
+            .map(|input| {
+                Ok(Box::new(NativeTraceMergeStream {
+                    input,
+                    input_res: ctx.pool.register("trace_merge_in", false),
+                    merger: NativeTraceMerger::new(merge_columns, &self.schema)?,
+                    merger_res: ctx.pool.register("trace_merger", false),
+                    scratch_res: ctx.pool.register("trace_merge_scratch", false),
+                    merge_columns: merge_columns.clone(),
+                    full_schema: Arc::clone(&self.schema),
+                    merged_start_idx,
+                    bounds,
+                    post_filters: post_filters.clone(),
+                    projection: merged_to_output.clone(),
+                    remaining: shared_limit.clone(),
+                    eval: ctx.eval.clone(),
+                    active_input: None,
+                    current_trace_id: None,
+                    budget_bytes,
+                    max_traces_per_chunk,
+                    done: false,
+                }) as Box<dyn PartitionStream>)
+            })
+            .collect::<Result<Vec<_>, QueryError>>()?;
+        Ok(streams)
     }
 
     fn open_widening_list(
@@ -527,7 +560,7 @@ impl TracesSource {
                 p1_res.free();
                 return Err(QueryError::Cancelled);
             }
-            let Some(stream) = self.open_range_stream(
+            let streams = self.open_range_streams(
                 RangeScanArgs {
                     bounds: window,
                     around_ns: None,
@@ -538,17 +571,17 @@ impl TracesSource {
                     limit: None,
                 },
                 ctx,
-            )?
-            else {
+            )?;
+            if streams.is_empty() {
                 continue;
-            };
+            }
 
             let sink_schema = Arc::clone(&phase1_schema);
             let sink_keys = list_sort_keys.clone();
             let sink_ctx = ctx.clone();
             let sinks = run_pipeline(
                 ctx,
-                vec![stream],
+                streams,
                 |_| Ok(Vec::new()),
                 move |_| {
                     Ok(TopKSink::new(
@@ -660,7 +693,7 @@ impl TracesSource {
                 p1_res.free();
                 return Err(QueryError::Cancelled);
             }
-            if let Some(stream) = self.open_range_stream(
+            phase2_streams.extend(self.open_range_streams(
                 RangeScanArgs {
                     bounds: windows[slice_idx],
                     around_ns: None,
@@ -671,9 +704,7 @@ impl TracesSource {
                     limit: None,
                 },
                 ctx,
-            )? {
-                phase2_streams.push(stream);
-            }
+            )?);
         }
         p1_res.free();
         if phase2_streams.is_empty() {
@@ -776,7 +807,7 @@ impl TracesSource {
             })
             .collect::<Result<Vec<_>, QueryError>>()?;
 
-        let Some(p1_stream) = self.open_range_stream(
+        let p1_streams = self.open_range_streams(
             RangeScanArgs {
                 bounds,
                 around_ns: spec.time_range.around_ns,
@@ -787,17 +818,17 @@ impl TracesSource {
                 limit: None,
             },
             ctx,
-        )?
-        else {
+        )?;
+        if p1_streams.is_empty() {
             return Ok(Vec::new());
-        };
+        }
 
         let sink_schema = Arc::clone(&phase1_schema);
         let sink_keys = p1_sort_keys.clone();
         let sink_ctx = ctx.clone();
         let sinks = run_pipeline(
             ctx,
-            vec![p1_stream],
+            p1_streams,
             |_| Ok(Vec::new()),
             move |_| {
                 Ok(TopKSink::new(
@@ -868,7 +899,7 @@ impl TracesSource {
         } else {
             None
         };
-        let p2_stream_opt = self.open_range_stream(
+        let p2_streams = self.open_range_streams(
             RangeScanArgs {
                 bounds,
                 around_ns: p2_around,
@@ -882,28 +913,55 @@ impl TracesSource {
         )?;
         drop(winning_set);
         reconcile_res(Some(&mut meta_res), 0, winning_ids_bytes)?;
-        let Some(p2_stream) = p2_stream_opt else {
+        if p2_streams.is_empty() {
             meta_res.free();
             return Ok(Vec::new());
+        }
+
+        let p2_pool = Arc::clone(&ctx.pool);
+        let p2_sinks = match run_pipeline(
+            ctx,
+            p2_streams,
+            |_| Ok(Vec::new()),
+            move |_| Ok(CollectedWithRes::new(&p2_pool)),
+        ) {
+            Ok(s) => s,
+            Err(err) => {
+                meta_res.free();
+                return Err(err);
+            }
         };
 
-        let mut p2_res = ctx.pool.register("two_phase_p2", false);
         let mut p2_batches: Vec<Batch> = Vec::new();
-        let mut p2_stream = p2_stream;
-        while let Some(b) = p2_stream.next_batch(&ctx.eval.cancel, Some(&mut p2_res))? {
-            if !b.is_empty() {
-                p2_batches.push(b);
+        let mut p2_sink_res: Vec<Reservation> = Vec::with_capacity(p2_sinks.len());
+        for s in p2_sinks {
+            for b in s.batches {
+                if !b.is_empty() {
+                    p2_batches.push(b);
+                }
             }
+            p2_sink_res.push(s.res);
         }
         if p2_batches.is_empty() {
-            p2_res.free();
+            drop(p2_sink_res);
             meta_res.free();
             return Ok(Vec::new());
         }
 
+        let mut p2_res = ctx.pool.register("two_phase_p2", false);
         let refs: Vec<&Batch> = p2_batches.iter().collect();
-        let combined = Batch::concat(Arc::clone(&phase2_schema), &refs, Some(&mut p2_res))?;
+        let combined = match Batch::concat(Arc::clone(&phase2_schema), &refs, Some(&mut p2_res)) {
+            Ok(c) => c,
+            Err(err) => {
+                drop(p2_batches);
+                drop(p2_sink_res);
+                p2_res.free();
+                meta_res.free();
+                return Err(err.into());
+            }
+        };
         drop(p2_batches);
+        drop(p2_sink_res);
         reconcile_res(Some(&mut p2_res), 0, combined.memory_bytes())?;
 
         let id_col = combined
@@ -1043,7 +1101,7 @@ impl ScanSource for TracesSource {
                 let mut requested = requested_col_names(&self.schema, spec.projection.as_deref())?;
                 requested.extend(filter_col_names(&self.schema, &spec.filters));
                 let merge_columns = MergeColumns::new(&str_refs(&requested));
-                match self.open_range_stream(
+                self.open_range_streams(
                     RangeScanArgs {
                         bounds,
                         around_ns: spec.time_range.around_ns,
@@ -1054,10 +1112,7 @@ impl ScanSource for TracesSource {
                         limit: spec.limit,
                     },
                     ctx,
-                )? {
-                    Some(stream) => Ok(vec![stream]),
-                    None => Ok(Vec::new()),
-                }
+                )
             }
         }
     }
@@ -1075,10 +1130,37 @@ impl ScanSource for TracesSource {
             }
         };
         format!(
-            "TracesSource(mode={mode}, files={}, filters={})",
+            "TracesSource(mode={mode}, files={}, filters={}, deletions={})",
             self.files.len(),
-            spec.filters.len()
+            spec.filters.len(),
+            self.deletions.len()
         )
+    }
+}
+
+struct CollectedWithRes {
+    batches: Vec<Batch>,
+    res: Reservation,
+}
+
+impl CollectedWithRes {
+    fn new(pool: &Arc<cetra_column::ScopedPool>) -> Self {
+        Self {
+            batches: Vec::new(),
+            res: pool.register("two_phase_collect", false),
+        }
+    }
+}
+
+impl PushSink for CollectedWithRes {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
+        transfer_or_grow(batch_res, &mut self.res, batch.memory_bytes())?;
+        self.batches.push(batch);
+        Ok(ControlFlow::Continue)
     }
 }
 
@@ -1215,7 +1297,7 @@ struct NativeTraceMergeStream {
     bounds: TimeBounds,
     post_filters: Vec<Expr>,
     projection: Option<Vec<usize>>,
-    remaining: Option<usize>,
+    remaining: Option<Arc<AtomicUsize>>,
     eval: EvalContext,
     active_input: Option<(Batch, usize)>,
     current_trace_id: Option<[u8; 16]>,
@@ -1279,20 +1361,29 @@ impl NativeTraceMergeStream {
             }
         }
 
-        // 3. Apply `limit`.
-        if let Some(rem) = &mut self.remaining {
-            let take = merged.num_rows().min(*rem);
-            *rem -= take;
-            if *rem == 0 {
+        // 3. Apply shared `limit`.
+        if self.remaining.is_some() {
+            let take = claim_shared_limit(self.remaining.as_ref(), merged.num_rows());
+            if self
+                .remaining
+                .as_ref()
+                .is_some_and(|r| r.load(Ordering::Acquire) == 0)
+            {
                 self.done = true;
                 self.active_input = None;
                 self.input_res.free();
             }
             if take == 0 {
+                self.done = true;
+                self.active_input = None;
+                self.input_res.free();
                 self.scratch_res.free();
                 return Ok(None);
             }
             if take < merged.num_rows() {
+                self.done = true;
+                self.active_input = None;
+                self.input_res.free();
                 let end = u32::try_from(take).map_err(|_| ColumnError::Overflow {
                     reason: "traces limit exceeds u32::MAX",
                 })?;
@@ -1342,7 +1433,14 @@ impl PartitionStream for NativeTraceMergeStream {
                 rollback_res(res, before);
                 return Err(QueryError::Cancelled);
             }
-            if self.done {
+            if self.done
+                || self
+                    .remaining
+                    .as_ref()
+                    .is_some_and(|r| r.load(Ordering::Acquire) == 0)
+            {
+                self.done = true;
+                self.active_input = None;
                 self.scratch_res.free();
                 self.merger_res.free();
                 self.input_res.free();

@@ -11,9 +11,14 @@ pub(crate) mod scores_source;
 pub(crate) mod traces_source;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use cetra_column::{Batch, CancelToken, Reservation};
-use cetra_query::exec::PartitionStream;
+use cetra_column::{Batch, CancelToken, Column, ColumnError, DataType, Reservation, Schema};
+use cetra_query::exec::sort_window::ExternalSort;
+use cetra_query::exec::{
+    ControlFlow, ExecContext, MAX_MERGE_WAY, PartitionStream, PushSink, SortKey, SpillAppender,
+    SpillFile,
+};
 use cetra_query::{
     EvalContext, Expr, QueryError, TombstoneSpec, TombstoneTable, eval_filter, filter_uncovered,
 };
@@ -396,8 +401,8 @@ fn expr_timestamp_ns(expr: &Expr) -> Option<i64> {
     }
 }
 
-pub(super) fn read_str_at(col: &cetra_column::Column, row: usize) -> Option<&str> {
-    use cetra_column::{Column, FlatData, ScalarValue};
+pub(super) fn read_str_at(col: &Column, row: usize) -> Option<&str> {
+    use cetra_column::{FlatData, ScalarValue};
     match col {
         Column::Flat(f) => {
             if f.is_null(row) {
@@ -446,8 +451,8 @@ pub(super) fn read_str_at(col: &cetra_column::Column, row: usize) -> Option<&str
     }
 }
 
-pub(super) fn read_fixed16_at(col: &cetra_column::Column, row: usize) -> Option<[u8; 16]> {
-    use cetra_column::{Column, FlatData, ScalarValue};
+pub(super) fn read_fixed16_at(col: &Column, row: usize) -> Option<[u8; 16]> {
+    use cetra_column::{FlatData, ScalarValue};
     match col {
         Column::Flat(f) => {
             if f.is_null(row) {
@@ -496,8 +501,8 @@ pub(super) fn read_fixed16_at(col: &cetra_column::Column, row: usize) -> Option<
     }
 }
 
-pub(super) fn read_bool_at(col: &cetra_column::Column, row: usize) -> Option<bool> {
-    use cetra_column::{Column, FlatData, ScalarValue};
+pub(super) fn read_bool_at(col: &Column, row: usize) -> Option<bool> {
+    use cetra_column::{FlatData, ScalarValue};
     match col {
         Column::Flat(f) => {
             if f.is_null(row) {
@@ -583,6 +588,439 @@ impl PartitionStream for BufferedBatchStream {
     }
 }
 
+/// Moves `bytes` from `src` into `dst` without double-counting; if `src.size() < bytes`,
+/// transfers `src.size()` first and grows `dst` by the remainder (rolling back on error).
+pub(super) fn transfer_or_grow(
+    src: &mut Reservation,
+    dst: &mut Reservation,
+    bytes: usize,
+) -> Result<(), ColumnError> {
+    if bytes == 0 {
+        return Ok(());
+    }
+    let avail = src.size();
+    if avail >= bytes {
+        src.transfer_to(dst, bytes)
+    } else {
+        if avail > 0 {
+            src.transfer_to(dst, avail)?;
+        }
+        if let Err(err) = dst.try_grow(bytes - avail) {
+            if avail > 0 {
+                let _ = dst.transfer_to(src, avail);
+            }
+            return Err(err);
+        }
+        Ok(())
+    }
+}
+
+/// Atomically claims up to `want` rows from a shared query `LIMIT` counter across parallel streams.
+pub(super) fn claim_shared_limit(remaining: Option<&Arc<AtomicUsize>>, want: usize) -> usize {
+    let Some(counter) = remaining else {
+        return want;
+    };
+    if want == 0 {
+        return 0;
+    }
+    let mut cur = counter.load(Ordering::Acquire);
+    loop {
+        if cur == 0 {
+            return 0;
+        }
+        let take = cur.min(want);
+        match counter.compare_exchange_weak(cur, cur - take, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return take,
+            Err(actual) => cur = actual,
+        }
+    }
+}
+
+fn hash_bytes_fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    // Finalize to avoid FNV-1a's weak low-bit avalanche on periodic patterns mod 2^k.
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^ (h >> 33)
+}
+
+fn partition_for_row(col: &Column, phys_row: usize, num_partitions: usize) -> usize {
+    match col.data_type() {
+        DataType::FixedBytes16 => read_fixed16_at(col, phys_row)
+            .map_or(0, |id| (hash_bytes_fnv1a(&id) as usize) % num_partitions),
+        DataType::Utf8 => read_str_at(col, phys_row).map_or(0, |s| {
+            (hash_bytes_fnv1a(s.as_bytes()) as usize) % num_partitions
+        }),
+        _ => 0,
+    }
+}
+
+struct PartitionBucket {
+    batches: Vec<Batch>,
+    mem_bytes: usize,
+    appender: SpillAppender,
+}
+
+/// Worker-local hash-partitioning sink holding **one** spillable [`Reservation`] shared across
+/// `P` partition buckets and `P` lazy [`SpillAppender`]s (`0` idle FDs, `W` spillable consumers
+/// total rather than `W * P`, `R1-M3`).
+pub(super) struct HashPartitionedSortSink {
+    schema: Arc<Schema>,
+    key_col_idx: usize,
+    buckets: Vec<PartitionBucket>,
+    res: Reservation,
+    max_batch_bytes: usize,
+    ctx: ExecContext,
+}
+
+impl HashPartitionedSortSink {
+    pub(super) fn new(
+        schema: Arc<Schema>,
+        key_col_idx: usize,
+        num_partitions: usize,
+        ctx: ExecContext,
+    ) -> Self {
+        let p = num_partitions.max(1);
+        let buckets = (0..p)
+            .map(|_| PartitionBucket {
+                batches: Vec::new(),
+                mem_bytes: 0,
+                appender: ctx.spill.create_appender(),
+            })
+            .collect();
+        let res = ctx.pool.register("hash_part_sink", true);
+        Self {
+            schema,
+            key_col_idx,
+            buckets,
+            res,
+            max_batch_bytes: 0,
+            ctx,
+        }
+    }
+
+    fn total_mem_bytes(&self) -> usize {
+        self.buckets.iter().map(|b| b.mem_bytes).sum()
+    }
+
+    fn spill_largest_bucket(&mut self) -> Result<bool, QueryError> {
+        let Some((idx, _)) = self
+            .buckets
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| !b.batches.is_empty())
+            .max_by_key(|(_, b)| b.mem_bytes)
+        else {
+            return Ok(false);
+        };
+        let bucket = &mut self.buckets[idx];
+        let drained: Vec<Batch> = std::mem::take(&mut bucket.batches);
+        let freed_bytes = bucket.mem_bytes;
+        bucket.mem_bytes = 0;
+        for batch in drained {
+            if self.ctx.eval.cancel.is_cancelled() {
+                self.res.shrink(self.res.size().min(freed_bytes));
+                return Err(QueryError::Cancelled);
+            }
+            bucket.appender.append_batch(&batch, None)?;
+        }
+        self.res.shrink(self.res.size().min(freed_bytes));
+        Ok(true)
+    }
+
+    fn push_bucket_batch(
+        &mut self,
+        bucket_idx: usize,
+        batch: Batch,
+        batch_res: &mut Reservation,
+    ) -> Result<(), QueryError> {
+        let bytes = batch.memory_bytes();
+        loop {
+            match transfer_or_grow(batch_res, &mut self.res, bytes) {
+                Ok(()) => {
+                    self.buckets[bucket_idx].batches.push(batch);
+                    self.buckets[bucket_idx].mem_bytes =
+                        self.buckets[bucket_idx].mem_bytes.saturating_add(bytes);
+                    break;
+                }
+                Err(ColumnError::MemoryLimit { .. }) if self.total_mem_bytes() > 0 => {
+                    self.spill_largest_bucket()?;
+                }
+                Err(ColumnError::MemoryLimit { .. }) => {
+                    // Single sub-batch exceeds SpillShare with 0 buffered bytes: spill directly.
+                    self.buckets[bucket_idx]
+                        .appender
+                        .append_batch(&batch, None)?;
+                    return Ok(());
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+
+        let cap = self.ctx.pool.cap();
+        while self.total_mem_bytes() > 0
+            && (self
+                .res
+                .size()
+                .saturating_add(self.max_batch_bytes.saturating_mul(2))
+                > cap
+                || self
+                    .ctx
+                    .pool
+                    .reserved()
+                    .saturating_add(self.max_batch_bytes.saturating_mul(2))
+                    > cap)
+        {
+            if !self.spill_largest_bucket()? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Combines all worker sinks into up to `P` independent sorted [`PartitionStream`]s,
+    /// capping per-partition `max_merge_way = (MAX_MERGE_WAY / P).max(2)` so total open FDs
+    /// across `P` concurrent merge streams stay `<= 33`.
+    pub(super) fn into_partition_streams(
+        mut sinks: Vec<Self>,
+        schema: &Arc<Schema>,
+        sort_keys: &[SortKey],
+        ctx: &ExecContext,
+    ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+        if sinks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let num_partitions = sinks[0].buckets.len().max(1);
+        let mut combined: Vec<(Vec<Batch>, usize, Vec<SpillFile>)> = (0..num_partitions)
+            .map(|_| (Vec::new(), 0usize, Vec::new()))
+            .collect();
+
+        let per_part_in_mem_cap = (ctx.pool.cap() / (2 * num_partitions)).max(1);
+        let mut part_res: Vec<Reservation> = (0..num_partitions)
+            .map(|_| ctx.pool.register("hash_part_buf", false))
+            .collect();
+
+        for sink in &mut sinks {
+            for (p_idx, bucket) in sink.buckets.iter_mut().enumerate() {
+                if let Some(sf) =
+                    std::mem::replace(&mut bucket.appender, ctx.spill.create_appender()).finish()
+                {
+                    combined[p_idx].2.push(sf);
+                }
+                if bucket.batches.is_empty() {
+                    continue;
+                }
+                let b_bytes = bucket.mem_bytes;
+                let mut drained = std::mem::take(&mut bucket.batches);
+                bucket.mem_bytes = 0;
+
+                let must_spill = !combined[p_idx].2.is_empty()
+                    || combined[p_idx].1.saturating_add(b_bytes) > per_part_in_mem_cap;
+                if must_spill {
+                    // Spill already-accumulated in-memory batches for this partition too.
+                    let mut app = ctx.spill.create_appender();
+                    for prev in combined[p_idx].0.drain(..) {
+                        app.append_batch(&prev, None)?;
+                    }
+                    combined[p_idx].1 = 0;
+                    part_res[p_idx].free();
+                    for b in drained.drain(..) {
+                        app.append_batch(&b, None)?;
+                    }
+                    sink.res.shrink(sink.res.size().min(b_bytes));
+                    if let Some(sf) = app.finish() {
+                        combined[p_idx].2.push(sf);
+                    }
+                } else {
+                    let move_bytes = sink.res.size().min(b_bytes);
+                    if move_bytes > 0 {
+                        sink.res.transfer_to(&mut part_res[p_idx], move_bytes)?;
+                    }
+                    combined[p_idx].0.append(&mut drained);
+                    combined[p_idx].1 = combined[p_idx].1.saturating_add(b_bytes);
+                }
+            }
+            sink.res.free();
+        }
+        drop(sinks);
+
+        let max_merge_way = (MAX_MERGE_WAY / num_partitions).max(2);
+        let mut streams: Vec<Box<dyn PartitionStream>> = Vec::with_capacity(num_partitions);
+        for ((in_mem, _, spills), mut res) in combined.into_iter().zip(part_res) {
+            if in_mem.is_empty() && spills.is_empty() {
+                res.free();
+                continue;
+            }
+            streams.push(Box::new(PartitionSortStream {
+                schema: Arc::clone(schema),
+                keys: sort_keys.to_owned(),
+                ctx: ctx.clone(),
+                max_merge_way,
+                in_mem,
+                in_mem_res: res,
+                spills,
+                sorted_stream: None,
+            }));
+        }
+        Ok(streams)
+    }
+}
+
+impl PushSink for HashPartitionedSortSink {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
+        if self.ctx.eval.cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        if batch.is_empty() {
+            return Ok(ControlFlow::Continue);
+        }
+        if batch.schema().as_ref() != self.schema.as_ref() {
+            return Err(ColumnError::InvalidBatch {
+                reason: "batch schema does not match HashPartitionedSortSink schema",
+            }
+            .into());
+        }
+
+        self.max_batch_bytes = self.max_batch_bytes.max(batch.memory_bytes());
+        let p = self.buckets.len().max(1);
+        let key_col = batch
+            .column(self.key_col_idx)
+            .ok_or(ColumnError::InvalidBatch {
+                reason: "partition key column index out of bounds",
+            })?;
+
+        let mut per_bucket_rows: Vec<Vec<u32>> = vec![Vec::new(); p];
+        let indices = batch.selection().to_indices(batch.raw_len())?;
+        for phys_row in indices {
+            let b = partition_for_row(key_col, phys_row as usize, p);
+            per_bucket_rows[b].push(phys_row);
+        }
+
+        let non_empty_buckets = per_bucket_rows.iter().filter(|r| !r.is_empty()).count();
+        if non_empty_buckets == 0 {
+            return Ok(ControlFlow::Continue);
+        }
+
+        if non_empty_buckets == 1
+            && let Some(bucket_idx) = per_bucket_rows.iter().position(|r| !r.is_empty())
+        {
+            let compact = if batch.selection().is_all(batch.raw_len()) {
+                batch
+            } else {
+                batch.compact(None)?
+            };
+            return self
+                .push_bucket_batch(bucket_idx, compact, batch_res)
+                .map(|()| ControlFlow::Continue);
+        }
+
+        for (bucket_idx, rows) in per_bucket_rows.into_iter().enumerate() {
+            if rows.is_empty() {
+                continue;
+            }
+            let mut cols = Vec::with_capacity(batch.columns().len());
+            for col in batch.columns() {
+                cols.push(Column::Flat(col.take(&rows, None)?));
+            }
+            let sub = Batch::try_new_all(Arc::clone(&self.schema), cols, rows.len())?;
+            self.push_bucket_batch(bucket_idx, sub, batch_res)?;
+        }
+        Ok(ControlFlow::Continue)
+    }
+}
+
+struct PartitionSortStream {
+    schema: Arc<Schema>,
+    keys: Vec<SortKey>,
+    ctx: ExecContext,
+    max_merge_way: usize,
+    in_mem: Vec<Batch>,
+    in_mem_res: Reservation,
+    spills: Vec<SpillFile>,
+    sorted_stream: Option<Box<dyn PartitionStream>>,
+}
+
+impl PartitionSortStream {
+    fn init_stream(&mut self, cancel: &CancelToken) -> Result<(), QueryError> {
+        let mut sort = ExternalSort::new(
+            Arc::clone(&self.schema),
+            self.keys.clone(),
+            None,
+            self.ctx.clone(),
+        )
+        .with_max_merge_way(self.max_merge_way);
+
+        for batch in self.in_mem.drain(..) {
+            if cancel.is_cancelled() {
+                self.in_mem_res.free();
+                return Err(QueryError::Cancelled);
+            }
+            sort.consume(batch, &mut self.in_mem_res)?;
+        }
+        self.in_mem_res.free();
+
+        let mut read_res = self.ctx.pool.register("hash_part_spill_read", false);
+        for spill_file in self.spills.drain(..) {
+            let mut reader = spill_file.open_reader(Arc::clone(&self.schema))?;
+            loop {
+                read_res.free();
+                if cancel.is_cancelled() {
+                    read_res.free();
+                    return Err(QueryError::Cancelled);
+                }
+                let Some(batch) = reader.next_batch(Some(&mut read_res))? else {
+                    break;
+                };
+                if !batch.is_empty() {
+                    sort.consume(batch, &mut read_res)?;
+                }
+            }
+            read_res.free();
+        }
+
+        let stream = sort.into_stream()?;
+        self.sorted_stream = Some(stream);
+        Ok(())
+    }
+}
+
+impl PartitionStream for PartitionSortStream {
+    fn next_batch(
+        &mut self,
+        cancel: &CancelToken,
+        res: Option<&mut Reservation>,
+    ) -> Result<Option<Batch>, QueryError> {
+        let before = res.as_ref().map_or(0, |r| r.size());
+        if cancel.is_cancelled() {
+            self.in_mem_res.free();
+            rollback_res(res, before);
+            return Err(QueryError::Cancelled);
+        }
+        if self.sorted_stream.is_none()
+            && let Err(err) = self.init_stream(cancel)
+        {
+            self.in_mem_res.free();
+            rollback_res(res, before);
+            return Err(err);
+        }
+        let Some(stream) = self.sorted_stream.as_mut() else {
+            rollback_res(res, before);
+            return Ok(None);
+        };
+        stream.next_batch(cancel, res)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use cetra_column::{
@@ -631,10 +1069,12 @@ mod tests {
         use std::time::{Duration, Instant};
 
         use bytes::Bytes;
-        use cetra_column::{Batch, CancelToken, GlobalPool, Reservation, Schema};
+        use cetra_column::{
+            Batch, CancelToken, DataType, GlobalPool, Reservation, ScalarValue, Schema,
+        };
         use cetra_core::ids::ProjectId;
         use cetra_core::schema::{scores, traces};
-        use cetra_core::score::Score;
+        use cetra_core::score::{Score, ScoreTarget, ScoreValue};
         use cetra_core::span::Span;
         use cetra_query::exec::{
             CollectSink, ControlFlow, ExecContext, ExecMetrics, PushSink, ScanSource, ScanSpec,
@@ -959,7 +1399,7 @@ mod tests {
                 Arc::clone(&store),
                 project(),
                 vec![f_trace_a, f_trace_b],
-                Memtable::new(Table::Spans).snapshot(),
+                crate::deletion::ProjectMemSnapshot::empty(),
                 0,
                 Arc::from([]),
                 Arc::clone(&cache),
@@ -1080,7 +1520,7 @@ mod tests {
                 store,
                 project(),
                 vec![f_trace],
-                Memtable::new(Table::Spans).snapshot(),
+                crate::deletion::ProjectMemSnapshot::empty(),
                 0,
                 Arc::from([]),
                 cache,
@@ -1153,11 +1593,19 @@ mod tests {
             let tombstones = Tombstones::default().with(deletion);
             let deletions = tombstones.for_project(project());
 
+            let projected_spans = crate::deletion::project_snapshot(
+                Table::Spans,
+                &spans_mt.snapshot(),
+                project(),
+                None,
+                &deletions,
+            )
+            .unwrap();
             let traces_src = TracesSource::new(
                 Arc::clone(&store),
                 project(),
                 Vec::new(),
-                spans_mt.snapshot(),
+                projected_spans,
                 60_000_000_000,
                 Arc::clone(&deletions),
                 Arc::clone(&cache),
@@ -1246,6 +1694,442 @@ mod tests {
                     "Debug leaked `{secret}`: {scores_dbg}"
                 );
             }
+        }
+
+        #[test]
+        fn scores_source_pushes_score_id_and_trace_id_bloom_filters() {
+            use std::collections::HashMap;
+            use std::fmt;
+            use std::sync::Mutex;
+
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let path_reads: Arc<Mutex<HashMap<String, Vec<Range<u64>>>>> =
+                Arc::new(Mutex::new(HashMap::new()));
+
+            #[derive(Debug)]
+            struct PathCountingStore {
+                inner: Arc<dyn ObjectStore>,
+                reads: Arc<Mutex<HashMap<String, Vec<Range<u64>>>>>,
+            }
+            impl fmt::Display for PathCountingStore {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.write_str("PathCountingStore")
+                }
+            }
+            #[async_trait::async_trait]
+            impl ObjectStore for PathCountingStore {
+                async fn put_opts(
+                    &self,
+                    location: &ObjectPath,
+                    payload: PutPayload,
+                    opts: PutOptions,
+                ) -> object_store::Result<PutResult> {
+                    self.inner.put_opts(location, payload, opts).await
+                }
+                async fn put_multipart_opts(
+                    &self,
+                    location: &ObjectPath,
+                    opts: PutMultipartOptions,
+                ) -> object_store::Result<Box<dyn MultipartUpload>> {
+                    self.inner.put_multipart_opts(location, opts).await
+                }
+                async fn get_opts(
+                    &self,
+                    location: &ObjectPath,
+                    options: GetOptions,
+                ) -> object_store::Result<GetResult> {
+                    self.inner.get_opts(location, options).await
+                }
+                async fn get_ranges(
+                    &self,
+                    location: &ObjectPath,
+                    ranges: &[Range<u64>],
+                ) -> object_store::Result<Vec<Bytes>> {
+                    self.reads
+                        .lock()
+                        .unwrap()
+                        .entry(location.to_string())
+                        .or_default()
+                        .extend(ranges.iter().cloned());
+                    self.inner.get_ranges(location, ranges).await
+                }
+                fn delete_stream(
+                    &self,
+                    locations: BoxStream<'static, object_store::Result<ObjectPath>>,
+                ) -> BoxStream<'static, object_store::Result<ObjectPath>> {
+                    self.inner.delete_stream(locations)
+                }
+                fn list(
+                    &self,
+                    prefix: Option<&ObjectPath>,
+                ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+                    self.inner.list(prefix)
+                }
+                async fn list_with_delimiter(
+                    &self,
+                    prefix: Option<&ObjectPath>,
+                ) -> object_store::Result<ListResult> {
+                    self.inner.list_with_delimiter(prefix).await
+                }
+                async fn copy_opts(
+                    &self,
+                    from: &ObjectPath,
+                    to: &ObjectPath,
+                    options: CopyOptions,
+                ) -> object_store::Result<()> {
+                    let _ = (from, to, options);
+                    unreachable!()
+                }
+            }
+
+            let counting = Arc::new(PathCountingStore {
+                inner: Arc::clone(&inner),
+                reads: Arc::clone(&path_reads),
+            });
+            let store: Arc<dyn ObjectStore> = counting;
+            let cache = Arc::new(crate::file_format::FileMetadataCache::new(1024 * 1024));
+            let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
+
+            let base = 20_000 * DAY_NS;
+            let day = day_of(base);
+            // File A: score_id in 1..=50 plus sentinel 10_000 (so min/max brackets 1_000..=1_049!), trace_id = trace(10) and trace(30)
+            let mut rows_a = Vec::new();
+            for i in 1..=50_u128 {
+                rows_a.push(score_row(i, 10, base, base, base, false, "m"));
+            }
+            rows_a.push(score_row(10_000, 30, base, base, base, false, "m"));
+            let mut rows_b = Vec::new();
+            for i in 1_000..1_050_u128 {
+                rows_b.push(score_row(i, 20, base, base, base, false, "m"));
+            }
+
+            let path_a = "tables/scores/bloom_a.parquet";
+            let path_b = "tables/scores/bloom_b.parquet";
+            let f_a = write_table_file(
+                &rt,
+                &store,
+                FileTable::Scores,
+                day,
+                path_a,
+                score_rows(&rows_a),
+                0,
+            );
+            let f_b = write_table_file(
+                &rt,
+                &store,
+                FileTable::Scores,
+                day,
+                path_b,
+                score_rows(&rows_b),
+                0,
+            );
+
+            let scores_src = ScoresSource::new(
+                Arc::clone(&store),
+                project(),
+                vec![f_a, f_b],
+                Memtable::new(Table::Scores).snapshot(),
+                None,
+                Arc::from([]),
+                cache,
+                suspects,
+                rt.handle().clone(),
+            )
+            .unwrap();
+            let schema = scores_src.schema();
+            let (ctx, _dir) = make_ctx(8 * 1024 * 1024, 16 * 1024 * 1024, 1);
+
+            // Warm metadata cache once.
+            let _ = run_source(&scores_src, &ScanSpec::default(), &ctx).unwrap();
+            path_reads.lock().unwrap().clear();
+
+            // 1. Query by `score_id = Uuid(1010)`: File A min/max overlaps, so bloom filter MUST prune File A!
+            let target_sid = Uuid::from_u128(1_010).to_string();
+            let sid_spec = ScanSpec {
+                filters: vec![Expr::Binary {
+                    left: Box::new(col_expr(&schema, scores::SCORE_ID)),
+                    op: cetra_query::BinaryOp::Eq,
+                    right: Box::new(Expr::Literal(ScalarValue::Utf8(target_sid))),
+                    data_type: DataType::Bool,
+                }],
+                ..Default::default()
+            };
+            let out = run_source(&scores_src, &sid_spec, &ctx).unwrap();
+            let total: usize = out.iter().map(Batch::num_rows).sum();
+            assert_eq!(total, 1);
+            let reads_after_sid = path_reads.lock().unwrap().clone();
+            let a_reads = reads_after_sid.get(path_a).cloned().unwrap_or_default();
+            let b_reads = reads_after_sid.get(path_b).cloned().unwrap_or_default();
+            assert_eq!(
+                a_reads.len(),
+                1,
+                "File A should fetch ONLY its bloom filter (1 range), not data pages: {a_reads:?}"
+            );
+            assert!(
+                b_reads.len() > 1,
+                "File B should fetch bloom + data pages: {b_reads:?}"
+            );
+
+            // 2. Query by `trace_id = trace(20)` via `IdLookupHint`: File A min/max (trace(10)..trace(30)) overlaps,
+            // so bloom filter MUST prune File A!
+            path_reads.lock().unwrap().clear();
+            let ScoreTarget::Trace {
+                trace_id: target_tid,
+            } = score_row(1, 20, base, base, base, false, "m").target
+            else {
+                panic!("expected Trace target");
+            };
+            let tid_spec = ScanSpec {
+                id_lookups: vec![cetra_query::exec::IdLookupHint::Fixed16 {
+                    column: scores::TRACE_ID.to_owned(),
+                    values: vec![*target_tid.as_bytes()],
+                }],
+                ..Default::default()
+            };
+            let out_tid = run_source(&scores_src, &tid_spec, &ctx).unwrap();
+            let total_tid: usize = out_tid.iter().map(Batch::num_rows).sum();
+            assert_eq!(total_tid, 50);
+            let reads_after_tid = path_reads.lock().unwrap().clone();
+            let a_tid_reads = reads_after_tid.get(path_a).cloned().unwrap_or_default();
+            assert_eq!(
+                a_tid_reads.len(),
+                1,
+                "File A should fetch ONLY its trace_id bloom filter (1 range): {a_tid_reads:?}"
+            );
+        }
+
+        #[test]
+        fn parallel_traces_and_scores_match_single_partition_and_honor_limit() {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let cache = Arc::new(crate::file_format::FileMetadataCache::new(1024 * 1024));
+            let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
+
+            let base = 20_000 * DAY_NS;
+            let day = day_of(base);
+            let mut spans_vec = Vec::new();
+            let mut scores_vec = Vec::new();
+            for i in 1..=120_u16 {
+                let t = base + i64::from(i) * 1_000;
+                let mut sp = span_row(i, 1, t, t + 500);
+                sp.cost_total = Some(f64::from(i));
+                spans_vec.push(sp);
+                // Write 2 versions of score `i` across two files to test LWW across parallel partitions!
+                let mut sc_old = score_row(u128::from(i), 1, base, t, t, false, "q");
+                sc_old.value = ScoreValue::Numeric(1.0);
+                scores_vec.push(sc_old);
+            }
+            let mut scores_vec_new = Vec::new();
+            for i in 1..=120_u16 {
+                let t = base + i64::from(i) * 1_000;
+                let mut sc_new = score_row(
+                    u128::from(i),
+                    1,
+                    base,
+                    t + 10_000,
+                    t + 10_000,
+                    i % 10 == 0,
+                    "q",
+                );
+                sc_new.value = ScoreValue::Numeric(2.0);
+                scores_vec_new.push(sc_new);
+            }
+
+            let f_trace_a = write_table_file(
+                &rt,
+                &store,
+                FileTable::Traces,
+                day,
+                "tables/traces/par_a.parquet",
+                partials_from_spans_batch(&span_rows(&spans_vec[..60])).unwrap(),
+                0,
+            );
+            let f_trace_b = write_table_file(
+                &rt,
+                &store,
+                FileTable::Traces,
+                day,
+                "tables/traces/par_b.parquet",
+                partials_from_spans_batch(&span_rows(&spans_vec[60..])).unwrap(),
+                0,
+            );
+            let f_score_a = write_table_file(
+                &rt,
+                &store,
+                FileTable::Scores,
+                day,
+                "tables/scores/par_a.parquet",
+                score_rows(&scores_vec),
+                0,
+            );
+            let f_score_b = write_table_file(
+                &rt,
+                &store,
+                FileTable::Scores,
+                day,
+                "tables/scores/par_b.parquet",
+                score_rows(&scores_vec_new),
+                0,
+            );
+
+            let traces_src = TracesSource::new(
+                Arc::clone(&store),
+                project(),
+                vec![f_trace_a, f_trace_b],
+                crate::deletion::ProjectMemSnapshot::empty(),
+                0,
+                Arc::from([]),
+                Arc::clone(&cache),
+                suspects.clone(),
+                rt.handle().clone(),
+            )
+            .unwrap();
+            let scores_src = ScoresSource::new(
+                store,
+                project(),
+                vec![f_score_a, f_score_b],
+                Memtable::new(Table::Scores).snapshot(),
+                None,
+                Arc::from([]),
+                cache,
+                suspects,
+                rt.handle().clone(),
+            )
+            .unwrap();
+
+            let (mut ctx_1, _d1) = make_ctx(16 * 1024 * 1024, 16 * 1024 * 1024, 1);
+            ctx_1.batch_size = 17;
+            let (mut ctx_4, _d4) = make_ctx(16 * 1024 * 1024, 16 * 1024 * 1024, 4);
+            ctx_4.batch_size = 17;
+
+            // 1. TracesSource range mode: `target_partitions = 4` returns > 1 stream & matches P=1 row-for-row.
+            let t_schema = traces_src.schema();
+            let t_spec = ScanSpec {
+                projection: Some(vec![
+                    t_schema.index_of(traces::TRACE_ID).unwrap(),
+                    t_schema.index_of(traces::COST_TOTAL).unwrap(),
+                ]),
+                ..Default::default()
+            };
+            let t_streams_4 = traces_src.open_partitions(&t_spec, &ctx_4).unwrap();
+            assert!(
+                t_streams_4.len() > 1,
+                "expected >1 TracesSource stream for target_partitions=4, got {}",
+                t_streams_4.len()
+            );
+            let collect_trace_map =
+                |batches: Vec<Batch>| -> std::collections::BTreeMap<[u8; 16], f64> {
+                    let mut m = std::collections::BTreeMap::new();
+                    for b in batches {
+                        let b = b.compact(None).unwrap();
+                        let id_c = b.column(0).unwrap();
+                        let cost_c = b.column(1).unwrap();
+                        for r in 0..b.num_rows() {
+                            let id = super::super::read_fixed16_at(id_c, r).unwrap();
+                            let ScalarValue::F64(cost) = cost_c.get_scalar(r).unwrap() else {
+                                panic!("expected f64 cost");
+                            };
+                            m.insert(id, cost);
+                        }
+                    }
+                    m
+                };
+            let t_map_1 = collect_trace_map(run_source(&traces_src, &t_spec, &ctx_1).unwrap());
+            let t_map_4 = collect_trace_map(run_source(&traces_src, &t_spec, &ctx_4).unwrap());
+            assert_eq!(t_map_1.len(), 120);
+            assert_eq!(t_map_1, t_map_4);
+
+            // TracesSource shared limit across parallel streams:
+            let t_lim_spec = ScanSpec {
+                limit: Some(15),
+                ..t_spec.clone()
+            };
+            let t_lim_rows: usize = run_source(&traces_src, &t_lim_spec, &ctx_4)
+                .unwrap()
+                .iter()
+                .map(Batch::num_rows)
+                .sum();
+            assert_eq!(t_lim_rows, 15);
+
+            // TracesSource Widening & TwoPhase under P=4:
+            let widening = traces_src
+                .clone()
+                .with_list_mode(TraceListMode::Widening { fetch: 10 });
+            let w1 = collect_trace_map(run_source(&widening, &t_spec, &ctx_1).unwrap());
+            let w4 = collect_trace_map(run_source(&widening, &t_spec, &ctx_4).unwrap());
+            assert_eq!(w1.len(), 10);
+            assert_eq!(w1, w4);
+
+            let two_phase = traces_src.with_list_mode(TraceListMode::TwoPhase {
+                sort_keys: vec![SortKey {
+                    expr: col_expr(&t_schema, traces::COST_TOTAL),
+                    descending: true,
+                    nulls_first: false,
+                }],
+                limit: 10,
+                offset: 5,
+            });
+            let tp1 = collect_trace_map(run_source(&two_phase, &t_spec, &ctx_1).unwrap());
+            let tp4 = collect_trace_map(run_source(&two_phase, &t_spec, &ctx_4).unwrap());
+            assert_eq!(tp1.len(), 10);
+            assert_eq!(tp1, tp4);
+
+            // 2. ScoresSource: `target_partitions = 4` returns > 1 stream, matches P=1 row-for-row (108 non-deleted, val=2.0),
+            // and enforces shared `spec.limit`.
+            let s_schema = scores_src.schema();
+            let s_spec = ScanSpec {
+                projection: Some(vec![
+                    s_schema.index_of(scores::SCORE_ID).unwrap(),
+                    s_schema.index_of(scores::VALUE_NUM).unwrap(),
+                ]),
+                ..Default::default()
+            };
+            let s_streams_4 = scores_src.open_partitions(&s_spec, &ctx_4).unwrap();
+            assert!(
+                s_streams_4.len() > 1,
+                "expected >1 ScoresSource stream for target_partitions=4, got {}",
+                s_streams_4.len()
+            );
+            let collect_score_map =
+                |batches: Vec<Batch>| -> std::collections::BTreeMap<String, f64> {
+                    let mut m = std::collections::BTreeMap::new();
+                    for b in batches {
+                        let b = b.compact(None).unwrap();
+                        let id_c = b.column(0).unwrap();
+                        let val_c = b.column(1).unwrap();
+                        for r in 0..b.num_rows() {
+                            let id = super::super::read_str_at(id_c, r).unwrap().to_owned();
+                            let ScalarValue::F64(v) = val_c.get_scalar(r).unwrap() else {
+                                panic!("expected f64 value_num");
+                            };
+                            m.insert(id, v);
+                        }
+                    }
+                    m
+                };
+            let s_map_1 = collect_score_map(run_source(&scores_src, &s_spec, &ctx_1).unwrap());
+            let s_map_4 = collect_score_map(run_source(&scores_src, &s_spec, &ctx_4).unwrap());
+            assert_eq!(s_map_1.len(), 108);
+            assert!(s_map_1.values().all(|&v| v == 2.0));
+            assert_eq!(s_map_1, s_map_4);
+
+            let s_lim_spec = ScanSpec {
+                limit: Some(13),
+                ..s_spec
+            };
+            let s_lim_rows: usize = run_source(&scores_src, &s_lim_spec, &ctx_4)
+                .unwrap()
+                .iter()
+                .map(Batch::num_rows)
+                .sum();
+            assert_eq!(s_lim_rows, 13);
         }
     }
 }

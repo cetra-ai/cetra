@@ -4,6 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cetra_column::{
     Batch, Bitmap, CancelToken, ColumnError, DataType, Reservation, Schema, Selection,
@@ -12,7 +13,8 @@ use cetra_core::ids::ProjectId;
 use cetra_core::schema::{scores, scores_schema};
 use cetra_query::exec::sort_window::ExternalSort;
 use cetra_query::exec::{
-    ExecContext, PartitionStream, ScanSource, ScanSpec, SortKey, TimeRangeHint, run_pipeline,
+    ExecContext, IdLookupHint, PartitionStream, ScanSource, ScanSpec, SortKey, TimeRangeHint,
+    run_pipeline,
 };
 use cetra_query::{BinaryOp, EvalContext, Expr, QueryError, eval_filter};
 use chrono::NaiveDate;
@@ -20,15 +22,14 @@ use object_store::ObjectStore;
 
 use crate::catalog::{FileMeta, FileTable};
 use crate::deletion::PendingDeletion;
+use crate::file_format::{FileMetadataCache, open_table_source};
 use crate::verify::Suspects;
 use crate::wal::Table;
 
 use super::mem_source::MemtableSource;
-use super::metadata_cache::MetadataCache;
-use super::parquet_source::ParquetSource;
 use super::{
-    TimeBounds, cap_partitions, extract_time_bounds, read_bool_at, read_str_at, reconcile_res,
-    rollback_res,
+    HashPartitionedSortSink, TimeBounds, cap_partitions, claim_shared_limit, extract_time_bounds,
+    read_bool_at, read_str_at, reconcile_res, rollback_res,
 };
 
 /// Native [`ScanSource`] for the `scores` table with LWW deduplication per `score_id`.
@@ -41,7 +42,7 @@ pub(crate) struct ScoresSource {
     scores_mem: Arc<crate::memtable::MemSnapshot>,
     keep_from: Option<NaiveDate>,
     deletions: Arc<[Arc<PendingDeletion>]>,
-    metadata_cache: Arc<MetadataCache>,
+    metadata_cache: Arc<FileMetadataCache>,
     suspects: Suspects,
     runtime: tokio::runtime::Handle,
 }
@@ -75,7 +76,7 @@ impl ScoresSource {
         scores_mem: Arc<crate::memtable::MemSnapshot>,
         keep_from: Option<NaiveDate>,
         deletions: Arc<[Arc<PendingDeletion>]>,
-        metadata_cache: Arc<MetadataCache>,
+        metadata_cache: Arc<FileMetadataCache>,
         suspects: Suspects,
         runtime: tokio::runtime::Handle,
     ) -> Result<Self, QueryError> {
@@ -122,18 +123,36 @@ impl ScanSource for ScoresSource {
 
         let created_at_idx = schema_col_idx(&self.schema, scores::CREATED_AT)?;
         let score_id_idx = schema_col_idx(&self.schema, scores::SCORE_ID)?;
+        let trace_id_idx = schema_col_idx(&self.schema, scores::TRACE_ID)?;
         let updated_at_idx = schema_col_idx(&self.schema, scores::UPDATED_AT)?;
         let ingest_time_idx = schema_col_idx(&self.schema, scores::INGEST_TIME)?;
         let deleted_idx = schema_col_idx(&self.schema, scores::DELETED)?;
 
-        // Mandatory pushdown safety invariant: ONLY predicates whose column references are
-        // non-empty and all equal `"created_at"` are pushed below LWW dedup (no `around_ns`!).
-        let pushed_created_at = created_at_only_conjuncts(&spec.filters, created_at_idx);
+        // Mandatory pushdown safety invariant (`QE-M15`): ONLY immutable columns
+        // (`created_at`, `score_id`, `trace_id`) and their `IdLookupHint`s are pushed below
+        // LWW dedup (still keeping `around_ns: None`).
+        let pushed_immutable = immutable_pushdown_conjuncts(
+            &spec.filters,
+            &[created_at_idx, score_id_idx, trace_id_idx],
+        );
+        let pushed_id_lookups: Vec<IdLookupHint> = spec
+            .id_lookups
+            .iter()
+            .filter(|h| {
+                let col = match h {
+                    IdLookupHint::Fixed16 { column, .. }
+                    | IdLookupHint::Fixed8 { column, .. }
+                    | IdLookupHint::Utf8 { column, .. } => column.as_str(),
+                };
+                matches!(col, scores::SCORE_ID | scores::TRACE_ID)
+            })
+            .cloned()
+            .collect();
         let hint_bounds = TimeBounds {
             min: spec.time_range.min_ns,
             max: spec.time_range.max_ns,
         };
-        let filter_bounds = extract_time_bounds(&pushed_created_at, scores::CREATED_AT);
+        let filter_bounds = extract_time_bounds(&pushed_immutable, scores::CREATED_AT);
         let effective_bounds = hint_bounds.intersect_with(&filter_bounds);
         if effective_bounds.contradicts() {
             return Ok(Vec::new());
@@ -206,7 +225,7 @@ impl ScanSource for ScoresSource {
             }
         };
 
-        // Push ONLY `created_at` bounds + `created_at`-only filters below LWW dedup.
+        // Push immutable `created_at` bounds + `created_at`/`score_id`/`trace_id` filters & hints below LWW dedup.
         let inner_spec = ScanSpec {
             projection: Some(scan_indices),
             map_projections: spec.map_projections.clone(),
@@ -215,8 +234,8 @@ impl ScanSource for ScoresSource {
                 max_ns: effective_bounds.max,
                 around_ns: None,
             },
-            id_lookups: Vec::new(),
-            filters: pushed_created_at,
+            id_lookups: pushed_id_lookups,
+            filters: pushed_immutable,
             substrings: Vec::new(),
             sort_hints: Vec::new(),
             limit: None,
@@ -224,7 +243,7 @@ impl ScanSource for ScoresSource {
 
         let mut raw_streams: Vec<Box<dyn PartitionStream>> = Vec::new();
         if !self.files.is_empty() {
-            let parquet_src = ParquetSource::new(
+            let parquet_src = open_table_source(
                 Arc::clone(&self.store),
                 FileTable::Scores,
                 Arc::clone(&self.schema),
@@ -249,7 +268,8 @@ impl ScanSource for ScoresSource {
         if raw_streams.is_empty() {
             return Ok(Vec::new());
         }
-        let capped_streams = cap_partitions(raw_streams, ctx.target_partitions.max(1));
+        let target_partitions = ctx.target_partitions.max(1);
+        let capped_streams = cap_partitions(raw_streams, target_partitions);
 
         // Sort globally by (score_id ASC, updated_at DESC NULLS FIRST, ingest_time DESC NULLS FIRST).
         let sort_keys = vec![
@@ -282,44 +302,76 @@ impl ScanSource for ScoresSource {
             },
         ];
 
-        let sort_schema = Arc::clone(&scan_schema);
-        let sort_keys_for_sink = sort_keys.clone();
-        let ctx_for_sink = ctx.clone();
-        let sinks = run_pipeline(
-            ctx,
-            capped_streams,
-            |_| Ok(Vec::new()),
-            move |_| {
-                Ok(ExternalSort::new(
-                    Arc::clone(&sort_schema),
-                    sort_keys_for_sink.clone(),
-                    None,
-                    ctx_for_sink.clone(),
-                ))
-            },
-        )?;
-
-        let sorted_stream = ExternalSort::merge_sinks(sinks, scan_schema, sort_keys, None, ctx)?;
-        let dedup_stream = ScoresDedupStream {
-            input: sorted_stream,
-            scratch_res: ctx.pool.register("scores_dedup", false),
-            score_id_idx: scan_score_id_idx,
-            deleted_idx: scan_deleted_idx,
-            post_filters,
-            projection: scan_to_output,
-            remaining: spec.limit,
-            eval: ctx.eval.clone(),
-            prev_score_id: None,
-            done: false,
+        let sorted_streams: Vec<Box<dyn PartitionStream>> = if target_partitions == 1 {
+            let sort_schema = Arc::clone(&scan_schema);
+            let sort_keys_for_sink = sort_keys.clone();
+            let ctx_for_sink = ctx.clone();
+            let sinks = run_pipeline(
+                ctx,
+                capped_streams,
+                |_| Ok(Vec::new()),
+                move |_| {
+                    Ok(ExternalSort::new(
+                        Arc::clone(&sort_schema),
+                        sort_keys_for_sink.clone(),
+                        None,
+                        ctx_for_sink.clone(),
+                    ))
+                },
+            )?;
+            vec![ExternalSort::merge_sinks(
+                sinks,
+                scan_schema,
+                sort_keys,
+                None,
+                ctx,
+            )?]
+        } else {
+            let part_schema = Arc::clone(&scan_schema);
+            let ctx_for_sink = ctx.clone();
+            let sinks = run_pipeline(
+                ctx,
+                capped_streams,
+                |_| Ok(Vec::new()),
+                move |_| {
+                    Ok(HashPartitionedSortSink::new(
+                        Arc::clone(&part_schema),
+                        scan_score_id_idx,
+                        target_partitions,
+                        ctx_for_sink.clone(),
+                    ))
+                },
+            )?;
+            HashPartitionedSortSink::into_partition_streams(sinks, &scan_schema, &sort_keys, ctx)?
         };
-        Ok(vec![Box::new(dedup_stream)])
+
+        let shared_limit = spec.limit.map(|l| Arc::new(AtomicUsize::new(l)));
+        let streams = sorted_streams
+            .into_iter()
+            .map(|input| {
+                Box::new(ScoresDedupStream {
+                    input,
+                    scratch_res: ctx.pool.register("scores_dedup", false),
+                    score_id_idx: scan_score_id_idx,
+                    deleted_idx: scan_deleted_idx,
+                    post_filters: post_filters.clone(),
+                    projection: scan_to_output.clone(),
+                    remaining: shared_limit.clone(),
+                    eval: ctx.eval.clone(),
+                    prev_score_id: None,
+                    done: false,
+                }) as Box<dyn PartitionStream>
+            })
+            .collect();
+        Ok(streams)
     }
 
     fn explain_summary(&self, spec: &ScanSpec) -> String {
         format!(
-            "ScoresSource(files={}, filters={})",
+            "ScoresSource(files={}, filters={}, deletions={})",
             self.files.len(),
-            spec.filters.len()
+            spec.filters.len(),
+            self.deletions.len()
         )
     }
 }
@@ -330,15 +382,15 @@ fn schema_col_idx(schema: &Schema, name: &str) -> Result<usize, QueryError> {
         .ok_or_else(|| QueryError::internal(format!("scores schema missing column {name}")))
 }
 
-fn created_at_only_conjuncts(filters: &[Expr], created_at_idx: usize) -> Vec<Expr> {
+fn immutable_pushdown_conjuncts(filters: &[Expr], allowed_cols: &[usize]) -> Vec<Expr> {
     let mut out = Vec::new();
     for filter in filters {
-        collect_created_at_conjuncts(filter, created_at_idx, &mut out);
+        collect_allowed_conjuncts(filter, allowed_cols, &mut out);
     }
     out
 }
 
-fn collect_created_at_conjuncts(expr: &Expr, created_at_idx: usize, out: &mut Vec<Expr>) {
+fn collect_allowed_conjuncts(expr: &Expr, allowed_cols: &[usize], out: &mut Vec<Expr>) {
     if let Expr::Binary {
         left,
         op: BinaryOp::And,
@@ -346,13 +398,13 @@ fn collect_created_at_conjuncts(expr: &Expr, created_at_idx: usize, out: &mut Ve
         ..
     } = expr
     {
-        collect_created_at_conjuncts(left, created_at_idx, out);
-        collect_created_at_conjuncts(right, created_at_idx, out);
+        collect_allowed_conjuncts(left, allowed_cols, out);
+        collect_allowed_conjuncts(right, allowed_cols, out);
         return;
     }
     let mut cols = BTreeSet::new();
     expr.referenced_columns(&mut cols);
-    if !cols.is_empty() && cols.iter().all(|&idx| idx == created_at_idx) {
+    if !cols.is_empty() && cols.iter().all(|idx| allowed_cols.contains(idx)) {
         out.push(expr.clone());
     }
 }
@@ -364,7 +416,7 @@ struct ScoresDedupStream {
     deleted_idx: usize,
     post_filters: Vec<Expr>,
     projection: Option<Vec<usize>>,
-    remaining: Option<usize>,
+    remaining: Option<Arc<AtomicUsize>>,
     eval: EvalContext,
     prev_score_id: Option<String>,
     done: bool,
@@ -385,7 +437,11 @@ impl PartitionStream for ScoresDedupStream {
                 rollback_res(res, before);
                 return Err(QueryError::Cancelled);
             }
-            if self.remaining == Some(0) {
+            if self
+                .remaining
+                .as_ref()
+                .is_some_and(|r| r.load(Ordering::Acquire) == 0)
+            {
                 self.done = true;
                 break;
             }
@@ -471,13 +527,23 @@ impl PartitionStream for ScoresDedupStream {
                 continue;
             }
 
-            if let Some(rem) = &mut self.remaining {
-                let take = filtered.num_rows().min(*rem);
-                *rem -= take;
-                if *rem == 0 {
+            if self.remaining.is_some() {
+                let take = claim_shared_limit(self.remaining.as_ref(), filtered.num_rows());
+                if take == 0 {
+                    self.done = true;
+                    self.scratch_res.free();
+                    rollback_res(res, before);
+                    return Ok(None);
+                }
+                if self
+                    .remaining
+                    .as_ref()
+                    .is_some_and(|r| r.load(Ordering::Acquire) == 0)
+                {
                     self.done = true;
                 }
                 if take < filtered.num_rows() {
+                    self.done = true;
                     filtered = match truncate_batch_rows(filtered, take) {
                         Ok(b) => b,
                         Err(err) => {

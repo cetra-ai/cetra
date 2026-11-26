@@ -660,3 +660,73 @@ async fn a_reingested_trace_survives_another_pending_deletion() {
     assert_eq!(trace_count(&storage, 1).await, 1, "so does the trace");
     storage.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explain_redacts_tombstone_pii_and_shows_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config_in(dir.path());
+    cfg.flush.max_age = Duration::from_millis(100);
+    let storage = crate::Storage::open(cfg).await.unwrap();
+
+    let mut span = span_row(1, 1, INGEST, INGEST);
+    span.user_id = Some("erased-alice@example.com".to_owned());
+    span.session_id = Some("erased-session-secret-01".to_owned());
+    let trace_hex = span.trace_id.to_hex();
+
+    let mut score = score_row(1, 1, INGEST, INGEST, INGEST, false, "quality");
+    score.user_id = Some("erased-alice@example.com".to_owned());
+    score.session_id = Some("erased-session-secret-01".to_owned());
+
+    storage
+        .append_spans(project(), span_rows(&[span.clone()]))
+        .await
+        .unwrap();
+    storage
+        .append_scores(project(), score_rows(&[score]))
+        .await
+        .unwrap();
+    // Wait briefly so spans/scores flush into Parquet files with `deletions_applied_seq == 0`.
+    wait_for_flush_commit(&storage, 1).await;
+
+    storage
+        .register_deletion(Deletion {
+            id: Uuid::now_v7(),
+            project: project(),
+            cutoff: INGEST + 1_000,
+            scope: DeletionScope::User {
+                user_id: "erased-alice@example.com".to_owned(),
+                trace_ids: vec![span.trace_id],
+                session_ids: vec!["erased-session-secret-01".to_owned()],
+            },
+        })
+        .await
+        .unwrap();
+
+    let ctx = context(&storage).await;
+    for table in ["spans", "traces", "scores"] {
+        let out = rows(&ctx, &format!("EXPLAIN SELECT * FROM {table}")).await;
+        let plan_text: String = out
+            .iter()
+            .filter_map(|r| r.get("plan").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan_text.contains("deletions=1"),
+            "EXPLAIN for {table} should include redacted deletions=1: {plan_text}"
+        );
+        assert!(
+            !plan_text.contains("erased-alice@example.com"),
+            "EXPLAIN for {table} leaked erased user_id: {plan_text}"
+        );
+        assert!(
+            !plan_text.contains("erased-session-secret-01"),
+            "EXPLAIN for {table} leaked erased session_id: {plan_text}"
+        );
+        assert!(
+            !plan_text.contains(&trace_hex),
+            "EXPLAIN for {table} leaked erased trace_id: {plan_text}"
+        );
+    }
+
+    storage.shutdown().await.unwrap();
+}

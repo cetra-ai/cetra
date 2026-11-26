@@ -304,13 +304,38 @@ pub(crate) struct QeRuntime {
     pub(crate) admission: Arc<engine::admission::AsyncAdmissionPool>,
     workers: std::sync::OnceLock<Arc<cetra_query::exec::WorkerPool>>,
     workers_init: Mutex<()>,
-    pub(crate) metadata_cache: Arc<engine::metadata_cache::MetadataCache>,
+    bg_workers: std::sync::OnceLock<Arc<cetra_query::exec::WorkerPool>>,
+    bg_workers_init: Mutex<()>,
+    pub(crate) coordinator_slots: Arc<tokio::sync::Semaphore>,
+    pub(crate) metadata_cache: Arc<file_format::FileMetadataCache>,
     pub(crate) spill: Arc<cetra_query::exec::SpillManager>,
     pub(crate) target_partitions: usize,
     pub(crate) query_memory: QueryMemory,
 }
 
 impl QeRuntime {
+    pub(crate) fn new(
+        admission: Arc<engine::admission::AsyncAdmissionPool>,
+        metadata_cache: Arc<file_format::FileMetadataCache>,
+        spill: Arc<cetra_query::exec::SpillManager>,
+        target_partitions: usize,
+        query_memory: QueryMemory,
+    ) -> Arc<Self> {
+        let max_coordinators = target_partitions.saturating_mul(4).max(32);
+        Arc::new(Self {
+            admission,
+            workers: std::sync::OnceLock::new(),
+            workers_init: Mutex::new(()),
+            bg_workers: std::sync::OnceLock::new(),
+            bg_workers_init: Mutex::new(()),
+            coordinator_slots: Arc::new(tokio::sync::Semaphore::new(max_coordinators)),
+            metadata_cache,
+            spill,
+            target_partitions,
+            query_memory,
+        })
+    }
+
     /// Lazily initializes and returns the persistent [`cetra_query::exec::WorkerPool`].
     pub(crate) fn workers(
         &self,
@@ -330,24 +355,49 @@ impl QeRuntime {
         Ok(pool)
     }
 
+    /// Lazily initializes and returns the dedicated low-concurrency background maintenance
+    /// [`cetra_query::exec::WorkerPool`] (`(target_partitions / 2).clamp(1, 4)`), isolating
+    /// compaction and media GC from interactive query workers.
+    pub(crate) fn bg_workers(
+        &self,
+    ) -> Result<Arc<cetra_query::exec::WorkerPool>, cetra_query::QueryError> {
+        if let Some(pool) = self.bg_workers.get() {
+            return Ok(Arc::clone(pool));
+        }
+        let _guard = self
+            .bg_workers_init
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(pool) = self.bg_workers.get() {
+            return Ok(Arc::clone(pool));
+        }
+        let count = (self.target_partitions / 2).clamp(1, 4);
+        let pool = Arc::new(cetra_query::exec::WorkerPool::new(count)?);
+        let _ = self.bg_workers.set(Arc::clone(&pool));
+        Ok(pool)
+    }
+
     #[cfg(any(test, fuzzing))]
     pub(crate) fn for_test() -> Arc<Self> {
-        Arc::new(Self {
-            admission: Arc::new(engine::admission::AsyncAdmissionPool::new(64 << 20)),
-            workers: std::sync::OnceLock::new(),
-            workers_init: Mutex::new(()),
-            metadata_cache: Arc::new(engine::metadata_cache::MetadataCache::new(64 << 20)),
-            spill: Arc::new(cetra_query::exec::SpillManager::with_fixed_cap(
+        Self::for_test_with_cache(64 << 20)
+    }
+
+    #[cfg(any(test, fuzzing))]
+    pub(crate) fn for_test_with_cache(metadata_cache_bytes: usize) -> Arc<Self> {
+        Self::new(
+            Arc::new(engine::admission::AsyncAdmissionPool::new(64 << 20)),
+            Arc::new(file_format::FileMetadataCache::new(metadata_cache_bytes)),
+            Arc::new(cetra_query::exec::SpillManager::with_fixed_cap(
                 PathBuf::new(),
                 0,
             )),
-            target_partitions: 2,
-            query_memory: QueryMemory {
+            2,
+            QueryMemory {
                 initial: 1 << 20,
                 cap: 64 << 20,
                 wait: std::time::Duration::from_secs(1),
             },
-        })
+        )
     }
 }
 
@@ -358,6 +408,11 @@ impl std::fmt::Debug for QeRuntime {
             .field("admission_limit", &self.admission.limit())
             .field("admission_used", &self.admission.used())
             .field("workers_initialized", &self.workers.get().is_some())
+            .field("bg_workers_initialized", &self.bg_workers.get().is_some())
+            .field(
+                "coordinator_slots_available",
+                &self.coordinator_slots.available_permits(),
+            )
             .field("metadata_cache_bytes", &self.metadata_cache.bytes())
             .field("spill", &self.spill)
             .finish()
@@ -533,18 +588,15 @@ impl Storage {
             disk.set_engine_spilled(spill.spilled_bytes_counter());
             let metadata_cache_bytes =
                 usize::try_from(config.query.metadata_cache_bytes.0).unwrap_or(usize::MAX);
-            let metadata_cache = Arc::new(engine::metadata_cache::MetadataCache::new(
-                metadata_cache_bytes,
-            ));
-            Arc::new(QeRuntime {
+            let metadata_cache =
+                Arc::new(file_format::FileMetadataCache::new(metadata_cache_bytes));
+            QeRuntime::new(
                 admission,
-                workers: std::sync::OnceLock::new(),
-                workers_init: Mutex::new(()),
                 metadata_cache,
                 spill,
-                target_partitions: target_partitions.get(),
+                target_partitions.get(),
                 query_memory,
-            })
+            )
         };
         let spans_flushed = committer.flushed_seq(Table::Spans).await;
         let scores_flushed = committer.flushed_seq(Table::Scores).await;

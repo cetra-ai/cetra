@@ -17,15 +17,33 @@ pub(crate) fn may_be_corrupt(error: &EngineError) -> bool {
     error.kind() == EngineErrorKind::Parquet
 }
 
+/// Whether an `object_store::Error` represents missing or truncated/corrupt data
+/// rather than a transient store outage.
+pub(crate) fn is_corrupt_store_error(err: &object_store::Error) -> bool {
+    if matches!(err, object_store::Error::NotFound { .. }) {
+        return true;
+    }
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(src) = cur {
+        if let Some(io_err) = src.downcast_ref::<std::io::Error>()
+            && io_err.kind() == std::io::ErrorKind::UnexpectedEof
+        {
+            return true;
+        }
+        cur = src.source();
+    }
+    false
+}
+
 /// A `ParquetError::External` holding an `object_store::Error` other than
-/// `NotFound`: the store failed, the file may be fine. A missing object is
-/// not a store failure: it makes the file a suspect, and verification
-/// finds it corrupt.
+/// a corrupt-store error (`NotFound` / `UnexpectedEof`): the store failed, the
+/// file may be fine. A missing or truncated object is not a store failure: it
+/// makes the file a suspect, and verification finds it corrupt.
 pub(crate) fn is_store_error(error: &ParquetError) -> bool {
     match error {
         ParquetError::External(source) => source
             .downcast_ref::<object_store::Error>()
-            .is_some_and(|error| !matches!(error, object_store::Error::NotFound { .. })),
+            .is_some_and(|error| !is_corrupt_store_error(error)),
         _ => false,
     }
 }

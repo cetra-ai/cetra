@@ -6,13 +6,14 @@
 use std::fmt;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use cetra_column::{
     Batch, Column, DataType, EventItem, EventsData, FlatColumn, FlatData, LinkItem, LinksData,
     MapData, Reservation, ScalarValue, Schema, ScopedPool, Selection,
 };
 use cetra_core::schema::{event_field, link_field};
 use cetra_query::QueryError;
-use cetra_query::encode::format_interval;
+use cetra_query::encode::{EXPORT_MAX_CHUNK_BYTES, format_interval};
 use parquet::basic::{
     Compression, LogicalType, Repetition, TimeUnit, Type as PhysicalType, ZstdLevel,
 };
@@ -42,8 +43,10 @@ pub(crate) struct ParquetBatchExporter {
     buffered_batches: Vec<Batch>,
     buffered_rows: usize,
     buffered_bytes: usize,
+    writer_reserved_bytes: usize,
     max_row_group_rows: usize,
     max_row_group_bytes: usize,
+    max_chunk_bytes: usize,
     reservation: Reservation,
 }
 
@@ -54,11 +57,32 @@ impl fmt::Debug for ParquetBatchExporter {
             .field("buffered_batches", &self.buffered_batches.len())
             .field("buffered_rows", &self.buffered_rows)
             .field("buffered_bytes", &self.buffered_bytes)
+            .field("writer_reserved_bytes", &self.writer_reserved_bytes)
             .field("max_row_group_rows", &self.max_row_group_rows)
             .field("max_row_group_bytes", &self.max_row_group_bytes)
+            .field("max_chunk_bytes", &self.max_chunk_bytes)
             .field("reserved_bytes", &self.reservation.size())
             .finish_non_exhaustive()
     }
+}
+
+fn split_bytes_chunks(buf: Vec<u8>, max_chunk_bytes: usize) -> Vec<Bytes> {
+    if buf.is_empty() {
+        return Vec::new();
+    }
+    let bytes = Bytes::from(buf);
+    let step = max_chunk_bytes.max(1);
+    if bytes.len() <= step {
+        return vec![bytes];
+    }
+    let mut out = Vec::with_capacity(bytes.len().div_ceil(step));
+    let mut off = 0usize;
+    while off < bytes.len() {
+        let end = (off + step).min(bytes.len());
+        out.push(bytes.slice(off..end));
+        off = end;
+    }
+    out
 }
 
 impl ParquetBatchExporter {
@@ -102,16 +126,41 @@ impl ParquetBatchExporter {
             buffered_batches: Vec::new(),
             buffered_rows: 0,
             buffered_bytes: 0,
+            writer_reserved_bytes: 0,
             max_row_group_rows,
             max_row_group_bytes,
+            max_chunk_bytes: EXPORT_MAX_CHUNK_BYTES,
             reservation,
         })
     }
 
-    /// Buffers `batch` under the query memory pool and flushes a row group once
-    /// buffered rows reach `max_row_group_rows` or buffered bytes reach
-    /// `max_row_group_bytes`.
-    pub(crate) fn push_batch(&mut self, batch: Batch) -> Result<Vec<Vec<u8>>, QueryError> {
+    /// Caps each emitted [`Bytes`] slice to at most `max_chunk_bytes` (clamped `>= 1`).
+    pub(crate) fn with_chunk_bytes(mut self, max_chunk_bytes: usize) -> Self {
+        self.max_chunk_bytes = max_chunk_bytes.max(1);
+        self
+    }
+
+    fn reserve_batch_bytes(
+        &mut self,
+        batch_res: Option<&mut Reservation>,
+        bytes: usize,
+    ) -> Result<(), QueryError> {
+        if let Some(src) = batch_res {
+            super::transfer_or_grow(src, &mut self.reservation, bytes)?;
+        } else {
+            self.reservation.try_grow(bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Buffers `batch` under the query memory pool (transferring ownership from `batch_res`
+    /// via `transfer_or_grow` to avoid a 2x spike) and flushes a row group once buffered rows
+    /// reach `max_row_group_rows` or buffered bytes reach `max_row_group_bytes`.
+    pub(crate) fn push_batch(
+        &mut self,
+        batch: Batch,
+        mut batch_res: Option<&mut Reservation>,
+    ) -> Result<Vec<Bytes>, QueryError> {
         if !schemas_compatible(&self.schema, batch.schema()) {
             return Err(QueryError::failed(
                 "batch schema does not match parquet export schema",
@@ -124,15 +173,12 @@ impl ParquetBatchExporter {
 
         let bytes = batch.memory_bytes();
         let mut chunks = Vec::new();
-        if let Err(err) = self.reservation.try_grow(bytes) {
+        if let Err(err) = self.reserve_batch_bytes(batch_res.as_deref_mut(), bytes) {
             if self.buffered_batches.is_empty() {
-                return Err(err.into());
+                return Err(err);
             }
-            let chunk = self.flush_row_group()?;
-            if !chunk.is_empty() {
-                chunks.push(chunk);
-            }
-            self.reservation.try_grow(bytes)?;
+            chunks.extend(self.flush_row_group()?);
+            self.reserve_batch_bytes(batch_res, bytes)?;
         }
         self.buffered_batches.push(batch);
         self.buffered_rows = self.buffered_rows.saturating_add(rows);
@@ -141,27 +187,42 @@ impl ParquetBatchExporter {
         if self.buffered_rows >= self.max_row_group_rows
             || self.buffered_bytes >= self.max_row_group_bytes
         {
-            let chunk = self.flush_row_group()?;
-            if !chunk.is_empty() {
-                chunks.push(chunk);
-            }
+            chunks.extend(self.flush_row_group()?);
         }
         Ok(chunks)
     }
 
     /// Flushes any remaining buffered rows, writes the Parquet footer, and
-    /// returns the trailing file bytes.
-    pub(crate) fn finish(mut self) -> Result<Vec<u8>, QueryError> {
+    /// returns the trailing file bytes split into `<= max_chunk_bytes` slices.
+    pub(crate) fn finish(mut self) -> Result<Vec<Bytes>, QueryError> {
         if !self.buffered_batches.is_empty() {
             self.write_buffered_row_group()?;
         }
-        self.writer.into_inner().map_err(|e| parquet_err(&e))
+        let prev_len = self.writer.inner_mut().len();
+        let buf = self.writer.into_inner().map_err(|e| parquet_err(&e))?;
+        let delta = buf.len().saturating_sub(prev_len);
+        if delta > 0 {
+            self.reservation.try_grow(delta)?;
+        }
+        self.reservation.free();
+        self.writer_reserved_bytes = 0;
+        Ok(split_bytes_chunks(buf, self.max_chunk_bytes))
     }
 
-    fn flush_row_group(&mut self) -> Result<Vec<u8>, QueryError> {
+    fn flush_row_group(&mut self) -> Result<Vec<Bytes>, QueryError> {
         self.write_buffered_row_group()?;
+        let prev_len = self.writer.inner_mut().len();
         self.writer.flush().map_err(|e| io_err(&e))?;
-        Ok(std::mem::take(self.writer.inner_mut()))
+        let delta = self.writer.inner_mut().len().saturating_sub(prev_len);
+        if delta > 0 {
+            self.reservation.try_grow(delta)?;
+            self.writer_reserved_bytes = self.writer_reserved_bytes.saturating_add(delta);
+        }
+        let buf = std::mem::take(self.writer.inner_mut());
+        let to_shrink = self.writer_reserved_bytes.min(self.reservation.size());
+        self.reservation.shrink(to_shrink);
+        self.writer_reserved_bytes = 0;
+        Ok(split_bytes_chunks(buf, self.max_chunk_bytes))
     }
 
     fn write_buffered_row_group(&mut self) -> Result<(), QueryError> {
@@ -169,7 +230,8 @@ impl ParquetBatchExporter {
             return Ok(());
         }
 
-        let res = (|| {
+        let prev_writer_len = self.writer.inner_mut().len();
+        let res: Result<(), QueryError> = (|| {
             let mut rg = self.writer.next_row_group().map_err(|e| parquet_err(&e))?;
             write_columns_for_batches(&mut rg, &self.schema, &self.buffered_batches)?;
             rg.close().map_err(|e| parquet_err(&e))?;
@@ -178,9 +240,21 @@ impl ParquetBatchExporter {
 
         self.buffered_batches.clear();
         self.buffered_rows = 0;
-        self.buffered_bytes = 0;
-        self.reservation.free();
-        res
+        let freed_batches = std::mem::take(&mut self.buffered_bytes);
+        self.reservation
+            .shrink(freed_batches.min(self.reservation.size()));
+        res?;
+
+        let writer_delta = self
+            .writer
+            .inner_mut()
+            .len()
+            .saturating_sub(prev_writer_len);
+        if writer_delta > 0 {
+            self.reservation.try_grow(writer_delta)?;
+            self.writer_reserved_bytes = self.writer_reserved_bytes.saturating_add(writer_delta);
+        }
+        Ok(())
     }
 }
 
@@ -1393,12 +1467,13 @@ mod tests {
             ParquetBatchExporter::with_row_group_limits(schema, pool, max_rows, max_bytes)?;
         let mut out = Vec::new();
         for b in batches {
-            for chunk in exporter.push_batch(b)? {
+            for chunk in exporter.push_batch(b, None)? {
                 out.extend_from_slice(&chunk);
             }
         }
-        let tail = exporter.finish()?;
-        out.extend_from_slice(&tail);
+        for tail in exporter.finish()? {
+            out.extend_from_slice(&tail);
+        }
         Ok(out)
     }
 
@@ -2219,25 +2294,27 @@ mod tests {
         let mut stream_bytes = Vec::new();
 
         // Push 3 rows -> buffered (< 5), reservation > 0, no chunk emitted.
-        let c1 = exporter.push_batch(make_batch(0, 3)).unwrap();
+        let c1 = exporter.push_batch(make_batch(0, 3), None).unwrap();
         assert!(c1.is_empty());
         assert!(pool.reserved() > 0);
 
         // Push 3 more rows -> total 6 >= 5 -> flushes row group 0 & releases reservation!
-        let c2 = exporter.push_batch(make_batch(3, 3)).unwrap();
+        let c2 = exporter.push_batch(make_batch(3, 3), None).unwrap();
         assert_eq!(c2.len(), 1);
         assert!(!c2[0].is_empty());
         assert_eq!(pool.reserved(), 0);
         stream_bytes.extend_from_slice(&c2[0]);
 
         // Push 2 rows -> buffered, then trigger byte threshold flush on a second exporter.
-        let c3 = exporter.push_batch(make_batch(6, 2)).unwrap();
+        let c3 = exporter.push_batch(make_batch(6, 2), None).unwrap();
         assert!(c3.is_empty());
         assert!(pool.reserved() > 0);
 
-        let tail = exporter.finish().unwrap();
+        let tails = exporter.finish().unwrap();
         assert_eq!(pool.reserved(), 0);
-        stream_bytes.extend_from_slice(&tail);
+        for tail in tails {
+            stream_bytes.extend_from_slice(&tail);
+        }
 
         let ll = read_low_level(&stream_bytes);
         assert_eq!(ll.metadata().num_row_groups(), 2);
@@ -2284,7 +2361,7 @@ mod tests {
         .unwrap();
 
         let mut exporter = ParquetBatchExporter::new(schema, &pool).unwrap();
-        let err = exporter.push_batch(big_batch).unwrap_err();
+        let err = exporter.push_batch(big_batch, None).unwrap_err();
         assert!(matches!(err, QueryError::TooLarge));
         drop(exporter);
         assert_eq!(pool.reserved(), 0);
@@ -2307,7 +2384,7 @@ mod tests {
         .unwrap();
 
         let mut exporter = ParquetBatchExporter::new(export_schema, &pool).unwrap();
-        let err = exporter.push_batch(batch).unwrap_err();
+        let err = exporter.push_batch(batch, None).unwrap_err();
         assert!(matches!(err, QueryError::Failed(_)));
         assert_eq!(pool.reserved(), 0);
     }
@@ -2561,18 +2638,20 @@ mod tests {
         .unwrap();
 
         // Batch 1 is buffered without flushing (normal threshold not reached).
-        let chunks1 = exporter.push_batch(b1).unwrap();
+        let chunks1 = exporter.push_batch(b1, None).unwrap();
         assert!(chunks1.is_empty());
 
         // Batch 2 exceeds tight pool -> flushes batch 1's row group first, then buffers batch 2!
-        let chunks2 = exporter.push_batch(b2).unwrap();
+        let chunks2 = exporter.push_batch(b2, None).unwrap();
         assert_eq!(chunks2.len(), 1);
 
         let mut out = Vec::new();
         for c in chunks2 {
             out.extend_from_slice(&c);
         }
-        out.extend_from_slice(&exporter.finish().unwrap());
+        for c in exporter.finish().unwrap() {
+            out.extend_from_slice(&c);
+        }
         assert_eq!(pool.reserved(), 0);
 
         let arrow_batches = read_arrow(&out);
@@ -2583,8 +2662,85 @@ mod tests {
         let mut strict_exporter =
             ParquetBatchExporter::new(Arc::clone(&non_null_schema), &pool).unwrap();
         let bad_batch = mk_batch(&nullable_schema, vec![1, 2, 3]);
-        assert!(strict_exporter.push_batch(bad_batch).is_err());
+        assert!(strict_exporter.push_batch(bad_batch, None).is_err());
         assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn chunk_bytes_splits_both_flush_and_finish_and_transfers_pull_res_without_2x_spike() {
+        let schema = Schema::try_new_arc(vec![Field::new("x", DataType::I64, false)]).unwrap();
+        let mk_batch = |vals: Vec<i64>| {
+            let len = vals.len();
+            let col = Column::Flat(FlatColumn::try_new(FlatData::I64(vals), None).unwrap());
+            Batch::try_new_all(Arc::clone(&schema), vec![col], len).unwrap()
+        };
+
+        // Pool fits ONE batch + small writer overhead, NOT 2x batch memory!
+        let b1 = mk_batch((0..256).collect());
+        let b2 = mk_batch((256..512).collect());
+        let b1_bytes = b1.memory_bytes();
+        let cap = b1_bytes + 512;
+        assert!(b1_bytes * 2 > cap);
+
+        let pool = GlobalPool::standalone(cap);
+        let max_chunk_bytes = 64usize;
+        let mut exporter = ParquetBatchExporter::with_row_group_limits(
+            Arc::clone(&schema),
+            &pool,
+            256,
+            10 * 1024 * 1024,
+        )
+        .unwrap()
+        .with_chunk_bytes(max_chunk_bytes);
+
+        let mut pull_res = pool.register("pull", false);
+        pull_res.try_grow(b1.memory_bytes()).unwrap();
+        let flushed = exporter.push_batch(b1, Some(&mut pull_res)).unwrap();
+        assert_eq!(pull_res.size(), 0);
+        assert!(
+            flushed.len() > 1,
+            "flush_row_group must split into <=64B chunks"
+        );
+        for c in &flushed {
+            assert!(c.len() <= max_chunk_bytes);
+        }
+
+        let b2_bytes = b2.memory_bytes();
+        pull_res.try_grow(b2_bytes).unwrap();
+        // Force finish() to write a second row group + footer while under tight cap.
+        let mut exporter2 = ParquetBatchExporter::with_row_group_limits(
+            Arc::clone(&schema),
+            &pool,
+            10_000,
+            10 * 1024 * 1024,
+        )
+        .unwrap()
+        .with_chunk_bytes(max_chunk_bytes);
+        let c2 = exporter2.push_batch(b2, Some(&mut pull_res)).unwrap();
+        assert!(c2.is_empty());
+        assert_eq!(pull_res.size(), 0);
+        assert_eq!(pool.reserved(), b2_bytes);
+
+        let tail = exporter2.finish().unwrap();
+        assert!(tail.len() > 1, "finish() must also split into <=64B chunks");
+        for c in &tail {
+            assert!(c.len() <= max_chunk_bytes);
+        }
+        assert_eq!(pool.reserved(), 0);
+
+        // Verify the full file bytes from exporter (plus finishing it) parse cleanly.
+        let mut full = Vec::new();
+        for c in flushed {
+            full.extend_from_slice(&c);
+        }
+        for c in exporter.finish().unwrap() {
+            assert!(c.len() <= max_chunk_bytes);
+            full.extend_from_slice(&c);
+        }
+        assert_eq!(pool.reserved(), 0);
+        let arrow_batches = read_arrow(&full);
+        let total_rows: usize = arrow_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 256);
     }
 
     #[test]

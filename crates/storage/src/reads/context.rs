@@ -22,13 +22,12 @@ use cetra_query::{BinaryOp, CastMode, EvalContext, Expr, FilterView, QueryError,
 use chrono::NaiveDate;
 
 use crate::catalog::{FileMeta, FileTable};
-use crate::deletion::{self, PendingDeletion};
+use crate::deletion::{self, PendingDeletion, ProjectMemSnapshot};
 use crate::engine::mem_source::MemtableSource;
-use crate::engine::parquet_source::ParquetSource;
 use crate::engine::scores_source::ScoresSource;
 use crate::engine::traces_source::TracesSource;
 use crate::error::EngineError;
-use crate::memtable::MemSnapshot;
+use crate::file_format;
 use crate::query_error::{InvalidQuery, Position, RunError};
 use crate::verify::Suspects;
 use crate::wal::Table;
@@ -182,7 +181,7 @@ impl EngineContext {
         let spans_raw = spans_schema();
 
         if state.projects.is_dropped(project) {
-            let empty_mem = Arc::new(MemSnapshot::default());
+            let empty_mem = ProjectMemSnapshot::empty();
             let no_deletions: Arc<[Arc<PendingDeletion>]> = Arc::from(Vec::new());
             let spans: Arc<dyn ScanSource> = Arc::new(
                 UnionSource::new(spans_raw, Vec::new()).map_err(|e| EngineError::from_query(&e))?,
@@ -192,7 +191,7 @@ impl EngineContext {
                     Arc::clone(&store),
                     project,
                     Vec::new(),
-                    Arc::clone(&empty_mem),
+                    empty_mem.clone(),
                     lookback,
                     Arc::clone(&no_deletions),
                     Arc::clone(&runtime.metadata_cache),
@@ -206,7 +205,7 @@ impl EngineContext {
                     store,
                     project,
                     Vec::new(),
-                    empty_mem,
+                    Arc::clone(empty_mem.as_snapshot()),
                     None,
                     no_deletions,
                     Arc::clone(&runtime.metadata_cache),
@@ -231,37 +230,17 @@ impl EngineContext {
 
         let deletions = state.tombstones.for_project(project);
         let keep_from = state.projects.keep_from(project);
-        let has_late = |snapshot: &MemSnapshot| {
-            keep_from.is_some_and(|keep| {
-                snapshot
-                    .partitions
-                    .keys()
-                    .any(|key| key.project == project && key.day < keep)
-            })
-        };
-        let (spans_snapshot, scores_snapshot) =
-            if deletions.is_empty() && !has_late(&state.spans) && !has_late(&state.scores) {
-                (Arc::clone(&state.spans), Arc::clone(&state.scores))
-            } else {
-                (
-                    deletion::project_snapshot(
-                        Table::Spans,
-                        &state.spans,
-                        project,
-                        keep_from,
-                        &deletions,
-                    )
-                    .map_err(|e| query_err_to_engine(&e))?,
-                    deletion::project_snapshot(
-                        Table::Scores,
-                        &state.scores,
-                        project,
-                        keep_from,
-                        &deletions,
-                    )
-                    .map_err(|e| query_err_to_engine(&e))?,
-                )
-            };
+        let spans_snapshot =
+            deletion::project_snapshot(Table::Spans, &state.spans, project, keep_from, &deletions)
+                .map_err(|e| query_err_to_engine(&e))?;
+        let scores_snapshot = deletion::project_snapshot(
+            Table::Scores,
+            &state.scores,
+            project,
+            keep_from,
+            &deletions,
+        )
+        .map_err(|e| query_err_to_engine(&e))?;
 
         let all_days = NaiveDate::MIN..=NaiveDate::MAX;
         let spans_files: Vec<Arc<FileMeta>> = state
@@ -280,7 +259,7 @@ impl EngineContext {
             .cloned()
             .collect();
 
-        let spans_parquet = ParquetSource::new(
+        let spans_parquet = file_format::open_table_source(
             Arc::clone(&store),
             FileTable::Spans,
             Arc::clone(&spans_raw),
@@ -294,16 +273,13 @@ impl EngineContext {
             Table::Spans,
             project,
             keep_from,
-            Arc::clone(&spans_snapshot),
+            Arc::clone(spans_snapshot.as_snapshot()),
             Arc::clone(&deletions),
         )
         .map_err(|e| EngineError::from_query(&e))?;
         let spans: Arc<dyn ScanSource> = Arc::new(
-            UnionSource::new(
-                spans_raw,
-                vec![Arc::new(spans_parquet), Arc::new(spans_mem)],
-            )
-            .map_err(|e| EngineError::from_query(&e))?,
+            UnionSource::new(spans_raw, vec![spans_parquet, Arc::new(spans_mem)])
+                .map_err(|e| EngineError::from_query(&e))?,
         );
 
         let traces = Arc::new(
@@ -326,7 +302,7 @@ impl EngineContext {
                 store,
                 project,
                 scores_files,
-                scores_snapshot,
+                Arc::clone(scores_snapshot.as_snapshot()),
                 keep_from,
                 deletions,
                 Arc::clone(&runtime.metadata_cache),
@@ -2048,19 +2024,17 @@ mod tests {
         let mut base =
             EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
                 .expect("ctx");
-        base.runtime = Arc::new(QeRuntime {
-            admission: Arc::clone(&admission),
-            workers: Default::default(),
-            workers_init: Default::default(),
-            metadata_cache: Arc::clone(&base.runtime.metadata_cache),
-            spill: Arc::clone(&base.runtime.spill),
-            target_partitions: 1,
-            query_memory: crate::QueryMemory {
+        base.runtime = QeRuntime::new(
+            Arc::clone(&admission),
+            Arc::clone(&base.runtime.metadata_cache),
+            Arc::clone(&base.runtime.spill),
+            1,
+            crate::QueryMemory {
                 initial: cap,
                 cap,
                 wait: Duration::from_millis(40),
             },
-        });
+        );
 
         // 1. Caller timeout <= admission_wait -> RunError::Timeout (not Busy).
         let err_timeout = base

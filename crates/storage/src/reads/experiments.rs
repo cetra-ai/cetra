@@ -701,7 +701,13 @@ mod tests {
             let mut q = experiment_scores(&ctx, E1, since, TIMEOUT)
                 .await
                 .expect("experiment_scores");
-            q.sort_by(|a, b| (&a.name, &a.trace_id).cmp(&(&b.name, &b.trace_id)));
+            q.sort_by(|a, b| {
+                (&a.name, &a.trace_id, a.value_num.map(f64::to_bits)).cmp(&(
+                    &b.name,
+                    &b.trace_id,
+                    b.value_num.map(f64::to_bits),
+                ))
+            });
             assert_eq!(q.len(), expected_len);
             if since == 0 {
                 assert_eq!(q[0].dataset_item_id.as_deref(), Some(ITEM));

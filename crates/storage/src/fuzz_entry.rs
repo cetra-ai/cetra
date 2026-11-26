@@ -313,6 +313,11 @@ pub(crate) fn parquet_meta(table: FileTable, size: u64, footer_size: u64) -> Fil
     }
 }
 
+fn fuzz_qe_runtime() -> Arc<QeRuntime> {
+    static FUZZ_RUNTIME: OnceLock<Arc<QeRuntime>> = OnceLock::new();
+    Arc::clone(FUZZ_RUNTIME.get_or_init(|| QeRuntime::for_test_with_cache(0)))
+}
+
 /// The read state over one file and the query context a read runs in. `store` must
 /// already hold the file at `meta.path`. Harness setup: the inputs are fixed, so every
 /// `expect` here is one.
@@ -341,7 +346,7 @@ pub(crate) fn parquet_query(
         store,
         project(),
         &QueryOptions::new(None, None),
-        QeRuntime::for_test(),
+        fuzz_qe_runtime(),
         DAY_NS,
         &verify,
         runtime().handle().clone(),
@@ -535,7 +540,7 @@ fn run_filter(view: ViewName, text: &str) {
         Arc::new(InMemory::new()),
         project(),
         &QueryOptions::new(None, None),
-        QeRuntime::for_test(),
+        fuzz_qe_runtime(),
         DAY_NS,
         &verify,
         runtime().handle().clone(),

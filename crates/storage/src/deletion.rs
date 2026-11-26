@@ -4,6 +4,7 @@
 //! covered-row rule exists (D-A1-3): queries, flush and compaction all use it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 
 use cetra_core::ids::{ProjectId, TraceId};
@@ -77,8 +78,8 @@ pub(crate) struct PendingDeletion {
     pub(crate) sessions: HashSet<String>,
 }
 
-impl std::fmt::Debug for PendingDeletion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for PendingDeletion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PendingDeletion")
             .field("id", &self.id)
             .field("seq", &self.seq)
@@ -253,6 +254,33 @@ pub(crate) fn drop_covered_batch(
     Ok(filtered.compact(None)?)
 }
 
+/// Proof-type wrapper around a [`MemSnapshot`] already projected by [`project_snapshot`]
+/// for one project, retention watermark, and pending-deletion set (`QE-M16`).
+#[derive(Clone)]
+pub(crate) struct ProjectMemSnapshot(Arc<MemSnapshot>);
+
+impl fmt::Debug for ProjectMemSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProjectMemSnapshot")
+            .field("partitions", &self.0.partitions.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProjectMemSnapshot {
+    /// Returns an empty [`ProjectMemSnapshot`].
+    pub(crate) fn empty() -> Self {
+        Self(Arc::new(MemSnapshot {
+            partitions: BTreeMap::new(),
+        }))
+    }
+
+    /// Returns the underlying [`Arc<MemSnapshot>`].
+    pub(crate) fn as_snapshot(&self) -> &Arc<MemSnapshot> {
+        &self.0
+    }
+}
+
 /// A filtered copy of `snapshot` for `project`: every batch without its covered
 /// rows, other projects' partitions left out, and the partitions of days before
 /// the project's retention watermark dropped entirely (spec 03 §8). Batches no
@@ -260,11 +288,20 @@ pub(crate) fn drop_covered_batch(
 /// cache.
 pub(crate) fn project_snapshot(
     table: Table,
-    snapshot: &MemSnapshot,
+    snapshot: &Arc<MemSnapshot>,
     project: ProjectId,
     keep_from: Option<NaiveDate>,
     deletions: &[Arc<PendingDeletion>],
-) -> Result<Arc<MemSnapshot>, QueryError> {
+) -> Result<ProjectMemSnapshot, QueryError> {
+    let has_late = keep_from.is_some_and(|keep| {
+        snapshot
+            .partitions
+            .keys()
+            .any(|key| key.project == project && key.day < keep)
+    });
+    if deletions.is_empty() && !has_late {
+        return Ok(ProjectMemSnapshot(Arc::clone(snapshot)));
+    }
     let tombstone_table = match table {
         Table::Spans => cetra_query::TombstoneTable::Spans,
         Table::Scores => cetra_query::TombstoneTable::Scores,
@@ -309,7 +346,7 @@ pub(crate) fn project_snapshot(
             partitions.insert(*key, kept);
         }
     }
-    Ok(Arc::new(MemSnapshot { partitions }))
+    Ok(ProjectMemSnapshot(Arc::new(MemSnapshot { partitions })))
 }
 
 #[cfg(test)]

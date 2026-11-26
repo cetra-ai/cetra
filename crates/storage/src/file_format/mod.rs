@@ -20,8 +20,10 @@ use cetra_column::{
     Batch, Bitmap, Column, DataType, Field, FlatColumn, FlatData, ScalarValue, Schema, Selection,
 };
 use cetra_core::schema::{scores, spans, traces};
-use cetra_query::Expr;
-use cetra_query::exec::{SortKey, compare_rows};
+use cetra_query::exec::{
+    ExecContext, PartitionStream, ScanSource, ScanSpec, SortKey, compare_rows,
+};
+use cetra_query::{Expr, QueryError};
 use futures::FutureExt;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
@@ -45,10 +47,90 @@ use parquet::file::statistics::Statistics;
 use parquet::schema::types::{ColumnDescPtr, ColumnPath, SchemaDescriptor};
 
 use crate::catalog::{FileMeta, FileTable};
+use crate::deletion::PendingDeletion;
 use crate::error::{AnchorError, CompactionError, EngineError, ParquetWriteError};
 use crate::format::FORMAT_VERSION;
 use crate::unwind::{decoder_panicked, guard_sync};
-use crate::verify::{Verdict, is_store_error};
+use crate::verify::{Suspects, Verdict, is_store_error};
+
+/// Cached Parquet file metadata index shared across queries and maintenance jobs.
+pub(crate) type FileMetadataCache = crate::engine::metadata_cache::MetadataCache;
+
+/// Opens a native Parquet [`ScanSource`] over `files` for `table` with inline `deletions`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_table_source(
+    store: Arc<dyn ObjectStore>,
+    table: FileTable,
+    schema: Arc<Schema>,
+    files: Vec<Arc<FileMeta>>,
+    deletions: Arc<[Arc<PendingDeletion>]>,
+    metadata_cache: Arc<FileMetadataCache>,
+    suspects: Suspects,
+    runtime: tokio::runtime::Handle,
+) -> Arc<dyn ScanSource> {
+    Arc::new(crate::engine::parquet_source::ParquetSource::new(
+        store,
+        table,
+        schema,
+        files,
+        deletions,
+        metadata_cache,
+        suspects,
+        runtime,
+    ))
+}
+
+/// Opens a single-file Parquet scan (without inline tombstones) for rewrite/maintenance checks.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_file_scan(
+    store: Arc<dyn ObjectStore>,
+    file: Arc<FileMeta>,
+    schema: Arc<Schema>,
+    metadata_cache: Arc<FileMetadataCache>,
+    suspects: Suspects,
+    runtime: tokio::runtime::Handle,
+    spec: &ScanSpec,
+    exec_ctx: &ExecContext,
+) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+    let table = file.table;
+    let source = crate::engine::parquet_source::ParquetSource::new(
+        store,
+        table,
+        schema,
+        vec![file],
+        Arc::from([]),
+        metadata_cache,
+        suspects,
+        runtime,
+    );
+    source.open_partitions(spec, exec_ctx)
+}
+
+/// Opens a single-file Parquet stream (without inline tombstones) for k-way compaction merge.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_merge_file_stream(
+    store: Arc<dyn ObjectStore>,
+    table: FileTable,
+    schema: Arc<Schema>,
+    file: Arc<FileMeta>,
+    metadata_cache: Arc<FileMetadataCache>,
+    suspects: Suspects,
+    runtime: tokio::runtime::Handle,
+    spec: &ScanSpec,
+    exec_ctx: &ExecContext,
+) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+    let source = crate::engine::parquet_source::ParquetSource::new(
+        store,
+        table,
+        schema,
+        vec![file],
+        Arc::from([]),
+        metadata_cache,
+        suspects,
+        runtime,
+    );
+    source.open_partitions(spec, exec_ctx)
+}
 
 /// `cetra.schema_version` written into every file: the row normalization
 /// version (spec 01), **not** the file format version (`cetra.format_version`,

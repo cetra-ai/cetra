@@ -64,6 +64,11 @@ fn encode_within(
     out: &mut Vec<u8>,
     max_decoded: u32,
 ) -> Result<(), WalError> {
+    if !batch.columns().iter().all(|c| is_all_flat(c)) {
+        return Err(WalError::InvalidPayload {
+            reason: "non-flat column encoding in WAL record",
+        });
+    }
     let mut payload = Vec::new();
     cetra_column::frame::encode_batch_with_limit(batch, &mut payload, None, max_decoded)
         .map_err(|err| WalError::from_column(&err))?;
@@ -714,6 +719,61 @@ mod tests {
         let mut rle_payload = Vec::new();
         cetra_column::frame::encode_batch(&rle_batch, &mut rle_payload, None).unwrap();
         assert!(is_invalid_payload(&read_batch(&rle_payload, Table::Spans)));
+    }
+
+    #[test]
+    fn encode_rejects_non_flat_columns_symmetrically() {
+        let base = spans_batch();
+        let schema = Arc::clone(base.schema());
+        let raw_len = base.raw_len();
+        let name_idx = schema.index_of("name").unwrap();
+
+        let mut cols = base.columns().to_vec();
+        cols[name_idx] = Arc::new(Column::Const {
+            value: ScalarValue::Utf8("const-name".to_owned()),
+            len: raw_len,
+        });
+        let const_batch = Batch::try_new_shared(
+            Arc::clone(&schema),
+            cols,
+            raw_len,
+            cetra_column::Selection::All,
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        let err = encode(1, &const_batch, &mut out);
+        assert!(
+            matches!(err, Err(WalError::InvalidPayload { .. })),
+            "expected InvalidPayload, got {err:?}"
+        );
+        assert!(out.is_empty());
+
+        let tags_idx = schema.index_of("tags").unwrap();
+        let offsets: Vec<u32> = (0..=raw_len).map(|i| u32::try_from(i).unwrap()).collect();
+        let mut nested_cols = base.columns().to_vec();
+        nested_cols[tags_idx] = Arc::new(Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets,
+                    values: Box::new(Column::Const {
+                        value: ScalarValue::Utf8("tag".to_owned()),
+                        len: raw_len,
+                    }),
+                },
+                None,
+            )
+            .unwrap(),
+        ));
+        let nested_batch =
+            Batch::try_new_shared(schema, nested_cols, raw_len, cetra_column::Selection::All)
+                .unwrap();
+        let err_nested = encode(2, &nested_batch, &mut out);
+        assert!(
+            matches!(err_nested, Err(WalError::InvalidPayload { .. })),
+            "expected InvalidPayload for nested Const, got {err_nested:?}"
+        );
+        assert!(out.is_empty());
     }
 
     #[test]

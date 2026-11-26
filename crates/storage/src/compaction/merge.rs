@@ -18,8 +18,8 @@ use cetra_column::{
 };
 use cetra_core::schema::{scores, spans};
 use cetra_query::exec::{
-    ExecContext, ExecMetrics, PartitionStream, ScanSource, ScanSpec, SortKey, SpillManager,
-    TimeRangeHint, WorkerPool, compare_rows_across,
+    ExecContext, ExecMetrics, PartitionStream, ScanSpec, SortKey, SpillManager, TimeRangeHint,
+    WorkerPool, compare_rows_across,
 };
 use cetra_query::tombstone::filter_uncovered;
 use cetra_query::{BinaryOp, EvalContext, Expr, QueryError};
@@ -28,7 +28,7 @@ use crate::catalog::{FileMeta, FileTable};
 use crate::compaction::slice::Slice;
 use crate::dedup;
 use crate::error::CompactionError;
-use crate::file_format::{BatchFileWriter, sort_columns, time_column};
+use crate::file_format::{BatchFileWriter, open_merge_file_stream, sort_columns, time_column};
 use crate::partials::partials_from_spans_batch;
 use crate::verify::Suspects;
 
@@ -187,7 +187,7 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
         .pool
         .try_admit(0, ctx.pool.limit())
         .ok_or_else(|| CompactionError::from(QueryError::TooLarge))?;
-    let workers = ctx.qe_runtime.workers().map_err(CompactionError::from)?;
+    let workers = ctx.qe_runtime.bg_workers().map_err(CompactionError::from)?;
     let cancel = CancelToken::new();
     let _cancel_guard = super::CancelOnDrop(cancel.clone());
     let eval_ctx = EvalContext::new(crate::catalog::now_ns(), cancel.clone());
@@ -204,19 +204,18 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
     // Open one independent `ParquetSource` stream per input file in `file.id` ascending order.
     let mut raw_streams: Vec<(usize, Box<dyn PartitionStream>)> = Vec::with_capacity(files.len());
     for (input_index, file) in files.iter().enumerate() {
-        let source = crate::engine::parquet_source::ParquetSource::new(
+        let partitions = open_merge_file_stream(
             Arc::clone(&ctx.store),
             table,
             Arc::clone(&schema),
-            vec![Arc::clone(file)],
-            Arc::from([]),
+            Arc::clone(file),
             Arc::clone(&ctx.qe_runtime.metadata_cache),
             Suspects::new(Arc::clone(&ctx.verify)),
             ctx.runtime_handle.clone(),
-        );
-        let partitions = source
-            .open_partitions(&spec, &exec_ctx)
-            .map_err(CompactionError::from)?;
+            &spec,
+            &exec_ctx,
+        )
+        .map_err(CompactionError::from)?;
         for stream in partitions {
             raw_streams.push((input_index, stream));
         }

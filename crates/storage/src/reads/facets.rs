@@ -2543,19 +2543,17 @@ mod tests {
         let cap = 320 * 1024;
         let admission = Arc::new(crate::engine::admission::AsyncAdmissionPool::new(cap));
         let spill = Arc::new(SpillManager::with_fixed_cap(dir.path().join("spill"), 0));
-        ctx.runtime = Arc::new(QeRuntime {
+        ctx.runtime = QeRuntime::new(
             admission,
-            workers: Default::default(),
-            workers_init: Default::default(),
-            metadata_cache: Arc::clone(&ctx.runtime.metadata_cache),
+            Arc::clone(&ctx.runtime.metadata_cache),
             spill,
-            target_partitions: 1,
-            query_memory: QueryMemory {
+            1,
+            QueryMemory {
                 initial: 0,
                 cap,
                 wait: Duration::from_secs(1),
             },
-        });
+        );
 
         let fields = [
             FacetField {

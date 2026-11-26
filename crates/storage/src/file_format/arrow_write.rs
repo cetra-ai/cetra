@@ -483,3 +483,126 @@ fn flat_to_arrow_array(flat: &FlatColumn, target: &ArrowDataType) -> Result<Arra
         _ => Err(invalid("column data type does not match target Arrow type")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use cetra_column::DataType as ColDataType;
+
+    use super::*;
+    use crate::catalog::FileTable;
+
+    fn assert_arrow_matches_col(arrow: &ArrowDataType, col: &ColDataType) {
+        match (arrow, col) {
+            (ArrowDataType::Boolean, ColDataType::Bool) => {}
+            (
+                ArrowDataType::Int64 | ArrowDataType::Int32 | ArrowDataType::UInt16,
+                ColDataType::I64,
+            ) => {}
+            (ArrowDataType::Float64, ColDataType::F64) => {}
+            (ArrowDataType::Utf8, ColDataType::Utf8) => {}
+            (ArrowDataType::Binary, ColDataType::Binary) => {}
+            (
+                ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some(tz)),
+                ColDataType::TimestampNs { utc: true },
+            ) if tz.as_ref() == "UTC" => {}
+            (
+                ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
+                ColDataType::TimestampNs { utc: false },
+            ) => {}
+            (ArrowDataType::FixedSizeBinary(8), ColDataType::FixedBytes8) => {}
+            (ArrowDataType::FixedSizeBinary(16), ColDataType::FixedBytes16) => {}
+            (ArrowDataType::List(item), ColDataType::List(inner))
+                if item.name() == "item" && !item.is_nullable() =>
+            {
+                assert_arrow_matches_col(item.data_type(), inner);
+            }
+            (ArrowDataType::Map(entries, false), ColDataType::MapUtf8)
+                if entries.name() == "entries" && !entries.is_nullable() =>
+            {
+                let ArrowDataType::Struct(fields) = entries.data_type() else {
+                    panic!("expected Map struct entries, got {:?}", entries.data_type());
+                };
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name(), "keys");
+                assert_eq!(fields[0].data_type(), &ArrowDataType::Utf8);
+                assert!(!fields[0].is_nullable());
+                assert_eq!(fields[1].name(), "values");
+                assert_eq!(fields[1].data_type(), &ArrowDataType::Utf8);
+                assert!(fields[1].is_nullable());
+            }
+            (ArrowDataType::List(item), ColDataType::Events)
+                if item.name() == "item" && !item.is_nullable() =>
+            {
+                let ArrowDataType::Struct(fields) = item.data_type() else {
+                    panic!("expected Events struct item, got {:?}", item.data_type());
+                };
+                assert_eq!(fields.len(), 3);
+                assert_eq!(fields[0].name(), event_field::TIME);
+                assert_eq!(fields[0].data_type(), &timestamp_ns());
+                assert!(!fields[0].is_nullable());
+                assert_eq!(fields[1].name(), event_field::NAME);
+                assert_eq!(fields[1].data_type(), &ArrowDataType::Utf8);
+                assert!(!fields[1].is_nullable());
+                assert_eq!(fields[2].name(), event_field::ATTRIBUTES);
+                assert_eq!(fields[2].data_type(), &ArrowDataType::Utf8);
+                assert!(fields[2].is_nullable());
+            }
+            (ArrowDataType::List(item), ColDataType::Links)
+                if item.name() == "item" && !item.is_nullable() =>
+            {
+                let ArrowDataType::Struct(fields) = item.data_type() else {
+                    panic!("expected Links struct item, got {:?}", item.data_type());
+                };
+                assert_eq!(fields.len(), 3);
+                assert_eq!(fields[0].name(), link_field::TRACE_ID);
+                assert_eq!(fields[0].data_type(), &ArrowDataType::FixedSizeBinary(16));
+                assert!(!fields[0].is_nullable());
+                assert_eq!(fields[1].name(), link_field::SPAN_ID);
+                assert_eq!(fields[1].data_type(), &ArrowDataType::FixedSizeBinary(8));
+                assert!(!fields[1].is_nullable());
+                assert_eq!(fields[2].name(), link_field::ATTRIBUTES);
+                assert_eq!(fields[2].data_type(), &ArrowDataType::Utf8);
+                assert!(fields[2].is_nullable());
+            }
+            (other_arrow, other_col) => {
+                panic!(
+                    "Arrow/column schema type mismatch: arrow={other_arrow:?}, col={other_col:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn arrow_and_core_schemas_have_110_column_parity() {
+        let mut total_cols = 0usize;
+        for (table, arrow_schema) in [
+            (FileTable::Spans, arrow_spans_schema()),
+            (FileTable::Traces, arrow_traces_schema()),
+            (FileTable::Scores, arrow_scores_schema()),
+        ] {
+            let core_schema = table.column_schema();
+            assert_eq!(
+                arrow_schema.fields().len(),
+                core_schema.len(),
+                "{table:?} field count mismatch"
+            );
+            for (idx, (af, cf)) in arrow_schema
+                .fields()
+                .iter()
+                .zip(core_schema.fields())
+                .enumerate()
+            {
+                assert_eq!(af.name(), &cf.name, "{table:?} col {idx} name mismatch");
+                assert_eq!(
+                    af.is_nullable(),
+                    cf.nullable,
+                    "{table:?} col {} nullability mismatch",
+                    cf.name
+                );
+                assert_arrow_matches_col(af.data_type(), &cf.data_type);
+            }
+            total_cols += core_schema.len();
+        }
+        assert_eq!(total_cols, 110);
+    }
+}

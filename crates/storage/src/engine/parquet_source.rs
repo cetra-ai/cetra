@@ -7,20 +7,21 @@ use std::fmt;
 use std::ops::Range;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 use cetra_column::{
     Batch, BinaryData, Bitmap, CancelToken, Column, DataType, DictColumn, EventsData, Field,
-    FlatColumn, FlatData, LinksData, MapData, Reservation, ScalarValue, Schema, Selection,
-    Utf8Data,
+    FlatColumn, FlatData, LinksData, MapData, Reservation, ScalarValue, Schema, ScopedPool,
+    Selection, Utf8Data,
 };
 use cetra_core::schema::{event_field, link_field, scores, spans, traces};
-use cetra_query::exec::{ExecContext, IdLookupHint, PartitionStream, ScanSource, ScanSpec};
+use cetra_query::exec::{
+    ExecContext, IdLookupHint, MapProjection, PartitionStream, ScanSource, ScanSpec,
+};
 use cetra_query::{BinaryOp, EvalContext, Expr, QueryError, UnaryOp, covered_predicate};
 use chrono::NaiveDate;
-use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, ObjectStoreExt};
 use parquet::DecodeResult;
 use parquet::basic::{ConvertedType, Encoding, LogicalType, Repetition};
 use parquet::bloom_filter::Sbbf;
@@ -55,7 +56,9 @@ use super::{
 };
 
 const MAX_METADATA_DECODE_ROUNDS: usize = 4;
-const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const COALESCE_GAP_BYTES: u64 = 64 * 1024;
+const MAX_COALESCED_RANGE_BYTES: u64 = 8 * 1024 * 1024;
+const RG_CACHE_IO_FRACTION: usize = 8;
 const BLOOM_COLUMNS: &[&str] = &["trace_id", "session_id", "user_id", "score_id"];
 
 /// Zero-Arrow low-level Parquet [`ScanSource`].
@@ -205,8 +208,10 @@ impl ScanSource for ParquetSource {
                     metadata_cache: Arc::clone(&self.metadata_cache),
                     suspects: self.suspects.clone(),
                     runtime: self.runtime.clone(),
+                    pool: Arc::clone(&ctx.pool),
                     plan: Arc::clone(&plan),
                     batch_size,
+                    remaining: plan.limit,
                     eval: ctx.eval.clone(),
                     active_file: None,
                 }) as Box<dyn PartitionStream>
@@ -217,10 +222,11 @@ impl ScanSource for ParquetSource {
 
     fn explain_summary(&self, spec: &ScanSpec) -> String {
         format!(
-            "ParquetSource(table={}, files={}, filters={})",
+            "ParquetSource(table={}, files={}, filters={}, deletions={})",
             self.table.as_str(),
             self.files.len(),
-            spec.filters.len()
+            spec.filters.len(),
+            self.deletions.len()
         )
     }
 }
@@ -307,8 +313,10 @@ struct ScanPlan {
     output_cols: Vec<usize>,
     filter_cols: BTreeSet<usize>,
     filters: Vec<Expr>,
+    map_projections: BTreeMap<String, MapProjection>,
     constraints: BTreeMap<String, Vec<ColConstraint>>,
     bloom_lookups: Vec<BloomLookup>,
+    limit: Option<usize>,
 }
 
 impl fmt::Debug for ScanPlan {
@@ -319,8 +327,10 @@ impl fmt::Debug for ScanPlan {
             .field("output_cols_len", &self.output_cols.len())
             .field("filter_cols_len", &self.filter_cols.len())
             .field("filters_len", &self.filters.len())
+            .field("map_projections_len", &self.map_projections.len())
             .field("constraints_len", &self.constraints.len())
             .field("bloom_lookups_len", &self.bloom_lookups.len())
+            .field("limit", &self.limit)
             .finish()
     }
 }
@@ -485,8 +495,10 @@ impl ScanPlan {
             output_cols,
             filter_cols,
             filters: spec.filters.clone(),
+            map_projections: spec.map_projections.clone(),
             constraints,
             bloom_lookups,
+            limit: spec.limit,
         })
     }
 }
@@ -727,10 +739,82 @@ enum FetchError {
     Runtime,
 }
 
+async fn fetch_ranges_async(
+    store: Arc<dyn ObjectStore>,
+    path: ObjectPath,
+    ranges: Vec<Range<u64>>,
+    expected_file_size: u64,
+    cancel: CancelToken,
+) -> Result<Vec<Bytes>, FetchError> {
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let _cancel_guard = cancel.register_waker({
+        let notify = Arc::clone(&notify);
+        move || notify.notify_one()
+    });
+    if cancel.is_cancelled() {
+        return Err(FetchError::Cancelled);
+    }
+
+    let res = {
+        let fut = store.get_ranges(&path, &ranges);
+        tokio::pin!(fut);
+        loop {
+            tokio::select! {
+                biased;
+                _ = notify.notified() => {
+                    if cancel.is_cancelled() {
+                        return Err(FetchError::Cancelled);
+                    }
+                }
+                res = &mut fut => break res,
+            }
+        }
+    };
+
+    match res {
+        Ok(bufs) => Ok(bufs),
+        Err(err) => {
+            if crate::verify::is_corrupt_store_error(&err) {
+                return Err(FetchError::Corrupt);
+            }
+            if matches!(
+                &err,
+                object_store::Error::Generic { store: name, .. }
+                    if *name == "LocalFileSystem" || *name == "InMemory"
+            ) {
+                let head_fut = store.head(&path);
+                tokio::pin!(head_fut);
+                let head_res = loop {
+                    tokio::select! {
+                        biased;
+                        _ = notify.notified() => {
+                            if cancel.is_cancelled() {
+                                return Err(FetchError::Cancelled);
+                            }
+                        }
+                        res = &mut head_fut => break res,
+                    }
+                };
+                match head_res {
+                    Ok(meta) if meta.size < expected_file_size => {
+                        return Err(FetchError::Corrupt);
+                    }
+                    Err(head_err) if crate::verify::is_corrupt_store_error(&head_err) => {
+                        return Err(FetchError::Corrupt);
+                    }
+                    _ => {}
+                }
+            }
+            Err(FetchError::Store)
+        }
+    }
+}
+
 fn fetch_ranges(
     store: &Arc<dyn ObjectStore>,
     path: &ObjectPath,
     ranges: &[Range<u64>],
+    expected_file_size: u64,
     cancel: &CancelToken,
     runtime: &tokio::runtime::Handle,
 ) -> Result<Vec<Bytes>, FetchError> {
@@ -750,28 +834,13 @@ fn fetch_ranges(
     let cancel_token = cancel.clone();
 
     let caught = catch_unwind(AssertUnwindSafe(|| {
-        runtime.block_on(async move {
-            let fut = store.get_ranges(&path, &ranges_owned);
-            tokio::pin!(fut);
-            let mut interval = tokio::time::interval(CANCEL_POLL_INTERVAL);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = interval.tick() => {
-                        if cancel_token.is_cancelled() {
-                            return Err(FetchError::Cancelled);
-                        }
-                    }
-                    res = &mut fut => {
-                        return res.map_err(|err| match err {
-                            object_store::Error::NotFound { .. } => FetchError::Corrupt,
-                            _ => FetchError::Store,
-                        });
-                    }
-                }
-            }
-        })
+        runtime.block_on(fetch_ranges_async(
+            store,
+            path,
+            ranges_owned,
+            expected_file_size,
+            cancel_token,
+        ))
     }));
 
     match caught {
@@ -785,9 +854,9 @@ fn map_fetch_err(err: &FetchError, file_id: FileId, suspects: &Suspects) -> Quer
         FetchError::Cancelled => QueryError::Cancelled,
         FetchError::Corrupt => {
             suspects.report_corrupt(file_id);
-            QueryError::internal("corrupt parquet file")
+            QueryError::CorruptData("corrupt parquet file".to_owned())
         }
-        FetchError::Store => QueryError::internal("storage read error"),
+        FetchError::Store => QueryError::StorageIo("storage read error".to_owned()),
         FetchError::Runtime => {
             QueryError::internal("cannot block on parquet I/O inside tokio runtime")
         }
@@ -796,7 +865,7 @@ fn map_fetch_err(err: &FetchError, file_id: FileId, suspects: &Suspects) -> Quer
 
 fn corrupt_err(file_id: FileId, suspects: &Suspects) -> QueryError {
     suspects.report_corrupt(file_id);
-    QueryError::internal("corrupt parquet file")
+    QueryError::CorruptData("corrupt parquet file".to_owned())
 }
 
 fn load_metadata(
@@ -820,6 +889,7 @@ fn load_metadata(
         store,
         &path,
         std::slice::from_ref(&tail_range),
+        file.size,
         cancel,
         runtime,
     )
@@ -863,7 +933,7 @@ fn load_metadata(
                         return Err(corrupt_err(file.id, suspects));
                     }
                 }
-                let bufs = fetch_ranges(store, &path, &ranges, cancel, runtime)
+                let bufs = fetch_ranges(store, &path, &ranges, file.size, cancel, runtime)
                     .map_err(|e| map_fetch_err(&e, file.id, suspects))?;
                 if bufs.len() != ranges.len()
                     || bufs
@@ -1064,16 +1134,32 @@ fn stats_bounds(
                 .map(ConstraintValue::F64),
         ),
         Statistics::ByteArray(s) => (
-            s.min_opt()
-                .map(|b| ConstraintValue::Bytes(b.data().to_vec())),
-            s.max_opt()
-                .map(|b| ConstraintValue::Bytes(b.data().to_vec())),
+            s.min_is_exact()
+                .then(|| {
+                    s.min_opt()
+                        .map(|b| ConstraintValue::Bytes(b.data().to_vec()))
+                })
+                .flatten(),
+            s.max_is_exact()
+                .then(|| {
+                    s.max_opt()
+                        .map(|b| ConstraintValue::Bytes(b.data().to_vec()))
+                })
+                .flatten(),
         ),
         Statistics::FixedLenByteArray(s) => (
-            s.min_opt()
-                .map(|b| ConstraintValue::Bytes(b.data().to_vec())),
-            s.max_opt()
-                .map(|b| ConstraintValue::Bytes(b.data().to_vec())),
+            s.min_is_exact()
+                .then(|| {
+                    s.min_opt()
+                        .map(|b| ConstraintValue::Bytes(b.data().to_vec()))
+                })
+                .flatten(),
+            s.max_is_exact()
+                .then(|| {
+                    s.max_opt()
+                        .map(|b| ConstraintValue::Bytes(b.data().to_vec()))
+                })
+                .flatten(),
         ),
         Statistics::Int96(_) => (None, None),
     }
@@ -1190,6 +1276,7 @@ fn validate_page_locations(
     locs: &[PageLocation],
     num_rows: usize,
     file_size: u64,
+    is_repeated: bool,
 ) -> Result<(), ParquetError> {
     if let Some(first) = locs.first()
         && first.first_row_index != 0
@@ -1203,7 +1290,12 @@ fn validate_page_locations(
         if loc.offset < 0 || loc.compressed_page_size <= 0 || loc.first_row_index < 0 {
             return Err(ParquetError::General("negative page location".to_owned()));
         }
-        if loc.first_row_index <= prev_row || (loc.first_row_index as usize) >= num_rows {
+        let non_monotonic = if is_repeated {
+            loc.first_row_index < prev_row
+        } else {
+            loc.first_row_index <= prev_row
+        };
+        if non_monotonic || (loc.first_row_index as usize) >= num_rows {
             return Err(ParquetError::General(
                 "invalid page first_row_index".to_owned(),
             ));
@@ -1222,13 +1314,18 @@ fn validate_page_locations(
     Ok(())
 }
 
+fn next_distinct_first_row_gt(locs: &[PageLocation], idx: usize, r: usize) -> Option<usize> {
+    locs[idx + 1..].iter().find_map(|next| {
+        let nr = next.first_row_index as usize;
+        (nr > r).then_some(nr)
+    })
+}
+
 fn page_row_ranges(locs: &[PageLocation], num_rows: usize) -> Vec<Range<usize>> {
     let mut ranges = Vec::with_capacity(locs.len());
     for (idx, loc) in locs.iter().enumerate() {
         let start = loc.first_row_index as usize;
-        let end = locs
-            .get(idx + 1)
-            .map_or(num_rows, |next| next.first_row_index as usize);
+        let end = next_distinct_first_row_gt(locs, idx, start).unwrap_or(num_rows);
         ranges.push(start..end);
     }
     ranges
@@ -1295,7 +1392,7 @@ fn prune_pages_for_row_group(
         if locs.is_empty() {
             continue;
         }
-        validate_page_locations(locs, num_rows, file_size)?;
+        validate_page_locations(locs, num_rows, file_size, false)?;
         let num_pages = locs.len();
         if col_index.num_pages() as usize != num_pages {
             continue;
@@ -1376,7 +1473,7 @@ fn filter_row_groups(
     let mut pruned_by_bloom: BTreeSet<usize> = BTreeSet::new();
     if !bloom_requests.is_empty() {
         let ranges: Vec<Range<u64>> = bloom_requests.iter().map(|(_, _, r)| r.clone()).collect();
-        let bufs = fetch_ranges(store, &path, &ranges, cancel, runtime)
+        let bufs = fetch_ranges(store, &path, &ranges, file.size, cancel, runtime)
             .map_err(|e| map_fetch_err(&e, file.id, suspects))?;
         if bufs.len() != ranges.len()
             || bufs
@@ -1506,6 +1603,10 @@ fn coalesce_ranges(mut ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
     for r in ranges.into_iter().skip(1) {
         if r.start <= cur.end {
             cur.end = cur.end.max(r.end);
+        } else if r.start <= cur.end.saturating_add(COALESCE_GAP_BYTES)
+            && r.end.saturating_sub(cur.start) <= MAX_COALESCED_RANGE_BYTES
+        {
+            cur.end = r.end;
         } else {
             merged.push(cur);
             cur = r;
@@ -1962,6 +2063,47 @@ impl DictUtf8LeafDecoder {
         }
     }
 
+    fn new_flat(
+        descr: ColumnDescPtr,
+        page_reader: SerializedPageReader<SliceChunkReader>,
+        rg_num_rows: usize,
+    ) -> Result<Self, ParquetError> {
+        let col_reader = open_byte_array_reader(&descr, page_reader)?;
+        Ok(Self {
+            descr,
+            rg_num_rows,
+            mode: DictUtf8Mode::Flat(col_reader),
+        })
+    }
+
+    fn transition_to_flat(&mut self, other_page: Option<Page>) -> Result<(), ParquetError> {
+        let old = std::mem::replace(&mut self.mode, DictUtf8Mode::Transitioning);
+        let DictUtf8Mode::Dict {
+            page_reader,
+            mut dict_page,
+            ..
+        } = old
+        else {
+            return Err(ParquetError::General(
+                "invalid dict state transition".to_owned(),
+            ));
+        };
+        let mut queued = VecDeque::new();
+        if let Some(dp) = dict_page.take() {
+            queued.push_back(dp);
+        }
+        if let Some(op) = other_page {
+            queued.push_back(op);
+        }
+        let fallback = Box::new(FallbackPageReader {
+            queued,
+            rest: page_reader,
+        });
+        let col_reader = open_byte_array_reader_boxed(self.descr.clone(), fallback)?;
+        self.mode = DictUtf8Mode::Flat(col_reader);
+        Ok(())
+    }
+
     fn skip_records(&mut self, n: usize) -> Result<(), ParquetError> {
         let mut remaining = n;
         while remaining > 0 {
@@ -2052,6 +2194,11 @@ impl DictUtf8LeafDecoder {
                         return Err(ParquetError::General("expected dictionary page".to_owned()));
                     }
 
+                    if self.descr.max_rep_level() > 0 && meta.num_rows == Some(0) {
+                        self.transition_to_flat(None)?;
+                        continue;
+                    }
+
                     let page_rows = meta.num_rows.or_else(|| {
                         (self.descr.max_rep_level() == 0)
                             .then_some(meta.num_levels)
@@ -2094,9 +2241,9 @@ impl DictUtf8LeafDecoder {
                 let Some(page) = page_reader.get_next_page()? else {
                     return Ok(false);
                 };
-                match page {
+                match &page {
                     Page::DictionaryPage {
-                        ref buf,
+                        buf,
                         num_values,
                         encoding,
                         ..
@@ -2109,13 +2256,13 @@ impl DictUtf8LeafDecoder {
                                 "unsupported dict page encoding".to_owned(),
                             ));
                         }
-                        let flat = decode_plain_utf8_dict(buf, num_values)?;
+                        let flat = decode_plain_utf8_dict(buf, *num_values)?;
                         *dict_flat = Some(flat);
                         *dict_page = Some(page);
                         *dict_gen = dict_gen.wrapping_add(1);
                     }
                     Page::DataPage {
-                        ref buf,
+                        buf,
                         num_values,
                         encoding,
                         def_level_encoding,
@@ -2128,7 +2275,7 @@ impl DictUtf8LeafDecoder {
                     {
                         let max_rep = self.descr.max_rep_level();
                         let max_def = self.descr.max_def_level();
-                        let n = num_values as usize;
+                        let n = *num_values as usize;
                         if max_rep == 0 && n > self.rg_num_rows {
                             return Err(ParquetError::General(
                                 "page num_values exceeds row group row count".to_owned(),
@@ -2138,24 +2285,27 @@ impl DictUtf8LeafDecoder {
                         let rep_levels = if max_rep > 0 {
                             let (used, slice) = split_v1_level_slice(
                                 max_rep,
-                                num_values,
-                                rep_level_encoding,
+                                *num_values,
+                                *rep_level_encoding,
                                 &buf[offset..],
                             )?;
                             offset += used;
-                            decode_levels(max_rep, n, rep_level_encoding, slice)?
+                            decode_levels(max_rep, n, *rep_level_encoding, slice)?
                         } else {
                             Vec::new()
                         };
+                        if max_rep > 0 && !rep_levels.is_empty() && rep_levels[0] != 0 {
+                            break page;
+                        }
                         let def_levels = if max_def > 0 {
                             let (used, slice) = split_v1_level_slice(
                                 max_def,
-                                num_values,
-                                def_level_encoding,
+                                *num_values,
+                                *def_level_encoding,
                                 &buf[offset..],
                             )?;
                             offset += used;
-                            decode_levels(max_def, n, def_level_encoding, slice)?
+                            decode_levels(max_def, n, *def_level_encoding, slice)?
                         } else {
                             Vec::new()
                         };
@@ -2195,10 +2345,11 @@ impl DictUtf8LeafDecoder {
                         return Ok(true);
                     }
                     Page::DataPageV2 {
-                        ref buf,
+                        buf,
                         num_values,
                         encoding,
                         num_nulls,
+                        num_rows,
                         def_levels_byte_len,
                         rep_levels_byte_len,
                         ..
@@ -2207,24 +2358,27 @@ impl DictUtf8LeafDecoder {
                         Encoding::RLE_DICTIONARY | Encoding::PLAIN_DICTIONARY
                     ) && dict_flat.is_some() =>
                     {
-                        if num_nulls > num_values {
+                        if *num_nulls > *num_values {
                             return Err(ParquetError::General("more nulls than values".to_owned()));
                         }
                         let max_rep = self.descr.max_rep_level();
+                        if max_rep > 0 && *num_rows == 0 {
+                            break page;
+                        }
                         let max_def = self.descr.max_def_level();
-                        if max_def == 0 && num_nulls != 0 {
+                        if max_def == 0 && *num_nulls != 0 {
                             return Err(ParquetError::General(
                                 "non-zero nulls on required column".to_owned(),
                             ));
                         }
-                        let n = num_values as usize;
+                        let n = *num_values as usize;
                         if max_rep == 0 && n > self.rg_num_rows {
                             return Err(ParquetError::General(
                                 "page num_values exceeds row group row count".to_owned(),
                             ));
                         }
-                        let rep_len = rep_levels_byte_len as usize;
-                        let def_len = def_levels_byte_len as usize;
+                        let rep_len = *rep_levels_byte_len as usize;
+                        let def_len = *def_levels_byte_len as usize;
                         if rep_len
                             .checked_add(def_len)
                             .is_none_or(|sum| sum > buf.len())
@@ -2238,6 +2392,9 @@ impl DictUtf8LeafDecoder {
                         } else {
                             Vec::new()
                         };
+                        if max_rep > 0 && !rep_levels.is_empty() && rep_levels[0] != 0 {
+                            break page;
+                        }
                         let def_levels = if max_def > 0 {
                             decode_levels(
                                 max_def,
@@ -2248,7 +2405,7 @@ impl DictUtf8LeafDecoder {
                         } else {
                             Vec::new()
                         };
-                        let non_null = (num_values - num_nulls) as usize;
+                        let non_null = (*num_values - *num_nulls) as usize;
                         if max_def > 0 {
                             let actual_non_null =
                                 def_levels.iter().filter(|&&d| d == max_def).count();
@@ -2288,41 +2445,13 @@ impl DictUtf8LeafDecoder {
                         });
                         return Ok(true);
                     }
-                    other => break other,
+                    _ => break page,
                 }
             }
         };
 
-        // Transition cleanly to `ColumnReaderImpl<ByteArrayType>` on non-dict page.
-        let old = std::mem::replace(&mut self.mode, DictUtf8Mode::Transitioning);
-        let DictUtf8Mode::Dict {
-            page_reader,
-            mut dict_page,
-            ..
-        } = old
-        else {
-            return Err(ParquetError::General(
-                "invalid dict state transition".to_owned(),
-            ));
-        };
-        let mut queued = VecDeque::new();
-        if let Some(dp) = dict_page.take() {
-            queued.push_back(dp);
-        }
-        queued.push_back(other_page);
-        let fallback = Box::new(FallbackPageReader {
-            queued,
-            rest: page_reader,
-        });
-        let col_reader = match get_column_reader(self.descr.clone(), fallback) {
-            ColumnReader::ByteArrayColumnReader(r) => r,
-            _ => {
-                return Err(ParquetError::General(
-                    "expected ByteArray column reader".to_owned(),
-                ));
-            }
-        };
-        self.mode = DictUtf8Mode::Flat(col_reader);
+        // Transition cleanly to `ColumnReaderImpl<ByteArrayType>` on non-dict or continuation page.
+        self.transition_to_flat(Some(other_page))?;
         Ok(true)
     }
 
@@ -3098,8 +3227,7 @@ enum ColumnDecoder {
     MapUtf8 {
         key_descr: ColumnDescPtr,
         key_reader: ColumnReaderImpl<ByteArrayType>,
-        val_descr: ColumnDescPtr,
-        val_reader: ColumnReaderImpl<ByteArrayType>,
+        val: Option<(ColumnDescPtr, ColumnReaderImpl<ByteArrayType>)>,
         outer_non_null_def: i16,
         elem_present_def: i16,
     },
@@ -3159,15 +3287,13 @@ impl ColumnDecoder {
             Self::MapUtf8 {
                 key_descr,
                 key_reader,
-                val_descr,
-                val_reader,
+                val,
                 outer_non_null_def,
                 elem_present_def,
             } => read_map_utf8_ranges(
                 key_descr,
                 key_reader,
-                val_descr,
-                val_reader,
+                val.as_mut().map(|(d, r)| (&*d, r)),
                 *outer_non_null_def,
                 *elem_present_def,
                 ranges,
@@ -3446,22 +3572,27 @@ fn copy_fixed<const N: usize>(bytes: &[u8]) -> Result<[u8; N], ParquetError> {
 fn read_map_utf8_ranges(
     key_descr: &ColumnDescPtr,
     key_reader: &mut ColumnReaderImpl<ByteArrayType>,
-    val_descr: &ColumnDescPtr,
-    val_reader: &mut ColumnReaderImpl<ByteArrayType>,
+    val: Option<(&ColumnDescPtr, &mut ColumnReaderImpl<ByteArrayType>)>,
     outer_non_null_def: i16,
     elem_present_def: i16,
     ranges: &[Range<usize>],
     current_row: &mut usize,
 ) -> Result<Column, ParquetError> {
     let mut row_a = *current_row;
-    let mut row_b = *current_row;
     let keys_leaf = collect_leaf_ranges(key_reader, key_descr, ranges, &mut row_a)?;
-    let vals_leaf = collect_leaf_ranges(val_reader, val_descr, ranges, &mut row_b)?;
-    if row_a != row_b || keys_leaf.rep_levels != vals_leaf.rep_levels {
-        return Err(ParquetError::General(
-            "map key/value leaves out of lockstep".to_owned(),
-        ));
-    }
+    let vals_leaf = match val {
+        Some((val_descr, val_reader)) => {
+            let mut row_b = *current_row;
+            let vl = collect_leaf_ranges(val_reader, val_descr, ranges, &mut row_b)?;
+            if row_a != row_b || keys_leaf.rep_levels != vl.rep_levels {
+                return Err(ParquetError::General(
+                    "map key/value leaves out of lockstep".to_owned(),
+                ));
+            }
+            Some((val_descr.max_def_level(), vl))
+        }
+        None => None,
+    };
     *current_row = row_a;
 
     let n = keys_leaf.row_count;
@@ -3473,7 +3604,6 @@ fn read_map_utf8_ranges(
     }
 
     let key_max_def = key_descr.max_def_level();
-    let val_max_def = val_descr.max_def_level();
     let mut map_offsets = Vec::with_capacity(n + 1);
     map_offsets.push(0u32);
     let mut parent_valid = Vec::with_capacity(n);
@@ -3501,7 +3631,6 @@ fn read_map_utf8_ranges(
             parent_valid.push(true);
             for lvl in lvl_start..lvl_end {
                 let kd = keys_leaf.def_levels[lvl];
-                let vd = vals_leaf.def_levels[lvl];
                 if kd != key_max_def {
                     return Err(ParquetError::General("unexpected null map key".to_owned()));
                 }
@@ -3517,16 +3646,22 @@ fn read_map_utf8_ranges(
                     .map_err(|_| ParquetError::General("map keys exceed u32::MAX".to_owned()))?;
                 key_offsets.push(koff);
 
-                if vd == val_max_def {
-                    let vb = vals_leaf
-                        .values
-                        .get(v_idx)
-                        .ok_or_else(|| ParquetError::General("missing map value".to_owned()))?;
-                    v_idx += 1;
-                    let vs = std::str::from_utf8(vb.data())
-                        .map_err(|_| ParquetError::General("invalid UTF-8 map value".to_owned()))?;
-                    val_bytes.extend_from_slice(vs.as_bytes());
-                    val_valid.push(true);
+                if let Some((val_max_def, ref vl)) = vals_leaf {
+                    let vd = vl.def_levels[lvl];
+                    if vd == val_max_def {
+                        let vb = vl
+                            .values
+                            .get(v_idx)
+                            .ok_or_else(|| ParquetError::General("missing map value".to_owned()))?;
+                        v_idx += 1;
+                        let vs = std::str::from_utf8(vb.data()).map_err(|_| {
+                            ParquetError::General("invalid UTF-8 map value".to_owned())
+                        })?;
+                        val_bytes.extend_from_slice(vs.as_bytes());
+                        val_valid.push(true);
+                    } else {
+                        val_valid.push(false);
+                    }
                 } else {
                     val_valid.push(false);
                 }
@@ -3540,7 +3675,11 @@ fn read_map_utf8_ranges(
         map_offsets.push(moff);
     }
 
-    if k_idx != keys_leaf.values.len() || v_idx != vals_leaf.values.len() {
+    if k_idx != keys_leaf.values.len()
+        || vals_leaf
+            .as_ref()
+            .is_some_and(|(_, vl)| v_idx != vl.values.len())
+    {
         return Err(ParquetError::General(
             "trailing map key/value entries".to_owned(),
         ));
@@ -3897,7 +4036,7 @@ enum ResolvedColumnPlan {
     },
     MapUtf8 {
         key_leaf: usize,
-        val_leaf: usize,
+        val_leaf: Option<usize>,
         outer_non_null_def: i16,
         elem_present_def: i16,
     },
@@ -3924,7 +4063,13 @@ impl ResolvedColumnPlan {
             Self::Scalar { leaf_idx, .. } | Self::ListUtf8 { leaf_idx, .. } => vec![*leaf_idx],
             Self::MapUtf8 {
                 key_leaf, val_leaf, ..
-            } => vec![*key_leaf, *val_leaf],
+            } => {
+                let mut leaves = vec![*key_leaf];
+                if let Some(vl) = val_leaf {
+                    leaves.push(*vl);
+                }
+                leaves
+            }
             Self::Events {
                 time_leaf,
                 name_leaf,
@@ -3944,6 +4089,7 @@ impl ResolvedColumnPlan {
 fn resolve_column_plan(
     descr: &SchemaDescriptor,
     field: &Field,
+    map_projections: &BTreeMap<String, MapProjection>,
 ) -> Result<ResolvedColumnPlan, ParquetError> {
     let leaves: Vec<usize> = descr
         .columns()
@@ -3991,11 +4137,20 @@ fn resolve_column_plan(
                 .copied()
                 .find(|&i| matches!(descr.column(i).name(), "key" | "keys"))
                 .unwrap_or(leaves[0]);
-            let val_leaf = leaves
-                .iter()
-                .copied()
-                .find(|&i| matches!(descr.column(i).name(), "value" | "values"))
-                .unwrap_or(leaves[1]);
+            let val_leaf = if matches!(
+                map_projections.get(&field.name),
+                Some(MapProjection::KeysOnly)
+            ) {
+                None
+            } else {
+                Some(
+                    leaves
+                        .iter()
+                        .copied()
+                        .find(|&i| matches!(descr.column(i).name(), "value" | "values"))
+                        .unwrap_or(leaves[1]),
+                )
+            };
             let (outer_non_null_def, elem_present_def) =
                 repeated_def_bounds(descr.root_schema(), descr.column(key_leaf).path().parts())?;
             Ok(ResolvedColumnPlan::MapUtf8 {
@@ -4109,7 +4264,19 @@ fn page_ranges_for_leaf(
         return Ok((std::iter::once(chunk_start..chunk_end).collect(), None));
     }
 
-    validate_page_locations(&locs, num_rows, file_size)?;
+    let is_repeated = rg.schema_descr().column(leaf_idx).max_rep_level() > 0;
+    validate_page_locations(&locs, num_rows, file_size, is_repeated)?;
+
+    // Full-chunk safety on duplicate `first_row_index` (R1-B2): whenever a repeated column has
+    // continuation pages sharing `first_row_index`, fetch the full column chunk with
+    // `page_locations: None` so `ColumnReaderImpl` decodes/skips multi-page records from row 0.
+    if locs
+        .windows(2)
+        .any(|w| w[0].first_row_index == w[1].first_row_index)
+    {
+        return Ok((std::iter::once(chunk_start..chunk_end).collect(), None));
+    }
+
     let p_ranges = page_row_ranges(&locs, num_rows);
     let mut byte_ranges = Vec::new();
     let first_data_off = locs[0].offset as u64;
@@ -4184,7 +4351,14 @@ fn open_byte_array_reader(
     descr: &ColumnDescPtr,
     page_reader: SerializedPageReader<SliceChunkReader>,
 ) -> Result<ColumnReaderImpl<ByteArrayType>, ParquetError> {
-    match get_column_reader(descr.clone(), Box::new(page_reader)) {
+    open_byte_array_reader_boxed(descr.clone(), Box::new(page_reader))
+}
+
+fn open_byte_array_reader_boxed(
+    descr: ColumnDescPtr,
+    page_reader: Box<dyn PageReader>,
+) -> Result<ColumnReaderImpl<ByteArrayType>, ParquetError> {
+    match get_column_reader(descr, page_reader) {
         ColumnReader::ByteArrayColumnReader(r) => Ok(r),
         _ => Err(ParquetError::General(
             "expected ByteArray column reader".to_owned(),
@@ -4264,8 +4438,23 @@ fn build_column_decoder(
             elem_present_def,
         } => {
             let (col_descr, pr) = get_leaf(*leaf_idx)?;
+            let has_continuation = meta
+                .offset_index()
+                .and_then(|oi| oi.get(rg_idx))
+                .and_then(|rg_oi| rg_oi.get(*leaf_idx))
+                .is_some_and(|col_oi| {
+                    col_oi
+                        .page_locations
+                        .windows(2)
+                        .any(|w| w[0].first_row_index == w[1].first_row_index)
+                });
+            let decoder = if has_continuation {
+                DictUtf8LeafDecoder::new_flat(col_descr, pr, rg_num_rows)?
+            } else {
+                DictUtf8LeafDecoder::new(col_descr, pr, rg_num_rows)
+            };
             Ok(ColumnDecoder::ListUtf8Dict {
-                decoder: DictUtf8LeafDecoder::new(col_descr, pr, rg_num_rows),
+                decoder,
                 outer_non_null_def: *outer_non_null_def,
                 elem_present_def: *elem_present_def,
             })
@@ -4277,12 +4466,18 @@ fn build_column_decoder(
             elem_present_def,
         } => {
             let (kd, kpr) = get_leaf(*key_leaf)?;
-            let (vd, vpr) = get_leaf(*val_leaf)?;
+            let val = match val_leaf {
+                Some(vl) => {
+                    let (vd, vpr) = get_leaf(*vl)?;
+                    let vr = open_byte_array_reader(&vd, vpr)?;
+                    Some((vd, vr))
+                }
+                None => None,
+            };
             Ok(ColumnDecoder::MapUtf8 {
                 key_reader: open_byte_array_reader(&kd, kpr)?,
                 key_descr: kd,
-                val_reader: open_byte_array_reader(&vd, vpr)?,
-                val_descr: vd,
+                val,
                 outer_non_null_def: *outer_non_null_def,
                 elem_present_def: *elem_present_def,
             })
@@ -4337,13 +4532,18 @@ struct ActiveRowGroup {
     kept_ranges: Vec<Range<usize>>,
     range_idx: usize,
     range_offset: usize,
+    chunk_rows: usize,
     phase1_indices: Vec<usize>,
     phase1_plans: Vec<ResolvedColumnPlan>,
     phase1_decoders: Option<Vec<ColumnDecoder>>,
+    phase1_streaming: bool,
+    phase1_io_res: Reservation,
     phase1_row: usize,
     phase2_indices: Vec<usize>,
     phase2_plans: Vec<ResolvedColumnPlan>,
     phase2_decoders: Option<Vec<ColumnDecoder>>,
+    phase2_streaming: bool,
+    phase2_io_res: Reservation,
     phase2_row: usize,
 }
 
@@ -4375,6 +4575,30 @@ impl ActiveRowGroup {
     }
 }
 
+struct AbortJoinHandle(Option<tokio::task::JoinHandle<Result<Vec<Bytes>, FetchError>>>);
+
+impl AbortJoinHandle {
+    fn take(&mut self) -> Option<tokio::task::JoinHandle<Result<Vec<Bytes>, FetchError>>> {
+        self.0.take()
+    }
+}
+
+impl Drop for AbortJoinHandle {
+    fn drop(&mut self) {
+        if let Some(h) = self.0.take() {
+            h.abort();
+        }
+    }
+}
+
+struct PrefetchedRg {
+    rg_idx: usize,
+    handle: AbortJoinHandle,
+    coalesced: Vec<Range<u64>>,
+    per_leaf_plan: Vec<(usize, LeafPagePlan)>,
+    io_res: Reservation,
+}
+
 struct ActiveFileState {
     file: Arc<FileMeta>,
     meta: Arc<ParquetMetaData>,
@@ -4383,6 +4607,7 @@ struct ActiveFileState {
     tombstone_pred: Option<Expr>,
     row_groups: VecDeque<(usize, Vec<Range<usize>>)>,
     current_rg: Option<ActiveRowGroup>,
+    prefetch: Option<PrefetchedRg>,
     phase1_indices: Vec<usize>,
     phase2_indices: Vec<usize>,
 }
@@ -4396,8 +4621,10 @@ struct ParquetPartitionStream {
     metadata_cache: Arc<MetadataCache>,
     suspects: Suspects,
     runtime: tokio::runtime::Handle,
+    pool: Arc<ScopedPool>,
     plan: Arc<ScanPlan>,
     batch_size: usize,
+    remaining: Option<usize>,
     eval: EvalContext,
     active_file: Option<ActiveFileState>,
 }
@@ -4483,10 +4710,34 @@ impl ParquetPartitionStream {
             tombstone_pred: remapped_tombstone,
             row_groups: row_groups.into(),
             current_rg: None,
+            prefetch: None,
             phase1_indices,
             phase2_indices,
         });
         Ok(true)
+    }
+
+    fn compute_rg_chunk_rows(
+        pool_cap: usize,
+        batch_size: usize,
+        rg: &RowGroupMetaData,
+        phase1_plans: &[ResolvedColumnPlan],
+        phase2_plans: &[ResolvedColumnPlan],
+    ) -> usize {
+        let rg_rows = u64::try_from(rg.num_rows()).unwrap_or(1).max(1);
+        let mut leaves = BTreeSet::new();
+        for p in phase1_plans.iter().chain(phase2_plans.iter()) {
+            leaves.extend(p.leaf_indices());
+        }
+        let total_uncompressed: u64 = leaves
+            .into_iter()
+            .map(|leaf_idx| u64::try_from(rg.column(leaf_idx).uncompressed_size()).unwrap_or(0))
+            .sum();
+        let avg_row_bytes = usize::try_from(total_uncompressed / rg_rows)
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let target_chunk_bytes = (pool_cap / 8).clamp(256 * 1024, 16 * 1024 * 1024);
+        (target_chunk_bytes / avg_row_bytes).clamp(1, batch_size.max(1))
     }
 
     fn prepare_next_row_group(&mut self, cancel: &CancelToken) -> Result<bool, QueryError> {
@@ -4503,29 +4754,54 @@ impl ParquetPartitionStream {
             let phase1_plans = guard_parquet(af.file.id, &self.suspects, || {
                 af.phase1_indices
                     .iter()
-                    .map(|&idx| resolve_column_plan(&descr, &self.schema.fields()[idx]))
+                    .map(|&idx| {
+                        resolve_column_plan(
+                            &descr,
+                            &self.schema.fields()[idx],
+                            &self.plan.map_projections,
+                        )
+                    })
                     .collect::<Result<Vec<_>, _>>()
             })?;
 
             let phase2_plans = guard_parquet(af.file.id, &self.suspects, || {
                 af.phase2_indices
                     .iter()
-                    .map(|&idx| resolve_column_plan(&descr, &self.schema.fields()[idx]))
+                    .map(|&idx| {
+                        resolve_column_plan(
+                            &descr,
+                            &self.schema.fields()[idx],
+                            &self.plan.map_projections,
+                        )
+                    })
                     .collect::<Result<Vec<_>, _>>()
             })?;
+
+            let chunk_rows = Self::compute_rg_chunk_rows(
+                self.pool.cap(),
+                self.batch_size,
+                af.meta.row_group(rg_idx),
+                &phase1_plans,
+                &phase2_plans,
+            );
 
             let mut rg_state = ActiveRowGroup {
                 rg_idx,
                 kept_ranges,
                 range_idx: 0,
                 range_offset: 0,
+                chunk_rows,
                 phase1_indices: af.phase1_indices.clone(),
                 phase1_plans,
                 phase1_decoders: None,
+                phase1_streaming: false,
+                phase1_io_res: self.pool.register("parquet_io", false),
                 phase1_row: 0,
                 phase2_indices: af.phase2_indices.clone(),
                 phase2_plans,
                 phase2_decoders: None,
+                phase2_streaming: false,
+                phase2_io_res: self.pool.register("parquet_io", false),
                 phase2_row: 0,
             };
 
@@ -4534,25 +4810,81 @@ impl ParquetPartitionStream {
                 for p in &rg_state.phase1_plans {
                     leaf_indices.extend(p.leaf_indices());
                 }
-                let readers = fetch_leaf_readers(
-                    &self.store,
-                    &self.suspects,
-                    &self.runtime,
-                    &af.file,
-                    &af.meta,
-                    rg_idx,
-                    &leaf_indices,
-                    &rg_state.kept_ranges,
-                    cancel,
-                )?;
-                let decoders = guard_parquet(af.file.id, &self.suspects, || {
-                    rg_state
-                        .phase1_plans
-                        .iter()
-                        .map(|p| build_column_decoder(&af.meta, rg_idx, p, &readers))
-                        .collect::<Result<Vec<_>, _>>()
-                })?;
-                rg_state.phase1_decoders = Some(decoders);
+                let prefetched = af.prefetch.take().filter(|p| p.rg_idx == rg_idx);
+                let readers_opt = match prefetched {
+                    Some(p) => {
+                        let (r, io_res) =
+                            await_prefetch(p, &af.file, &self.suspects, cancel, &self.runtime)?;
+                        rg_state.phase1_io_res = io_res;
+                        Some(r)
+                    }
+                    None => try_fetch_cached_leaf_readers(
+                        &self.store,
+                        &self.suspects,
+                        &self.runtime,
+                        &af.file,
+                        &af.meta,
+                        rg_idx,
+                        &leaf_indices,
+                        &rg_state.kept_ranges,
+                        self.pool.cap(),
+                        &mut rg_state.phase1_io_res,
+                        &mut af.prefetch,
+                        cancel,
+                    )?,
+                };
+                if let Some(readers) = readers_opt {
+                    let decoders = guard_parquet(af.file.id, &self.suspects, || {
+                        rg_state
+                            .phase1_plans
+                            .iter()
+                            .map(|p| build_column_decoder(&af.meta, rg_idx, p, &readers))
+                            .collect::<Result<Vec<_>, _>>()
+                    })?;
+                    rg_state.phase1_decoders = Some(decoders);
+
+                    // Safe 1-RG speculative prefetch for the next RG's phase-1 ranges (R1-M4).
+                    if af.prefetch.is_none()
+                        && self.remaining != Some(0)
+                        && let Some((next_rg_idx, next_kept)) = af.row_groups.front()
+                        && next_kept.iter().any(|r| !r.is_empty())
+                        && let Ok(planned) = plan_leaf_fetch(
+                            &af.file,
+                            &af.meta,
+                            *next_rg_idx,
+                            &leaf_indices,
+                            next_kept,
+                            &self.suspects,
+                        )
+                        && !planned.coalesced.is_empty()
+                        && planned.coalesced_bytes <= self.pool.cap() / 4
+                    {
+                        let mut io_res = self.pool.register("parquet_prefetch_io", false);
+                        if io_res.try_grow(planned.coalesced_bytes).is_ok() {
+                            let store = Arc::clone(&self.store);
+                            let path = ObjectPath::from(af.file.path.as_str());
+                            let ranges = planned.coalesced.clone();
+                            let expected_size = af.file.size;
+                            let cancel_clone = cancel.clone();
+                            let handle = self.runtime.spawn(fetch_ranges_async(
+                                store,
+                                path,
+                                ranges,
+                                expected_size,
+                                cancel_clone,
+                            ));
+                            af.prefetch = Some(PrefetchedRg {
+                                rg_idx: *next_rg_idx,
+                                handle: AbortJoinHandle(Some(handle)),
+                                coalesced: planned.coalesced,
+                                per_leaf_plan: planned.per_leaf_plan,
+                                io_res,
+                            });
+                        }
+                    }
+                } else {
+                    rg_state.phase1_streaming = true;
+                }
             }
 
             af.current_rg = Some(rg_state);
@@ -4563,18 +4895,20 @@ impl ParquetPartitionStream {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn fetch_leaf_readers(
-    store: &Arc<dyn ObjectStore>,
-    suspects: &Suspects,
-    runtime: &tokio::runtime::Handle,
+struct PlannedLeafFetch {
+    per_leaf_plan: Vec<(usize, LeafPagePlan)>,
+    coalesced: Vec<Range<u64>>,
+    coalesced_bytes: usize,
+}
+
+fn plan_leaf_fetch(
     file: &FileMeta,
     meta: &ParquetMetaData,
     rg_idx: usize,
     leaf_indices: &[usize],
     kept_ranges: &[Range<usize>],
-    cancel: &CancelToken,
-) -> Result<BTreeMap<usize, LeafReader>, QueryError> {
+    suspects: &Suspects,
+) -> Result<PlannedLeafFetch, QueryError> {
     let mut unique_leaves = BTreeSet::new();
     for &l in leaf_indices {
         unique_leaves.insert(l);
@@ -4591,31 +4925,374 @@ fn fetch_leaf_readers(
     }
 
     let coalesced = coalesce_ranges(all_ranges);
-    let fetched = if coalesced.is_empty() {
+    let mut coalesced_bytes = 0usize;
+    for r in &coalesced {
+        let len = usize::try_from(r.end - r.start).map_err(|_| QueryError::TooLarge)?;
+        coalesced_bytes = coalesced_bytes
+            .checked_add(len)
+            .ok_or(QueryError::TooLarge)?;
+    }
+
+    Ok(PlannedLeafFetch {
+        per_leaf_plan,
+        coalesced,
+        coalesced_bytes,
+    })
+}
+
+fn await_prefetch(
+    prefetch: PrefetchedRg,
+    file: &FileMeta,
+    suspects: &Suspects,
+    cancel: &CancelToken,
+    runtime: &tokio::runtime::Handle,
+) -> Result<(BTreeMap<usize, LeafReader>, Reservation), QueryError> {
+    let PrefetchedRg {
+        rg_idx: _,
+        mut handle,
+        coalesced,
+        per_leaf_plan,
+        io_res,
+    } = prefetch;
+    let Some(mut handle) = handle.take() else {
+        return Err(corrupt_err(file.id, suspects));
+    };
+    if cancel.is_cancelled() {
+        return Err(QueryError::Cancelled);
+    }
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return Err(QueryError::internal(
+            "cannot block on parquet I/O inside tokio runtime",
+        ));
+    }
+    let cancel_token = cancel.clone();
+    let res = runtime.block_on(async move {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let _guard = cancel_token.register_waker({
+            let n = Arc::clone(&notify);
+            move || n.notify_one()
+        });
+        if cancel_token.is_cancelled() {
+            handle.abort();
+            return Err(FetchError::Cancelled);
+        }
+        loop {
+            tokio::select! {
+                biased;
+                _ = notify.notified() => {
+                    if cancel_token.is_cancelled() {
+                        handle.abort();
+                        return Err(FetchError::Cancelled);
+                    }
+                }
+                joined = &mut handle => {
+                    return match joined {
+                        Ok(r) => r,
+                        Err(_) => Err(FetchError::Corrupt),
+                    };
+                }
+            }
+        }
+    });
+    let fetched = res.map_err(|e| map_fetch_err(&e, file.id, suspects))?;
+    if fetched.len() != coalesced.len()
+        || fetched
+            .iter()
+            .zip(&coalesced)
+            .any(|(b, r)| b.len() as u64 != r.end - r.start)
+    {
+        return Err(corrupt_err(file.id, suspects));
+    }
+    let chunk_reader = Arc::new(SliceChunkReader::from_fetched(
+        file.size, coalesced, fetched,
+    ));
+    let mut out = BTreeMap::new();
+    for (leaf_idx, (_, locs)) in per_leaf_plan {
+        out.insert(leaf_idx, (locs, Arc::clone(&chunk_reader)));
+    }
+    Ok((out, io_res))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_planned_readers_reserved(
+    store: &Arc<dyn ObjectStore>,
+    suspects: &Suspects,
+    runtime: &tokio::runtime::Handle,
+    file: &FileMeta,
+    planned: PlannedLeafFetch,
+    io_res: &mut Reservation,
+    before_io: usize,
+    cancel: &CancelToken,
+) -> Result<BTreeMap<usize, LeafReader>, QueryError> {
+    let fetched = if planned.coalesced.is_empty() {
         Vec::new()
     } else {
         let path = ObjectPath::from(file.path.as_str());
-        let bufs = fetch_ranges(store, &path, &coalesced, cancel, runtime)
-            .map_err(|e| map_fetch_err(&e, file.id, suspects))?;
-        if bufs.len() != coalesced.len()
+        let bufs = match fetch_ranges(store, &path, &planned.coalesced, file.size, cancel, runtime)
+        {
+            Ok(b) => b,
+            Err(e) => {
+                rollback_res(Some(io_res), before_io);
+                return Err(map_fetch_err(&e, file.id, suspects));
+            }
+        };
+        if bufs.len() != planned.coalesced.len()
             || bufs
                 .iter()
-                .zip(&coalesced)
+                .zip(&planned.coalesced)
                 .any(|(b, r)| b.len() as u64 != r.end - r.start)
         {
+            rollback_res(Some(io_res), before_io);
             return Err(corrupt_err(file.id, suspects));
         }
         bufs
     };
     let chunk_reader = Arc::new(SliceChunkReader::from_fetched(
-        file.size, coalesced, fetched,
+        file.size,
+        planned.coalesced,
+        fetched,
     ));
 
     let mut out = BTreeMap::new();
-    for (leaf_idx, (_, locs)) in per_leaf_plan {
+    for (leaf_idx, (_, locs)) in planned.per_leaf_plan {
         out.insert(leaf_idx, (locs, Arc::clone(&chunk_reader)));
     }
     Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_fetch_cached_leaf_readers(
+    store: &Arc<dyn ObjectStore>,
+    suspects: &Suspects,
+    runtime: &tokio::runtime::Handle,
+    file: &FileMeta,
+    meta: &ParquetMetaData,
+    rg_idx: usize,
+    leaf_indices: &[usize],
+    kept_ranges: &[Range<usize>],
+    pool_cap: usize,
+    io_res: &mut Reservation,
+    prefetch: &mut Option<PrefetchedRg>,
+    cancel: &CancelToken,
+) -> Result<Option<BTreeMap<usize, LeafReader>>, QueryError> {
+    let planned = plan_leaf_fetch(file, meta, rg_idx, leaf_indices, kept_ranges, suspects)?;
+    if planned.coalesced_bytes > pool_cap / RG_CACHE_IO_FRACTION {
+        return Ok(None);
+    }
+    let before_io = io_res.size();
+    let reserved = match io_res.try_grow(planned.coalesced_bytes) {
+        Ok(()) => true,
+        Err(cetra_column::ColumnError::MemoryLimit { .. }) if prefetch.take().is_some() => {
+            io_res.try_grow(planned.coalesced_bytes).is_ok()
+        }
+        Err(cetra_column::ColumnError::MemoryLimit { .. }) => false,
+        Err(err) => return Err(err.into()),
+    };
+    if !reserved {
+        return Ok(None);
+    }
+    fetch_planned_readers_reserved(
+        store, suspects, runtime, file, planned, io_res, before_io, cancel,
+    )
+    .map(Some)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_leaf_readers(
+    store: &Arc<dyn ObjectStore>,
+    suspects: &Suspects,
+    runtime: &tokio::runtime::Handle,
+    file: &FileMeta,
+    meta: &ParquetMetaData,
+    rg_idx: usize,
+    leaf_indices: &[usize],
+    kept_ranges: &[Range<usize>],
+    io_res: &mut Reservation,
+    cancel: &CancelToken,
+) -> Result<BTreeMap<usize, LeafReader>, QueryError> {
+    let planned = plan_leaf_fetch(file, meta, rg_idx, leaf_indices, kept_ranges, suspects)?;
+    let before_io = io_res.size();
+    io_res.try_grow(planned.coalesced_bytes)?;
+    fetch_planned_readers_reserved(
+        store, suspects, runtime, file, planned, io_res, before_io, cancel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_streaming_chunk(
+    store: &Arc<dyn ObjectStore>,
+    suspects: &Suspects,
+    runtime: &tokio::runtime::Handle,
+    pool: &Arc<ScopedPool>,
+    file: &FileMeta,
+    meta: &ParquetMetaData,
+    rg_idx: usize,
+    plans: &[ResolvedColumnPlan],
+    decode_ranges: &[Range<usize>],
+    prefetch: &mut Option<PrefetchedRg>,
+    cancel: &CancelToken,
+) -> Result<Vec<Column>, QueryError> {
+    let mut leaves = Vec::new();
+    for p in plans {
+        leaves.extend(p.leaf_indices());
+    }
+    let mut chunk_io_res = pool.register("parquet_io_chunk", false);
+    let readers = match fetch_leaf_readers(
+        store,
+        suspects,
+        runtime,
+        file,
+        meta,
+        rg_idx,
+        &leaves,
+        decode_ranges,
+        &mut chunk_io_res,
+        cancel,
+    ) {
+        Ok(r) => r,
+        Err(QueryError::TooLarge) if prefetch.take().is_some() => fetch_leaf_readers(
+            store,
+            suspects,
+            runtime,
+            file,
+            meta,
+            rg_idx,
+            &leaves,
+            decode_ranges,
+            &mut chunk_io_res,
+            cancel,
+        )?,
+        Err(e) => return Err(e),
+    };
+    let cols = guard_parquet(file.id, suspects, || {
+        let mut decs = plans
+            .iter()
+            .map(|p| build_column_decoder(meta, rg_idx, p, &readers))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut out = Vec::with_capacity(decs.len());
+        for dec in &mut decs {
+            let mut r = 0usize;
+            out.push(dec.read_ranges(decode_ranges, &mut r)?);
+        }
+        Ok(out)
+    })?;
+    drop(readers);
+    chunk_io_res.free();
+    Ok(cols)
+}
+
+fn narrow_kept_ranges(kept_ranges: &[Range<usize>], start_row: usize) -> Vec<Range<usize>> {
+    kept_ranges
+        .iter()
+        .filter_map(|r| {
+            let s = r.start.max(start_row);
+            (s < r.end).then_some(s..r.end)
+        })
+        .collect()
+}
+
+const SPARSE_CHUNK_GAP: usize = 64;
+
+type SparseChunkCoalesced = (Vec<Range<usize>>, Vec<u32>, Selection);
+
+/// For sparse surviving chunks (`active * 4 < raw_len`), coalesces surviving row ranges
+/// within each `chunk_range` separated by `gap < 64` so phase-2 never thrashes 1-row
+/// `skip_records` calls while avoiding decoding dead stretches, and returns matching
+/// `(phase2_decode_ranges, phase1_take_indices, compacted_selection)`.
+fn coalesce_sparse_chunk(
+    chunk_ranges: &[Range<usize>],
+    sel: &Selection,
+    raw_len: usize,
+) -> Result<SparseChunkCoalesced, QueryError> {
+    let active_locals = sel.to_indices(raw_len)?;
+    let mut active_iter = active_locals.iter().copied().peekable();
+
+    let mut decode_ranges: Vec<Range<usize>> = Vec::new();
+    let mut take_indices: Vec<u32> = Vec::new();
+    let mut sel_bools: Vec<bool> = Vec::new();
+
+    let mut seg_local_base = 0usize;
+    for seg in chunk_ranges {
+        let seg_len = seg.len();
+        let seg_local_end = seg_local_base + seg_len;
+        let mut cur_rg_start: Option<usize> = None;
+        let mut cur_rg_end: usize = 0;
+
+        let flush_run = |start: usize,
+                         end: usize,
+                         seg_start: usize,
+                         seg_base: usize,
+                         active_set: &[u32],
+                         decode_ranges: &mut Vec<Range<usize>>,
+                         take_indices: &mut Vec<u32>,
+                         sel_bools: &mut Vec<bool>|
+         -> Result<(), QueryError> {
+            decode_ranges.push(start..end);
+            for rg_row in start..end {
+                let local = seg_base + (rg_row - seg_start);
+                let local_u32 =
+                    u32::try_from(local).map_err(|_| cetra_column::ColumnError::Overflow {
+                        reason: "chunk row index exceeds u32::MAX",
+                    })?;
+                take_indices.push(local_u32);
+                sel_bools.push(active_set.binary_search(&local_u32).is_ok());
+            }
+            Ok(())
+        };
+
+        while let Some(&local_u32) = active_iter.peek() {
+            let local = local_u32 as usize;
+            if local >= seg_local_end {
+                break;
+            }
+            let _ = active_iter.next();
+            let rg_row = seg.start + (local - seg_local_base);
+            match cur_rg_start {
+                None => {
+                    cur_rg_start = Some(rg_row);
+                    cur_rg_end = rg_row + 1;
+                }
+                Some(s) if rg_row < cur_rg_end.saturating_add(SPARSE_CHUNK_GAP) => {
+                    cur_rg_end = rg_row + 1;
+                    let _ = s;
+                }
+                Some(s) => {
+                    flush_run(
+                        s,
+                        cur_rg_end,
+                        seg.start,
+                        seg_local_base,
+                        &active_locals,
+                        &mut decode_ranges,
+                        &mut take_indices,
+                        &mut sel_bools,
+                    )?;
+                    cur_rg_start = Some(rg_row);
+                    cur_rg_end = rg_row + 1;
+                }
+            }
+        }
+        if let Some(s) = cur_rg_start {
+            flush_run(
+                s,
+                cur_rg_end,
+                seg.start,
+                seg_local_base,
+                &active_locals,
+                &mut decode_ranges,
+                &mut take_indices,
+                &mut sel_bools,
+            )?;
+        }
+        seg_local_base = seg_local_end;
+    }
+
+    let new_sel = if sel_bools.iter().all(|&b| b) {
+        Selection::All
+    } else {
+        Selection::Mask(Bitmap::from_bools(&sel_bools))
+    };
+    Ok((decode_ranges, take_indices, new_sel))
 }
 
 fn guard_parquet<T, F>(file_id: FileId, suspects: &Suspects, f: F) -> Result<T, QueryError>
@@ -4638,6 +5315,10 @@ impl PartitionStream for ParquetPartitionStream {
             if cancel.is_cancelled() {
                 rollback_res(res.as_deref_mut(), before);
                 return Err(QueryError::Cancelled);
+            }
+            if self.remaining == Some(0) {
+                rollback_res(res.as_deref_mut(), before);
+                return Ok(None);
             }
 
             let has_rg = self
@@ -4670,12 +5351,14 @@ impl PartitionStream for ParquetPartitionStream {
                 }
             }
 
-            let batch_size = self.batch_size;
             let chunk_opt = self
                 .active_file
                 .as_mut()
                 .and_then(|f| f.current_rg.as_mut())
-                .and_then(|rg| rg.next_chunk(batch_size));
+                .and_then(|rg| {
+                    let rows = rg.chunk_rows;
+                    rg.next_chunk(rows)
+                });
             let Some(chunk_ranges) = chunk_opt else {
                 if let Some(af) = self.active_file.as_mut() {
                     af.current_rg = None;
@@ -4691,11 +5374,11 @@ impl PartitionStream for ParquetPartitionStream {
                 file_id,
                 meta,
                 rg_idx,
-                kept_ranges,
                 phase1_schema,
                 phase1_filters,
                 tombstone_pred,
                 has_phase1,
+                has_phase2,
             ) = {
                 let Some(af) = self.active_file.as_ref() else {
                     continue;
@@ -4707,43 +5390,65 @@ impl PartitionStream for ParquetPartitionStream {
                     af.file.id,
                     Arc::clone(&af.meta),
                     rg.rg_idx,
-                    rg.kept_ranges.clone(),
                     Arc::clone(&af.phase1_schema),
                     af.phase1_filters.clone(),
                     af.tombstone_pred.clone(),
-                    rg.phase1_decoders.is_some(),
+                    !rg.phase1_plans.is_empty(),
+                    !rg.phase2_plans.is_empty(),
                 )
             };
 
-            let (sel, mut p1_map) = if has_phase1 {
+            let (mut sel, mut p1_map) = if has_phase1 {
                 let (p1_indices, p1_cols) = {
                     let Some(af) = self.active_file.as_mut() else {
                         continue;
                     };
+                    let mut prefetch = af.prefetch.take();
+                    let file_meta = Arc::clone(&af.file);
+                    let pq_meta = Arc::clone(&af.meta);
                     let Some(rg) = af.current_rg.as_mut() else {
+                        af.prefetch = prefetch;
                         continue;
                     };
-                    let Some(decs) = rg.phase1_decoders.as_mut() else {
-                        continue;
-                    };
-                    let mut row_cursor = rg.phase1_row;
-                    let cols = match guard_parquet(file_id, &self.suspects, || {
-                        let mut out = Vec::with_capacity(decs.len());
-                        for dec in decs {
-                            let mut r = rg.phase1_row;
-                            let c = dec.read_ranges(&chunk_ranges, &mut r)?;
-                            row_cursor = r;
-                            out.push(c);
+                    let cols_res = if let Some(decs) = rg.phase1_decoders.as_mut() {
+                        let mut row_cursor = rg.phase1_row;
+                        let r = guard_parquet(file_id, &self.suspects, || {
+                            let mut out = Vec::with_capacity(decs.len());
+                            for dec in decs {
+                                let mut r = rg.phase1_row;
+                                let c = dec.read_ranges(&chunk_ranges, &mut r)?;
+                                row_cursor = r;
+                                out.push(c);
+                            }
+                            Ok(out)
+                        });
+                        if r.is_ok() {
+                            rg.phase1_row = row_cursor;
                         }
-                        Ok(out)
-                    }) {
+                        r
+                    } else {
+                        decode_streaming_chunk(
+                            &self.store,
+                            &self.suspects,
+                            &self.runtime,
+                            &self.pool,
+                            &file_meta,
+                            &pq_meta,
+                            rg_idx,
+                            &rg.phase1_plans,
+                            &chunk_ranges,
+                            &mut prefetch,
+                            cancel,
+                        )
+                    };
+                    af.prefetch = prefetch;
+                    let cols = match cols_res {
                         Ok(c) => c,
                         Err(e) => {
                             rollback_res(res.as_deref_mut(), before);
                             return Err(e);
                         }
                     };
-                    rg.phase1_row = row_cursor;
                     (rg.phase1_indices.clone(), cols)
                 };
 
@@ -4785,39 +5490,47 @@ impl PartitionStream for ParquetPartitionStream {
                 let Some(rg) = af.current_rg.as_ref() else {
                     continue;
                 };
-                !rg.phase2_plans.is_empty() && rg.phase2_decoders.is_none()
+                !rg.phase2_plans.is_empty() && !rg.phase2_streaming && rg.phase2_decoders.is_none()
             };
 
             if need_phase2_fetch {
-                let (file_copy, leaf_indices) = {
-                    let Some(af) = self.active_file.as_ref() else {
+                let maybe_readers = {
+                    let Some(af) = self.active_file.as_mut() else {
                         continue;
                     };
-                    let Some(rg) = af.current_rg.as_ref() else {
+                    let mut prefetch = af.prefetch.take();
+                    let file_meta = Arc::clone(&af.file);
+                    let pq_meta = Arc::clone(&af.meta);
+                    let Some(rg) = af.current_rg.as_mut() else {
+                        af.prefetch = prefetch;
                         continue;
                     };
+                    let remaining_kept = narrow_kept_ranges(&rg.kept_ranges, chunk_ranges[0].start);
                     let mut leaves = Vec::new();
                     for p in &rg.phase2_plans {
                         leaves.extend(p.leaf_indices());
                     }
-                    (Arc::clone(&af.file), leaves)
-                };
-
-                let readers = match fetch_leaf_readers(
-                    &self.store,
-                    &self.suspects,
-                    &self.runtime,
-                    &file_copy,
-                    &meta,
-                    rg_idx,
-                    &leaf_indices,
-                    &kept_ranges,
-                    cancel,
-                ) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        rollback_res(res.as_deref_mut(), before);
-                        return Err(e);
+                    let res_opt = try_fetch_cached_leaf_readers(
+                        &self.store,
+                        &self.suspects,
+                        &self.runtime,
+                        &file_meta,
+                        &pq_meta,
+                        rg_idx,
+                        &leaves,
+                        &remaining_kept,
+                        self.pool.cap(),
+                        &mut rg.phase2_io_res,
+                        &mut prefetch,
+                        cancel,
+                    );
+                    af.prefetch = prefetch;
+                    match res_opt {
+                        Ok(opt) => opt,
+                        Err(e) => {
+                            rollback_res(res.as_deref_mut(), before);
+                            return Err(e);
+                        }
                     }
                 };
 
@@ -4827,48 +5540,107 @@ impl PartitionStream for ParquetPartitionStream {
                 let Some(rg) = af.current_rg.as_mut() else {
                     continue;
                 };
-                let decs = match guard_parquet(file_id, &self.suspects, || {
-                    rg.phase2_plans
-                        .iter()
-                        .map(|p| build_column_decoder(&meta, rg_idx, p, &readers))
-                        .collect::<Result<Vec<_>, _>>()
-                }) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        rollback_res(res.as_deref_mut(), before);
-                        return Err(e);
-                    }
-                };
-                rg.phase2_decoders = Some(decs);
+                if let Some(readers) = maybe_readers {
+                    let decs = match guard_parquet(file_id, &self.suspects, || {
+                        rg.phase2_plans
+                            .iter()
+                            .map(|p| build_column_decoder(&meta, rg_idx, p, &readers))
+                            .collect::<Result<Vec<_>, _>>()
+                    }) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            rollback_res(res.as_deref_mut(), before);
+                            return Err(e);
+                        }
+                    };
+                    rg.phase2_decoders = Some(decs);
+                } else {
+                    rg.phase2_streaming = true;
+                }
             }
+
+            let mut out_raw_len = raw_len;
+            let mut p2_ranges_buf: Option<Vec<Range<usize>>> = None;
+            if has_phase1 && has_phase2 {
+                let active = sel.active_len(raw_len);
+                if active.saturating_mul(4) < raw_len {
+                    let (decode_ranges, take_indices, new_sel) =
+                        coalesce_sparse_chunk(&chunk_ranges, &sel, raw_len)?;
+                    if take_indices.len() < raw_len {
+                        let mut compacted_p1 = BTreeMap::new();
+                        for (col_idx, col) in p1_map {
+                            let taken = match col.take(&take_indices, None) {
+                                Ok(fc) => Arc::new(Column::Flat(fc)),
+                                Err(err) => {
+                                    rollback_res(res.as_deref_mut(), before);
+                                    return Err(err.into());
+                                }
+                            };
+                            compacted_p1.insert(col_idx, taken);
+                        }
+                        p1_map = compacted_p1;
+                        sel = new_sel;
+                        out_raw_len = take_indices.len();
+                        p2_ranges_buf = Some(decode_ranges);
+                    }
+                }
+            }
+            let p2_decode_ranges = p2_ranges_buf.as_deref().unwrap_or(&chunk_ranges);
 
             let mut p2_map = BTreeMap::new();
             {
                 let Some(af) = self.active_file.as_mut() else {
                     continue;
                 };
+                let mut prefetch = af.prefetch.take();
+                let file_meta = Arc::clone(&af.file);
+                let pq_meta = Arc::clone(&af.meta);
                 let Some(rg) = af.current_rg.as_mut() else {
+                    af.prefetch = prefetch;
                     continue;
                 };
-                if let Some(p2_decs) = rg.phase2_decoders.as_mut() {
+                let decoded_opt = if let Some(p2_decs) = rg.phase2_decoders.as_mut() {
                     let mut row_cursor = rg.phase2_row;
-                    let decoded_p2 = match guard_parquet(file_id, &self.suspects, || {
+                    let r = guard_parquet(file_id, &self.suspects, || {
                         let mut out = Vec::with_capacity(p2_decs.len());
                         for dec in p2_decs {
                             let mut r = rg.phase2_row;
-                            let c = dec.read_ranges(&chunk_ranges, &mut r)?;
+                            let c = dec.read_ranges(p2_decode_ranges, &mut r)?;
                             row_cursor = r;
                             out.push(c);
                         }
                         Ok(out)
-                    }) {
+                    });
+                    if r.is_ok() {
+                        rg.phase2_row = row_cursor;
+                    }
+                    Some(r)
+                } else if rg.phase2_streaming {
+                    Some(decode_streaming_chunk(
+                        &self.store,
+                        &self.suspects,
+                        &self.runtime,
+                        &self.pool,
+                        &file_meta,
+                        &pq_meta,
+                        rg_idx,
+                        &rg.phase2_plans,
+                        p2_decode_ranges,
+                        &mut prefetch,
+                        cancel,
+                    ))
+                } else {
+                    None
+                };
+                af.prefetch = prefetch;
+                if let Some(decoded_res) = decoded_opt {
+                    let decoded_p2 = match decoded_res {
                         Ok(v) => v,
                         Err(e) => {
                             rollback_res(res.as_deref_mut(), before);
                             return Err(e);
                         }
                     };
-                    rg.phase2_row = row_cursor;
                     for (&idx, col) in rg.phase2_indices.iter().zip(decoded_p2) {
                         p2_map.insert(idx, Arc::new(col));
                     }
@@ -4907,14 +5679,30 @@ impl PartitionStream for ParquetPartitionStream {
                 }
             };
 
-            let batch = match Batch::try_new_shared(proj_schema, assembled, raw_len, sel) {
+            let batch = match Batch::try_new_shared(proj_schema, assembled, out_raw_len, sel) {
                 Ok(b) => b,
                 Err(_) => {
                     rollback_res(res.as_deref_mut(), before);
                     return Err(corrupt_err(file_id, &self.suspects));
                 }
             };
-            reconcile_res(res.as_deref_mut(), before, batch.memory_bytes())?;
+            let batch_bytes = batch.memory_bytes();
+            match reconcile_res(res.as_deref_mut(), before, batch_bytes) {
+                Ok(()) => {}
+                Err(QueryError::TooLarge)
+                    if self
+                        .active_file
+                        .as_mut()
+                        .and_then(|af| af.prefetch.take())
+                        .is_some() =>
+                {
+                    reconcile_res(res.as_deref_mut(), before, batch_bytes)?;
+                }
+                Err(e) => return Err(e),
+            }
+            if let Some(rem) = &mut self.remaining {
+                *rem = rem.saturating_sub(batch.num_rows());
+            }
             return Ok(Some(batch));
         }
     }
@@ -4924,6 +5712,7 @@ impl PartitionStream for ParquetPartitionStream {
 pub(crate) mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use arrow::array::Array;
     use arrow::record_batch::RecordBatch;
@@ -5540,7 +6329,7 @@ pub(crate) mod tests {
         let exec = test_ctx(16 * 1024 * 1024);
         let err = drain_on_workers(&source, &ScanSpec::default(), &exec)
             .expect_err("corrupt 8-byte file must error without panicking");
-        assert!(matches!(err, QueryError::Internal(_)));
+        assert!(matches!(err, QueryError::CorruptData(_)));
 
         let queued = queue.take(100);
         assert!(
@@ -5582,7 +6371,7 @@ pub(crate) mod tests {
         let err = drain_on_workers(&transient_source, &ScanSpec::default(), &transient_exec)
             .expect_err("transient store error");
         assert!(
-            matches!(err, QueryError::Internal(_)),
+            matches!(err, QueryError::StorageIo(_)),
             "unexpected error for transient store failure: {err:?}"
         );
         assert!(
@@ -6196,7 +6985,7 @@ pub(crate) mod tests {
         let exec = test_ctx(16 * 1024 * 1024);
         let err = drain_on_workers(&source, &spec, &exec)
             .expect_err("0-block bloom filter must fail safely");
-        assert!(matches!(err, QueryError::Internal(_)));
+        assert!(matches!(err, QueryError::CorruptData(_)));
         assert!(
             queue.take(10).contains(&file_id),
             "0-block bloom filter file must be quarantined"
@@ -6375,7 +7164,7 @@ pub(crate) mod tests {
             compressed_page_size: 50,
             first_row_index: 1,
         }];
-        assert!(validate_page_locations(&bad_locs, 100, 1000).is_err());
+        assert!(validate_page_locations(&bad_locs, 100, 1000, false).is_err());
 
         // `fetch_ranges` inside a Tokio runtime returns non-quarantining Runtime error.
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -6393,6 +7182,7 @@ pub(crate) mod tests {
                 &store,
                 &ObjectPath::from("missing.parquet"),
                 std::slice::from_ref(&range),
+                1000,
                 &CancelToken::new(),
                 &handle,
             )
@@ -6402,5 +7192,665 @@ pub(crate) mod tests {
             assert!(matches!(qerr, QueryError::Internal(_)));
         });
         assert!(queue.take(10).is_empty());
+    }
+
+    fn run_source(
+        source: &dyn ScanSource,
+        spec: &ScanSpec,
+        ctx: &ExecContext,
+    ) -> Result<Vec<Batch>, QueryError> {
+        let partitions = source.open_partitions(spec, ctx)?;
+        let pool = Arc::clone(&ctx.pool);
+        let sinks = run_pipeline(
+            ctx,
+            partitions,
+            |_| Ok(Vec::new()),
+            move |_| Ok(CollectSink::new(&pool)),
+        )?;
+        Ok(sinks
+            .into_iter()
+            .flat_map(CollectSink::into_batches)
+            .collect())
+    }
+
+    struct RecordingStore {
+        inner: Arc<dyn ObjectStore>,
+        recorded: std::sync::Mutex<Vec<Range<u64>>>,
+    }
+
+    impl fmt::Debug for RecordingStore {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("RecordingStore").finish()
+        }
+    }
+
+    impl fmt::Display for RecordingStore {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("RecordingStore")
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for RecordingStore {
+        async fn put_opts(
+            &self,
+            location: &ObjectPath,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &ObjectPath,
+            opts: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &ObjectPath,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+
+        async fn get_ranges(
+            &self,
+            location: &ObjectPath,
+            ranges: &[Range<u64>],
+        ) -> object_store::Result<Vec<Bytes>> {
+            self.recorded
+                .lock()
+                .expect("lock")
+                .extend(ranges.iter().cloned());
+            self.inner.get_ranges(location, ranges).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, object_store::Result<ObjectPath>>,
+        ) -> BoxStream<'static, object_store::Result<ObjectPath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &ObjectPath,
+            to: &ObjectPath,
+            options: CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    #[test]
+    fn continuation_pages_with_duplicate_first_row_index_decode_and_prune_cleanly() {
+        use parquet::basic::Repetition;
+        use parquet::column::writer::ColumnWriter;
+        use parquet::data_type::ByteArray;
+        use parquet::file::writer::SerializedFileWriter;
+        use parquet::schema::types::Type;
+
+        // 1. Unit tests for `validate_page_locations` & `page_row_ranges` with duplicate `first_row_index`.
+        let dup_locs = vec![
+            PageLocation {
+                offset: 10,
+                compressed_page_size: 20,
+                first_row_index: 0,
+            },
+            PageLocation {
+                offset: 30,
+                compressed_page_size: 20,
+                first_row_index: 0,
+            },
+            PageLocation {
+                offset: 50,
+                compressed_page_size: 20,
+                first_row_index: 1,
+            },
+        ];
+        assert!(validate_page_locations(&dup_locs, 5, 100, false).is_err());
+        assert!(validate_page_locations(&dup_locs, 5, 100, true).is_ok());
+        assert_eq!(page_row_ranges(&dup_locs, 5), vec![0..1, 0..1, 1..5]);
+
+        // 2. Build a real Parquet file where a List(Utf8) record spans 2 pages (duplicate first_row_index == 0),
+        // alongside a scalar `id` column with small pages for page-level pruning.
+        let id_field = Arc::new(
+            Type::primitive_type_builder("id", parquet::basic::Type::INT64)
+                .with_repetition(Repetition::REQUIRED)
+                .build()
+                .unwrap(),
+        );
+        let elem_field = Arc::new(
+            Type::primitive_type_builder("element", parquet::basic::Type::BYTE_ARRAY)
+                .with_repetition(Repetition::REQUIRED)
+                .with_converted_type(ConvertedType::UTF8)
+                .build()
+                .unwrap(),
+        );
+        let list_group = Arc::new(
+            Type::group_type_builder("list")
+                .with_repetition(Repetition::REPEATED)
+                .with_fields(vec![elem_field])
+                .build()
+                .unwrap(),
+        );
+        let tags_field = Arc::new(
+            Type::group_type_builder("tags")
+                .with_repetition(Repetition::OPTIONAL)
+                .with_converted_type(ConvertedType::LIST)
+                .with_fields(vec![list_group])
+                .build()
+                .unwrap(),
+        );
+        let pq_schema = Arc::new(
+            Type::group_type_builder("root")
+                .with_fields(vec![id_field, tags_field])
+                .build()
+                .unwrap(),
+        );
+        let props = Arc::new(
+            WriterProperties::builder()
+                .set_dictionary_enabled(false)
+                .set_statistics_enabled(parquet::file::properties::EnabledStatistics::Page)
+                .build(),
+        );
+        let mut buf = Vec::new();
+        let mut writer = SerializedFileWriter::new(&mut buf, pq_schema, props).unwrap();
+        {
+            let mut rg = writer.next_row_group().unwrap();
+            {
+                let mut col = rg.next_column().unwrap().unwrap();
+                let ColumnWriter::Int64ColumnWriter(w) = col.untyped() else {
+                    panic!("expected Int64ColumnWriter");
+                };
+                for chunk in [[0_i64, 1], [2, 3], [4, 5]] {
+                    w.write_batch(&chunk, None, None).unwrap();
+                }
+                col.close().unwrap();
+            }
+            {
+                let mut col = rg.next_column().unwrap().unwrap();
+                let ColumnWriter::ByteArrayColumnWriter(w) = col.untyped() else {
+                    panic!("expected ByteArrayColumnWriter");
+                };
+                w.write_batch(
+                    &[
+                        ByteArray::from("r0-0"),
+                        ByteArray::from("r1"),
+                        ByteArray::from("r2"),
+                        ByteArray::from("r3"),
+                        ByteArray::from("r4"),
+                        ByteArray::from("r5"),
+                    ],
+                    Some(&[2; 6]),
+                    Some(&[0; 6]),
+                )
+                .unwrap();
+                col.close().unwrap();
+            }
+            rg.close().unwrap();
+        }
+        writer.close().unwrap();
+
+        // Replace `tags` column chunk with two V1 DataPages that split Row 0 across
+        // continuation pages (`first_row_index == 0` on both Page 0 and Page 1).
+        let encode_v1_list_page = |reps_mask: u8, n_vals: usize, vals: &[&str]| {
+            use parquet::column::page::{CompressedPage, Page};
+            // RLE bit-packed header `(1 << 1) | 1 = 3` (1 group of 8 values, bit-width 1).
+            let rep_bytes = [0x03_u8, reps_mask];
+            // RLE repeated-run header `(n << 1)` + level `2` (bit-width 2).
+            let def_bytes = [u8::try_from(n_vals << 1).unwrap(), 0x02_u8];
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&(rep_bytes.len() as u32).to_le_bytes());
+            payload.extend_from_slice(&rep_bytes);
+            payload.extend_from_slice(&(def_bytes.len() as u32).to_le_bytes());
+            payload.extend_from_slice(&def_bytes);
+            for v in vals {
+                payload.extend_from_slice(&(v.len() as u32).to_le_bytes());
+                payload.extend_from_slice(v.as_bytes());
+            }
+            let sz = payload.len();
+            CompressedPage::new(
+                Page::DataPage {
+                    buf: payload.into(),
+                    num_values: vals.len() as u32,
+                    encoding: Encoding::PLAIN,
+                    def_level_encoding: Encoding::RLE,
+                    rep_level_encoding: Encoding::RLE,
+                    statistics: None,
+                },
+                sz,
+            )
+        };
+
+        let base_meta = parquet::file::metadata::ParquetMetaDataReader::new()
+            .with_page_index_policy(PageIndexPolicy::Required)
+            .parse_and_finish(&Bytes::from(buf.clone()))
+            .unwrap();
+
+        let (c0_start, c0_len) = base_meta.row_group(0).column(0).byte_range();
+        let col0_end = usize::try_from(c0_start + c0_len).unwrap();
+        let mut out_buf = Vec::new();
+        let (base_off, spec0, spec1, tracked) = {
+            use parquet::column::page::PageWriter;
+            use parquet::file::writer::{SerializedPageWriter, TrackedWrite};
+            use std::io::Write;
+            let mut tracked = TrackedWrite::new(&mut out_buf);
+            tracked.write_all(&buf[..col0_end]).unwrap();
+            let base_off = col0_end as i64;
+            let mut pw = SerializedPageWriter::new(&mut tracked);
+            // Page 0: rep = [0, 1] -> mask 0b10 = 0x02
+            let p0 = encode_v1_list_page(0b0000_0010, 2, &["r0-a", "r0-b"]);
+            // Page 1: rep = [1, 1, 0, 0, 0, 0, 0] -> mask 0b11 = 0x03
+            let p1 = encode_v1_list_page(
+                0b0000_0011,
+                7,
+                &["r0-c", "r0-d", "r1", "r2", "r3", "r4", "r5"],
+            );
+            let s0 = pw.write_page(p0).unwrap();
+            let s1 = pw.write_page(p1).unwrap();
+            pw.close().unwrap();
+            (base_off, s0, s1, tracked)
+        };
+
+        let rg0 = base_meta.row_group(0).clone();
+        let schema_descr = base_meta.file_metadata().schema_descr_ptr();
+        let mut rg_cols = rg0.columns().to_vec();
+        let total_uncomp = (spec0.uncompressed_size + spec1.uncompressed_size) as i64;
+        let total_comp = (spec0.compressed_size + spec1.compressed_size) as i64;
+        rg_cols[1] = rg_cols[1]
+            .clone()
+            .into_builder()
+            .set_data_page_offset(base_off)
+            .set_dictionary_page_offset(None)
+            .set_num_values(9)
+            .set_encodings(vec![Encoding::PLAIN, Encoding::RLE])
+            .set_total_uncompressed_size(total_uncomp)
+            .set_total_compressed_size(total_comp)
+            .build()
+            .unwrap();
+        let updated_rg = RowGroupMetaData::builder(schema_descr)
+            .set_column_metadata(rg_cols)
+            .set_num_rows(6)
+            .set_total_byte_size(total_uncomp)
+            .build()
+            .unwrap();
+
+        let mut offset_idx = base_meta.offset_index().unwrap().clone();
+        offset_idx[0][1] = parquet::file::page_index::offset_index::OffsetIndexMetaData {
+            page_locations: vec![
+                PageLocation {
+                    offset: spec0.offset as i64,
+                    compressed_page_size: spec0.compressed_size as i32,
+                    first_row_index: 0,
+                },
+                PageLocation {
+                    offset: spec1.offset as i64,
+                    compressed_page_size: spec1.compressed_size as i32,
+                    first_row_index: 0,
+                },
+            ],
+            unencoded_byte_array_data_bytes: None,
+        };
+        let col_idx = base_meta.column_index().unwrap().clone();
+
+        let new_meta = base_meta
+            .into_builder()
+            .set_row_groups(vec![updated_rg])
+            .set_offset_index(Some(offset_idx))
+            .set_column_index(Some(col_idx))
+            .build();
+        parquet::file::metadata::ParquetMetaDataWriter::new_with_tracked(tracked, &new_meta)
+            .finish()
+            .unwrap();
+        let bytes = Bytes::from(out_buf);
+        let pq_meta = parquet::file::metadata::ParquetMetaDataReader::new()
+            .with_page_index_policy(PageIndexPolicy::Required)
+            .parse_and_finish(&bytes)
+            .unwrap();
+        let tags_locs = &pq_meta.offset_index().unwrap()[0][1].page_locations;
+        assert!(
+            tags_locs
+                .windows(2)
+                .any(|w| w[0].first_row_index == w[1].first_row_index),
+            "expected duplicate first_row_index in tags OffsetIndex: {tags_locs:?}"
+        );
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = ObjectPath::from("dup_pages.parquet");
+        rt.block_on(store.put(&path, PutPayload::from(bytes.clone())))
+            .unwrap();
+        let file_meta = Arc::new(FileMeta {
+            id: FileId::new_v7(),
+            table: FileTable::Spans,
+            project: "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap(),
+            day: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            level: 0,
+            path: path.to_string(),
+            size: bytes.len() as u64,
+            footer_size: 4096,
+            rows: 6,
+            min_time: 0,
+            max_time: 0,
+            min_ingest_time: 0,
+            max_ingest_time: 0,
+            fully_merged: true,
+            deletions_applied_seq: 0,
+        });
+        let schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("tags", DataType::List(Box::new(DataType::Utf8)), true),
+        ])
+        .unwrap();
+        let cache = Arc::new(MetadataCache::new(1024 * 1024));
+        let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
+        let source = ParquetSource::new(
+            store,
+            FileTable::Spans,
+            Arc::clone(&schema),
+            vec![file_meta],
+            Arc::from([]),
+            cache,
+            suspects,
+            rt.handle().clone(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ExecContext {
+            pool: GlobalPool::standalone(16 * 1024 * 1024),
+            eval: EvalContext::new(0, CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(dir.path().to_path_buf(), 0)),
+            workers: Arc::new(WorkerPool::new(1).unwrap()),
+            batch_size: 16,
+            target_partitions: 1,
+            metrics: ExecMetrics::default(),
+        };
+
+        // Full scan reads row 0 with all 4 elements across both continuation pages + rows 1..=5.
+        let batches = run_source(&source, &ScanSpec::default(), &ctx).unwrap();
+        let total: usize = batches.iter().map(Batch::num_rows).sum();
+        assert_eq!(total, 6);
+        assert_eq!(
+            batches[0].column(1).unwrap().get_scalar(0).unwrap(),
+            ScalarValue::List {
+                item_type: DataType::Utf8,
+                values: vec![
+                    ScalarValue::Utf8("r0-a".to_owned()),
+                    ScalarValue::Utf8("r0-b".to_owned()),
+                    ScalarValue::Utf8("r0-c".to_owned()),
+                    ScalarValue::Utf8("r0-d".to_owned()),
+                ],
+            }
+        );
+
+        // Page-pruned scan (`id >= 3`) skips row 0 and decodes rows 3..=5 cleanly.
+        let pruned_spec = ScanSpec {
+            filters: vec![Expr::Binary {
+                left: Box::new(Expr::Column {
+                    index: 0,
+                    name: "id".to_owned(),
+                    data_type: DataType::I64,
+                }),
+                op: BinaryOp::GtEq,
+                right: Box::new(Expr::Literal(ScalarValue::I64(3))),
+                data_type: DataType::Bool,
+            }],
+            ..Default::default()
+        };
+        let pruned = run_source(&source, &pruned_spec, &ctx).unwrap();
+        let pruned_rows: usize = pruned.iter().map(Batch::num_rows).sum();
+        assert_eq!(pruned_rows, 3);
+        let first_pruned = pruned[0].compact(None).unwrap();
+        assert_eq!(
+            first_pruned.column(1).unwrap().get_scalar(0).unwrap(),
+            ScalarValue::List {
+                item_type: DataType::Utf8,
+                values: vec![ScalarValue::Utf8("r3".to_owned())],
+            }
+        );
+    }
+
+    #[test]
+    fn truncated_local_parquet_file_reports_corrupt_and_queues_suspect() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let base = day_start_ns(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()).unwrap();
+        let spans_batch = span_rows(&[span_row(1, 1, base, base + 100)]);
+        let written = write_file_batch(FileTable::Spans, 0, &[Arc::new(spans_batch)]).unwrap();
+        let rel = "tables/spans/trunc.parquet";
+        let disk_path = dir.path().join(rel);
+        std::fs::create_dir_all(disk_path.parent().unwrap()).unwrap();
+        std::fs::write(&disk_path, &written.bytes).unwrap();
+
+        // Truncate the local file on disk so metadata/range reads hit short read or InvalidRange.
+        let full_size = written.bytes.len() as u64;
+        std::fs::write(&disk_path, &written.bytes[..8]).unwrap();
+
+        let file_id = FileId::new_v7();
+        let meta = Arc::new(FileMeta {
+            id: file_id,
+            table: FileTable::Spans,
+            project: "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap(),
+            day: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            level: 0,
+            path: rel.to_owned(),
+            size: full_size,
+            footer_size: written.footer_size,
+            rows: written.rows,
+            min_time: written.min_time,
+            max_time: written.max_time,
+            min_ingest_time: written.min_ingest_time,
+            max_ingest_time: written.max_ingest_time,
+            fully_merged: false,
+            deletions_applied_seq: 0,
+        });
+        let queue = Arc::new(VerifyQueue::default());
+        let suspects = Suspects::new(Arc::clone(&queue));
+        let source = ParquetSource::new(
+            store,
+            FileTable::Spans,
+            spans_schema(),
+            vec![meta],
+            Arc::from([]),
+            Arc::new(MetadataCache::new(0)),
+            suspects,
+            rt.handle().clone(),
+        );
+        let ctx = ExecContext {
+            pool: GlobalPool::standalone(16 * 1024 * 1024),
+            eval: EvalContext::new(0, CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(dir.path().to_path_buf(), 0)),
+            workers: Arc::new(WorkerPool::new(1).unwrap()),
+            batch_size: 16,
+            target_partitions: 1,
+            metrics: ExecMetrics::default(),
+        };
+
+        let err = run_source(&source, &ScanSpec::default(), &ctx).unwrap_err();
+        assert!(
+            matches!(err, QueryError::CorruptData(_)),
+            "expected QueryError::CorruptData, got {err:?}"
+        );
+        let eng = crate::error::EngineError::from_query(&err);
+        assert_eq!(eng.kind_label(), "parquet");
+        assert_eq!(queue.take(10), vec![file_id]);
+    }
+
+    #[test]
+    fn map_projection_keys_only_skips_value_leaf_fetch() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let recorder = Arc::new(RecordingStore {
+            inner,
+            recorded: std::sync::Mutex::new(Vec::new()),
+        });
+        let store: Arc<dyn ObjectStore> = recorder.clone();
+
+        let base = day_start_ns(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()).unwrap();
+        let mut s = span_row(1, 1, base, base + 100);
+        s.attributes = [
+            ("env".to_owned(), "prod".to_owned()),
+            (
+                "secret_key".to_owned(),
+                "very-long-value-payload-1234567890".to_owned(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let batch = span_rows(&[s]);
+        let written = write_file_batch(FileTable::Spans, 0, &[Arc::new(batch)]).unwrap();
+        let path = ObjectPath::from("tables/spans/keys_only.parquet");
+        rt.block_on(store.put(&path, PutPayload::from(written.bytes.clone())))
+            .unwrap();
+
+        let pq_meta = parquet::file::metadata::ParquetMetaDataReader::new()
+            .parse_and_finish(&written.bytes)
+            .unwrap();
+        let descr = pq_meta.file_metadata().schema_descr();
+        let val_leaf = descr
+            .columns()
+            .iter()
+            .position(|c| {
+                c.path().parts().first().map(String::as_str) == Some(spans::ATTRIBUTES)
+                    && matches!(c.name(), "value" | "values")
+            })
+            .unwrap();
+        let (val_start, val_len) = pq_meta.row_group(0).column(val_leaf).byte_range();
+        let val_end = val_start + val_len;
+
+        let meta = Arc::new(FileMeta {
+            id: FileId::new_v7(),
+            table: FileTable::Spans,
+            project: "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap(),
+            day: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            level: 0,
+            path: path.to_string(),
+            size: written.bytes.len() as u64,
+            footer_size: written.footer_size,
+            rows: written.rows,
+            min_time: written.min_time,
+            max_time: written.max_time,
+            min_ingest_time: written.min_ingest_time,
+            max_ingest_time: written.max_ingest_time,
+            fully_merged: false,
+            deletions_applied_seq: 0,
+        });
+        let schema = spans_schema();
+        let attrs_idx = schema.index_of(spans::ATTRIBUTES).unwrap();
+        let source = ParquetSource::new(
+            store,
+            FileTable::Spans,
+            schema,
+            vec![meta],
+            Arc::from([]),
+            Arc::new(MetadataCache::new(1024 * 1024)),
+            Suspects::new(Arc::new(VerifyQueue::default())),
+            rt.handle().clone(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ExecContext {
+            pool: GlobalPool::standalone(16 * 1024 * 1024),
+            eval: EvalContext::new(0, CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(dir.path().to_path_buf(), 0)),
+            workers: Arc::new(WorkerPool::new(1).unwrap()),
+            batch_size: 16,
+            target_partitions: 1,
+            metrics: ExecMetrics::default(),
+        };
+
+        // Pre-warm metadata cache so recorded ranges reflect only column data fetches.
+        let _ = load_metadata(
+            &(recorder.clone() as Arc<dyn ObjectStore>),
+            &source.files[0],
+            &source.metadata_cache,
+            &source.suspects,
+            &CancelToken::new(),
+            rt.handle(),
+        )
+        .unwrap();
+        recorder.recorded.lock().unwrap().clear();
+
+        let spec = ScanSpec {
+            projection: Some(vec![attrs_idx]),
+            map_projections: [(spans::ATTRIBUTES.to_owned(), MapProjection::KeysOnly)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let out = run_source(&source, &spec, &ctx).unwrap();
+        assert_eq!(out.len(), 1);
+        let col = out[0].column(0).unwrap();
+        let Column::Flat(fc) = col else {
+            panic!("expected flat MapUtf8");
+        };
+        let FlatData::MapUtf8(map) = fc.data() else {
+            panic!("expected MapUtf8");
+        };
+        assert_eq!(map.keys().len(), 2);
+        assert_eq!(map.keys().get(0), Some("env"));
+        assert_eq!(map.keys().get(1), Some("secret_key"));
+        assert_eq!(map.values().len(), 2);
+        assert!(map.values().bytes().is_empty());
+        assert!(map.value_nulls().is_some_and(|b| !b.get(0) && !b.get(1)));
+
+        let fetched = recorder.recorded.lock().unwrap().clone();
+        assert!(
+            !fetched
+                .iter()
+                .any(|r| r.start < val_end && r.end > val_start),
+            "KeysOnly must not fetch map value leaf {val_start}..{val_end}, fetched {fetched:?}"
+        );
+    }
+
+    #[test]
+    fn sparse_chunk_coalescing_and_phase2_narrowing() {
+        let chunk_ranges = vec![10..20, 30..130];
+        // Active at local 2 (rg=12), local 5 (rg=15, gap<64), local 11 (rg=31), local 105 (rg=125, gap=94>=64).
+        let mut bm = Bitmap::new_zeroed(110);
+        for idx in [2_usize, 5, 11, 105] {
+            let _ = bm.set(idx, true);
+        }
+        let sel = Selection::Mask(bm);
+        let (decode_ranges, take_indices, new_sel) =
+            coalesce_sparse_chunk(&chunk_ranges, &sel, 110).unwrap();
+        assert_eq!(decode_ranges, vec![12..16, 31..32, 125..126]);
+        assert_eq!(take_indices, vec![2, 3, 4, 5, 11, 105]);
+        assert_eq!(new_sel.active_len(take_indices.len()), 4);
+        let active_remapped = new_sel.to_indices(take_indices.len()).unwrap();
+        assert_eq!(active_remapped, vec![0, 3, 4, 5]);
+        assert_eq!(
+            narrow_kept_ranges(&[0..5, 10..20, 30..40], 12),
+            vec![12..20, 30..40]
+        );
     }
 }

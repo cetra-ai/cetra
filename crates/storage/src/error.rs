@@ -86,8 +86,12 @@ impl EngineError {
         match self.kind {
             EngineErrorKind::ResourcesExhausted => cetra_query::QueryError::TooLarge,
             EngineErrorKind::Busy => cetra_query::QueryError::Busy,
-            EngineErrorKind::Parquet => cetra_query::QueryError::internal("corrupt parquet file"),
-            EngineErrorKind::ObjectStore => cetra_query::QueryError::internal("storage read error"),
+            EngineErrorKind::Parquet => {
+                cetra_query::QueryError::CorruptData("corrupt parquet file".to_owned())
+            }
+            EngineErrorKind::ObjectStore => {
+                cetra_query::QueryError::StorageIo("storage read error".to_owned())
+            }
             _ => cetra_query::QueryError::internal(self.kind.label()),
         }
     }
@@ -97,12 +101,6 @@ impl EngineError {
             cetra_query::QueryError::TooLarge => EngineErrorKind::ResourcesExhausted,
             cetra_query::QueryError::CorruptData(_) => EngineErrorKind::Parquet,
             cetra_query::QueryError::StorageIo(_) => EngineErrorKind::ObjectStore,
-            cetra_query::QueryError::Internal(msg) if msg == "corrupt parquet file" => {
-                EngineErrorKind::Parquet
-            }
-            cetra_query::QueryError::Internal(msg) if msg == "storage read error" => {
-                EngineErrorKind::ObjectStore
-            }
             cetra_query::QueryError::Column(_) => EngineErrorKind::Column,
             cetra_query::QueryError::Busy => EngineErrorKind::Busy,
             _ => EngineErrorKind::Internal,
@@ -1127,19 +1125,25 @@ mod tests {
             Some("resources_exhausted")
         );
 
-        let corrupt = EngineError::from_query(&QueryError::internal("corrupt parquet file"));
+        let corrupt =
+            EngineError::from_query(&QueryError::CorruptData("corrupt parquet file".to_owned()));
         assert!(may_be_corrupt(&corrupt));
         assert_eq!(
             CompactionError::Read { source: corrupt }.read_source(),
             Some("parquet")
         );
 
-        let store = EngineError::from_query(&QueryError::internal("storage read error"));
+        let store =
+            EngineError::from_query(&QueryError::StorageIo("storage read error".to_owned()));
         assert!(!may_be_corrupt(&store));
         assert_eq!(
             CompactionError::Read { source: store }.read_source(),
             Some("object_store")
         );
+
+        let string_only = EngineError::from_query(&QueryError::internal("corrupt parquet file"));
+        assert!(!may_be_corrupt(&string_only));
+        assert_eq!(string_only.kind_label(), "internal");
 
         let anchor_store = AnchorError::parquet(parquet::errors::ParquetError::External(Box::new(
             object_store::Error::Generic {

@@ -307,6 +307,7 @@ impl QueryContext {
         )
         .with_pool(self.engine.pool().cloned())
         .with_suspects(self.engine.suspects.clone())
+        .with_coordinator_slots(Arc::clone(&self.engine.runtime.coordinator_slots))
         .with_target_partitions(self.engine.runtime.target_partitions))
     }
 

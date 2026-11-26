@@ -13,7 +13,7 @@ use cetra_column::{CancelToken, DataType, ScalarValue, Schema};
 use cetra_core::ids::ProjectId;
 use cetra_core::schema::{scores, spans};
 use cetra_query::exec::{
-    ExecContext, ExecMetrics, IdLookupHint, ScanSource, ScanSpec, SpillManager, TimeRangeHint,
+    ExecContext, ExecMetrics, IdLookupHint, ScanSpec, SpillManager, TimeRangeHint,
 };
 use cetra_query::tombstone::{TombstoneTable, covered_predicate};
 use cetra_query::{BinaryOp, EvalContext, Expr, QueryError};
@@ -27,7 +27,7 @@ use crate::compaction::merge::MergeContext;
 use crate::compaction::plan::{Job, JobKind, Policy};
 use crate::deletion::{PendingDeletion, Tombstones, applicable, to_tombstone_specs};
 use crate::error::{CommitError, CompactionError};
-use crate::file_format::ingest_column;
+use crate::file_format::{ingest_column, open_file_scan};
 use crate::memtable::MemSnapshot;
 use crate::read_state::{ReadState, publish_catalog, publish_tombstones};
 use crate::verify::{Suspects, may_be_corrupt};
@@ -553,7 +553,7 @@ async fn holds_covered(
         .pool
         .try_admit(0, ctx.pool.limit())
         .ok_or_else(|| CompactionError::from(QueryError::TooLarge))?;
-    let workers = ctx.qe_runtime.workers().map_err(CompactionError::from)?;
+    let workers = ctx.qe_runtime.bg_workers().map_err(CompactionError::from)?;
     let cancel = CancelToken::new();
     let _cancel_guard = super::CancelOnDrop(cancel.clone());
     let exec_ctx = ExecContext {
@@ -568,19 +568,17 @@ async fn holds_covered(
 
     // Inline tombstones MUST be disabled (`Arc::from([])`) so covered rows
     // are not stripped before `spec.filters` sees them.
-    let source = crate::engine::parquet_source::ParquetSource::new(
+    let mut streams = open_file_scan(
         Arc::clone(&ctx.store),
-        file.table,
+        Arc::clone(file),
         Arc::clone(col_schema),
-        vec![Arc::clone(file)],
-        Arc::from([]),
         Arc::clone(&ctx.qe_runtime.metadata_cache),
         Suspects::new(Arc::clone(&ctx.verify)),
         ctx.runtime_handle.clone(),
-    );
-    let mut streams = source
-        .open_partitions(&spec, &exec_ctx)
-        .map_err(CompactionError::from)?;
+        &spec,
+        &exec_ctx,
+    )
+    .map_err(CompactionError::from)?;
     let Some(mut stream) = streams.pop() else {
         return Ok(false);
     };
