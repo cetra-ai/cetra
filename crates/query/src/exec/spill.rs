@@ -144,7 +144,7 @@ impl SpillWriter {
     /// and other I/O errors to `QueryError::Internal(...)`.
     pub fn write_batch(&mut self, batch: &Batch) -> Result<(), QueryError> {
         self.scratch_buf.clear();
-        encode_batch(batch, &mut self.scratch_buf)?;
+        encode_batch(batch, &mut self.scratch_buf, None)?;
         let frame_len = u64::try_from(self.scratch_buf.len()).map_err(|_| QueryError::TooLarge)?;
         reserve_spill_bytes(&self.spilled_bytes, &self.cap, frame_len)?;
 

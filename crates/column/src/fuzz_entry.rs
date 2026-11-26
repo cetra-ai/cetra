@@ -552,23 +552,23 @@ pub(crate) mod tests {
         };
 
         let mut empty_buf = Vec::new();
-        encode_batch(&Batch::empty(all_types_schema()), &mut empty_buf).unwrap();
+        encode_batch(&Batch::empty(all_types_schema()), &mut empty_buf, None).unwrap();
         write("seed-empty", &empty_buf);
 
         let mut all_types_buf = Vec::new();
-        encode_batch(&all_types_batch(), &mut all_types_buf).unwrap();
+        encode_batch(&all_types_batch(), &mut all_types_buf, None).unwrap();
         write("seed-all-types", &all_types_buf);
 
         let mut encodings_buf = Vec::new();
-        encode_batch(&encodings_batch(), &mut encodings_buf).unwrap();
+        encode_batch(&encodings_batch(), &mut encodings_buf, None).unwrap();
         write("seed-encodings", &encodings_buf);
 
         let mut nested_buf = Vec::new();
-        encode_batch(&nested_list_batch(), &mut nested_buf).unwrap();
+        encode_batch(&nested_list_batch(), &mut nested_buf, None).unwrap();
         write("seed-nested-list", &nested_buf);
 
         let mut uncompressed_buf = Vec::new();
-        encode_batch(&small_uncompressed_batch(), &mut uncompressed_buf).unwrap();
+        encode_batch(&small_uncompressed_batch(), &mut uncompressed_buf, None).unwrap();
         assert_eq!(uncompressed_buf[5], 0, "seed-uncompressed must set flags=0");
         write("seed-uncompressed", &uncompressed_buf);
 

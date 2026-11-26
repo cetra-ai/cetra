@@ -1058,7 +1058,7 @@ fn build_unmatched_build_table_batch(
         for &bid in build_ids {
             let (b_idx, r_idx) = table.row_locs[bid as usize];
             sources.push(Some((
-                &table.batches[b_idx as usize].columns()[col_idx],
+                table.batches[b_idx as usize].columns()[col_idx].as_ref(),
                 r_idx as usize,
             )));
         }
@@ -1112,7 +1112,7 @@ fn build_paired_batch(
                         Some(bid) => {
                             let (b_idx, r_idx) = tbl.row_locs[*bid as usize];
                             sources.push(Some((
-                                &tbl.batches[b_idx as usize].columns()[col_idx],
+                                tbl.batches[b_idx as usize].columns()[col_idx].as_ref(),
                                 r_idx as usize,
                             )));
                         }
@@ -1399,7 +1399,7 @@ impl HashJoinStream {
         let mut offset = 0usize;
         while offset < batch.num_rows() {
             let len = (batch.num_rows() - offset).min(self.batch_size);
-            let slice = batch.slice(offset, len)?;
+            let slice = batch.slice(offset, len, None)?;
             slices_bytes = slices_bytes.saturating_add(slice.memory_bytes());
             slices.push(slice);
             offset += len;
@@ -1547,7 +1547,10 @@ impl HashJoinStream {
         for (col_idx, field) in right_fields.iter().enumerate() {
             let mut sources = Vec::with_capacity(n);
             for &(rb_idx, r_row) in right_refs {
-                sources.push(Some((&right_batches[rb_idx].columns()[col_idx], r_row)));
+                sources.push(Some((
+                    right_batches[rb_idx].columns()[col_idx].as_ref(),
+                    r_row,
+                )));
             }
             let mut sref = Some(&mut self.scratch_res);
             cols.push(build_flat_from_sources(
@@ -3715,10 +3718,11 @@ mod tests {
                 let n = b.num_rows();
                 let k =
                     Column::Flat(FlatColumn::try_new(FlatData::I64(vec![42; n]), None).unwrap());
-                Batch::try_new_all(
+                Batch::try_new_shared(
                     Arc::clone(&right_schema),
-                    vec![k, b.columns()[1].clone()],
+                    vec![Arc::new(k), Arc::clone(&b.columns()[1])],
                     n,
+                    cetra_column::Selection::All,
                 )
                 .unwrap()
             })

@@ -561,7 +561,7 @@ fn take_rows(batches: Vec<Batch>, limit: usize) -> Result<Vec<Batch>, RunError> 
             kept.push(batch);
         } else {
             let sliced = match batch.selection() {
-                Selection::All => batch.slice(0, remaining),
+                Selection::All => batch.slice(0, remaining, None),
                 Selection::Mask(bm) => {
                     let indices: Vec<u32> =
                         bm.iter_ones().take(remaining).map(|i| i as u32).collect();

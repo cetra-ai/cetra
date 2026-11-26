@@ -2587,7 +2587,7 @@ mod tests {
         let mut ids = Vec::new();
         for batch in &batches {
             let idx = batch.schema().index_of(spans::SPAN_ID).unwrap();
-            let col = &batch.columns()[idx];
+            let col = batch.columns()[idx].as_ref();
             for phys in active_rows(batch) {
                 if let Column::Flat(flat) = col
                     && let FlatData::FixedBytes8(arr) = flat.data()
@@ -4603,8 +4603,11 @@ mod tests {
 
         // 2. Const
         let mut const_cols = base.columns().to_vec();
-        const_cols[pid_idx] = Column::try_new_const(ScalarValue::Utf8(pid_str.clone()), 2).unwrap();
-        let const_batch = Batch::try_new_all(Arc::clone(base.schema()), const_cols, 2).unwrap();
+        const_cols[pid_idx] =
+            Arc::new(Column::try_new_const(ScalarValue::Utf8(pid_str.clone()), 2).unwrap());
+        let const_batch =
+            Batch::try_new_shared(Arc::clone(base.schema()), const_cols, 2, Selection::All)
+                .unwrap();
         assert_eq!(project_of(&const_batch).unwrap(), project());
 
         // 3. Dict (with Selection::Indices keeping only row 1 so mixed row 0 is ignored)
@@ -4616,9 +4619,10 @@ mod tests {
             None,
         )
         .unwrap();
-        dict_cols[pid_idx] =
-            Column::Dict(DictColumn::try_new(dict_vals, vec![0, 1], None).unwrap());
-        let dict_batch = Batch::try_new(
+        dict_cols[pid_idx] = Arc::new(Column::Dict(
+            DictColumn::try_new(dict_vals, vec![0, 1], None).unwrap(),
+        ));
+        let dict_batch = Batch::try_new_shared(
             Arc::clone(base.schema()),
             dict_cols,
             2,
@@ -4634,8 +4638,9 @@ mod tests {
             None,
         )
         .unwrap();
-        rle_cols[pid_idx] = Column::Rle(RleColumn::try_new(rle_vals, vec![2]).unwrap());
-        let rle_batch = Batch::try_new_all(Arc::clone(base.schema()), rle_cols, 2).unwrap();
+        rle_cols[pid_idx] = Arc::new(Column::Rle(RleColumn::try_new(rle_vals, vec![2]).unwrap()));
+        let rle_batch =
+            Batch::try_new_shared(Arc::clone(base.schema()), rle_cols, 2, Selection::All).unwrap();
         assert_eq!(project_of(&rle_batch).unwrap(), project());
 
         // Replay across all 4 encodings into a memtable.

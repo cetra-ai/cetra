@@ -3309,7 +3309,7 @@ impl HashAgg {
             return Ok(());
         }
         if let Some(states) = self.global_states.as_mut() {
-            let cols: Vec<&Column> = batch.columns().iter().collect();
+            let cols: Vec<&Column> = batch.columns().iter().map(Arc::as_ref).collect();
             let num_rows = batch.num_rows();
             for row in 0..num_rows {
                 let mut offset = 0usize;
@@ -4021,7 +4021,7 @@ fn fold_partial_batch_into_table(
     eval_ctx: &EvalContext,
 ) -> Result<Option<usize>, QueryError> {
     let num_group_cols = layout.group_types.len();
-    let cols: Vec<&Column> = batch.columns().iter().collect();
+    let cols: Vec<&Column> = batch.columns().iter().map(Arc::as_ref).collect();
     let group_cols = &cols[..num_group_cols];
     let num_rows = batch.num_rows();
 
@@ -4431,7 +4431,7 @@ fn route_partial_batch_to_writers(
     ctx: &ExecContext,
     writers: &mut [Option<SpillWriter>],
 ) -> Result<(), QueryError> {
-    let cols: Vec<&Column> = batch.columns().iter().collect();
+    let cols: Vec<&Column> = batch.columns().iter().map(Arc::as_ref).collect();
     let group_cols = &cols[..num_group_cols];
     let num_rows = batch.num_rows();
     if start_row >= num_rows {

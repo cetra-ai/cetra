@@ -340,6 +340,61 @@ impl Reservation {
     pub fn new_empty(&self, name: &'static str) -> Self {
         self.pool.register(name, self.can_spill)
     }
+
+    /// Atomically moves `bytes` from `self` to `dst` under their shared [`ScopedPool`] lock.
+    ///
+    /// Requires `self` and `dst` to belong to the same `ScopedPool` and `bytes <= self.size()`,
+    /// returning [`ColumnError::InvalidBatch`] otherwise. When `dst.can_spill()` is true,
+    /// enforces `dst.size() + bytes <= post_transfer_share` (where `post_transfer_share` is
+    /// computed after subtracting `bytes` from `unspillable` if `!self.can_spill()`) and returns
+    /// [`ColumnError::MemoryLimit`] (`SpillShare`) without mutating either reservation if exceeded.
+    pub fn transfer_to(&mut self, dst: &mut Reservation, bytes: usize) -> Result<(), ColumnError> {
+        if !Arc::ptr_eq(&self.pool, &dst.pool) {
+            return Err(ColumnError::InvalidBatch {
+                reason: "cannot transfer reservation across different ScopedPools",
+            });
+        }
+        if bytes > self.size {
+            return Err(ColumnError::InvalidBatch {
+                reason: "transfer exceeds source reservation size",
+            });
+        }
+        if bytes == 0 {
+            return Ok(());
+        }
+
+        let mut guard = self.pool.lock();
+        let state = &mut *guard;
+
+        if dst.can_spill {
+            let post_unspillable = if !self.can_spill {
+                state.unspillable.saturating_sub(bytes)
+            } else {
+                state.unspillable
+            };
+            let remaining = self.pool.cap.saturating_sub(post_unspillable);
+            let share = remaining / state.spillable_consumers.max(1);
+            if dst
+                .size
+                .checked_add(bytes)
+                .is_none_or(|after| after > share)
+            {
+                return Err(ColumnError::MemoryLimit {
+                    kind: MemoryLimitKind::SpillShare,
+                    requested: dst.size.saturating_add(bytes),
+                    limit: share,
+                });
+            }
+        }
+
+        if self.can_spill != dst.can_spill {
+            state.sub(self.can_spill, bytes);
+            state.add(dst.can_spill, bytes);
+        }
+        self.size -= bytes;
+        dst.size = dst.size.saturating_add(bytes);
+        Ok(())
+    }
 }
 
 impl Drop for Reservation {
@@ -521,5 +576,87 @@ mod tests {
             h.join().expect("join");
         }
         assert_eq!(global.used(), 0);
+    }
+
+    #[test]
+    fn transfer_to_moves_atomically_without_peak_spike_and_updates_spill_accounting() {
+        let global = GlobalPool::new(300);
+        let scope = global.try_admit(0, 300).expect("admit");
+        let mut scan_res = scope.register("scan", false);
+        let mut sink_res = scope.register("sink", true);
+
+        // Fill the entire 300B pool in scan_res; transferring to sink_res must succeed
+        // with zero peak spike in GlobalPool or ScopedPool.
+        scan_res.try_grow(300).expect("scan grow 300");
+        assert_eq!(scope.spill_share(), 0);
+        scan_res.transfer_to(&mut sink_res, 300).expect("transfer");
+        assert_eq!(scan_res.size(), 0);
+        assert_eq!(sink_res.size(), 300);
+        assert_eq!(scope.reserved(), 300);
+        assert_eq!(global.used(), 300);
+        assert_eq!(scope.spill_share(), 300);
+
+        // Moving back from spillable sink_res to unspillable scan_res updates unspillable_bytes.
+        sink_res
+            .transfer_to(&mut scan_res, 100)
+            .expect("transfer back");
+        assert_eq!(scan_res.size(), 100);
+        assert_eq!(sink_res.size(), 200);
+        assert_eq!(scope.spill_share(), 200);
+
+        // Zero-byte transfer is a no-op when valid.
+        scan_res
+            .transfer_to(&mut sink_res, 0)
+            .expect("zero transfer");
+        assert_eq!(scan_res.size(), 100);
+        assert_eq!(sink_res.size(), 200);
+    }
+
+    #[test]
+    fn transfer_to_enforces_post_transfer_spill_share_and_validates_errors() {
+        let scope = GlobalPool::standalone(300);
+        let mut scan_res = scope.register("scan", false);
+        let mut sink1 = scope.register("sink1", true);
+        let mut sink2 = scope.register("sink2", true);
+
+        scan_res.try_grow(200).expect("scan grow");
+        sink1.try_grow(50).expect("sink1 grow");
+        // Post-transfer unspillable = 0, remaining = 300, share = 300 / 2 = 150.
+        // sink1 has 50; adding 200 would reach 250 > 150 -> SpillShare without mutation.
+        let err = scan_res.transfer_to(&mut sink1, 200).unwrap_err();
+        assert!(matches!(
+            err,
+            ColumnError::MemoryLimit {
+                kind: MemoryLimitKind::SpillShare,
+                requested: 250,
+                limit: 150,
+            }
+        ));
+        assert_eq!(scan_res.size(), 200);
+        assert_eq!(sink1.size(), 50);
+        assert_eq!(scope.reserved(), 250);
+        assert_eq!(scope.spill_share(), 50);
+
+        // Transferring 100 fits: post_unspillable = 100, share = (300 - 100) / 2 = 100.
+        //Wait: 50 + 100 = 150 > 100, whereas transferring 50 -> post_unspillable = 150, share = 75 -> 100 > 75.
+        // Transferring 100 to sink2 (0 -> 100): post_unspillable = 100, share = 100 -> 100 <= 100 succeeds!
+        scan_res
+            .transfer_to(&mut sink2, 100)
+            .expect("transfer to sink2");
+        assert_eq!(scan_res.size(), 100);
+        assert_eq!(sink2.size(), 100);
+        assert_eq!(scope.spill_share(), 100);
+
+        // Exceeding source reservation fails with InvalidBatch.
+        let err = scan_res.transfer_to(&mut sink1, 101).unwrap_err();
+        assert!(matches!(err, ColumnError::InvalidBatch { .. }));
+
+        // Cross-pool transfer fails with InvalidBatch (even for 0 bytes).
+        let other_scope = GlobalPool::standalone(300);
+        let mut other_res = other_scope.register("other", true);
+        let err = scan_res.transfer_to(&mut other_res, 10).unwrap_err();
+        assert!(matches!(err, ColumnError::InvalidBatch { .. }));
+        let err = scan_res.transfer_to(&mut other_res, 0).unwrap_err();
+        assert!(matches!(err, ColumnError::InvalidBatch { .. }));
     }
 }

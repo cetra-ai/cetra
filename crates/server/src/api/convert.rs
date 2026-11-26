@@ -1963,8 +1963,9 @@ mod tests {
         let raw_len = base.raw_len();
         for bad_version in [i64::from(u16::MAX) + 1, -1] {
             let mut cols = base.columns().to_vec();
-            cols[sv_idx] = Column::try_new_const(ScalarValue::I64(bad_version), raw_len).unwrap();
-            let bad_batch = Batch::try_new(
+            cols[sv_idx] =
+                Arc::new(Column::try_new_const(ScalarValue::I64(bad_version), raw_len).unwrap());
+            let bad_batch = Batch::try_new_shared(
                 Arc::clone(base.schema()),
                 cols,
                 raw_len,

@@ -2815,7 +2815,7 @@ fn single_row(batches: &[Batch], exec_ctx: &ExecContext) -> Result<Option<Batch>
     if combined.num_rows() == 1 {
         return Ok(Some(combined));
     }
-    Ok(Some(combined.slice(0, 1)?))
+    Ok(Some(combined.slice(0, 1, None)?))
 }
 
 fn cap_rows(batches: Vec<Batch>, limit: usize) -> Result<(Vec<Batch>, bool), RunError> {
@@ -2838,7 +2838,7 @@ fn cap_rows(batches: Vec<Batch>, limit: usize) -> Result<(Vec<Batch>, bool), Run
             kept.push(batch);
         } else {
             let sliced = match batch.selection() {
-                Selection::All => batch.slice(0, remaining),
+                Selection::All => batch.slice(0, remaining, None),
                 Selection::Mask(bm) => {
                     let indices: Vec<u32> =
                         bm.iter_ones().take(remaining).map(|i| i as u32).collect();

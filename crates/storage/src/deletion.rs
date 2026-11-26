@@ -586,15 +586,17 @@ mod tests {
         // Also check with non-All Selection and Const column encoding.
         let mut cols = col_batch.columns().to_vec();
         let ingest_idx = col_batch.schema().index_of(spans::INGEST_TIME).unwrap();
-        cols[ingest_idx] = Column::try_new_const(
-            ScalarValue::TimestampNs {
-                value: 1,
-                utc: true,
-            },
-            3,
-        )
-        .unwrap();
-        let with_const = Batch::try_new(
+        cols[ingest_idx] = Arc::new(
+            Column::try_new_const(
+                ScalarValue::TimestampNs {
+                    value: 1,
+                    utc: true,
+                },
+                3,
+            )
+            .unwrap(),
+        );
+        let with_const = Batch::try_new_shared(
             Arc::clone(col_batch.schema()),
             cols,
             3,

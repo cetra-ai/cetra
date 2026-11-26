@@ -357,7 +357,7 @@ impl<W: Write + Send> BatchFileWriter<W> {
             let room = ROW_GROUP_ROWS.saturating_sub(self.writer.in_progress_rows());
             let len = WRITE_SLICE_ROWS.min(room.max(1)).min(num_rows - offset);
             let slice = dense
-                .slice(offset, len)
+                .slice(offset, len, None)
                 .map_err(ParquetWriteError::from_column)?;
             let arrow_slice = batch_to_record_batch(&slice, &self.arrow_schema)
                 .map_err(ParquetWriteError::from_column)?;
@@ -1971,8 +1971,9 @@ mod tests {
         );
         let mut cols = scores_col.columns().to_vec();
         let p_idx = scores_col.schema().index_of(scores::PROJECT_ID).unwrap();
-        cols[p_idx] = Column::try_new_const(ScalarValue::Utf8(project().to_string()), 2).unwrap();
-        let masked = Batch::try_new(
+        cols[p_idx] =
+            Arc::new(Column::try_new_const(ScalarValue::Utf8(project().to_string()), 2).unwrap());
+        let masked = Batch::try_new_shared(
             Arc::clone(scores_col.schema()),
             cols,
             2,
@@ -2074,7 +2075,7 @@ mod tests {
         ));
 
         let spans = span_rows(&[span_row(1, 0, 1, 1)]);
-        let empty = spans.slice(0, 0).unwrap();
+        let empty = spans.slice(0, 0, None).unwrap();
         assert!(matches!(
             write_file_batch(FileTable::Spans, 0, &[Arc::new(empty)]).unwrap_err(),
             ParquetWriteError::Invalid { .. }

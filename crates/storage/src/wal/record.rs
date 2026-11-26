@@ -65,7 +65,7 @@ fn encode_within(
     max_decoded: u32,
 ) -> Result<(), WalError> {
     let mut payload = Vec::new();
-    cetra_column::frame::encode_batch_with_limit(batch, &mut payload, max_decoded)
+    cetra_column::frame::encode_batch_with_limit(batch, &mut payload, None, max_decoded)
         .map_err(|err| WalError::from_column(&err))?;
     let Ok(len) = u32::try_from(payload.len()) else {
         return Err(WalError::InvalidPayload {
@@ -157,7 +157,7 @@ pub(crate) fn read_batch(payload: &[u8], table: Table) -> Result<Batch, WalError
     }
     let batch = cetra_column::frame::decode_batch(payload, Some(&table.column_schema()), None)
         .map_err(|err| WalError::from_column(&err))?;
-    if !batch.columns().iter().all(is_all_flat) {
+    if !batch.columns().iter().all(|c| is_all_flat(c)) {
         return Err(WalError::InvalidPayload {
             reason: "non-flat column encoding in WAL record",
         });
@@ -548,7 +548,7 @@ mod tests {
         let col = Column::Flat(FlatColumn::try_new(FlatData::I64(vec![1]), None).unwrap());
         let wrong = Batch::try_new_all(schema, vec![col], 1).unwrap();
         let mut wrong_payload = Vec::new();
-        cetra_column::frame::encode_batch(&wrong, &mut wrong_payload).unwrap();
+        cetra_column::frame::encode_batch(&wrong, &mut wrong_payload, None).unwrap();
         assert!(is_invalid_payload(&read_batch(
             &wrong_payload,
             Table::Spans
@@ -591,12 +591,12 @@ mod tests {
         let top_bomb =
             Batch::try_new_all(Arc::clone(&schema), const_cols, u32::MAX as usize).unwrap();
         let mut top_payload = Vec::new();
-        cetra_column::frame::encode_batch(&top_bomb, &mut top_payload).unwrap();
+        cetra_column::frame::encode_batch(&top_bomb, &mut top_payload, None).unwrap();
         assert!(top_payload.len() < 2048);
         let err = read_batch(&top_payload, Table::Spans).unwrap_err();
         assert!(
-            matches!(err, WalError::InvalidPayload { reason } if reason == "non-flat column encoding in WAL record"),
-            "expected non-flat rejection for top-level Const bomb, got {err:?}"
+            matches!(err, WalError::InvalidPayload { reason } if reason == "batch raw_len exceeds max_decoded"),
+            "expected max_decoded rejection for top-level Const bomb, got {err:?}"
         );
 
         // 2. Nested FlatData::List { offsets: [0, u32::MAX], values: Const(u32::MAX) } bomb.
@@ -616,14 +616,68 @@ mod tests {
             .unwrap(),
         );
         let mut nested_cols = base.columns().to_vec();
-        nested_cols[tags_idx] = list_bomb_col;
-        let nested_bomb = Batch::try_new_all(Arc::clone(&schema), nested_cols, 1).unwrap();
+        nested_cols[tags_idx] = Arc::new(list_bomb_col);
+        let nested_bomb = Batch::try_new_shared(
+            Arc::clone(&schema),
+            nested_cols,
+            1,
+            cetra_column::Selection::All,
+        )
+        .unwrap();
         let mut nested_payload = Vec::new();
-        cetra_column::frame::encode_batch(&nested_bomb, &mut nested_payload).unwrap();
+        cetra_column::frame::encode_batch(&nested_bomb, &mut nested_payload, None).unwrap();
         let err = read_batch(&nested_payload, Table::Spans).unwrap_err();
         assert!(
+            matches!(err, WalError::InvalidPayload { reason } if reason == "list child length exceeds max_decoded"),
+            "expected max_decoded rejection for nested List(Const) bomb, got {err:?}"
+        );
+
+        // 2b. Small (1-row) top-level Const and nested List(Const) pass framing and are rejected by is_all_flat.
+        let small_const_cols: Vec<Column> = base
+            .columns()
+            .iter()
+            .map(|c| Column::try_new_const(c.get_scalar(0).unwrap(), 1).unwrap())
+            .collect();
+        let small_const_batch =
+            Batch::try_new_all(Arc::clone(&schema), small_const_cols, 1).unwrap();
+        let mut small_const_payload = Vec::new();
+        cetra_column::frame::encode_batch(&small_const_batch, &mut small_const_payload, None)
+            .unwrap();
+        let err = read_batch(&small_const_payload, Table::Spans).unwrap_err();
+        assert!(
             matches!(err, WalError::InvalidPayload { reason } if reason == "non-flat column encoding in WAL record"),
-            "expected non-flat rejection for nested List(Const) bomb, got {err:?}"
+            "expected non-flat rejection for 1-row Const, got {err:?}"
+        );
+
+        let small_list_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    offsets: vec![0, 1],
+                    values: Box::new(
+                        Column::try_new_const(ScalarValue::Utf8("x".to_owned()), 1).unwrap(),
+                    ),
+                    item_type: DataType::Utf8,
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let mut small_nested_cols = base.columns().to_vec();
+        small_nested_cols[tags_idx] = Arc::new(small_list_col);
+        let small_nested_batch = Batch::try_new_shared(
+            Arc::clone(&schema),
+            small_nested_cols,
+            1,
+            cetra_column::Selection::All,
+        )
+        .unwrap();
+        let mut small_nested_payload = Vec::new();
+        cetra_column::frame::encode_batch(&small_nested_batch, &mut small_nested_payload, None)
+            .unwrap();
+        let err = read_batch(&small_nested_payload, Table::Spans).unwrap_err();
+        assert!(
+            matches!(err, WalError::InvalidPayload { reason } if reason == "non-flat column encoding in WAL record"),
+            "expected non-flat rejection for 1-row nested List(Const), got {err:?}"
         );
 
         // 3. Dict and Rle encodings are also rejected in WAL records.
@@ -634,10 +688,18 @@ mod tests {
             None,
         )
         .unwrap();
-        dict_cols[name_idx] = Column::Dict(DictColumn::try_new(dict_vals, vec![0], None).unwrap());
-        let dict_batch = Batch::try_new_all(Arc::clone(&schema), dict_cols, 1).unwrap();
+        dict_cols[name_idx] = Arc::new(Column::Dict(
+            DictColumn::try_new(dict_vals, vec![0], None).unwrap(),
+        ));
+        let dict_batch = Batch::try_new_shared(
+            Arc::clone(&schema),
+            dict_cols,
+            1,
+            cetra_column::Selection::All,
+        )
+        .unwrap();
         let mut dict_payload = Vec::new();
-        cetra_column::frame::encode_batch(&dict_batch, &mut dict_payload).unwrap();
+        cetra_column::frame::encode_batch(&dict_batch, &mut dict_payload, None).unwrap();
         assert!(is_invalid_payload(&read_batch(&dict_payload, Table::Spans)));
 
         let mut rle_cols = base.columns().to_vec();
@@ -646,10 +708,11 @@ mod tests {
             None,
         )
         .unwrap();
-        rle_cols[name_idx] = Column::Rle(RleColumn::try_new(rle_vals, vec![1]).unwrap());
-        let rle_batch = Batch::try_new_all(schema, rle_cols, 1).unwrap();
+        rle_cols[name_idx] = Arc::new(Column::Rle(RleColumn::try_new(rle_vals, vec![1]).unwrap()));
+        let rle_batch =
+            Batch::try_new_shared(schema, rle_cols, 1, cetra_column::Selection::All).unwrap();
         let mut rle_payload = Vec::new();
-        cetra_column::frame::encode_batch(&rle_batch, &mut rle_payload).unwrap();
+        cetra_column::frame::encode_batch(&rle_batch, &mut rle_payload, None).unwrap();
         assert!(is_invalid_payload(&read_batch(&rle_payload, Table::Spans)));
     }
 

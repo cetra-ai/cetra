@@ -430,14 +430,14 @@ mod tests {
         let schema = Arc::new(Schema::try_new(fields).unwrap());
         let mut columns = source.columns().to_vec();
         let index = schema.index_of(spans::SPAN_ID).unwrap();
-        columns[index] = Column::Flat(
+        columns[index] = Arc::new(Column::Flat(
             FlatColumn::try_new(
                 FlatData::FixedBytes8(vec![[0; 8]]),
                 Some(Bitmap::from_bools(&[false])),
             )
             .unwrap(),
-        );
-        let batch = Batch::try_new_all(schema, columns, 1).unwrap();
+        ));
+        let batch = Batch::try_new_shared(schema, columns, 1, Selection::All).unwrap();
         let error = latest_spans_batch(&batch).unwrap_err();
         assert_eq!(error.reason(), "null span identity");
     }
@@ -456,14 +456,16 @@ mod tests {
         let ingest_idx = schema.index_of(spans::INGEST_TIME).unwrap();
 
         let tid = [0x11_u8; 16];
-        cols[trace_idx] = Column::try_new_const(ScalarValue::FixedBytes16(tid), 3).unwrap();
+        cols[trace_idx] =
+            Arc::new(Column::try_new_const(ScalarValue::FixedBytes16(tid), 3).unwrap());
         let span_dict_vals = FlatColumn::try_new(
             FlatData::FixedBytes8(vec![[0, 0, 0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, 0, 0, 2]]),
             None,
         )
         .unwrap();
-        cols[span_idx] =
-            Column::Dict(DictColumn::try_new(span_dict_vals, vec![0, 1, 0], None).unwrap());
+        cols[span_idx] = Arc::new(Column::Dict(
+            DictColumn::try_new(span_dict_vals, vec![0, 1, 0], None).unwrap(),
+        ));
         let ingest_rle_vals = FlatColumn::try_new(
             FlatData::TimestampNs {
                 values: vec![10, 20],
@@ -472,12 +474,14 @@ mod tests {
             None,
         )
         .unwrap();
-        cols[ingest_idx] = Column::Rle(RleColumn::try_new(ingest_rle_vals, vec![1, 3]).unwrap());
+        cols[ingest_idx] = Arc::new(Column::Rle(
+            RleColumn::try_new(ingest_rle_vals, vec![1, 3]).unwrap(),
+        ));
 
         // Selection::Indices([2, 1, 0]): row 0 and row 2 share span_id 1; row 0 (ingest=10) loses to row 2 (ingest=20),
         // and even if tied, row 0 comes AFTER row 2 in input order [2, 1, 0]!
         // Here row 2 has ingest=20 and row 0 has ingest=10, so row 2 wins and output order is [2, 1].
-        let enc_batch = Batch::try_new(
+        let enc_batch = Batch::try_new_shared(
             Arc::clone(&schema),
             cols.clone(),
             3,
@@ -512,7 +516,7 @@ mod tests {
         );
 
         // Selection::Mask([true, false, true]): keeps rows 0 and 2 -> row 2 wins.
-        let masked = Batch::try_new(
+        let masked = Batch::try_new_shared(
             schema,
             cols,
             3,
@@ -554,8 +558,10 @@ mod tests {
             None,
         )
         .unwrap();
-        cols[id_idx] = Column::Dict(DictColumn::try_new(id_vals, vec![0, 1, 0, 1], None).unwrap());
-        cols[upd_idx] = Column::Rle(
+        cols[id_idx] = Arc::new(Column::Dict(
+            DictColumn::try_new(id_vals, vec![0, 1, 0, 1], None).unwrap(),
+        ));
+        cols[upd_idx] = Arc::new(Column::Rle(
             RleColumn::try_new(
                 FlatColumn::try_new(
                     FlatData::TimestampNs {
@@ -568,18 +574,20 @@ mod tests {
                 vec![2, 4],
             )
             .unwrap(),
+        ));
+        cols[ing_idx] = Arc::new(
+            Column::try_new_const(
+                ScalarValue::TimestampNs {
+                    value: 100,
+                    utc: true,
+                },
+                4,
+            )
+            .unwrap(),
         );
-        cols[ing_idx] = Column::try_new_const(
-            ScalarValue::TimestampNs {
-                value: 100,
-                utc: true,
-            },
-            4,
-        )
-        .unwrap();
-        cols[del_idx] = Column::try_new_const(ScalarValue::Bool(true), 4).unwrap();
+        cols[del_idx] = Arc::new(Column::try_new_const(ScalarValue::Bool(true), 4).unwrap());
 
-        let enc = Batch::try_new(
+        let enc = Batch::try_new_shared(
             schema,
             cols,
             4,

@@ -921,15 +921,17 @@ mod tests {
             .schema()
             .index_of(Table::Spans.ingest_column())
             .unwrap();
-        cols[ingest_idx] = Column::try_new_const(
-            ScalarValue::TimestampNs {
-                value: 555,
-                utc: true,
-            },
-            3,
-        )
-        .unwrap();
-        let filtered = Batch::try_new(
+        cols[ingest_idx] = Arc::new(
+            Column::try_new_const(
+                ScalarValue::TimestampNs {
+                    value: 555,
+                    utc: true,
+                },
+                3,
+            )
+            .unwrap(),
+        );
+        let filtered = Batch::try_new_shared(
             Arc::clone(base.schema()),
             cols,
             3,

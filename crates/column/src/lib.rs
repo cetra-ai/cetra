@@ -20,7 +20,7 @@ pub mod fuzz_entry;
 
 pub use batch::Batch;
 pub use bitmap::Bitmap;
-pub use cancel::CancelToken;
+pub use cancel::{CancelGuard, CancelToken};
 pub use column::{
     BinaryData, Column, DictColumn, EventsData, FlatColumn, FlatData, LinksData, MapData,
     RleColumn, Utf8Data,

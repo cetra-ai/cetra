@@ -1360,7 +1360,7 @@ fn single_row(batches: &[Batch], exec_ctx: &ExecContext) -> Result<Option<Batch>
     if merged.num_rows() == 1 {
         return Ok(Some(merged));
     }
-    Ok(Some(merged.slice(0, 1)?))
+    Ok(Some(merged.slice(0, 1, None)?))
 }
 
 #[cfg(test)]

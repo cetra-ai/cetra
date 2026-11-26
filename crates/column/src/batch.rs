@@ -12,7 +12,7 @@ use crate::{
 #[derive(Clone, PartialEq)]
 pub struct Batch {
     schema: Arc<Schema>,
-    columns: Vec<Column>,
+    columns: Vec<Arc<Column>>,
     raw_len: usize,
     selection: Selection,
 }
@@ -30,7 +30,7 @@ impl fmt::Debug for Batch {
 
 fn validate_non_null_fields(
     schema: &Schema,
-    columns: &[Column],
+    columns: &[Arc<Column>],
     selection: &Selection,
 ) -> Result<(), ColumnError> {
     for (field, col) in schema.fields().iter().zip(columns) {
@@ -54,14 +54,21 @@ impl Batch {
     /// Validates `raw_len <= u32::MAX as usize`, column count == `schema.len()`, every column's
     /// `data_type()` and `len() == raw_len`, `Const` scalar validity, `selection.validate(raw_len)`,
     /// and non-nullable field constraints across active rows without allocating `to_indices` or
-    /// looping `0..raw_len`:
-    /// - Fast path: if `!field.nullable && col.has_nulls()`:
-    ///   - `Selection::All` → reject immediately in O(1);
-    ///   - `Selection::Mask(m)` → check `m.iter_ones().any(|r| col.is_null(r))`;
-    ///   - `Selection::Indices(idx)` → check `idx.iter().any(|&r| col.is_null(r as usize))`.
+    /// looping `0..raw_len`.
     pub fn try_new(
         schema: Arc<Schema>,
         columns: Vec<Column>,
+        raw_len: usize,
+        selection: Selection,
+    ) -> Result<Self, ColumnError> {
+        let shared = columns.into_iter().map(Arc::new).collect();
+        Self::try_new_shared(schema, shared, raw_len, selection)
+    }
+
+    /// Zero-copy shared-column variant of [`Self::try_new`] taking `Vec<Arc<Column>>`.
+    pub fn try_new_shared(
+        schema: Arc<Schema>,
+        columns: Vec<Arc<Column>>,
         raw_len: usize,
         selection: Selection,
     ) -> Result<Self, ColumnError> {
@@ -112,7 +119,7 @@ impl Batch {
         let columns = schema
             .fields()
             .iter()
-            .map(|f| Column::Flat(FlatColumn::empty(&f.data_type)))
+            .map(|f| Arc::new(Column::Flat(FlatColumn::empty(&f.data_type))))
             .collect();
         Self {
             schema,
@@ -129,25 +136,28 @@ impl Batch {
 
     /// Consumes this batch and returns its raw `(schema, columns, raw_len, selection)` parts
     /// without cloning column buffers.
-    pub fn into_parts(self) -> (Arc<Schema>, Vec<Column>, usize, Selection) {
+    pub fn into_parts(self) -> (Arc<Schema>, Vec<Arc<Column>>, usize, Selection) {
         (self.schema, self.columns, self.raw_len, self.selection)
     }
 
     /// All columns in schema order.
-    pub fn columns(&self) -> &[Column] {
+    pub fn columns(&self) -> &[Arc<Column>] {
         &self.columns
     }
 
-    /// Column at index `i`.
+    /// Column at index `index`.
     pub fn column(&self, index: usize) -> Option<&Column> {
+        self.columns.get(index).map(Arc::as_ref)
+    }
+
+    /// Shared `Arc<Column>` handle at index `index`.
+    pub fn column_arc(&self, index: usize) -> Option<&Arc<Column>> {
         self.columns.get(index)
     }
 
     /// Column by exact field name.
     pub fn column_by_name(&self, name: &str) -> Option<&Column> {
-        self.schema
-            .index_of(name)
-            .and_then(|idx| self.columns.get(idx))
+        self.schema.index_of(name).and_then(|idx| self.column(idx))
     }
 
     /// Physical row count before applying `selection`.
@@ -170,7 +180,8 @@ impl Batch {
         &self.selection
     }
 
-    /// Replaces `selection` after validating against `raw_len` and non-null field constraints.
+    /// Replaces `selection` after validating against `raw_len` and non-null field constraints,
+    /// sharing underlying `Arc<Column>` handles with zero buffer copying.
     pub fn with_selection(&self, selection: Selection) -> Result<Self, ColumnError> {
         selection.validate(self.raw_len)?;
         validate_non_null_fields(&self.schema, &self.columns, &selection)?;
@@ -188,10 +199,14 @@ impl Batch {
         self.with_selection(next)
     }
 
-    /// Projects a subset of columns by index, keeping `selection` intact.
+    /// Projects a subset of columns by index, keeping `selection` intact and sharing
+    /// `Arc<Column>` handles with zero buffer copying (even for duplicate indices).
     pub fn project(&self, indices: &[usize]) -> Result<Self, ColumnError> {
         let new_schema = Arc::new(self.schema.project(indices)?);
-        let new_columns = indices.iter().map(|&i| self.columns[i].clone()).collect();
+        let new_columns = indices
+            .iter()
+            .map(|&i| Arc::clone(&self.columns[i]))
+            .collect();
         Ok(Self {
             schema: new_schema,
             columns: new_columns,
@@ -215,48 +230,119 @@ impl Batch {
         self.into_with_selection(next)
     }
 
-    /// Consumes `self` and projects a subset of columns by index, keeping `selection` intact.
-    /// Moves unique columns without cloning and clones only when an index appears more than once.
+    /// Consumes `self` and projects a subset of columns by index, keeping `selection` intact
+    /// and sharing `Arc<Column>` handles with zero buffer copying (even for duplicate indices).
     pub fn into_project(mut self, indices: &[usize]) -> Result<Self, ColumnError> {
         let new_schema = Arc::new(self.schema.project(indices)?);
-        let old_columns = std::mem::take(&mut self.columns);
-        let mut slots: Vec<Option<Column>> = old_columns.into_iter().map(Some).collect();
-        let mut first_out_pos: Vec<Option<usize>> = vec![None; slots.len()];
-        let mut new_columns = Vec::with_capacity(indices.len());
-
-        for &idx in indices {
-            if let Some(col) = slots.get_mut(idx).and_then(Option::take) {
-                if let Some(pos_slot) = first_out_pos.get_mut(idx) {
-                    *pos_slot = Some(new_columns.len());
-                }
-                new_columns.push(col);
-            } else if let Some(out_col) = first_out_pos
-                .get(idx)
-                .and_then(|pos| *pos)
-                .and_then(|pos| new_columns.get(pos))
-                .cloned()
-            {
-                new_columns.push(out_col);
-            } else {
-                return Err(ColumnError::InvalidBatch {
-                    reason: "projection index out of bounds",
-                });
-            }
-        }
-
+        let new_columns = indices
+            .iter()
+            .map(|&i| Arc::clone(&self.columns[i]))
+            .collect();
         self.schema = new_schema;
         self.columns = new_columns;
         Ok(self)
     }
 
     /// Slices physical rows `offset..offset + len`, slicing `selection` accordingly.
-    pub fn slice(&self, offset: usize, len: usize) -> Result<Self, ColumnError> {
-        let new_sel = self.selection.slice(self.raw_len, offset, len)?;
-        let mut new_cols = Vec::with_capacity(self.columns.len());
-        for col in &self.columns {
-            new_cols.push(col.slice(offset, len)?);
+    /// Deduplicates shared `Arc<Column>` pointers and accounts for newly allocated slice buffers
+    /// in `pool` when `Some` (rolling back on error).
+    pub fn slice(
+        &self,
+        offset: usize,
+        len: usize,
+        mut pool: Option<&mut Reservation>,
+    ) -> Result<Self, ColumnError> {
+        let before = pool.as_ref().map_or(0, |p| p.size());
+        let new_sel = match self.selection.slice(self.raw_len, offset, len) {
+            Ok(s) => s,
+            Err(err) => {
+                rollback_reservation(pool, before);
+                return Err(err);
+            }
+        };
+        if let Some(res) = pool.as_deref_mut()
+            && let Err(err) = res.try_grow(new_sel.memory_bytes())
+        {
+            rollback_reservation(pool, before);
+            return Err(err);
         }
-        Self::try_new(Arc::clone(&self.schema), new_cols, len, new_sel)
+
+        let mut seen_inline: [(*const Column, usize); 64] = [(std::ptr::null(), 0); 64];
+        let mut seen_inline_len = 0usize;
+        let mut seen_overflow: Vec<(*const Column, usize)> = Vec::new();
+        let mut new_cols: Vec<Arc<Column>> = Vec::with_capacity(self.columns.len());
+
+        for col in &self.columns {
+            let ptr = Arc::as_ptr(col);
+            let existing_idx = seen_inline[..seen_inline_len]
+                .iter()
+                .find_map(|&(p, idx)| (p == ptr).then_some(idx))
+                .or_else(|| {
+                    seen_overflow
+                        .iter()
+                        .find_map(|&(p, idx)| (p == ptr).then_some(idx))
+                });
+
+            if let Some(idx) = existing_idx {
+                new_cols.push(Arc::clone(&new_cols[idx]));
+                continue;
+            }
+
+            let sliced = match col.slice(offset, len, pool.as_deref_mut()) {
+                Ok(c) => Arc::new(c),
+                Err(err) => {
+                    rollback_reservation(pool, before);
+                    return Err(err);
+                }
+            };
+            let out_idx = new_cols.len();
+            if seen_inline_len < seen_inline.len() {
+                seen_inline[seen_inline_len] = (ptr, out_idx);
+                seen_inline_len += 1;
+            } else {
+                seen_overflow.push((ptr, out_idx));
+            }
+            new_cols.push(sliced);
+        }
+
+        match Self::try_new_shared(Arc::clone(&self.schema), new_cols, len, new_sel) {
+            Ok(batch) => Ok(batch),
+            Err(err) => {
+                rollback_reservation(pool, before);
+                Err(err)
+            }
+        }
+    }
+
+    fn checked_dedup_columns_memory_bytes(&self) -> Result<usize, ColumnError> {
+        let mut total = 0usize;
+        let mut seen_inline: [*const Column; 64] = [std::ptr::null(); 64];
+        let mut seen_inline_len = 0usize;
+        let mut seen_overflow: Vec<*const Column> = Vec::new();
+
+        for col in &self.columns {
+            let ptr = Arc::as_ptr(col);
+            let already_seen = if seen_inline[..seen_inline_len].contains(&ptr) {
+                true
+            } else if seen_inline_len < seen_inline.len() {
+                seen_inline[seen_inline_len] = ptr;
+                seen_inline_len += 1;
+                false
+            } else if seen_overflow.contains(&ptr) {
+                true
+            } else {
+                seen_overflow.push(ptr);
+                false
+            };
+            if !already_seen {
+                total = total
+                    .checked_add(col.memory_bytes())
+                    .ok_or(ColumnError::Overflow {
+                        reason: "batch column byte total overflow",
+                    })?;
+            }
+        }
+        Ok(total)
     }
 
     /// Materializes active rows (`Selection::All`, `raw_len == num_rows()`).
@@ -266,15 +352,7 @@ impl Batch {
     pub fn compact(&self, mut pool: Option<&mut Reservation>) -> Result<Self, ColumnError> {
         let before = pool.as_ref().map_or(0, |p| p.size());
         if self.selection.is_all(self.raw_len) {
-            let mut target_bytes = 0usize;
-            for col in &self.columns {
-                target_bytes =
-                    target_bytes
-                        .checked_add(col.memory_bytes())
-                        .ok_or(ColumnError::Overflow {
-                            reason: "batch compact byte total overflow",
-                        })?;
-            }
+            let target_bytes = self.checked_dedup_columns_memory_bytes()?;
             reconcile_reservation(pool, before, target_bytes)?;
             return Ok(Self {
                 schema: Arc::clone(&self.schema),
@@ -377,7 +455,7 @@ impl Batch {
         for (col_idx, field) in schema.fields().iter().enumerate() {
             let mut pieces: Vec<FlatPiece<'_>> = Vec::with_capacity(active_batches.len());
             for (b, maybe_idx) in active_batches.iter().zip(&batch_indices) {
-                let col = &b.columns[col_idx];
+                let col = b.columns[col_idx].as_ref();
                 let piece = match (maybe_idx, col) {
                     (None, Column::Flat(fc)) => FlatPiece::Borrowed(fc),
                     (None, other) => match other.materialize(pool.as_deref_mut()) {
@@ -471,9 +549,33 @@ impl Batch {
         true
     }
 
-    /// Deterministic logical heap bytes across all columns and selection.
+    /// Deterministic logical heap bytes across unique columns (deduplicated by `Arc::as_ptr`)
+    /// and selection.
     pub fn memory_bytes(&self) -> usize {
-        self.columns.iter().map(Column::memory_bytes).sum::<usize>() + self.selection.memory_bytes()
+        let mut total = self.selection.memory_bytes();
+        let mut seen_inline: [*const Column; 64] = [std::ptr::null(); 64];
+        let mut seen_inline_len = 0usize;
+        let mut seen_overflow: Vec<*const Column> = Vec::new();
+
+        for col in &self.columns {
+            let ptr = Arc::as_ptr(col);
+            let already_seen = if seen_inline[..seen_inline_len].contains(&ptr) {
+                true
+            } else if seen_inline_len < seen_inline.len() {
+                seen_inline[seen_inline_len] = ptr;
+                seen_inline_len += 1;
+                false
+            } else if seen_overflow.contains(&ptr) {
+                true
+            } else {
+                seen_overflow.push(ptr);
+                false
+            };
+            if !already_seen {
+                total += col.memory_bytes();
+            }
+        }
+        total
     }
 }
 
@@ -521,9 +623,9 @@ mod tests {
             .with_selection(Selection::Mask(Bitmap::new_ones(4)))
             .unwrap();
         let compacted_all = batch_all_mask.compact(None).unwrap();
-        assert!(matches!(compacted_all.columns()[0], Column::Const { .. }));
-        assert!(matches!(compacted_all.columns()[1], Column::Dict(_)));
-        assert!(matches!(compacted_all.columns()[2], Column::Rle(_)));
+        assert!(matches!(*compacted_all.columns()[0], Column::Const { .. }));
+        assert!(matches!(*compacted_all.columns()[1], Column::Dict(_)));
+        assert!(matches!(*compacted_all.columns()[2], Column::Rle(_)));
         assert_eq!(compacted_all.selection(), &Selection::All);
 
         // filter_mask keeps raw_len unchanged
@@ -547,7 +649,7 @@ mod tests {
         assert_eq!(projected.raw_len(), 4);
 
         // slice
-        let sliced = filtered.slice(1, 3).unwrap();
+        let sliced = filtered.slice(1, 3, None).unwrap();
         assert_eq!(sliced.raw_len(), 3);
         assert_eq!(sliced.num_rows(), 1);
         assert!(
@@ -832,7 +934,7 @@ mod tests {
             let offset = if raw_len == 0 { 0 } else { slice_seed.0 % (raw_len + 1) };
             let len = if raw_len == offset { 0 } else { slice_seed.1 % (raw_len - offset + 1) };
 
-            let sliced = batch.slice(offset, len).unwrap();
+            let sliced = batch.slice(offset, len, None).unwrap();
             let sliced_compacted = sliced.compact(None).unwrap();
             prop_assert!(sliced.semantic_eq(&sliced_compacted));
 
@@ -996,27 +1098,28 @@ mod tests {
         assert_eq!(filtered.num_rows(), 2);
         assert_eq!(filtered.raw_len(), 3);
 
-        // into_project with duplicate index [2, 0, 2]: c2[0] and c0[1] are moved, c2[2] is cloned
+        // into_project with duplicate index [2, 0, 2]: shares Arc<Column> across all slots
+        // with zero buffer copying, even on duplicate indices.
         let projected = filtered.into_project(&[2, 0, 2]).unwrap();
         assert_eq!(projected.schema().len(), 3);
         assert_eq!(projected.num_rows(), 2);
         assert_eq!(projected.raw_len(), 3);
 
-        let moved_ptr2 = match &projected.columns()[0] {
+        let moved_ptr2 = match projected.column(0).unwrap() {
             Column::Flat(fc) => match fc.data() {
                 FlatData::I64(v) => v.as_ptr(),
                 _ => unreachable!(),
             },
             _ => unreachable!(),
         };
-        let moved_ptr0 = match &projected.columns()[1] {
+        let moved_ptr0 = match projected.column(1).unwrap() {
             Column::Flat(fc) => match fc.data() {
                 FlatData::I64(v) => v.as_ptr(),
                 _ => unreachable!(),
             },
             _ => unreachable!(),
         };
-        let cloned_ptr2 = match &projected.columns()[2] {
+        let shared_ptr2 = match projected.column(2).unwrap() {
             Column::Flat(fc) => match fc.data() {
                 FlatData::I64(v) => v.as_ptr(),
                 _ => unreachable!(),
@@ -1025,7 +1128,11 @@ mod tests {
         };
         assert_eq!(moved_ptr2, ptr2);
         assert_eq!(moved_ptr0, ptr0);
-        assert_ne!(cloned_ptr2, ptr2);
+        assert_eq!(shared_ptr2, ptr2);
+        assert!(Arc::ptr_eq(
+            projected.column_arc(0).unwrap(),
+            projected.column_arc(2).unwrap()
+        ));
 
         // Empty projection yields 0 columns while preserving raw_len and selection
         let empty_proj = projected.clone().into_project(&[]).unwrap();
@@ -1049,5 +1156,85 @@ mod tests {
             with_sel.into_with_selection(Selection::Indices(vec![5])),
             Err(ColumnError::InvalidBatch { .. })
         ));
+    }
+
+    #[test]
+    fn arc_sharing_and_deduplicated_memory_bytes_and_slice_reservation() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("a", DataType::I64, false),
+            Field::new("d", DataType::Utf8, false),
+        ])
+        .unwrap();
+
+        let c0 = Arc::new(Column::Flat(
+            FlatColumn::try_new(FlatData::I64(vec![10, 20, 30, 40]), None).unwrap(),
+        ));
+        let dict_vals = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(["long_alpha", "long_beta"]).unwrap()),
+            None,
+        )
+        .unwrap();
+        let c1 = Arc::new(Column::Dict(
+            DictColumn::try_new(dict_vals, vec![0, 1, 0, 1], None).unwrap(),
+        ));
+
+        let batch = Batch::try_new_shared(
+            Arc::clone(&schema),
+            vec![Arc::clone(&c0), Arc::clone(&c1)],
+            4,
+            Selection::All,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(batch.column_arc(0).unwrap(), &c0));
+        assert!(Arc::ptr_eq(batch.column_arc(1).unwrap(), &c1));
+
+        // with_selection shares Arcs
+        let with_sel = batch
+            .with_selection(Selection::Indices(vec![0, 2]))
+            .unwrap();
+        assert!(Arc::ptr_eq(with_sel.column_arc(0).unwrap(), &c0));
+        assert!(Arc::ptr_eq(with_sel.column_arc(1).unwrap(), &c1));
+
+        // filter_mask shares Arcs
+        let mask = Bitmap::from_bools(&[true, false, true, false]);
+        let filtered = batch.filter_mask(&mask).unwrap();
+        assert!(Arc::ptr_eq(filtered.column_arc(0).unwrap(), &c0));
+        assert!(Arc::ptr_eq(filtered.column_arc(1).unwrap(), &c1));
+
+        // project (with duplicates) shares Arcs and deduplicates memory_bytes
+        let proj = batch.project(&[0, 0, 1, 0]).unwrap();
+        assert!(Arc::ptr_eq(proj.column_arc(0).unwrap(), &c0));
+        assert!(Arc::ptr_eq(proj.column_arc(1).unwrap(), &c0));
+        assert!(Arc::ptr_eq(proj.column_arc(2).unwrap(), &c1));
+        assert!(Arc::ptr_eq(proj.column_arc(3).unwrap(), &c0));
+        assert_eq!(proj.memory_bytes(), c0.memory_bytes() + c1.memory_bytes());
+
+        // into_project (with duplicates) shares Arcs and deduplicates memory_bytes
+        let into_proj = batch.into_project(&[1, 1]).unwrap();
+        assert!(Arc::ptr_eq(into_proj.column_arc(0).unwrap(), &c1));
+        assert!(Arc::ptr_eq(into_proj.column_arc(1).unwrap(), &c1));
+        assert_eq!(into_proj.memory_bytes(), c1.memory_bytes());
+
+        // slice with pool accounts only for newly allocated slice buffers and deduplicates shared columns
+        let scope = GlobalPool::standalone(4096);
+        let mut res = scope.register("slice", true);
+        let sliced = proj.slice(1, 2, Some(&mut res)).unwrap();
+        assert!(Arc::ptr_eq(
+            sliced.column_arc(0).unwrap(),
+            sliced.column_arc(1).unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            sliced.column_arc(0).unwrap(),
+            sliced.column_arc(3).unwrap()
+        ));
+        // Newly allocated: c0 slice (2*8 = 16) + c1 slice codes (2*4 = 8; dict values shared) = 24 bytes
+        assert_eq!(res.size(), 16 + 8);
+
+        // Tight pool rejects and rolls back cleanly
+        let tight = GlobalPool::standalone(23);
+        let mut tight_res = tight.register("tight_slice", true);
+        let err = proj.slice(1, 2, Some(&mut tight_res)).unwrap_err();
+        assert!(matches!(err, ColumnError::MemoryLimit { .. }));
+        assert_eq!(tight_res.size(), 0);
     }
 }

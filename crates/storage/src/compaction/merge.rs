@@ -412,9 +412,11 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
                     split -= 1;
                 }
                 if split > 0 {
-                    let chunk = combined.slice(0, split).map_err(CompactionError::from)?;
+                    let chunk = combined
+                        .slice(0, split, None)
+                        .map_err(CompactionError::from)?;
                     let tail = combined
-                        .slice(split, combined.num_rows() - split)
+                        .slice(split, combined.num_rows() - split, None)
                         .map_err(CompactionError::from)?;
                     drop(combined);
                     scratch_res.free();

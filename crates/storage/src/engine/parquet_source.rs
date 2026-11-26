@@ -2678,7 +2678,7 @@ fn concat_flat_columns(dt: DataType, parts: Vec<FlatColumn>) -> Result<Column, P
     combined
         .columns()
         .first()
-        .cloned()
+        .map(|c| c.as_ref().clone())
         .ok_or_else(|| ParquetError::General("empty concat batch".to_owned()))
 }
 
@@ -4873,7 +4873,7 @@ impl PartitionStream for ParquetPartitionStream {
                     };
                     rg.phase2_row = row_cursor;
                     for (&idx, col) in rg.phase2_indices.iter().zip(decoded_p2) {
-                        p2_map.insert(idx, col);
+                        p2_map.insert(idx, Arc::new(col));
                     }
                 }
             }
@@ -4888,7 +4888,7 @@ impl PartitionStream for ParquetPartitionStream {
                             first_pos.insert(idx, cols.len());
                             cols.push(c);
                         } else if let Some(&pos) = first_pos.get(&idx) {
-                            cols.push(cols[pos].clone());
+                            cols.push(Arc::clone(&cols[pos]));
                         } else {
                             rollback_res(res.as_deref_mut(), before);
                             return Err(QueryError::internal("missing projected column slot"));
@@ -4910,7 +4910,7 @@ impl PartitionStream for ParquetPartitionStream {
                 }
             };
 
-            let batch = match Batch::try_new(proj_schema, assembled, raw_len, sel) {
+            let batch = match Batch::try_new_shared(proj_schema, assembled, raw_len, sel) {
                 Ok(b) => b,
                 Err(_) => {
                     rollback_res(res.as_deref_mut(), before);
@@ -5291,7 +5291,7 @@ pub(crate) mod tests {
         assert_eq!(total_rows, 2);
         let b = &batches[0];
         let status_idx = span_schema.index_of(spans::STATUS).expect("status col");
-        assert!(matches!(b.columns()[status_idx], Column::Dict(_)));
+        assert!(matches!(*b.columns()[status_idx], Column::Dict(_)));
         let sv_idx = span_schema
             .index_of(spans::SCHEMA_VERSION)
             .expect("schema_version");
@@ -5367,7 +5367,7 @@ pub(crate) mod tests {
             .index_of("future_nullable_tag")
             .expect("future col");
         assert!(matches!(
-            evolved_batches[0].columns()[future_idx],
+            *evolved_batches[0].columns()[future_idx],
             Column::Const {
                 value: ScalarValue::Null(DataType::Utf8),
                 len: 2
@@ -5757,7 +5757,7 @@ pub(crate) mod tests {
         let batches =
             drain_on_workers(&dict_source, &ScanSpec::default(), &exec).expect("dict >= 260");
         assert_eq!(batches.iter().map(Batch::num_rows).sum::<usize>(), 300);
-        assert!(matches!(batches[0].columns()[0], Column::Dict(_)));
+        assert!(matches!(*batches[0].columns()[0], Column::Dict(_)));
         assert_eq!(
             batches[0].columns()[0].get_scalar(0).expect("row 0"),
             ScalarValue::Null(DataType::Utf8)

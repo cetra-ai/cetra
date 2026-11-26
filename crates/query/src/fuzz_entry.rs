@@ -262,11 +262,17 @@ fn with_score_columns(
     let n = batch.raw_len();
     let mut cols = batch.columns().to_vec();
     for _ in 0..score_count {
-        cols.push(Column::try_new_const(ScalarValue::F64(0.75), n).ok()?);
-        cols.push(Column::try_new_const(ScalarValue::Utf8("good".to_owned()), n).ok()?);
-        cols.push(Column::try_new_const(ScalarValue::Bool(true), n).ok()?);
+        cols.push(Arc::new(
+            Column::try_new_const(ScalarValue::F64(0.75), n).ok()?,
+        ));
+        cols.push(Arc::new(
+            Column::try_new_const(ScalarValue::Utf8("good".to_owned()), n).ok()?,
+        ));
+        cols.push(Arc::new(
+            Column::try_new_const(ScalarValue::Bool(true), n).ok()?,
+        ));
     }
-    Batch::try_new(
+    Batch::try_new_shared(
         Arc::new(planning_schema.clone()),
         cols,
         n,

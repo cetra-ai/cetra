@@ -765,7 +765,7 @@ impl PartitionStream for RetagStream {
             return Ok(Some(batch));
         }
         let (_old_schema, columns, raw_len, selection) = batch.into_parts();
-        match Batch::try_new(Arc::clone(&self.target_schema), columns, raw_len, selection) {
+        match Batch::try_new_shared(Arc::clone(&self.target_schema), columns, raw_len, selection) {
             Ok(retagged) => Ok(Some(retagged)),
             Err(err) => {
                 rollback_res(res, before);

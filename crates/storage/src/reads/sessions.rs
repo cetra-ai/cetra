@@ -780,7 +780,7 @@ fn cap_rows(batches: Vec<Batch>, limit: usize) -> Result<(Vec<Batch>, bool), Que
 
 fn slice_active_batch(batch: &Batch, start: usize, len: usize) -> Result<Batch, QueryError> {
     let sliced = match batch.selection() {
-        Selection::All => batch.slice(start, len),
+        Selection::All => batch.slice(start, len, None),
         Selection::Mask(bm) => {
             let indices: Vec<u32> = bm
                 .iter_ones()

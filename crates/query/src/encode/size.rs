@@ -877,7 +877,7 @@ mod tests {
         // Each kept row is {"items":["a"]} -> BRACKETS(2) + member("items", 5+4=9) + list(2 + (1+2) + 1 = 6) = 17.
         assert_eq!(sizes, vec![17, 17]);
 
-        let sliced = list.slice(1, 2).unwrap();
+        let sliced = list.slice(1, 2, None).unwrap();
         assert_eq!(column_row_sizes(&sliced).unwrap(), vec![6, 6]);
     }
 

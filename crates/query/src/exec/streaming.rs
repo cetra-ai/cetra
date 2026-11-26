@@ -843,18 +843,19 @@ impl PartitionStream for RetagPartitionStream {
             return Ok(Some(batch));
         }
         let (_old_schema, columns, raw_len, selection) = batch.into_parts();
-        let retagged = match Batch::try_new(Arc::clone(&self.schema), columns, raw_len, selection) {
-            Ok(b) => b,
-            Err(err) => {
-                if let Some(r) = res {
-                    let cur = r.size();
-                    if cur > before {
-                        r.shrink(cur - before);
+        let retagged =
+            match Batch::try_new_shared(Arc::clone(&self.schema), columns, raw_len, selection) {
+                Ok(b) => b,
+                Err(err) => {
+                    if let Some(r) = res {
+                        let cur = r.size();
+                        if cur > before {
+                            r.shrink(cur - before);
+                        }
                     }
+                    return Err(err.into());
                 }
-                return Err(err.into());
-            }
-        };
+            };
         Ok(Some(retagged))
     }
 }
@@ -1061,7 +1062,7 @@ impl TopKSink {
             for (col_idx, field) in self.schema.fields().iter().enumerate() {
                 let sources: Vec<Option<(&Column, usize)>> = live_refs
                     .iter()
-                    .map(|&(b, r)| Some((&self.row_batches[b].columns()[col_idx], r)))
+                    .map(|&(b, r)| Some((self.row_batches[b].columns()[col_idx].as_ref(), r)))
                     .collect();
                 let col = build_flat_from_sources(
                     &field.data_type,
@@ -1289,7 +1290,7 @@ impl TopKSink {
                     .iter()
                     .map(|e| {
                         Some((
-                            &sinks[e.sink_idx].row_batches[e.batch_idx].columns()[col_idx],
+                            sinks[e.sink_idx].row_batches[e.batch_idx].columns()[col_idx].as_ref(),
                             e.row_idx,
                         ))
                     })

@@ -201,8 +201,8 @@ fn write_batch_framed(
             writer.write_batch(&cur)?;
         } else {
             let mid = rows / 2;
-            let right = cur.slice(mid, rows - mid)?;
-            let left = cur.slice(0, mid)?;
+            let right = cur.slice(mid, rows - mid, None)?;
+            let left = cur.slice(0, mid, None)?;
             stack.push(right);
             stack.push(left);
         }
@@ -1783,8 +1783,8 @@ impl WindowStream {
         };
         if split_at < n_first {
             drop(first_keys);
-            let head = first.slice(0, split_at)?;
-            let tail = first.slice(split_at, n_first - split_at)?;
+            let head = first.slice(0, split_at, None)?;
+            let tail = first.slice(split_at, n_first - split_at, None)?;
             drop(first);
             self.lookahead = Some(tail);
             let target = self.current_held_bytes(head.memory_bytes());
@@ -1840,8 +1840,8 @@ impl WindowStream {
 
             if split < n_next {
                 drop(first_keys);
-                let head = next_b.slice(0, split)?;
-                let tail = next_b.slice(split, n_next - split)?;
+                let head = next_b.slice(0, split, None)?;
+                let tail = next_b.slice(split, n_next - split, None)?;
                 drop(next_b);
                 parts.push(head);
                 self.lookahead = Some(tail);
@@ -1933,10 +1933,11 @@ impl WindowStream {
 
         let mut all_cols = Vec::with_capacity(self.output_schema.len());
         all_cols.extend(part_batch.columns().iter().cloned());
-        all_cols.extend(out_cols);
+        all_cols.extend(out_cols.into_iter().map(Arc::new));
         drop(part_batch);
 
-        let full_out = Batch::try_new_all(Arc::clone(&self.output_schema), all_cols, n)?;
+        let full_out =
+            Batch::try_new_shared(Arc::clone(&self.output_schema), all_cols, n, Selection::All)?;
         let chunk_size = self.ctx.batch_size.max(1);
         if n <= chunk_size {
             self.queued_out.push_back(full_out);
@@ -1944,7 +1945,7 @@ impl WindowStream {
             let mut offset = 0usize;
             while offset < n {
                 let len = (n - offset).min(chunk_size);
-                let slice = full_out.slice(offset, len)?;
+                let slice = full_out.slice(offset, len, None)?;
                 self.queued_out.push_back(slice);
                 offset += len;
             }
