@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use arrow::array::RecordBatch;
+use cetra_column::Batch;
 use cetra_core::ids::ProjectId;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -38,9 +38,9 @@ pub(crate) const CHANNEL_CAPACITY: usize = 1024;
 pub(crate) struct AppendRequest {
     /// Project that owns the rows.
     pub project: ProjectId,
-    /// Rows to write. The schema is the table's schema.
-    pub batch: RecordBatch,
-    /// [`RecordBatch::get_array_memory_size`], used for group limits.
+    /// Rows to write. The schema is the table's columnar schema.
+    pub batch: Batch,
+    /// [`Batch::memory_bytes`], used for group limits.
     pub bytes: usize,
     /// Completed when the group is acknowledged, or when it fails.
     pub ack: oneshot::Sender<Result<AppendReceipt, AppendError>>,
@@ -167,7 +167,7 @@ impl WalWriterHandle {
     pub(crate) async fn append(
         &self,
         project: ProjectId,
-        batch: RecordBatch,
+        batch: Batch,
         bytes: usize,
     ) -> Result<AppendReceipt, AppendError> {
         if self.state.failed() {
@@ -318,7 +318,7 @@ pub(crate) fn spawn(mut params: WriterParams) -> WalWriterHandle {
 
 struct Prepared {
     project: ProjectId,
-    batch: RecordBatch,
+    batch: Batch,
     bytes: usize,
     rows: usize,
     seq: u64,
@@ -955,11 +955,12 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use arrow::array::TimestampNanosecondArray;
+    use cetra_column::{Column, FlatData};
     use cetra_core::ids::ProjectId;
     use cetra_core::schema::spans::START_TIME;
 
     use super::*;
+    use crate::column_bridge::record_batch_to_column;
     use crate::config::WalSync;
     use crate::hooks::HookPoint;
     use crate::read_state::{Published, ReadState};
@@ -1026,13 +1027,14 @@ mod tests {
     }
 
     async fn append_at(handle: &WalWriterHandle, start: i64) -> Result<AppendReceipt, AppendError> {
-        let batch = spans_at(&[start]);
-        let bytes = batch.get_array_memory_size();
+        let batch = record_batch_to_column(&spans_at(&[start])).unwrap();
+        let bytes = batch.memory_bytes();
         handle.append(project(), batch, bytes).await
     }
 
     fn batch_bytes() -> u64 {
-        u64::try_from(spans_at(&[0]).get_array_memory_size()).unwrap()
+        let batch = record_batch_to_column(&spans_at(&[0])).unwrap();
+        u64::try_from(batch.memory_bytes()).unwrap()
     }
 
     async fn wait_for(mut ready: impl FnMut() -> bool) {
@@ -1066,13 +1068,13 @@ mod tests {
                     .batch
                     .column_by_name(START_TIME)
                     .expect("start_time column");
-                let array = column
-                    .as_any()
-                    .downcast_ref::<TimestampNanosecondArray>()
-                    .expect("start_time is timestamp ns");
-                for row in 0..array.len() {
-                    times.push(array.value(row));
-                }
+                let Column::Flat(flat) = column else {
+                    panic!("expected flat start_time column");
+                };
+                let FlatData::TimestampNs { values, .. } = flat.data() else {
+                    panic!("expected timestamp ns column");
+                };
+                times.extend_from_slice(values);
             }
         }
         times
@@ -1377,8 +1379,8 @@ mod tests {
         if state.failed() {
             return Err(AppendError::WalFailed);
         }
-        let batch = spans_at(&[start]);
-        let bytes = batch.get_array_memory_size();
+        let batch = record_batch_to_column(&spans_at(&[start])).unwrap();
+        let bytes = batch.memory_bytes();
         let (ack, rx) = oneshot::channel();
         tx.send(AppendRequest {
             project: project(),

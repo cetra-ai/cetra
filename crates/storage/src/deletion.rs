@@ -364,8 +364,10 @@ pub(crate) fn project_snapshot(
     keep_from: Option<NaiveDate>,
     deletions: &[Arc<PendingDeletion>],
 ) -> Result<Arc<MemSnapshot>, QueryError> {
-    let schema = table.schema();
-    let file_table = FileTable::from(table);
+    let tombstone_table = match table {
+        Table::Spans => cetra_query::TombstoneTable::Spans,
+        Table::Scores => cetra_query::TombstoneTable::Scores,
+    };
     let mut partitions: BTreeMap<PartitionKey, Vec<MemBatch>> = BTreeMap::new();
     for (key, batches) in &snapshot.partitions {
         if key.project != project {
@@ -381,14 +383,19 @@ pub(crate) fn project_snapshot(
                 kept.push(batch.clone());
                 continue;
             }
-            let Some(predicate) = covered_predicate(file_table, &schema, &covering)
-                .map_err(QueryError::DataFusion)?
+            let specs = to_tombstone_specs(&covering);
+            let Some(predicate) = cetra_query::tombstone::covered_predicate(
+                tombstone_table,
+                batch.batch.schema(),
+                &specs,
+            )
+            .map_err(|err| QueryError::DataFusion(crate::error::query_err_to_df(err)))?
             else {
                 kept.push(batch.clone());
                 continue;
             };
-            let filtered =
-                drop_covered(&batch.batch, &predicate).map_err(QueryError::DataFusion)?;
+            let filtered = drop_covered_batch(&batch.batch, &predicate)
+                .map_err(|err| QueryError::DataFusion(crate::error::query_err_to_df(err)))?;
             if filtered.num_rows() == 0 {
                 continue;
             }

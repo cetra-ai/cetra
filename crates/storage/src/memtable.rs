@@ -6,14 +6,14 @@
 //!
 //! Each table has an active memtable and at most one frozen memtable. The
 //! writer inserts into the active one. The flush task calls `freeze`.
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use arrow::array::{Array, BooleanArray, RecordBatch, TimestampNanosecondArray};
-use arrow::compute::{concat_batches, filter_record_batch};
+use cetra_column::{
+    Batch, Bitmap, Column, ColumnError, DataType, FlatData, ScalarValue, Selection,
+};
 use cetra_core::ids::ProjectId;
 use chrono::NaiveDate;
 
@@ -45,18 +45,18 @@ pub(crate) struct PartitionKey {
 #[derive(Debug, Clone)]
 pub(crate) struct MemBatch {
     /// Rows as inserted, or a concatenation of small batches.
-    pub batch: Arc<RecordBatch>,
+    pub batch: Arc<Batch>,
     /// Minimum of the table's time column.
     pub min_time: i64,
     /// Maximum of the table's time column.
     pub max_time: i64,
     /// Minimum of the table's `ingest_time` column (spec 03 §7).
     pub min_ingest_time: i64,
-    /// [`RecordBatch::get_array_memory_size`] of `batch`.
+    /// [`Batch::memory_bytes`] of `batch`.
     pub bytes: usize,
     /// Trace partials of `batch`, computed once and shared by every read state
     /// that holds this `MemBatch`. A coalesced batch starts with a fresh cache.
-    pub partials: Arc<OnceLock<Arc<RecordBatch>>>,
+    pub partials: Arc<OnceLock<Arc<Batch>>>,
 }
 
 /// Rows accepting inserts, and the flush trigger measured from them.
@@ -143,7 +143,7 @@ impl Memtable {
         }
     }
 
-    /// Bytes of the active and frozen batches, from Arrow's buffer sizes.
+    /// Bytes of the active and frozen batches, from columnar buffer sizes.
     ///
     /// Backpressure compares this with `memtable.hard_limit`.
     pub(crate) fn bytes(&self) -> usize {
@@ -159,6 +159,7 @@ impl Memtable {
     }
 
     /// Highest WAL seq in the active memtable, or `0` when it is empty.
+    #[cfg(test)]
     pub(crate) fn active_max_seq(&self) -> u64 {
         self.active.max_seq
     }
@@ -221,36 +222,77 @@ impl Memtable {
     pub(crate) fn insert(
         &mut self,
         project: ProjectId,
-        batch: RecordBatch,
+        batch: Batch,
         seq: u64,
     ) -> Result<(), MemtableError> {
         if batch.num_rows() == 0 {
             return Ok(());
         }
-        let times = time_array(self.table, &batch)?;
-        let mut days = Vec::with_capacity(batch.num_rows());
-        for row in 0..batch.num_rows() {
-            if times.is_null(row) {
+        let time_col_name = self.table.time_column();
+        let time_col = ts_column(&batch, time_col_name)?;
+        let mut by_day: BTreeMap<NaiveDate, Vec<u32>> = BTreeMap::new();
+        let mut single_day: Option<NaiveDate> = None;
+        let mut multi_day = false;
+        let mut active_days = Vec::with_capacity(batch.num_rows());
+        for_each_active_row(&batch, |phys| {
+            let Some(ts) = read_ts(time_col, phys) else {
                 return Err(MemtableError::BadColumn {
-                    column: self.table.time_column(),
+                    column: time_col_name,
                 });
+            };
+            let day = utc_day(ts)?;
+            match single_day {
+                None => single_day = Some(day),
+                Some(first) if first != day => multi_day = true,
+                Some(_) => {}
             }
-            days.push(utc_day(times.value(row))?);
+            active_days.push((phys, day));
+            Ok(())
+        })?;
+
+        if !multi_day {
+            if let Some(day) = single_day {
+                let stored_batch = if batch.selection().is_all(batch.raw_len()) {
+                    batch
+                } else {
+                    batch.compact(None).map_err(MemtableError::from_column)?
+                };
+                self.store(project, day, stored_batch, seq)?;
+            }
+            return Ok(());
         }
-        let same_day = days.iter().all(|day| *day == days[0]);
-        if same_day {
-            self.store(project, days[0], batch, seq)?;
-        } else {
-            let mut distinct = days.clone();
-            distinct.sort();
+
+        if matches!(batch.selection(), Selection::All) {
+            let mut distinct: Vec<NaiveDate> = active_days.iter().map(|(_, day)| *day).collect();
+            distinct.sort_unstable();
             distinct.dedup();
             for day in distinct {
-                let mask = BooleanArray::from(
-                    days.iter()
-                        .map(|row_day| *row_day == day)
-                        .collect::<Vec<_>>(),
-                );
-                let filtered = filter_record_batch(&batch, &mask).map_err(MemtableError::Arrow)?;
+                let mut mask = Bitmap::new_zeroed(batch.raw_len());
+                for &(phys, row_day) in &active_days {
+                    if row_day == day {
+                        mask.set(phys, true).map_err(MemtableError::from_column)?;
+                    }
+                }
+                let filtered = batch
+                    .filter_mask(&mask)
+                    .and_then(|b| b.compact(None))
+                    .map_err(MemtableError::from_column)?;
+                self.store(project, day, filtered, seq)?;
+            }
+        } else {
+            for (phys, day) in active_days {
+                let idx = u32::try_from(phys).map_err(|_| {
+                    MemtableError::from_column(ColumnError::Overflow {
+                        reason: "row index exceeds u32::MAX",
+                    })
+                })?;
+                by_day.entry(day).or_default().push(idx);
+            }
+            for (day, indices) in by_day {
+                let filtered = batch
+                    .with_selection(Selection::Indices(indices))
+                    .and_then(|b| b.compact(None))
+                    .map_err(MemtableError::from_column)?;
                 self.store(project, day, filtered, seq)?;
             }
         }
@@ -280,7 +322,7 @@ impl Memtable {
         &mut self,
         project: ProjectId,
         day: NaiveDate,
-        batch: RecordBatch,
+        batch: Batch,
         seq: u64,
     ) -> Result<(), MemtableError> {
         if batch.num_rows() == 0 {
@@ -308,31 +350,29 @@ impl MemBatch {
     ///
     /// A filtered copy of a batch goes through here too, which recomputes every
     /// field and starts a fresh partials cache.
-    pub(crate) fn from_batch(table: Table, batch: RecordBatch) -> Result<Self, MemtableError> {
-        let times = time_array(table, &batch)?;
+    pub(crate) fn from_batch(table: Table, batch: Batch) -> Result<Self, MemtableError> {
+        let time_name = table.time_column();
+        let ingest_name = table.ingest_column();
+        let times = ts_column(&batch, time_name)?;
+        let ingest = ts_column(&batch, ingest_name)?;
         let mut min_time = i64::MAX;
         let mut max_time = i64::MIN;
-        for row in 0..times.len() {
-            if times.is_null(row) {
-                return Err(MemtableError::BadColumn {
-                    column: table.time_column(),
-                });
-            }
-            let value = times.value(row);
-            min_time = min_time.min(value);
-            max_time = max_time.max(value);
-        }
-        let ingest = ingest_array(table, &batch)?;
         let mut min_ingest_time = i64::MAX;
-        for row in 0..ingest.len() {
-            if ingest.is_null(row) {
+        for_each_active_row(&batch, |row| {
+            let Some(t) = read_ts(times, row) else {
+                return Err(MemtableError::BadColumn { column: time_name });
+            };
+            let Some(ing) = read_ts(ingest, row) else {
                 return Err(MemtableError::BadColumn {
-                    column: table.ingest_column(),
+                    column: ingest_name,
                 });
-            }
-            min_ingest_time = min_ingest_time.min(ingest.value(row));
-        }
-        let bytes = batch.get_array_memory_size();
+            };
+            min_time = min_time.min(t);
+            max_time = max_time.max(t);
+            min_ingest_time = min_ingest_time.min(ing);
+            Ok(())
+        })?;
+        let bytes = batch.memory_bytes();
         Ok(Self {
             batch: Arc::new(batch),
             min_time,
@@ -348,11 +388,13 @@ impl MemBatch {
     /// The `Arc<OnceLock<...>>` is shared by every clone of this `MemBatch`, so
     /// every read state that holds it reuses the same partials. Errors are not
     /// cached (a valid spans batch always builds its partials).
-    pub(crate) fn trace_partials(&self) -> Result<Arc<RecordBatch>, crate::error::PartialsError> {
+    pub(crate) fn trace_partials(&self) -> Result<Arc<Batch>, crate::error::PartialsError> {
         if let Some(cached) = self.partials.get() {
             return Ok(Arc::clone(cached));
         }
-        let built = Arc::new(crate::partials::partials_from_spans(self.batch.as_ref())?);
+        let built = Arc::new(crate::partials::partials_from_spans_batch(
+            self.batch.as_ref(),
+        )?);
         // A concurrent reader may have won the race; both values are built from
         // the same immutable batch, so returning either is equivalent.
         let _ = self.partials.set(Arc::clone(&built));
@@ -360,33 +402,82 @@ impl MemBatch {
     }
 }
 
-fn time_array(
-    table: Table,
-    batch: &RecordBatch,
-) -> Result<&TimestampNanosecondArray, MemtableError> {
-    let column = table.time_column();
-    let array = batch
+fn ts_column<'a>(batch: &'a Batch, column: &'static str) -> Result<&'a Column, MemtableError> {
+    let col = batch
         .column_by_name(column)
         .ok_or(MemtableError::MissingColumn { column })?;
-    array
-        .as_any()
-        .downcast_ref::<TimestampNanosecondArray>()
-        .ok_or(MemtableError::BadColumn { column })
+    if !matches!(col.data_type(), DataType::TimestampNs { .. }) {
+        return Err(MemtableError::BadColumn { column });
+    }
+    Ok(col)
 }
 
-/// The `ingest_time` column, which the covered-row rule reads (spec 03 §7).
-fn ingest_array(
-    table: Table,
-    batch: &RecordBatch,
-) -> Result<&TimestampNanosecondArray, MemtableError> {
-    let column = table.ingest_column();
-    let array = batch
-        .column_by_name(column)
-        .ok_or(MemtableError::MissingColumn { column })?;
-    array
-        .as_any()
-        .downcast_ref::<TimestampNanosecondArray>()
-        .ok_or(MemtableError::BadColumn { column })
+fn read_ts(col: &Column, row: usize) -> Option<i64> {
+    match col {
+        Column::Flat(flat) => {
+            if flat.is_null(row) {
+                return None;
+            }
+            match flat.data() {
+                FlatData::TimestampNs { values, .. } => values.get(row).copied(),
+                _ => None,
+            }
+        }
+        Column::Const { value, len } => (row < *len).then_some(value).and_then(|val| match val {
+            ScalarValue::TimestampNs { value, .. } => Some(*value),
+            _ => None,
+        }),
+        Column::Dict(dict) => {
+            if dict.is_null(row) {
+                return None;
+            }
+            let code = *dict.codes().get(row)? as usize;
+            if dict.values().is_null(code) {
+                return None;
+            }
+            match dict.values().data() {
+                FlatData::TimestampNs { values, .. } => values.get(code).copied(),
+                _ => None,
+            }
+        }
+        Column::Rle(rle) => {
+            if row >= rle.len() {
+                return None;
+            }
+            let run = rle.run_ends().partition_point(|&end| (end as usize) <= row);
+            if rle.values().is_null(run) {
+                return None;
+            }
+            match rle.values().data() {
+                FlatData::TimestampNs { values, .. } => values.get(run).copied(),
+                _ => None,
+            }
+        }
+    }
+}
+
+fn for_each_active_row(
+    batch: &Batch,
+    mut f: impl FnMut(usize) -> Result<(), MemtableError>,
+) -> Result<(), MemtableError> {
+    match batch.selection() {
+        Selection::All => {
+            for row in 0..batch.raw_len() {
+                f(row)?;
+            }
+        }
+        Selection::Mask(mask) => {
+            for row in mask.iter_ones() {
+                f(row)?;
+            }
+        }
+        Selection::Indices(indices) => {
+            for &row in indices {
+                f(row as usize)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn utc_day(nanos: i64) -> Result<NaiveDate, MemtableError> {
@@ -440,14 +531,14 @@ fn coalesce(batches: &mut Vec<MemBatch>) -> Result<(), MemtableError> {
 
 fn concat_small(smalls: &[MemBatch]) -> Result<MemBatch, MemtableError> {
     let Some(first) = smalls.first() else {
-        return Err(MemtableError::Arrow(
-            arrow::error::ArrowError::InvalidArgumentError("no batches to coalesce".into()),
-        ));
+        return Err(MemtableError::from_column(ColumnError::InvalidBatch {
+            reason: "no batches to coalesce",
+        }));
     };
-    let schema = first.batch.schema();
-    let refs: Vec<&RecordBatch> = smalls.iter().map(|batch| batch.batch.as_ref()).collect();
-    let merged = concat_batches(&schema, refs).map_err(MemtableError::Arrow)?;
-    let bytes = merged.get_array_memory_size();
+    let schema = Arc::clone(first.batch.schema());
+    let refs: Vec<&Batch> = smalls.iter().map(|batch| batch.batch.as_ref()).collect();
+    let merged = Batch::concat(schema, &refs, None).map_err(MemtableError::from_column)?;
+    let bytes = merged.memory_bytes();
     let min_time = smalls
         .iter()
         .map(|batch| batch.min_time)
@@ -479,7 +570,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use arrow::array::{Array, TimestampNanosecondArray};
     use cetra_core::batch::scores_to_record_batch;
     use cetra_core::enums::ScoreSource;
     use cetra_core::ids::{ProjectId, TraceId};
@@ -488,6 +578,7 @@ mod tests {
     use chrono::NaiveDate;
 
     use super::*;
+    use crate::column_bridge::record_batch_to_column;
     use crate::wal::spans_at;
 
     const DAY: i64 = DAY_NS;
@@ -504,21 +595,25 @@ mod tests {
         NaiveDate::from_ymd_opt(year, month, day).unwrap()
     }
 
+    fn spans_col(starts: &[i64]) -> Batch {
+        record_batch_to_column(&spans_at(starts)).unwrap()
+    }
+
     fn start_times(batch: &MemBatch) -> Vec<i64> {
-        let column = batch
-            .batch
-            .column_by_name(START_TIME)
-            .unwrap()
-            .as_any()
-            .downcast_ref::<TimestampNanosecondArray>()
-            .unwrap();
-        (0..column.len()).map(|row| column.value(row)).collect()
+        let column = batch.batch.column_by_name(START_TIME).unwrap();
+        let mut out = Vec::with_capacity(batch.batch.num_rows());
+        for_each_active_row(&batch.batch, |row| {
+            out.push(read_ts(column, row).unwrap());
+            Ok(())
+        })
+        .unwrap();
+        out
     }
 
     #[test]
     fn a_batch_spanning_three_days_lands_in_three_partitions() {
         let mut table = Memtable::new(Table::Spans);
-        let batch = spans_at(&[0, 50, DAY, DAY + 10, 2 * DAY]);
+        let batch = spans_col(&[0, 50, DAY, DAY + 10, 2 * DAY]);
         table.insert(project(), batch, 1).unwrap();
         let parts = table.partitions();
         assert_eq!(parts.len(), 3);
@@ -548,9 +643,9 @@ mod tests {
     #[test]
     fn times_before_1970_land_on_the_previous_day() {
         let mut table = Memtable::new(Table::Spans);
-        table.insert(project(), spans_at(&[-1]), 1).unwrap();
-        table.insert(project(), spans_at(&[-DAY]), 2).unwrap();
-        table.insert(project(), spans_at(&[-DAY - 1]), 3).unwrap();
+        table.insert(project(), spans_col(&[-1]), 1).unwrap();
+        table.insert(project(), spans_col(&[-DAY]), 2).unwrap();
+        table.insert(project(), spans_col(&[-DAY - 1]), 3).unwrap();
         let parts = table.partitions();
         assert!(parts.contains_key(&PartitionKey {
             project: project(),
@@ -598,9 +693,8 @@ mod tests {
             deleted: false,
             ingest_time: DAY + 7,
         };
-        table
-            .insert(project(), scores_to_record_batch(&[score]).unwrap(), 1)
-            .unwrap();
+        let batch = record_batch_to_column(&scores_to_record_batch(&[score]).unwrap()).unwrap();
+        table.insert(project(), batch, 1).unwrap();
         assert!(table.partitions().contains_key(&PartitionKey {
             project: project(),
             day: date(1970, 1, 2),
@@ -614,7 +708,7 @@ mod tests {
             table
                 .insert(
                     project(),
-                    spans_at(&[offset]),
+                    spans_col(&[offset]),
                     u64::try_from(offset).unwrap(),
                 )
                 .unwrap();
@@ -631,10 +725,7 @@ mod tests {
         assert!(batches.len() < 100);
         let times: Vec<i64> = batches.iter().flat_map(start_times).collect();
         assert_eq!(times, (0..100).collect::<Vec<_>>());
-        let recomputed: usize = batches
-            .iter()
-            .map(|batch| batch.batch.get_array_memory_size())
-            .sum();
+        let recomputed: usize = batches.iter().map(|batch| batch.batch.memory_bytes()).sum();
         assert_eq!(table.bytes(), recomputed);
         assert_eq!(
             batches.iter().map(|batch| batch.bytes).sum::<usize>(),
@@ -646,7 +737,7 @@ mod tests {
     fn a_snapshot_keeps_the_batches_from_before_coalescing() {
         let mut table = Memtable::new(Table::Spans);
         for _ in 0..10 {
-            table.insert(project(), spans_at(&[0]), 1).unwrap();
+            table.insert(project(), spans_col(&[0]), 1).unwrap();
         }
         let key = PartitionKey {
             project: project(),
@@ -655,7 +746,7 @@ mod tests {
         let snapshot = table.snapshot();
         let original = Arc::clone(&snapshot.partitions[&key][0].batch);
         for _ in 0..60 {
-            table.insert(project(), spans_at(&[0]), 1).unwrap();
+            table.insert(project(), spans_col(&[0]), 1).unwrap();
         }
         assert_eq!(snapshot.partitions[&key].len(), 10);
         assert!(Arc::ptr_eq(&snapshot.partitions[&key][0].batch, &original));
@@ -671,7 +762,7 @@ mod tests {
     fn ten_thousand_inserts_do_not_keep_every_batch() {
         let mut table = Memtable::new(Table::Spans);
         for _ in 0..10_000 {
-            table.insert(project(), spans_at(&[0]), 1).unwrap();
+            table.insert(project(), spans_col(&[0]), 1).unwrap();
         }
         let batches = &table.partitions()[&PartitionKey {
             project: project(),
@@ -694,17 +785,17 @@ mod tests {
     #[test]
     fn projects_do_not_share_a_partition() {
         let mut table = Memtable::new(Table::Spans);
-        table.insert(project(), spans_at(&[0]), 1).unwrap();
-        table.insert(other_project(), spans_at(&[0]), 1).unwrap();
+        table.insert(project(), spans_col(&[0]), 1).unwrap();
+        table.insert(other_project(), spans_col(&[0]), 1).unwrap();
         assert_eq!(table.partitions().len(), 2);
     }
 
     #[test]
     fn extreme_timestamps_do_not_panic() {
         let mut table = Memtable::new(Table::Spans);
-        table.insert(project(), spans_at(&[i64::MIN]), 1).unwrap();
+        table.insert(project(), spans_col(&[i64::MIN]), 1).unwrap();
         table
-            .insert(other_project(), spans_at(&[i64::MAX]), 2)
+            .insert(other_project(), spans_col(&[i64::MAX]), 2)
             .unwrap();
         assert_eq!(table.partitions().len(), 2);
     }
@@ -737,8 +828,8 @@ mod tests {
     #[test]
     fn freeze_moves_every_row_and_snapshots_keep_them() {
         let mut table = Memtable::new(Table::Spans);
-        table.insert(project(), spans_at(&[1, 2]), 4).unwrap();
-        table.insert(project(), spans_at(&[3]), 7).unwrap();
+        table.insert(project(), spans_col(&[1, 2]), 4).unwrap();
+        table.insert(project(), spans_col(&[3]), 7).unwrap();
         let before = table.snapshot();
         let bytes = table.bytes();
         let view = table.freeze().expect("active rows");
@@ -757,9 +848,9 @@ mod tests {
     #[test]
     fn inserts_after_a_freeze_stay_active_and_a_retry_returns_the_same_view() {
         let mut table = Memtable::new(Table::Spans);
-        table.insert(project(), spans_at(&[1]), 4).unwrap();
+        table.insert(project(), spans_col(&[1]), 4).unwrap();
         let view = table.freeze().expect("active rows");
-        table.insert(project(), spans_at(&[2]), 9).unwrap();
+        table.insert(project(), spans_col(&[2]), 9).unwrap();
         assert_eq!(start_times(&table.partitions()[&key()][0]), vec![2]);
         assert_eq!(snapshot_times(&table.snapshot()), vec![1, 2]);
         let again = table.freeze().expect("frozen rows");
@@ -772,9 +863,9 @@ mod tests {
     #[test]
     fn drop_frozen_removes_only_the_frozen_rows() {
         let mut table = Memtable::new(Table::Spans);
-        table.insert(project(), spans_at(&[1]), 4).unwrap();
+        table.insert(project(), spans_col(&[1]), 4).unwrap();
         table.freeze().expect("active rows");
-        table.insert(project(), spans_at(&[2]), 9).unwrap();
+        table.insert(project(), spans_col(&[2]), 9).unwrap();
         let active = table.active_bytes();
         table.drop_frozen();
         assert_eq!(snapshot_times(&table.snapshot()), vec![2]);
@@ -787,10 +878,10 @@ mod tests {
     #[test]
     fn bytes_count_the_active_and_frozen_memtables() {
         let mut table = Memtable::new(Table::Spans);
-        table.insert(project(), spans_at(&[1]), 1).unwrap();
+        table.insert(project(), spans_col(&[1]), 1).unwrap();
         let frozen_bytes = table.bytes();
         table.freeze().expect("active rows");
-        table.insert(project(), spans_at(&[2]), 2).unwrap();
+        table.insert(project(), spans_col(&[2]), 2).unwrap();
         assert_eq!(table.bytes(), frozen_bytes + table.active_bytes());
         assert!(table.active_bytes() > 0);
         assert!(table.bytes() > table.active_bytes());
@@ -801,24 +892,61 @@ mod tests {
         let mut table = Memtable::new(Table::Spans);
         assert!(table.freeze().is_none());
         assert!(table.active_oldest().is_none());
-        table.insert(project(), spans_at(&[]), 99).unwrap();
+        table.insert(project(), spans_col(&[]), 99).unwrap();
         assert!(table.active_oldest().is_none());
         assert_eq!(table.active_max_seq(), 0);
         let started = Instant::now();
-        table.insert(project(), spans_at(&[1]), 3).unwrap();
+        table.insert(project(), spans_col(&[1]), 3).unwrap();
         let oldest = table.active_oldest().expect("first insert");
         assert!(oldest >= started);
-        table.insert(project(), spans_at(&[2]), 8).unwrap();
+        table.insert(project(), spans_col(&[2]), 8).unwrap();
         assert_eq!(table.active_oldest(), Some(oldest));
-        table.insert(project(), spans_at(&[3]), 5).unwrap();
+        table.insert(project(), spans_col(&[3]), 5).unwrap();
         assert_eq!(table.active_max_seq(), 8);
         let view = table.freeze().expect("active rows");
         assert_eq!(view.max_seq, 8);
         assert!(table.active_oldest().is_none());
         assert_eq!(table.active_max_seq(), 0);
-        table.insert(project(), spans_at(&[4]), 11).unwrap();
+        table.insert(project(), spans_col(&[4]), 11).unwrap();
         let restarted = table.active_oldest().expect("new active memtable");
         assert!(restarted >= oldest);
         assert_eq!(table.active_max_seq(), 11);
+    }
+
+    #[test]
+    fn handles_non_flat_encodings_and_non_all_selection() {
+        let mut table = Memtable::new(Table::Spans);
+        let base = spans_col(&[10, DAY + 20, 30]);
+        let mut cols = base.columns().to_vec();
+        let ingest_idx = base
+            .schema()
+            .index_of(Table::Spans.ingest_column())
+            .unwrap();
+        cols[ingest_idx] = Column::try_new_const(
+            ScalarValue::TimestampNs {
+                value: 555,
+                utc: true,
+            },
+            3,
+        )
+        .unwrap();
+        let filtered = Batch::try_new(
+            Arc::clone(base.schema()),
+            cols,
+            3,
+            Selection::Indices(vec![2, 0]),
+        )
+        .unwrap();
+        table.insert(project(), filtered, 7).unwrap();
+        let parts = table.partitions();
+        assert_eq!(parts.len(), 1);
+        let stored = &parts[&PartitionKey {
+            project: project(),
+            day: date(1970, 1, 1),
+        }][0];
+        assert_eq!(start_times(stored), vec![30, 10]);
+        assert_eq!(stored.min_time, 10);
+        assert_eq!(stored.max_time, 30);
+        assert_eq!(stored.min_ingest_time, 555);
     }
 }

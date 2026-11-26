@@ -454,7 +454,7 @@ mod tests {
     #[test]
     fn records_land_in_a_new_segment_after_the_limit() {
         let dir = tempfile::tempdir().unwrap();
-        let batch = sample_span_batch();
+        let batch = crate::column_bridge::record_batch_to_column(&sample_span_batch()).unwrap();
         let hooks = Hooks::default();
         let mut writer = SegmentWriter::create(dir.path(), 1, 1, hooks.clone()).unwrap();
         for seq in 1..=3 {

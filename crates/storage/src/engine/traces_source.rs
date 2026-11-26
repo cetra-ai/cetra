@@ -11,7 +11,7 @@ use cetra_column::{
 };
 use cetra_core::enums::SpanStatus;
 use cetra_core::ids::ProjectId;
-use cetra_core::schema::{traces, traces_schema};
+use cetra_core::schema::traces;
 use cetra_query::exec::sort_window::ExternalSort;
 use cetra_query::exec::streaming::TopKSink;
 use cetra_query::exec::{
@@ -23,7 +23,6 @@ use chrono::NaiveDate;
 use object_store::ObjectStore;
 
 use crate::catalog::{FileMeta, FileTable};
-use crate::column_bridge::{arrow_schema_to_column, record_batch_to_column};
 use crate::deletion::{PendingDeletion, applicable};
 use crate::memtable::{MemBatch, MemSnapshot};
 use crate::partials::MergeColumns;
@@ -137,7 +136,7 @@ impl TracesSource {
         suspects: Suspects,
         runtime: tokio::runtime::Handle,
     ) -> Result<Self, QueryError> {
-        let schema = Arc::new(arrow_schema_to_column(&traces_schema())?);
+        let schema = FileTable::Traces.column_schema();
         Ok(Self {
             store,
             project,
@@ -1164,32 +1163,24 @@ impl PartitionStream for MemPartialsStream {
                 continue;
             }
 
-            let partials_rb = match mem_batch.trace_partials() {
-                Ok(rb) => rb,
+            let partials = match mem_batch.trace_partials() {
+                Ok(p) => p,
                 Err(e) => {
                     rollback_res(res, before);
                     return Err(QueryError::internal(format!("trace partials error: {e}")));
                 }
             };
-            if partials_rb.num_rows() == 0 {
+            if partials.num_rows() == 0 {
                 continue;
             }
-            let projected_rb = match partials_rb.project(&self.input_indices) {
-                Ok(rb) => rb,
-                Err(_) => {
-                    rollback_res(res, before);
-                    return Err(QueryError::internal("failed to project memtable partials"));
-                }
-            };
-            let batch = match record_batch_to_column(&projected_rb) {
+            let batch = match partials.project(&self.input_indices) {
                 Ok(b) => b,
                 Err(err) => {
                     rollback_res(res, before);
                     return Err(err.into());
                 }
             };
-            drop(projected_rb);
-            drop(partials_rb);
+            drop(partials);
 
             reconcile_res(res.as_deref_mut(), before, batch.memory_bytes())?;
 

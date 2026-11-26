@@ -316,7 +316,9 @@ fn build_range_plan(ctx: &ScanContext, spec: RangeSpec) -> DfResult<Arc<dyn Exec
     let mut partials = Vec::with_capacity(batches.len());
     for batch in &batches {
         let cached = batch.trace_partials().map_err(partial_err)?;
-        partials.push((*cached).clone());
+        let rb = crate::column_bridge::column_to_record_batch(&cached, Some(schema.as_ref()))
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
+        partials.push(rb);
     }
 
     let mut plans: Vec<Arc<dyn ExecutionPlan>> = Vec::new();
