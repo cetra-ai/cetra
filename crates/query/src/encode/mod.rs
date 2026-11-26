@@ -202,6 +202,7 @@ pub(crate) struct BufferedSink<'a, 'b> {
     sink: &'a mut CappedBuffer<'b>,
     buf: Vec<u8>,
     fmt_scratch: String,
+    num_scratch: Vec<u8>,
 }
 
 impl<'a, 'b> BufferedSink<'a, 'b> {
@@ -210,6 +211,7 @@ impl<'a, 'b> BufferedSink<'a, 'b> {
             sink,
             buf: Vec::with_capacity(SCRATCH_FLUSH_BYTES),
             fmt_scratch: String::with_capacity(128),
+            num_scratch: Vec::with_capacity(32),
         }
     }
 
@@ -249,6 +251,26 @@ impl<'a, 'b> BufferedSink<'a, 'b> {
             }
         }
         self.buf.extend_from_slice(self.fmt_scratch.as_bytes());
+        Ok(())
+    }
+
+    pub(crate) fn push_json_f64(&mut self, v: f64) -> Result<(), QueryError> {
+        if !v.is_finite() {
+            return self.push_bytes(b"null");
+        }
+        self.num_scratch.clear();
+        serde_json::to_writer(&mut self.num_scratch, &v)
+            .map_err(|_| QueryError::internal("failed to encode f64"))?;
+        if std::str::from_utf8(&self.num_scratch).is_err() {
+            return Err(QueryError::internal("non-utf8 f64 formatting"));
+        }
+        if self.buf.len().saturating_add(self.num_scratch.len()) >= SCRATCH_FLUSH_BYTES {
+            self.flush()?;
+            if self.num_scratch.len() >= SCRATCH_FLUSH_BYTES {
+                return self.sink.push_bytes(&self.num_scratch);
+            }
+        }
+        self.buf.extend_from_slice(&self.num_scratch);
         Ok(())
     }
 
@@ -335,18 +357,7 @@ pub(crate) fn write_hex_to_string(bytes: &[u8], out: &mut String) {
 }
 
 pub(crate) fn write_json_f64(v: f64, out: &mut BufferedSink<'_, '_>) -> Result<(), QueryError> {
-    if !v.is_finite() {
-        return out.push_bytes(b"null");
-    }
-    out.push_str_formatted(|s| {
-        let mut vec = Vec::with_capacity(32);
-        serde_json::to_writer(&mut vec, &v)
-            .map_err(|_| QueryError::internal("failed to encode f64"))?;
-        let text = std::str::from_utf8(&vec)
-            .map_err(|_| QueryError::internal("non-utf8 f64 formatting"))?;
-        s.push_str(text);
-        Ok(())
-    })
+    out.push_json_f64(v)
 }
 
 pub(crate) fn write_json_i64(v: i64, out: &mut BufferedSink<'_, '_>) -> Result<(), QueryError> {
@@ -731,17 +742,29 @@ pub(crate) fn write_json_scalar(
 }
 
 /// Encodes a single `Batch` column cell (`List`, `MapUtf8`, `Events`, `Links`, or any nested value)
-/// to a compact JSON UTF-8 `Vec<u8>` bounded by `parent_sink`'s remaining byte cap and `Reservation`.
-pub(crate) fn encode_cell_json_bounded(
+/// to a compact JSON UTF-8 slice bounded by `out`'s remaining byte cap and `Reservation`, passing
+/// it to `write_csv` while the temporary JSON buffer's reservation remains held.
+pub(crate) fn write_cell_json_to_csv_sink(
     col: &Column,
     phys_row: usize,
-    parent_sink: &mut CappedBuffer<'_>,
-) -> Result<Vec<u8>, QueryError> {
-    parent_sink.encode_temp(|temp_sink| {
-        let mut out = BufferedSink::new(temp_sink);
-        write_json_cell(col, phys_row, &mut out)?;
-        out.flush()
-    })
+    out: &mut BufferedSink<'_, '_>,
+    write_csv: impl FnOnce(&str, &mut BufferedSink<'_, '_>) -> Result<(), QueryError>,
+) -> Result<(), QueryError> {
+    out.flush()?;
+    out.sink_mut().with_temp(
+        |temp_sink| {
+            let mut temp_out = BufferedSink::new(temp_sink);
+            write_json_cell(col, phys_row, &mut temp_out)?;
+            temp_out.flush()
+        },
+        |temp_bytes, outer_sink| {
+            let text = std::str::from_utf8(temp_bytes)
+                .map_err(|_| QueryError::internal("non-utf8 JSON cell"))?;
+            let mut outer_out = BufferedSink::new(outer_sink);
+            write_csv(text, &mut outer_out)?;
+            outer_out.flush()
+        },
+    )
 }
 
 #[cfg(test)]
