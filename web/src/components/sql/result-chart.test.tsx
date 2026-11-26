@@ -4,7 +4,7 @@ import { afterEach, expect, it } from "vitest";
 import type { Schema } from "@/api/types";
 import { SqlResultChart } from "@/components/sql/result-chart";
 
-const TS = 'Timestamp(Nanosecond, Some("UTC"))';
+const TS = "timestamp";
 
 function result(
   columns: { name: string; type: string }[],
@@ -16,8 +16,8 @@ function result(
 const MODELS = result(
   [
     { name: "day", type: TS },
-    { name: "model", type: "Utf8" },
-    { name: "cost", type: "Float64" },
+    { name: "model", type: "string" },
+    { name: "cost", type: "float" },
   ],
   [
     { day: "2026-01-01T00:00:00.000000000Z", model: "a", cost: 1 },
@@ -61,7 +61,7 @@ it("keeps the choice for the same result and resets it for a new one", async () 
 });
 
 it("shows the no-chart message for a result without a usable column", () => {
-  render(<SqlResultChart result={result([{ name: "flag", type: "Boolean" }], [{ flag: true }])} />);
+  render(<SqlResultChart result={result([{ name: "flag", type: "boolean" }], [{ flag: true }])} />);
   expect(
     screen.getByText(
       "No chart for this result: it needs a time or text column and a numeric column.",

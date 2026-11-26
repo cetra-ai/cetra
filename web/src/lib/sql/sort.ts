@@ -1,6 +1,6 @@
 import { isNumericType, isTextType } from "@/lib/sql/types";
 
-/** How a column's cells compare, from its Arrow type. */
+/** How a column's cells compare, from its column type. */
 export type SqlSortKind = "number" | "text" | "other";
 
 export function sortKindOf(type: string): SqlSortKind {
