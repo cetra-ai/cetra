@@ -10,7 +10,9 @@
       "sources": [
         "https://arize.com/docs/phoenix/self-hosting/architecture",
         "https://github.com/Arize-ai/phoenix/blob/main/docker-compose.yml"
-      ]
+      ],
+      "status": "yes",
+      "short": "One container, SQLite or Postgres"
     },
     "selfHostLicence": {
       "value": "Elastic License 2.0 (source-available, not OSI open source); docs state no feature gates when self-hosted",
@@ -18,64 +20,88 @@
         "https://github.com/Arize-ai/phoenix/blob/main/LICENSE",
         "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/self-hosting/license.mdx",
         "https://arize.com/docs/phoenix/self-hosting"
-      ]
+      ],
+      "status": "partial",
+      "short": "Elastic 2.0, source-available"
     },
     "cloudFree": {
       "value": "Free Phoenix Cloud account exists; its limits not found in docs. Arize AX Free: 25k spans, 1 GB/month, 15-day retention",
       "sources": [
         "https://arize.com/pricing/",
         "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/integrations/coding-agents/claude-code.mdx"
-      ]
+      ],
+      "status": "yes",
+      "short": "Free account; AX Free 25k spans"
     },
     "cloudPaidFrom": {
       "value": "Arize AX Pro (separate managed product): $50/month incl. 50k spans and 10 GB ingestion per month, 30-day retention",
-      "sources": ["https://arize.com/pricing/"]
+      "sources": ["https://arize.com/pricing/"],
+      "status": "yes",
+      "short": "Arize AX Pro $50/mo (separate)"
     },
     "otel": {
       "value": "OTLP over HTTP/protobuf at /v1/traces (port 6006) and gRPC (port 4317); OpenInference conventions",
       "sources": [
         "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/self-hosting/configuration.mdx",
         "https://github.com/Arize-ai/phoenix/blob/main/README.md"
-      ]
+      ],
+      "status": "yes",
+      "short": "OTLP HTTP + gRPC"
     },
     "sql": {
       "value": "Not documented: docs describe a span query DSL, dataframe export, REST API and CLI",
       "sources": [
         "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/tracing/how-to-tracing/importing-and-exporting-traces/extract-data-from-spans.mdx"
-      ]
+      ],
+      "status": "no",
+      "short": "Span query DSL, no SQL"
     },
     "mcp": {
       "value": "Remote MCP server (beta) built in at /mcp, Phoenix 19.0.0+; gives agents access to Phoenix data and skills",
-      "sources": ["https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/integrations/mcp.mdx"]
+      "sources": [
+        "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/integrations/mcp.mdx"
+      ],
+      "status": "partial",
+      "short": "Remote MCP (beta)"
     },
     "onlineEvals": {
       "value": "Evals can run on production traces; continuous online evals with alerting are documented under Arize AX",
       "sources": [
         "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/evaluation/llm-evals.mdx"
-      ]
+      ],
+      "status": "partial",
+      "short": "Online evals in Arize AX"
     },
     "datasetsExperiments": {
       "value": "Yes: datasets, experiments and server-side dataset evaluators (LLM and code)",
       "sources": [
         "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/datasets-and-experiments/overview-datasets.mdx",
         "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/evaluation/server-evals/llm-evaluators.mdx"
-      ]
+      ],
+      "status": "yes",
+      "short": "Datasets, experiments, evaluators"
     },
     "promptManagement": {
       "value": "Yes: prompt versioning, tags and a prompt playground",
       "sources": [
         "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/prompt-engineering/overview-prompts/prompt-management.mdx"
-      ]
+      ],
+      "status": "yes",
+      "short": "Versions, tags, playground"
     },
     "gateway": {
       "value": "Not documented in Phoenix docs; they list integrations with third-party AI gateways",
-      "sources": ["https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/integrations.mdx"]
+      "sources": ["https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/integrations.mdx"],
+      "status": "no",
+      "short": "Third-party gateways only"
     },
     "alerts": {
       "value": "Not documented in Phoenix; its docs list monitors and alerting as Arize AX features",
       "sources": [
         "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/resources/frequently-asked-questions/what-is-the-difference-between-phoenix-and-arize.mdx"
-      ]
+      ],
+      "status": "no",
+      "short": "Arize AX only"
     },
     "issueDetection": {
       "value": "Unknown",
@@ -83,18 +109,24 @@
         "https://arize.com/docs/phoenix/pxi",
         "https://arize.com/docs/phoenix/cookbook/tracing/identify-high-signal-traces",
         "https://arize.com/docs/phoenix/llms.txt"
-      ]
+      ],
+      "status": "unknown",
+      "short": "Not documented"
     },
     "annotationQueues": {
       "value": "Unknown",
       "sources": [
         "https://arize.com/docs/phoenix/resources/frequently-asked-questions/langfuse-alternative-arize-phoenix-vs-langfuse-key-differences",
         "https://arize.com/docs/phoenix/tracing/how-to-tracing/feedback-and-annotations"
-      ]
+      ],
+      "status": "unknown",
+      "short": "Not documented"
     },
     "assistant": {
       "value": "PXI (beta): assistant on every page; investigates failing traces, edits playground prompts, queries your data",
-      "sources": ["https://arize.com/docs/phoenix/pxi"]
+      "sources": ["https://arize.com/docs/phoenix/pxi"],
+      "status": "partial",
+      "short": "PXI assistant (beta)"
     },
     "codingAgents": {
       "value": "Plugin traces Claude Code sessions; guides for Codex, GitHub Copilot, Cursor and Gemini CLI",
@@ -104,9 +136,13 @@
         "https://arize.com/docs/phoenix/integrations/coding-agents/copilot",
         "https://arize.com/docs/phoenix/integrations/coding-agents/cursor",
         "https://arize.com/docs/phoenix/integrations/coding-agents/gemini"
-      ]
+      ],
+      "status": "yes",
+      "short": "5 coding agents"
     }
   },
+  "stack": ["Phoenix container", "SQLite or PostgreSQL"],
+  "strengths": ["sql", "assistant", "alerts"],
   "chooseThem": [
     "Runs as a single container with SQLite by default, so a first deployment needs few services",
     "OpenInference auto-instrumentation across many frameworks and providers",

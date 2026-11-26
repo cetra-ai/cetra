@@ -1,11 +1,18 @@
 ---
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import CheckTable from "../../marketing/compare/CheckTable.astro";
 import FactTable from "../../marketing/compare/FactTable.astro";
+import Strengths from "../../marketing/compare/Strengths.astro";
 import Button from "../../marketing/components/Button.astro";
 import Section from "../../marketing/components/Section.astro";
 import SectionHeading from "../../marketing/components/SectionHeading.astro";
-import { COMPETITORS, formatDate, loadProduct } from "../../marketing/data/compare.mjs";
+import {
+  COMPETITORS,
+  formatDate,
+  loadProduct,
+  strengthProblems,
+} from "../../marketing/data/compare.mjs";
 import MarketingLayout from "../../marketing/layouts/MarketingLayout.astro";
 import { CONTACT_EMAIL, DEMO_URL } from "../../marketing/site";
 
@@ -18,6 +25,8 @@ export function getStaticPaths() {
 
 const { slug, them } = Astro.props;
 const cetra = loadProduct("cetra");
+const problems = strengthProblems(them, cetra);
+if (problems.length > 0) throw new Error(problems.join("; "));
 // Only some competitors have a migration guide. The path is relative to website/, the build's cwd.
 const hasGuide = ["mdx", "md"].some((ext) =>
   existsSync(join(process.cwd(), `src/content/docs/docs/integrations/from-${slug}.${ext}`)),
@@ -43,12 +52,17 @@ const hasGuide = ["mdx", "md"].some((ext) =>
     </p>
   </Section>
 
-  <Section tone="raised" divider labelledby="side-title">
-    <SectionHeading title="Side by side" id="side-title" />
-    <FactTable them={them} cetra={cetra} />
+  <Section tone="raised" divider labelledby="strengths-title">
+    <SectionHeading title={`Where cetra is ahead of ${them.name}`} id="strengths-title" />
+    <Strengths them={them} cetra={cetra} />
   </Section>
 
-  <Section tone="ink" divider>
+  <Section tone="ink" divider labelledby="glance-title">
+    <SectionHeading title="At a glance" id="glance-title" />
+    <CheckTable them={them} cetra={cetra} />
+  </Section>
+
+  <Section tone="raised" divider>
     <div class="choose">
       <div>
         <h2>When to choose {them.name}</h2>
@@ -73,6 +87,15 @@ const hasGuide = ["mdx", "md"].some((ext) =>
         </ul>
       </div>
     </div>
+  </Section>
+
+  <Section tone="ink" divider labelledby="full-title">
+    <details class="full">
+      <summary>
+        <h2 id="full-title">Full comparison, with sources</h2>
+      </summary>
+      <FactTable them={them} cetra={cetra} />
+    </details>
   </Section>
 
   <Section tone="teal" divider labelledby="switch-title">
@@ -105,6 +128,31 @@ const hasGuide = ["mdx", "md"].some((ext) =>
 </MarketingLayout>
 
 <style>
+  .full summary {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .full summary::-webkit-details-marker {
+    display: none;
+  }
+  .full summary::before {
+    content: "▸";
+    color: var(--accent);
+    transition: transform 0.15s;
+  }
+  .full[open] summary::before {
+    transform: rotate(90deg);
+  }
+  .full h2 {
+    font-size: var(--text-xl);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .full summary::before {
+      transition: none;
+    }
+  }
   .checked {
     font-size: var(--text-sm);
     margin-top: var(--space-5);
