@@ -1,12 +1,15 @@
 //! Native query engine (`cetra-query` + `cetra-column`) implementations of the
 //! structured read entry points.
 
+pub(crate) mod alerts;
 pub(crate) mod buckets;
 pub(crate) mod columns;
 pub(crate) mod context;
 pub(crate) mod cursor;
+pub(crate) mod facets;
 pub(crate) mod scope;
 pub(crate) mod scores_join;
+pub(crate) mod widgets;
 
 #[allow(unused_imports)] // used in QE4.2-M7
 pub(crate) use buckets::{BUCKET, Bucket, BucketWidth, bucket_expr, resolve as resolve_bucket};
