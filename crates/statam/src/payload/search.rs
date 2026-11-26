@@ -1,6 +1,7 @@
 //! Exact substring search (`LIKE` / `ILIKE`) over inline payloads and `.stpk` chunk packs.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasherDefault;
 
 use cetra_column::Bitmap;
 use memchr::memmem;
@@ -407,7 +408,8 @@ fn search_short_needle_rows(
     }
 
     // Step B: Cross-chunk boundary matches using EdgeTable (0 extra data frame reads).
-    let mut distinct_pairs = HashSet::new();
+    let mut distinct_pairs: HashSet<(u32, u32), BuildHasherDefault<FastPairHasher>> =
+        HashSet::default();
     for &row_idx in remaining_rows {
         if let PayloadRefRow::Chunks(refs) = &row_refs[row_idx] {
             for w in refs.windows(2) {
@@ -423,7 +425,8 @@ fn search_short_needle_rows(
     }
 
     let edges = pack.read_edge_table()?;
-    let mut matched_pairs = HashSet::new();
+    let mut matched_pairs: HashSet<(u32, u32), BuildHasherDefault<FastPairHasher>> =
+        HashSet::default();
     let mut combined = Vec::with_capacity(126);
     let is_unicode_ilike = matches!(matcher, NeedleMatcher::UnicodeIlike { .. });
 
@@ -648,6 +651,30 @@ pub(crate) fn pack_short_circuits_all(
         .iter()
         .any(|opt| opt.as_ref().is_none_or(|b| b.may_contain_hashes(&hashes)));
     Ok(!any_frame_may)
+}
+
+#[derive(Default)]
+struct FastPairHasher(u64);
+
+impl std::hash::Hasher for FastPairHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        for &b in bytes {
+            h = (h ^ u64::from(b)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+        self.0 = h;
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.0 = (self.0 ^ u64::from(i)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0 ^ (self.0 >> 31)
+    }
 }
 
 #[inline]

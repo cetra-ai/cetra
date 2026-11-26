@@ -40,9 +40,7 @@ use crate::payload::{
     encode_payload_refs_l0_from_utf8,
 };
 use crate::simd::bloom::{BloomIndex, Sbbf, statam_bloom_hash};
-use crate::simd::trigram::{
-    MAX_TRIGRAM_BLOOM_BYTES, MIN_TRIGRAM_BLOOM_BYTES, TrigramBloom, extract_trigram_hashes,
-};
+use crate::simd::trigram::{MAX_TRIGRAM_BLOOM_BYTES, MIN_TRIGRAM_BLOOM_BYTES, TrigramBloom};
 
 /// Compressed Hot Tail soft budget (120 KiB) for keeping small FileDicts and secondary blooms hot
 /// within `DEFAULT_TAIL_HINT` (128 KiB).
@@ -4588,37 +4586,32 @@ fn build_narrow_trigram_for_mb(col: &Column, stored_len: usize) -> Option<Vec<u8
     let FlatData::Utf8(u) = flat.data() else {
         return None;
     };
-    let mut hashes = Vec::new();
-    let nulls = flat.nulls();
-    for r in 0..flat.len() {
-        if nulls.is_none_or(|bm| bm.get(r))
-            && let Some(s) = u.get(r)
-        {
-            extract_trigram_hashes(s.as_bytes(), false, &mut hashes);
-        }
-    }
-    if hashes.is_empty() {
-        return None;
-    }
-    hashes.sort_unstable();
-    hashes.dedup();
 
     let max_bytes = (stored_len / 10).min(MAX_TRIGRAM_BLOOM_BYTES);
     if max_bytes < MIN_TRIGRAM_BLOOM_BYTES {
         return None;
     }
     let cap_pow2 = 1usize << (usize::BITS as usize - 1 - max_bytes.leading_zeros() as usize);
-    let desired = hashes
-        .len()
-        .saturating_mul(10)
-        .checked_div(8)
-        .unwrap_or(MIN_TRIGRAM_BLOOM_BYTES)
-        .max(MIN_TRIGRAM_BLOOM_BYTES)
-        .next_power_of_two()
-        .min(cap_pow2);
 
-    let mut bloom = TrigramBloom::new(desired);
-    bloom.insert_hashes(&hashes);
+    let mut bloom = TrigramBloom::new(cap_pow2);
+    let mut any_trigram = false;
+    let nulls = flat.nulls();
+    for r in 0..flat.len() {
+        if nulls.is_none_or(|bm| bm.get(r))
+            && let Some(s) = u.get(r)
+            && s.len() >= 3
+        {
+            any_trigram = true;
+            bloom.insert_bytes(s.as_bytes());
+        }
+    }
+    if !any_trigram {
+        return None;
+    }
+
+    while bloom.as_bytes().len() > MIN_TRIGRAM_BLOOM_BYTES && bloom.bit_density() < 0.25 {
+        bloom = bloom.fold_half();
+    }
     if bloom.bit_density() > MAX_NARROW_TRIGRAM_DENSITY {
         return None;
     }

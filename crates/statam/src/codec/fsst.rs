@@ -35,6 +35,8 @@ pub struct FsstTable {
     sym_offsets: Vec<u16>,
     len1_code: [u8; 256],
     buckets: Vec<Vec<u8>>,
+    sym_words: [u64; 256],
+    sym_masks: [u64; 256],
 }
 
 impl fmt::Debug for FsstTable {
@@ -61,6 +63,8 @@ impl FsstTable {
             sym_offsets: vec![0],
             len1_code: [FSST_ESCAPE; 256],
             buckets: vec![Vec::new(); 256],
+            sym_words: [0u64; 256],
+            sym_masks: [0u64; 256],
         }
     }
 
@@ -71,14 +75,26 @@ impl FsstTable {
         let mut sym_bytes = Vec::with_capacity(count * 4);
         let mut len1_code = [FSST_ESCAPE; 256];
         let mut buckets = vec![Vec::new(); 256];
+        let mut sym_words = [0u64; 256];
+        let mut sym_masks = [0u64; 256];
 
         sym_offsets.push(0);
         for (code, entry) in entries[..count].iter().enumerate() {
             let len = entry.len;
             debug_assert!((1..=FSST_MAX_SYM_LEN as u8).contains(&len));
+            let len_usize = usize::from(len);
             sym_lens.push(len);
-            sym_bytes.extend_from_slice(&entry.bytes[..usize::from(len)]);
+            sym_bytes.extend_from_slice(&entry.bytes[..len_usize]);
             sym_offsets.push(sym_bytes.len() as u16);
+
+            let mut word_bytes = [0u8; FSST_MAX_SYM_LEN];
+            word_bytes[..len_usize].copy_from_slice(&entry.bytes[..len_usize]);
+            sym_words[code] = u64::from_le_bytes(word_bytes);
+            sym_masks[code] = if len_usize == FSST_MAX_SYM_LEN {
+                u64::MAX
+            } else {
+                (1u64 << (len_usize * 8)) - 1
+            };
 
             let code_u8 = code as u8;
             if len == 1 {
@@ -99,6 +115,8 @@ impl FsstTable {
             sym_offsets,
             len1_code,
             buckets,
+            sym_words,
+            sym_masks,
         }
     }
 
@@ -118,11 +136,25 @@ impl FsstTable {
     fn find_longest_match(&self, input: &[u8]) -> Option<(u8, usize)> {
         let first = *input.first()?;
         let bucket = &self.buckets[usize::from(first)];
-        if input.len() >= 2 {
+        if input.len() >= 8 {
+            let in_word = u64::from_le_bytes([
+                input[0], input[1], input[2], input[3], input[4], input[5], input[6], input[7],
+            ]);
             for &code in bucket {
-                let sym = self.symbol_slice(usize::from(code));
-                if sym.len() <= input.len() && input[1..sym.len()] == sym[1..] {
-                    return Some((code, sym.len()));
+                let c = usize::from(code);
+                if (in_word & self.sym_masks[c]) == self.sym_words[c] {
+                    return Some((code, usize::from(self.sym_lens[c])));
+                }
+            }
+        } else if input.len() >= 2 && !bucket.is_empty() {
+            let mut buf = [0u8; FSST_MAX_SYM_LEN];
+            buf[..input.len()].copy_from_slice(input);
+            let in_word = u64::from_le_bytes(buf);
+            for &code in bucket {
+                let c = usize::from(code);
+                let slen = usize::from(self.sym_lens[c]);
+                if slen <= input.len() && (in_word & self.sym_masks[c]) == self.sym_words[c] {
+                    return Some((code, slen));
                 }
             }
         }
