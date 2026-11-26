@@ -103,7 +103,29 @@ pub fn pack_u32(values: &[u32], bit_width: u8, out: &mut Vec<u8>) -> Result<(), 
                 pack_u32_tiles_scalar(&values[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
             }
         }
-        #[cfg(not(all(target_arch = "x86_64", not(miri))))]
+        #[cfg(all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_endian = "little",
+            not(miri)
+        ))]
+        {
+            // SAFETY: `target_feature = "neon"` is enabled at compile time, `1 <= bit_width <= 32`,
+            // `tile_src_len == full_tiles * 1024 <= values.len()`, and
+            // `tile_dst_len == full_tiles * 128 * bit_width <= dst.len()`.
+            unsafe {
+                pack_u32_tiles_neon(&values[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
+            }
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", not(miri)),
+            all(
+                target_arch = "aarch64",
+                target_feature = "neon",
+                target_endian = "little",
+                not(miri)
+            )
+        )))]
         {
             pack_u32_tiles_scalar(&values[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
         }
@@ -175,7 +197,29 @@ pub fn unpack_u32(
                 unpack_u32_tiles_scalar(&src[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
             }
         }
-        #[cfg(not(all(target_arch = "x86_64", not(miri))))]
+        #[cfg(all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_endian = "little",
+            not(miri)
+        ))]
+        {
+            // SAFETY: `target_feature = "neon"` is enabled at compile time, `1 <= bit_width <= 32`,
+            // `tile_src_len == full_tiles * 128 * bit_width <= src.len()`, and
+            // `tile_dst_len == full_tiles * 1024 <= dst.len()`.
+            unsafe {
+                unpack_u32_tiles_neon(&src[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
+            }
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", not(miri)),
+            all(
+                target_arch = "aarch64",
+                target_feature = "neon",
+                target_endian = "little",
+                not(miri)
+            )
+        )))]
         {
             unpack_u32_tiles_scalar(&src[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
         }
@@ -231,7 +275,29 @@ pub fn pack_u64(values: &[u64], bit_width: u8, out: &mut Vec<u8>) -> Result<(), 
                 pack_u64_tiles_scalar(&values[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
             }
         }
-        #[cfg(not(all(target_arch = "x86_64", not(miri))))]
+        #[cfg(all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_endian = "little",
+            not(miri)
+        ))]
+        {
+            // SAFETY: `target_feature = "neon"` is enabled at compile time, `1 <= bit_width <= 64`,
+            // `tile_src_len == full_tiles * 1024 <= values.len()`, and
+            // `tile_dst_len == full_tiles * 128 * bit_width <= dst.len()`.
+            unsafe {
+                pack_u64_tiles_neon(&values[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
+            }
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", not(miri)),
+            all(
+                target_arch = "aarch64",
+                target_feature = "neon",
+                target_endian = "little",
+                not(miri)
+            )
+        )))]
         {
             pack_u64_tiles_scalar(&values[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
         }
@@ -303,7 +369,29 @@ pub fn unpack_u64(
                 unpack_u64_tiles_scalar(&src[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
             }
         }
-        #[cfg(not(all(target_arch = "x86_64", not(miri))))]
+        #[cfg(all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_endian = "little",
+            not(miri)
+        ))]
+        {
+            // SAFETY: `target_feature = "neon"` is enabled at compile time, `1 <= bit_width <= 64`,
+            // `tile_src_len == full_tiles * 128 * bit_width <= src.len()`, and
+            // `tile_dst_len == full_tiles * 1024 <= dst.len()`.
+            unsafe {
+                unpack_u64_tiles_neon(&src[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
+            }
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", not(miri)),
+            all(
+                target_arch = "aarch64",
+                target_feature = "neon",
+                target_endian = "little",
+                not(miri)
+            )
+        )))]
         {
             unpack_u64_tiles_scalar(&src[..tile_src_len], bit_width, &mut dst[..tile_dst_len]);
         }
@@ -379,7 +467,32 @@ pub fn delta_encode_i64(values: &[i64], bases_out: &mut Vec<i64>, deltas_out: &m
                 );
             }
         }
-        #[cfg(not(all(target_arch = "x86_64", not(miri))))]
+        #[cfg(all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_endian = "little",
+            not(miri)
+        ))]
+        {
+            // SAFETY: `target_feature = "neon"` is enabled at compile time and
+            // output slices are pre-sized to `full_tiles * 8` and `full_tiles * 1024`.
+            unsafe {
+                delta_encode_i64_tiles_neon(
+                    &values[..tile_val_len],
+                    &mut bases_out[base_start..base_start + tile_base_len],
+                    &mut deltas_out[delta_start..delta_start + tile_val_len],
+                );
+            }
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", not(miri)),
+            all(
+                target_arch = "aarch64",
+                target_feature = "neon",
+                target_endian = "little",
+                not(miri)
+            )
+        )))]
         {
             delta_encode_i64_tiles_scalar(
                 &values[..tile_val_len],
@@ -455,7 +568,32 @@ pub fn delta_decode_i64(
                 );
             }
         }
-        #[cfg(not(all(target_arch = "x86_64", not(miri))))]
+        #[cfg(all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_endian = "little",
+            not(miri)
+        ))]
+        {
+            // SAFETY: `target_feature = "neon"` is enabled at compile time and
+            // input/output slices are exact multiples of `full_tiles`.
+            unsafe {
+                delta_decode_i64_tiles_neon(
+                    &bases[..tile_base_len],
+                    &deltas[..tile_val_len],
+                    &mut dst[..tile_val_len],
+                );
+            }
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", not(miri)),
+            all(
+                target_arch = "aarch64",
+                target_feature = "neon",
+                target_endian = "little",
+                not(miri)
+            )
+        )))]
         {
             delta_decode_i64_tiles_scalar(
                 &bases[..tile_base_len],
@@ -916,6 +1054,15 @@ fn unpack_u32_at_validated(src: &[u8], full_tiles: usize, bit_width: u8, idx: us
 
 // --- Portable Scalar Implementations ---
 
+#[cfg_attr(
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little",
+        not(miri)
+    ),
+    allow(dead_code)
+)]
 fn pack_u32_tiles_scalar(values: &[u32], bit_width: u8, dst: &mut [u8]) {
     let bw = u32::from(bit_width);
     let mask = if bit_width == 32 {
@@ -967,6 +1114,15 @@ fn pack_u32_tiles_scalar(values: &[u32], bit_width: u8, dst: &mut [u8]) {
     }
 }
 
+#[cfg_attr(
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little",
+        not(miri)
+    ),
+    allow(dead_code)
+)]
 fn unpack_u32_tiles_scalar(src: &[u8], bit_width: u8, dst: &mut [u32]) {
     let bw = u32::from(bit_width);
     let mask = if bit_width == 32 {
@@ -1014,6 +1170,15 @@ fn unpack_u32_tiles_scalar(src: &[u8], bit_width: u8, dst: &mut [u32]) {
     }
 }
 
+#[cfg_attr(
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little",
+        not(miri)
+    ),
+    allow(dead_code)
+)]
 #[inline]
 fn load_8xu32_le(buf: &[u8], offset: usize) -> [u32; 8] {
     let mut out = [0u32; 8];
@@ -1073,6 +1238,15 @@ fn unpack_u32_tail_scalar(src: &[u8], bit_width: u8, dst: &mut [u32]) {
     }
 }
 
+#[cfg_attr(
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little",
+        not(miri)
+    ),
+    allow(dead_code)
+)]
 fn pack_u64_tiles_scalar(values: &[u64], bit_width: u8, dst: &mut [u8]) {
     let bw = u32::from(bit_width);
     let mask = if bit_width == 64 {
@@ -1124,6 +1298,15 @@ fn pack_u64_tiles_scalar(values: &[u64], bit_width: u8, dst: &mut [u8]) {
     }
 }
 
+#[cfg_attr(
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little",
+        not(miri)
+    ),
+    allow(dead_code)
+)]
 fn unpack_u64_tiles_scalar(src: &[u8], bit_width: u8, dst: &mut [u64]) {
     let bw = u32::from(bit_width);
     let mask = if bit_width == 64 {
@@ -1171,6 +1354,15 @@ fn unpack_u64_tiles_scalar(src: &[u8], bit_width: u8, dst: &mut [u64]) {
     }
 }
 
+#[cfg_attr(
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little",
+        not(miri)
+    ),
+    allow(dead_code)
+)]
 #[inline]
 fn load_4xu64_le(buf: &[u8], offset: usize) -> [u64; 4] {
     let mut out = [0u64; 4];
@@ -1239,6 +1431,15 @@ fn unpack_u64_tail_scalar(src: &[u8], bit_width: u8, dst: &mut [u64]) {
     }
 }
 
+#[cfg_attr(
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little",
+        not(miri)
+    ),
+    allow(dead_code)
+)]
 fn delta_encode_i64_tiles_scalar(values: &[i64], bases_out: &mut [i64], deltas_out: &mut [i64]) {
     for ((tile_in, tile_bases), tile_deltas) in values
         .as_chunks::<FASTLANES_TILE_SIZE>()
@@ -1267,6 +1468,15 @@ fn delta_encode_i64_tiles_scalar(values: &[i64], bases_out: &mut [i64], deltas_o
     }
 }
 
+#[cfg_attr(
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little",
+        not(miri)
+    ),
+    allow(dead_code)
+)]
 fn delta_decode_i64_tiles_scalar(bases: &[i64], deltas: &[i64], dst: &mut [i64]) {
     for ((tile_bases, tile_deltas), tile_out) in bases
         .as_chunks::<8>()
@@ -1611,6 +1821,500 @@ unsafe fn delta_decode_i64_tiles_avx2(bases: &[i64], deltas: &[i64], dst: &mut [
             for lane in 0..8 {
                 let seg = FASTLANES_ORDER_8[lane];
                 tile_out[seg * 128 + r] = lanes[lane];
+            }
+        }
+    }
+}
+
+// --- aarch64 NEON Implementations ---
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn pack_u32_tiles_neon(values: &[u32], bit_width: u8, dst: &mut [u8]) {
+    use std::arch::aarch64::*;
+
+    debug_assert!((1..=32).contains(&bit_width));
+    if bit_width == 32 {
+        // SAFETY: `values.len() * 4 == dst.len()` (little-endian gated) and slices do not alias.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                values.as_ptr().cast::<u8>(),
+                dst.as_mut_ptr(),
+                dst.len(),
+            );
+        }
+        return;
+    }
+
+    let bw = u32::from(bit_width);
+    let mask = vdupq_n_u32((1u32 << bw) - 1);
+    let zero = vdupq_n_u32(0);
+    let tile_out_bytes = 128 * usize::from(bit_width);
+
+    for (tile_in, tile_out) in values
+        .as_chunks::<FASTLANES_TILE_SIZE>()
+        .0
+        .iter()
+        .zip(dst.chunks_exact_mut(tile_out_bytes))
+    {
+        let mut acc0 = zero;
+        let mut acc1 = zero;
+        let mut bit_pos: u32 = 0;
+        let mut word_idx: usize = 0;
+
+        for k in 0..128 {
+            // SAFETY: `tile_in` has length 1024 and `k * 8 + 8 <= 1024`.
+            let (raw0, raw1) = unsafe {
+                let ptr = tile_in.as_ptr().add(k * 8);
+                (vld1q_u32(ptr), vld1q_u32(ptr.add(4)))
+            };
+            let v0 = vandq_u32(raw0, mask);
+            let v1 = vandq_u32(raw1, mask);
+            let lshift = vdupq_n_s32(bit_pos as i32);
+            acc0 = vorrq_u32(acc0, vshlq_u32(v0, lshift));
+            acc1 = vorrq_u32(acc1, vshlq_u32(v1, lshift));
+
+            let next_bit_pos = bit_pos + bw;
+            if next_bit_pos >= 32 {
+                // SAFETY: `word_idx < 4 * bit_width`, so `word_idx * 32 + 32 <= tile_out.len()`;
+                // `vst1q_u8` uses 1-byte pointer alignment and little-endian byte order is gated.
+                unsafe {
+                    let out_ptr = tile_out.as_mut_ptr().add(word_idx * 32);
+                    vst1q_u8(out_ptr, vreinterpretq_u8_u32(acc0));
+                    vst1q_u8(out_ptr.add(16), vreinterpretq_u8_u32(acc1));
+                }
+                word_idx += 1;
+                let rem_bits = next_bit_pos - 32;
+                if rem_bits > 0 {
+                    // Negative shift in `vshlq_u32` performs a logical right shift (`-(32 - bit_pos)` in `-31..=-1`).
+                    let rshift = vdupq_n_s32(-((32 - bit_pos) as i32));
+                    acc0 = vshlq_u32(v0, rshift);
+                    acc1 = vshlq_u32(v1, rshift);
+                } else {
+                    acc0 = zero;
+                    acc1 = zero;
+                }
+                bit_pos = rem_bits;
+            } else {
+                bit_pos = next_bit_pos;
+            }
+        }
+    }
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn unpack_u32_tiles_neon(src: &[u8], bit_width: u8, dst: &mut [u32]) {
+    use std::arch::aarch64::*;
+
+    debug_assert!((1..=32).contains(&bit_width));
+    if bit_width == 32 {
+        // SAFETY: `src.len() == dst.len() * 4` (little-endian gated) and slices do not alias.
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr().cast::<u8>(), src.len());
+        }
+        return;
+    }
+
+    let bw = u32::from(bit_width);
+    let mask = vdupq_n_u32((1u32 << bw) - 1);
+    let tile_in_bytes = 128 * usize::from(bit_width);
+    let total_words = 4 * usize::from(bit_width);
+
+    for (tile_in, tile_out) in src
+        .chunks_exact(tile_in_bytes)
+        .zip(dst.as_chunks_mut::<FASTLANES_TILE_SIZE>().0.iter_mut())
+    {
+        // SAFETY: `bit_width >= 1`, so `tile_in.len() >= 128 >= 32`; `vld1q_u8` accepts any alignment.
+        let (mut cur0, mut cur1) = unsafe {
+            let ptr = tile_in.as_ptr();
+            (
+                vreinterpretq_u32_u8(vld1q_u8(ptr)),
+                vreinterpretq_u32_u8(vld1q_u8(ptr.add(16))),
+            )
+        };
+        let mut word_idx: usize = 0;
+        let mut bit_pos: u32 = 0;
+
+        for k in 0..128 {
+            // Negative shift in `vshlq_u32` performs logical right shift by `bit_pos` (`0..=31`).
+            let rshift = vdupq_n_s32(-(bit_pos as i32));
+            let mut v0 = vshlq_u32(cur0, rshift);
+            let mut v1 = vshlq_u32(cur1, rshift);
+
+            let next_bit_pos = bit_pos + bw;
+            if next_bit_pos >= 32 {
+                let rem_bits = next_bit_pos - 32;
+                word_idx += 1;
+                if word_idx < total_words {
+                    // SAFETY: `word_idx < total_words == 4 * bit_width`, so `word_idx * 32 + 32 <= tile_in.len()`.
+                    let (next0, next1) = unsafe {
+                        let ptr = tile_in.as_ptr().add(word_idx * 32);
+                        (
+                            vreinterpretq_u32_u8(vld1q_u8(ptr)),
+                            vreinterpretq_u32_u8(vld1q_u8(ptr.add(16))),
+                        )
+                    };
+                    if rem_bits > 0 {
+                        let lshift = vdupq_n_s32((32 - bit_pos) as i32);
+                        v0 = vorrq_u32(v0, vshlq_u32(next0, lshift));
+                        v1 = vorrq_u32(v1, vshlq_u32(next1, lshift));
+                    }
+                    cur0 = next0;
+                    cur1 = next1;
+                }
+                bit_pos = rem_bits;
+            } else {
+                bit_pos = next_bit_pos;
+            }
+            v0 = vandq_u32(v0, mask);
+            v1 = vandq_u32(v1, mask);
+            // SAFETY: `tile_out` has length 1024 and `k * 8 + 8 <= 1024`.
+            unsafe {
+                let out_ptr = tile_out.as_mut_ptr().add(k * 8);
+                vst1q_u32(out_ptr, v0);
+                vst1q_u32(out_ptr.add(4), v1);
+            }
+        }
+    }
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn pack_u64_tiles_neon(values: &[u64], bit_width: u8, dst: &mut [u8]) {
+    use std::arch::aarch64::*;
+
+    debug_assert!((1..=64).contains(&bit_width));
+    if bit_width == 64 {
+        // SAFETY: `values.len() * 8 == dst.len()` (little-endian gated) and slices do not alias.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                values.as_ptr().cast::<u8>(),
+                dst.as_mut_ptr(),
+                dst.len(),
+            );
+        }
+        return;
+    }
+
+    let bw = u32::from(bit_width);
+    let mask = vdupq_n_u64((1u64 << bw) - 1);
+    let zero = vdupq_n_u64(0);
+    let tile_out_bytes = 128 * usize::from(bit_width);
+
+    for (tile_in, tile_out) in values
+        .as_chunks::<FASTLANES_TILE_SIZE>()
+        .0
+        .iter()
+        .zip(dst.chunks_exact_mut(tile_out_bytes))
+    {
+        let mut acc0 = zero;
+        let mut acc1 = zero;
+        let mut bit_pos: u32 = 0;
+        let mut word_idx: usize = 0;
+
+        for k in 0..256 {
+            // SAFETY: `tile_in` has length 1024 and `k * 4 + 4 <= 1024`.
+            let (raw0, raw1) = unsafe {
+                let ptr = tile_in.as_ptr().add(k * 4);
+                (vld1q_u64(ptr), vld1q_u64(ptr.add(2)))
+            };
+            let v0 = vandq_u64(raw0, mask);
+            let v1 = vandq_u64(raw1, mask);
+            let lshift = vdupq_n_s64(i64::from(bit_pos));
+            acc0 = vorrq_u64(acc0, vshlq_u64(v0, lshift));
+            acc1 = vorrq_u64(acc1, vshlq_u64(v1, lshift));
+
+            let next_bit_pos = bit_pos + bw;
+            if next_bit_pos >= 64 {
+                // SAFETY: `word_idx < 4 * bit_width`, so `word_idx * 32 + 32 <= tile_out.len()`;
+                // `vst1q_u8` accepts any alignment and little-endian byte order is gated.
+                unsafe {
+                    let out_ptr = tile_out.as_mut_ptr().add(word_idx * 32);
+                    vst1q_u8(out_ptr, vreinterpretq_u8_u64(acc0));
+                    vst1q_u8(out_ptr.add(16), vreinterpretq_u8_u64(acc1));
+                }
+                word_idx += 1;
+                let rem_bits = next_bit_pos - 64;
+                if rem_bits > 0 {
+                    // Negative shift in `vshlq_u64` performs logical right shift (`-(64 - bit_pos)` in `-63..=-1`).
+                    let rshift = vdupq_n_s64(-i64::from(64 - bit_pos));
+                    acc0 = vshlq_u64(v0, rshift);
+                    acc1 = vshlq_u64(v1, rshift);
+                } else {
+                    acc0 = zero;
+                    acc1 = zero;
+                }
+                bit_pos = rem_bits;
+            } else {
+                bit_pos = next_bit_pos;
+            }
+        }
+    }
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn unpack_u64_tiles_neon(src: &[u8], bit_width: u8, dst: &mut [u64]) {
+    use std::arch::aarch64::*;
+
+    debug_assert!((1..=64).contains(&bit_width));
+    if bit_width == 64 {
+        // SAFETY: `src.len() == dst.len() * 8` (little-endian gated) and slices do not alias.
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr().cast::<u8>(), src.len());
+        }
+        return;
+    }
+
+    let bw = u32::from(bit_width);
+    let mask = vdupq_n_u64((1u64 << bw) - 1);
+    let tile_in_bytes = 128 * usize::from(bit_width);
+    let total_words = 4 * usize::from(bit_width);
+
+    for (tile_in, tile_out) in src
+        .chunks_exact(tile_in_bytes)
+        .zip(dst.as_chunks_mut::<FASTLANES_TILE_SIZE>().0.iter_mut())
+    {
+        // SAFETY: `bit_width >= 1`, so `tile_in.len() >= 128 >= 32`; `vld1q_u8` accepts any alignment.
+        let (mut cur0, mut cur1) = unsafe {
+            let ptr = tile_in.as_ptr();
+            (
+                vreinterpretq_u64_u8(vld1q_u8(ptr)),
+                vreinterpretq_u64_u8(vld1q_u8(ptr.add(16))),
+            )
+        };
+        let mut word_idx: usize = 0;
+        let mut bit_pos: u32 = 0;
+
+        for k in 0..256 {
+            // Negative shift in `vshlq_u64` performs logical right shift by `bit_pos` (`0..=63`).
+            let rshift = vdupq_n_s64(-i64::from(bit_pos));
+            let mut v0 = vshlq_u64(cur0, rshift);
+            let mut v1 = vshlq_u64(cur1, rshift);
+
+            let next_bit_pos = bit_pos + bw;
+            if next_bit_pos >= 64 {
+                let rem_bits = next_bit_pos - 64;
+                word_idx += 1;
+                if word_idx < total_words {
+                    // SAFETY: `word_idx < total_words == 4 * bit_width`, so `word_idx * 32 + 32 <= tile_in.len()`.
+                    let (next0, next1) = unsafe {
+                        let ptr = tile_in.as_ptr().add(word_idx * 32);
+                        (
+                            vreinterpretq_u64_u8(vld1q_u8(ptr)),
+                            vreinterpretq_u64_u8(vld1q_u8(ptr.add(16))),
+                        )
+                    };
+                    if rem_bits > 0 {
+                        let lshift = vdupq_n_s64(i64::from(64 - bit_pos));
+                        v0 = vorrq_u64(v0, vshlq_u64(next0, lshift));
+                        v1 = vorrq_u64(v1, vshlq_u64(next1, lshift));
+                    }
+                    cur0 = next0;
+                    cur1 = next1;
+                }
+                bit_pos = rem_bits;
+            } else {
+                bit_pos = next_bit_pos;
+            }
+            v0 = vandq_u64(v0, mask);
+            v1 = vandq_u64(v1, mask);
+            // SAFETY: `tile_out` has length 1024 and `k * 4 + 4 <= 1024`.
+            unsafe {
+                let out_ptr = tile_out.as_mut_ptr().add(k * 4);
+                vst1q_u64(out_ptr, v0);
+                vst1q_u64(out_ptr.add(2), v1);
+            }
+        }
+    }
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn delta_encode_i64_tiles_neon(
+    values: &[i64],
+    bases_out: &mut [i64],
+    deltas_out: &mut [i64],
+) {
+    use std::arch::aarch64::*;
+
+    const S0: usize = FASTLANES_ORDER_8[0] * 128;
+    const S1: usize = FASTLANES_ORDER_8[1] * 128;
+    const S2: usize = FASTLANES_ORDER_8[2] * 128;
+    const S3: usize = FASTLANES_ORDER_8[3] * 128;
+    const S4: usize = FASTLANES_ORDER_8[4] * 128;
+    const S5: usize = FASTLANES_ORDER_8[5] * 128;
+    const S6: usize = FASTLANES_ORDER_8[6] * 128;
+    const S7: usize = FASTLANES_ORDER_8[7] * 128;
+
+    for ((tile_in, tile_bases), tile_deltas) in values
+        .as_chunks::<FASTLANES_TILE_SIZE>()
+        .0
+        .iter()
+        .zip(bases_out.as_chunks_mut::<8>().0.iter_mut())
+        .zip(
+            deltas_out
+                .as_chunks_mut::<FASTLANES_TILE_SIZE>()
+                .0
+                .iter_mut(),
+        )
+    {
+        for lane in 0..8 {
+            let seg = FASTLANES_ORDER_8[lane];
+            tile_bases[lane] = tile_in[seg * 128];
+        }
+        // SAFETY: `tile_bases.len() == 8`; four 2-lane `i64` loads are in bounds.
+        let (mut prev0, mut prev1, mut prev2, mut prev3) = unsafe {
+            let ptr = tile_bases.as_ptr();
+            (
+                vld1q_s64(ptr),
+                vld1q_s64(ptr.add(2)),
+                vld1q_s64(ptr.add(4)),
+                vld1q_s64(ptr.add(6)),
+            )
+        };
+
+        // Process 2 rows (`r, r + 1`) per iteration using contiguous 128-bit loads and
+        // in-register `vzip1q_s64`/`vzip2q_s64` 2×2 transposes (0 cross-domain transfers).
+        // At `r == 0`, `cur*_a == prev*`, so row 0 deltas naturally compute to 0.
+        let in_ptr = tile_in.as_ptr();
+        let out_ptr = tile_deltas.as_mut_ptr();
+        for pair in 0..64 {
+            let r = pair * 2;
+            // SAFETY: each `S* + r + 2 <= 1024 == tile_in.len()` and
+            // `(r + 1) * 8 + 8 <= 1024 == tile_deltas.len()`.
+            unsafe {
+                let l0 = vld1q_s64(in_ptr.add(S0 + r));
+                let l1 = vld1q_s64(in_ptr.add(S1 + r));
+                let l2 = vld1q_s64(in_ptr.add(S2 + r));
+                let l3 = vld1q_s64(in_ptr.add(S3 + r));
+                let l4 = vld1q_s64(in_ptr.add(S4 + r));
+                let l5 = vld1q_s64(in_ptr.add(S5 + r));
+                let l6 = vld1q_s64(in_ptr.add(S6 + r));
+                let l7 = vld1q_s64(in_ptr.add(S7 + r));
+
+                let cur0_a = vzip1q_s64(l0, l1);
+                let cur0_b = vzip2q_s64(l0, l1);
+                let cur1_a = vzip1q_s64(l2, l3);
+                let cur1_b = vzip2q_s64(l2, l3);
+                let cur2_a = vzip1q_s64(l4, l5);
+                let cur2_b = vzip2q_s64(l4, l5);
+                let cur3_a = vzip1q_s64(l6, l7);
+                let cur3_b = vzip2q_s64(l6, l7);
+
+                let dst_a = out_ptr.add(r * 8);
+                vst1q_s64(dst_a, vsubq_s64(cur0_a, prev0));
+                vst1q_s64(dst_a.add(2), vsubq_s64(cur1_a, prev1));
+                vst1q_s64(dst_a.add(4), vsubq_s64(cur2_a, prev2));
+                vst1q_s64(dst_a.add(6), vsubq_s64(cur3_a, prev3));
+
+                let dst_b = dst_a.add(8);
+                vst1q_s64(dst_b, vsubq_s64(cur0_b, cur0_a));
+                vst1q_s64(dst_b.add(2), vsubq_s64(cur1_b, cur1_a));
+                vst1q_s64(dst_b.add(4), vsubq_s64(cur2_b, cur2_a));
+                vst1q_s64(dst_b.add(6), vsubq_s64(cur3_b, cur3_a));
+
+                prev0 = cur0_b;
+                prev1 = cur1_b;
+                prev2 = cur2_b;
+                prev3 = cur3_b;
+            }
+        }
+    }
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn delta_decode_i64_tiles_neon(bases: &[i64], deltas: &[i64], dst: &mut [i64]) {
+    use std::arch::aarch64::*;
+
+    const S0: usize = FASTLANES_ORDER_8[0] * 128;
+    const S1: usize = FASTLANES_ORDER_8[1] * 128;
+    const S2: usize = FASTLANES_ORDER_8[2] * 128;
+    const S3: usize = FASTLANES_ORDER_8[3] * 128;
+    const S4: usize = FASTLANES_ORDER_8[4] * 128;
+    const S5: usize = FASTLANES_ORDER_8[5] * 128;
+    const S6: usize = FASTLANES_ORDER_8[6] * 128;
+    const S7: usize = FASTLANES_ORDER_8[7] * 128;
+
+    for ((tile_bases, tile_deltas), tile_out) in bases
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .zip(deltas.as_chunks::<FASTLANES_TILE_SIZE>().0.iter())
+        .zip(dst.as_chunks_mut::<FASTLANES_TILE_SIZE>().0.iter_mut())
+    {
+        // SAFETY: `tile_bases.len() == 8`; four 2-lane `i64` loads are in bounds.
+        let (mut acc0, mut acc1, mut acc2, mut acc3) = unsafe {
+            let ptr = tile_bases.as_ptr();
+            (
+                vld1q_s64(ptr),
+                vld1q_s64(ptr.add(2)),
+                vld1q_s64(ptr.add(4)),
+                vld1q_s64(ptr.add(6)),
+            )
+        };
+
+        // Process 2 rows (`r, r + 1`) per iteration using `vzip1q_s64`/`vzip2q_s64`
+        // 2×2 transposes and contiguous 128-bit stores (0 cross-domain transfers).
+        let in_ptr = tile_deltas.as_ptr();
+        let out_ptr = tile_out.as_mut_ptr();
+        for pair in 0..64 {
+            let r = pair * 2;
+            // SAFETY: `(r + 1) * 8 + 8 <= 1024 == tile_deltas.len()` and
+            // each `S* + r + 2 <= 1024 == tile_out.len()`.
+            unsafe {
+                let p_a = in_ptr.add(r * 8);
+                let a0 = vaddq_s64(acc0, vld1q_s64(p_a));
+                let a1 = vaddq_s64(acc1, vld1q_s64(p_a.add(2)));
+                let a2 = vaddq_s64(acc2, vld1q_s64(p_a.add(4)));
+                let a3 = vaddq_s64(acc3, vld1q_s64(p_a.add(6)));
+
+                let p_b = p_a.add(8);
+                acc0 = vaddq_s64(a0, vld1q_s64(p_b));
+                acc1 = vaddq_s64(a1, vld1q_s64(p_b.add(2)));
+                acc2 = vaddq_s64(a2, vld1q_s64(p_b.add(4)));
+                acc3 = vaddq_s64(a3, vld1q_s64(p_b.add(6)));
+
+                vst1q_s64(out_ptr.add(S0 + r), vzip1q_s64(a0, acc0));
+                vst1q_s64(out_ptr.add(S1 + r), vzip2q_s64(a0, acc0));
+                vst1q_s64(out_ptr.add(S2 + r), vzip1q_s64(a1, acc1));
+                vst1q_s64(out_ptr.add(S3 + r), vzip2q_s64(a1, acc1));
+                vst1q_s64(out_ptr.add(S4 + r), vzip1q_s64(a2, acc2));
+                vst1q_s64(out_ptr.add(S5 + r), vzip2q_s64(a2, acc2));
+                vst1q_s64(out_ptr.add(S6 + r), vzip1q_s64(a3, acc3));
+                vst1q_s64(out_ptr.add(S7 + r), vzip2q_s64(a3, acc3));
             }
         }
     }
@@ -2098,5 +2802,43 @@ mod tests {
             delta_decode_i64_indices(&[], &[], usize::MAX, 0, false, &[]),
             Err(StatamError::BoundsExceeded { .. })
         ));
+    }
+
+    #[test]
+    fn bitpack_unaligned_buffer_and_dirty_high_bits_match_scalar() {
+        let len = 2053usize;
+        for bw in [1u8, 7, 13, 19, 31, 32] {
+            let mask = if bw == 32 { u32::MAX } else { (1u32 << bw) - 1 };
+            // Dirty high bits above `bw` must be masked identically by SIMD and scalar.
+            let dirty: Vec<u32> = (0..len)
+                .map(|i| (i as u32).wrapping_mul(0x9E37_79B9) | !mask)
+                .collect();
+            let expected: Vec<u32> = dirty.iter().map(|&v| v & mask).collect();
+
+            // 1-byte prefix forces unaligned `dst` and `src` addresses.
+            let mut packed = vec![0xAAu8];
+            pack_u32(&dirty, bw, &mut packed).unwrap();
+            assert_eq!(packed[0], 0xAA);
+
+            let mut unpacked = Vec::new();
+            unpack_u32(&packed[1..], len, bw, &mut unpacked).unwrap();
+            assert_eq!(unpacked, expected, "u32 unaligned dirty bw={bw}");
+        }
+
+        for bw in [1u8, 7, 19, 37, 63, 64] {
+            let mask = if bw == 64 { u64::MAX } else { (1u64 << bw) - 1 };
+            let dirty: Vec<u64> = (0..len)
+                .map(|i| (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | !mask)
+                .collect();
+            let expected: Vec<u64> = dirty.iter().map(|&v| v & mask).collect();
+
+            let mut packed = vec![0x55u8];
+            pack_u64(&dirty, bw, &mut packed).unwrap();
+            assert_eq!(packed[0], 0x55);
+
+            let mut unpacked = Vec::new();
+            unpack_u64(&packed[1..], len, bw, &mut unpacked).unwrap();
+            assert_eq!(unpacked, expected, "u64 unaligned dirty bw={bw}");
+        }
     }
 }

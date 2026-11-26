@@ -1,8 +1,9 @@
-//! Audited SIMD kernels with runtime CPU dispatch and safe scalar fallbacks.
+//! Audited SIMD kernels with CPU dispatch and safe scalar fallbacks.
 //!
-//! Every kernel dispatches to AVX2 on `x86_64` when `is_x86_feature_detected!("avx2")`
-//! holds and `#[cfg(not(miri))]` is active, and falls back to a 100% safe portable
-//! scalar implementation otherwise.
+//! Every kernel dispatches to AVX2 on `x86_64` (when `is_x86_feature_detected!("avx2")`
+//! holds) or little-endian NEON on `aarch64` (when `target_feature = "neon"` is enabled)
+//! under `#[cfg(not(miri))]`, and falls back to a 100% safe portable scalar implementation
+//! otherwise.
 
 pub mod bitpack;
 pub mod bloom;

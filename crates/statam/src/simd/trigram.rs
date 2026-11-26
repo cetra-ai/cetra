@@ -33,6 +33,21 @@ pub fn ascii_lowercase_into(src: &[u8], dst: &mut Vec<u8>) {
             return;
         }
     }
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little",
+        not(miri)
+    ))]
+    {
+        // SAFETY: `target_feature = "neon"` is enabled at compile time and
+        // `dst.len() == src.len()`.
+        unsafe {
+            ascii_lowercase_neon(src, dst);
+        }
+        return;
+    }
+    #[allow(unreachable_code)]
     ascii_lowercase_scalar(src, dst);
 }
 
@@ -137,6 +152,23 @@ impl TrigramBloom {
                 return;
             }
         }
+        #[cfg(all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_endian = "little",
+            not(miri)
+        ))]
+        {
+            if bytes.len() >= 16 {
+                // SAFETY: `target_feature = "neon"` is enabled at compile time,
+                // `bytes.len() >= 16`, and `self.bits.len()` is a non-zero power of two
+                // in `256..=16_384`.
+                unsafe {
+                    self.insert_bytes_neon(bytes);
+                }
+                return;
+            }
+        }
         self.insert_bytes_scalar(bytes);
     }
 
@@ -190,6 +222,9 @@ impl TrigramBloom {
             }
         }
 
+        // Packed `(idx | mask << 16)` layout requires `idx < 65_536`.
+        const { assert!(MAX_TRIGRAM_BLOOM_BYTES <= 65_536) };
+        debug_assert!(bytes.len() >= 16);
         debug_assert!(self.bits.len().is_power_of_two());
         debug_assert!(self.bits.len() <= MAX_TRIGRAM_BLOOM_BYTES);
         let byte_mask = self.bits.len() - 1;
@@ -249,6 +284,154 @@ impl TrigramBloom {
                 set_two_lanes(ptr, byte_mask, _mm256_extract_epi64::<3>(v2) as u64);
             }
             i += 8;
+        }
+
+        let end = bytes.len() - 2;
+        while i < end {
+            let h = trigram_hash(
+                bytes[i].to_ascii_lowercase(),
+                bytes[i + 1].to_ascii_lowercase(),
+                bytes[i + 2].to_ascii_lowercase(),
+            );
+            let p1 = (h as usize) & bit_mask;
+            let p2 = (h.rotate_right(16) as usize) & bit_mask;
+            bits[(p1 >> 3) & byte_mask] |= 1u8 << (p1 & 7);
+            bits[(p2 >> 3) & byte_mask] |= 1u8 << (p2 & 7);
+            i += 1;
+        }
+    }
+
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little",
+        not(miri)
+    ))]
+    #[target_feature(enable = "neon")]
+    unsafe fn insert_bytes_neon(&mut self, bytes: &[u8]) {
+        use std::arch::aarch64::*;
+
+        #[inline(always)]
+        unsafe fn set_two_lanes(ptr: *mut u8, byte_mask: usize, word: u64) {
+            let idx0 = (word as usize) & byte_mask;
+            let mask0 = (word >> 16) as u8;
+            let idx1 = ((word >> 32) as usize) & byte_mask;
+            let mask1 = (word >> 48) as u8;
+            // SAFETY: caller ensures `byte_mask == bits.len() - 1` and `bits.len()` is a power of two
+            // (`<= MAX_TRIGRAM_BLOOM_BYTES == 16_384`), so `idx0 < bits.len()` and `idx1 < bits.len()`.
+            unsafe {
+                *ptr.add(idx0) |= mask0;
+                *ptr.add(idx1) |= mask1;
+            }
+        }
+
+        const SHUF0: [u8; 16] = [0, 1, 2, 255, 1, 2, 3, 255, 2, 3, 4, 255, 3, 4, 5, 255];
+        const SHUF1: [u8; 16] = [4, 5, 6, 255, 5, 6, 7, 255, 6, 7, 8, 255, 7, 8, 9, 255];
+        const SHUF2: [u8; 16] = [
+            8, 9, 10, 255, 9, 10, 11, 255, 10, 11, 12, 255, 11, 12, 13, 255,
+        ];
+
+        // Packed `(idx | mask << 16)` layout requires `idx < 65_536`.
+        const { assert!(MAX_TRIGRAM_BLOOM_BYTES <= 65_536) };
+        debug_assert!(bytes.len() >= 16);
+        debug_assert!(self.bits.len().is_power_of_two());
+        debug_assert!(self.bits.len() <= MAX_TRIGRAM_BLOOM_BYTES);
+        let byte_mask = self.bits.len() - 1;
+        let bit_mask = (self.bits.len() * 8) - 1;
+        let bits = &mut self.bits;
+        let ptr = bits.as_mut_ptr();
+
+        let cap_a = vdupq_n_u8(b'A');
+        let alpha_len = vdupq_n_u8(26);
+        let bit20 = vdupq_n_u8(0x20);
+        // SAFETY: `SHUF0`, `SHUF1`, and `SHUF2` are `[u8; 16]`.
+        let (shuf0, shuf1, shuf2) = unsafe {
+            (
+                vld1q_u8(SHUF0.as_ptr()),
+                vld1q_u8(SHUF1.as_ptr()),
+                vld1q_u8(SHUF2.as_ptr()),
+            )
+        };
+        let c1 = vdupq_n_u32(0x85eb_ca6b);
+        let c2 = vdupq_n_u32(0xc2b2_ae35);
+        let mask_v = vdupq_n_u32(bit_mask as u32);
+        let ones_v = vdupq_n_u32(1);
+        let seven_v = vdupq_n_u32(7);
+
+        let mut i = 0usize;
+        while i + 16 <= bytes.len() {
+            // SAFETY: `i + 16 <= bytes.len()`, so unaligned 16-byte load is within bounds.
+            let v = unsafe { vld1q_u8(bytes.as_ptr().add(i)) };
+            let is_upper = vcltq_u8(vsubq_u8(v, cap_a), alpha_len);
+            let lowered = vorrq_u8(v, vandq_u8(is_upper, bit20));
+
+            let mut x0 = vreinterpretq_u32_u8(vqtbl1q_u8(lowered, shuf0));
+            let mut x1 = vreinterpretq_u32_u8(vqtbl1q_u8(lowered, shuf1));
+            let mut x2 = vreinterpretq_u32_u8(vqtbl1q_u8(lowered, shuf2));
+
+            x0 = veorq_u32(x0, vshrq_n_u32::<16>(x0));
+            x1 = veorq_u32(x1, vshrq_n_u32::<16>(x1));
+            x2 = veorq_u32(x2, vshrq_n_u32::<16>(x2));
+            x0 = vmulq_u32(x0, c1);
+            x1 = vmulq_u32(x1, c1);
+            x2 = vmulq_u32(x2, c1);
+            x0 = veorq_u32(x0, vshrq_n_u32::<13>(x0));
+            x1 = veorq_u32(x1, vshrq_n_u32::<13>(x1));
+            x2 = veorq_u32(x2, vshrq_n_u32::<13>(x2));
+            x0 = vmulq_u32(x0, c2);
+            x1 = vmulq_u32(x1, c2);
+            x2 = vmulq_u32(x2, c2);
+            x0 = veorq_u32(x0, vshrq_n_u32::<16>(x0));
+            x1 = veorq_u32(x1, vshrq_n_u32::<16>(x1));
+            x2 = veorq_u32(x2, vshrq_n_u32::<16>(x2));
+
+            let p1_0 = vandq_u32(x0, mask_v);
+            let p1_1 = vandq_u32(x1, mask_v);
+            let p1_2 = vandq_u32(x2, mask_v);
+            let rot16_0 = vreinterpretq_u32_u16(vrev32q_u16(vreinterpretq_u16_u32(x0)));
+            let rot16_1 = vreinterpretq_u32_u16(vrev32q_u16(vreinterpretq_u16_u32(x1)));
+            let rot16_2 = vreinterpretq_u32_u16(vrev32q_u16(vreinterpretq_u16_u32(x2)));
+            let p2_0 = vandq_u32(rot16_0, mask_v);
+            let p2_1 = vandq_u32(rot16_1, mask_v);
+            let p2_2 = vandq_u32(rot16_2, mask_v);
+
+            let idx1_0 = vshrq_n_u32::<3>(p1_0);
+            let mask1_0 = vshlq_u32(ones_v, vreinterpretq_s32_u32(vandq_u32(p1_0, seven_v)));
+            let idx1_1 = vshrq_n_u32::<3>(p1_1);
+            let mask1_1 = vshlq_u32(ones_v, vreinterpretq_s32_u32(vandq_u32(p1_1, seven_v)));
+            let idx1_2 = vshrq_n_u32::<3>(p1_2);
+            let mask1_2 = vshlq_u32(ones_v, vreinterpretq_s32_u32(vandq_u32(p1_2, seven_v)));
+
+            let idx2_0 = vshrq_n_u32::<3>(p2_0);
+            let mask2_0 = vshlq_u32(ones_v, vreinterpretq_s32_u32(vandq_u32(p2_0, seven_v)));
+            let idx2_1 = vshrq_n_u32::<3>(p2_1);
+            let mask2_1 = vshlq_u32(ones_v, vreinterpretq_s32_u32(vandq_u32(p2_1, seven_v)));
+            let idx2_2 = vshrq_n_u32::<3>(p2_2);
+            let mask2_2 = vshlq_u32(ones_v, vreinterpretq_s32_u32(vandq_u32(p2_2, seven_v)));
+
+            let v1_0 = vreinterpretq_u64_u32(vorrq_u32(idx1_0, vshlq_n_u32::<16>(mask1_0)));
+            let v1_1 = vreinterpretq_u64_u32(vorrq_u32(idx1_1, vshlq_n_u32::<16>(mask1_1)));
+            let v1_2 = vreinterpretq_u64_u32(vorrq_u32(idx1_2, vshlq_n_u32::<16>(mask1_2)));
+            let v2_0 = vreinterpretq_u64_u32(vorrq_u32(idx2_0, vshlq_n_u32::<16>(mask2_0)));
+            let v2_1 = vreinterpretq_u64_u32(vorrq_u32(idx2_1, vshlq_n_u32::<16>(mask2_1)));
+            let v2_2 = vreinterpretq_u64_u32(vorrq_u32(idx2_2, vshlq_n_u32::<16>(mask2_2)));
+
+            // SAFETY: `ptr` points to `bits` of length `byte_mask + 1` (power of two, `<= 16_384`).
+            unsafe {
+                set_two_lanes(ptr, byte_mask, vgetq_lane_u64::<0>(v1_0));
+                set_two_lanes(ptr, byte_mask, vgetq_lane_u64::<1>(v1_0));
+                set_two_lanes(ptr, byte_mask, vgetq_lane_u64::<0>(v1_1));
+                set_two_lanes(ptr, byte_mask, vgetq_lane_u64::<1>(v1_1));
+                set_two_lanes(ptr, byte_mask, vgetq_lane_u64::<0>(v1_2));
+                set_two_lanes(ptr, byte_mask, vgetq_lane_u64::<1>(v1_2));
+                set_two_lanes(ptr, byte_mask, vgetq_lane_u64::<0>(v2_0));
+                set_two_lanes(ptr, byte_mask, vgetq_lane_u64::<1>(v2_0));
+                set_two_lanes(ptr, byte_mask, vgetq_lane_u64::<0>(v2_1));
+                set_two_lanes(ptr, byte_mask, vgetq_lane_u64::<1>(v2_1));
+                set_two_lanes(ptr, byte_mask, vgetq_lane_u64::<0>(v2_2));
+                set_two_lanes(ptr, byte_mask, vgetq_lane_u64::<1>(v2_2));
+            }
+            i += 12;
         }
 
         let end = bytes.len() - 2;
@@ -346,6 +529,39 @@ unsafe fn ascii_lowercase_avx2(src: &[u8], dst: &mut [u8]) {
     }
 
     let rem_start = full_chunks * 32;
+    if rem_start < src.len() {
+        ascii_lowercase_scalar(&src[rem_start..], &mut dst[rem_start..]);
+    }
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn ascii_lowercase_neon(src: &[u8], dst: &mut [u8]) {
+    use std::arch::aarch64::*;
+
+    debug_assert_eq!(src.len(), dst.len());
+    let cap_a = vdupq_n_u8(b'A');
+    let alpha_len = vdupq_n_u8(26);
+    let bit20 = vdupq_n_u8(0x20);
+
+    let full_chunks = src.len() / 16;
+    for i in 0..full_chunks {
+        let byte_off = i * 16;
+        // SAFETY: `i * 16 + 16 <= src.len() == dst.len()`; byte load/store allow any alignment.
+        unsafe {
+            let v = vld1q_u8(src.as_ptr().add(byte_off));
+            let is_upper = vcltq_u8(vsubq_u8(v, cap_a), alpha_len);
+            let lowered = vorrq_u8(v, vandq_u8(is_upper, bit20));
+            vst1q_u8(dst.as_mut_ptr().add(byte_off), lowered);
+        }
+    }
+
+    let rem_start = full_chunks * 16;
     if rem_start < src.len() {
         ascii_lowercase_scalar(&src[rem_start..], &mut dst[rem_start..]);
     }

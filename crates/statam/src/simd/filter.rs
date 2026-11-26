@@ -38,6 +38,17 @@ pub fn filter_i64(values: &[i64], op: FilterOp, rhs: i64) -> Bitmap {
             return unsafe { filter_i64_avx2(values, op, rhs) };
         }
     }
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little",
+        not(miri)
+    ))]
+    {
+        // SAFETY: `target_feature = "neon"` is enabled at compile time.
+        return unsafe { filter_i64_neon(values, op, rhs) };
+    }
+    #[allow(unreachable_code)]
     filter_i64_scalar(values, op, rhs)
 }
 
@@ -53,6 +64,17 @@ pub fn filter_i64_between(values: &[i64], lo: i64, hi: i64) -> Bitmap {
             return unsafe { filter_i64_between_avx2(values, lo, hi) };
         }
     }
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little",
+        not(miri)
+    ))]
+    {
+        // SAFETY: `target_feature = "neon"` is enabled at compile time.
+        return unsafe { filter_i64_between_neon(values, lo, hi) };
+    }
+    #[allow(unreachable_code)]
     filter_i64_between_scalar(values, lo, hi)
 }
 
@@ -68,6 +90,17 @@ pub fn filter_u32(values: &[u32], op: FilterOp, rhs: u32) -> Bitmap {
             return unsafe { filter_u32_avx2(values, op, rhs) };
         }
     }
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little",
+        not(miri)
+    ))]
+    {
+        // SAFETY: `target_feature = "neon"` is enabled at compile time.
+        return unsafe { filter_u32_neon(values, op, rhs) };
+    }
+    #[allow(unreachable_code)]
     filter_u32_scalar(values, op, rhs)
 }
 
@@ -86,6 +119,17 @@ pub fn filter_f64(values: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
             return unsafe { filter_f64_avx2(values, op, rhs) };
         }
     }
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little",
+        not(miri)
+    ))]
+    {
+        // SAFETY: `target_feature = "neon"` is enabled at compile time.
+        return unsafe { filter_f64_neon(values, op, rhs) };
+    }
+    #[allow(unreachable_code)]
     filter_f64_scalar(values, op, rhs)
 }
 
@@ -356,6 +400,376 @@ unsafe fn filter_f64_avx2(values: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
         words[word_idx] = word;
     }
     words_to_bitmap(words, values.len())
+}
+
+// --- aarch64 NEON Implementations ---
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+const NEON_WEIGHTS_8: [u16; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+#[inline]
+unsafe fn pack_4x2_u64_masks_neon(
+    c0: std::arch::aarch64::uint64x2_t,
+    c1: std::arch::aarch64::uint64x2_t,
+    c2: std::arch::aarch64::uint64x2_t,
+    c3: std::arch::aarch64::uint64x2_t,
+    weights: std::arch::aarch64::uint16x8_t,
+) -> u64 {
+    use std::arch::aarch64::*;
+
+    let p01 = vuzp1q_u32(vreinterpretq_u32_u64(c0), vreinterpretq_u32_u64(c1));
+    let p23 = vuzp1q_u32(vreinterpretq_u32_u64(c2), vreinterpretq_u32_u64(c3));
+    let m8 = vuzp1q_u16(vreinterpretq_u16_u32(p01), vreinterpretq_u16_u32(p23));
+    u64::from(vaddvq_u16(vandq_u16(m8, weights)))
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn filter_i64_neon_op<const OP: u8>(values: &[i64], op: FilterOp, rhs: i64) -> Bitmap {
+    use std::arch::aarch64::*;
+
+    let vrhs = vdupq_n_s64(rhs);
+    // SAFETY: `NEON_WEIGHTS_8` is `[u16; 8]`.
+    let weights = unsafe { vld1q_u16(NEON_WEIGHTS_8.as_ptr()) };
+    let mut words = vec![0u64; values.len().div_ceil(64)];
+
+    for (word_idx, chunk) in values.chunks(64).enumerate() {
+        let mut word = 0u64;
+        let full_octs = chunk.len() / 8;
+        for o in 0..full_octs {
+            // SAFETY: `o * 8 + 8 <= chunk.len()`, so four 2-lane `i64` loads are in bounds.
+            let m = unsafe {
+                let ptr = chunk.as_ptr().add(o * 8);
+                let v0 = vld1q_s64(ptr);
+                let v1 = vld1q_s64(ptr.add(2));
+                let v2 = vld1q_s64(ptr.add(4));
+                let v3 = vld1q_s64(ptr.add(6));
+                let (c0, c1, c2, c3) = match OP {
+                    0 => (
+                        vceqq_s64(v0, vrhs),
+                        vceqq_s64(v1, vrhs),
+                        vceqq_s64(v2, vrhs),
+                        vceqq_s64(v3, vrhs),
+                    ),
+                    1 => (
+                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_s64(
+                            v0, vrhs,
+                        )))),
+                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_s64(
+                            v1, vrhs,
+                        )))),
+                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_s64(
+                            v2, vrhs,
+                        )))),
+                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_s64(
+                            v3, vrhs,
+                        )))),
+                    ),
+                    2 => (
+                        vcltq_s64(v0, vrhs),
+                        vcltq_s64(v1, vrhs),
+                        vcltq_s64(v2, vrhs),
+                        vcltq_s64(v3, vrhs),
+                    ),
+                    3 => (
+                        vcleq_s64(v0, vrhs),
+                        vcleq_s64(v1, vrhs),
+                        vcleq_s64(v2, vrhs),
+                        vcleq_s64(v3, vrhs),
+                    ),
+                    4 => (
+                        vcgtq_s64(v0, vrhs),
+                        vcgtq_s64(v1, vrhs),
+                        vcgtq_s64(v2, vrhs),
+                        vcgtq_s64(v3, vrhs),
+                    ),
+                    _ => (
+                        vcgeq_s64(v0, vrhs),
+                        vcgeq_s64(v1, vrhs),
+                        vcgeq_s64(v2, vrhs),
+                        vcgeq_s64(v3, vrhs),
+                    ),
+                };
+                pack_4x2_u64_masks_neon(c0, c1, c2, c3, weights)
+            };
+            word |= m << (o * 8);
+        }
+        let rem_start = full_octs * 8;
+        for (idx, &v) in chunk[rem_start..].iter().enumerate() {
+            if cmp_i64(v, op, rhs) {
+                word |= 1u64 << (rem_start + idx);
+            }
+        }
+        words[word_idx] = word;
+    }
+    words_to_bitmap(words, values.len())
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn filter_i64_neon(values: &[i64], op: FilterOp, rhs: i64) -> Bitmap {
+    // SAFETY: NEON target feature is active for this function.
+    unsafe {
+        match op {
+            FilterOp::Eq => filter_i64_neon_op::<0>(values, op, rhs),
+            FilterOp::Ne => filter_i64_neon_op::<1>(values, op, rhs),
+            FilterOp::Lt => filter_i64_neon_op::<2>(values, op, rhs),
+            FilterOp::Le => filter_i64_neon_op::<3>(values, op, rhs),
+            FilterOp::Gt => filter_i64_neon_op::<4>(values, op, rhs),
+            FilterOp::Ge => filter_i64_neon_op::<5>(values, op, rhs),
+        }
+    }
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn filter_i64_between_neon(values: &[i64], lo: i64, hi: i64) -> Bitmap {
+    use std::arch::aarch64::*;
+
+    let vlo = vdupq_n_s64(lo);
+    let vhi = vdupq_n_s64(hi);
+    // SAFETY: `NEON_WEIGHTS_8` is `[u16; 8]`.
+    let weights = unsafe { vld1q_u16(NEON_WEIGHTS_8.as_ptr()) };
+    let mut words = vec![0u64; values.len().div_ceil(64)];
+
+    for (word_idx, chunk) in values.chunks(64).enumerate() {
+        let mut word = 0u64;
+        let full_octs = chunk.len() / 8;
+        for o in 0..full_octs {
+            // SAFETY: `o * 8 + 8 <= chunk.len()`, so four 2-lane `i64` loads are in bounds.
+            let m = unsafe {
+                let ptr = chunk.as_ptr().add(o * 8);
+                let v0 = vld1q_s64(ptr);
+                let v1 = vld1q_s64(ptr.add(2));
+                let v2 = vld1q_s64(ptr.add(4));
+                let v3 = vld1q_s64(ptr.add(6));
+                let c0 = vandq_u64(vcgeq_s64(v0, vlo), vcleq_s64(v0, vhi));
+                let c1 = vandq_u64(vcgeq_s64(v1, vlo), vcleq_s64(v1, vhi));
+                let c2 = vandq_u64(vcgeq_s64(v2, vlo), vcleq_s64(v2, vhi));
+                let c3 = vandq_u64(vcgeq_s64(v3, vlo), vcleq_s64(v3, vhi));
+                pack_4x2_u64_masks_neon(c0, c1, c2, c3, weights)
+            };
+            word |= m << (o * 8);
+        }
+        let rem_start = full_octs * 8;
+        for (idx, &v) in chunk[rem_start..].iter().enumerate() {
+            if v >= lo && v <= hi {
+                word |= 1u64 << (rem_start + idx);
+            }
+        }
+        words[word_idx] = word;
+    }
+    words_to_bitmap(words, values.len())
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn filter_u32_neon_op<const OP: u8>(values: &[u32], op: FilterOp, rhs: u32) -> Bitmap {
+    use std::arch::aarch64::*;
+
+    let vrhs = vdupq_n_u32(rhs);
+    // SAFETY: `NEON_WEIGHTS_8` is `[u16; 8]`.
+    let weights = unsafe { vld1q_u16(NEON_WEIGHTS_8.as_ptr()) };
+    let mut words = vec![0u64; values.len().div_ceil(64)];
+
+    for (word_idx, chunk) in values.chunks(64).enumerate() {
+        let mut word = 0u64;
+        let full_octs = chunk.len() / 8;
+        for o in 0..full_octs {
+            // SAFETY: `o * 8 + 8 <= chunk.len()`, so two 4-lane `u32` loads are in bounds.
+            let m = unsafe {
+                let ptr = chunk.as_ptr().add(o * 8);
+                let v0 = vld1q_u32(ptr);
+                let v1 = vld1q_u32(ptr.add(4));
+                let (c0, c1) = match OP {
+                    0 => (vceqq_u32(v0, vrhs), vceqq_u32(v1, vrhs)),
+                    1 => (
+                        vmvnq_u32(vceqq_u32(v0, vrhs)),
+                        vmvnq_u32(vceqq_u32(v1, vrhs)),
+                    ),
+                    2 => (vcltq_u32(v0, vrhs), vcltq_u32(v1, vrhs)),
+                    3 => (vcleq_u32(v0, vrhs), vcleq_u32(v1, vrhs)),
+                    4 => (vcgtq_u32(v0, vrhs), vcgtq_u32(v1, vrhs)),
+                    _ => (vcgeq_u32(v0, vrhs), vcgeq_u32(v1, vrhs)),
+                };
+                let m8 = vuzp1q_u16(vreinterpretq_u16_u32(c0), vreinterpretq_u16_u32(c1));
+                u64::from(vaddvq_u16(vandq_u16(m8, weights)))
+            };
+            word |= m << (o * 8);
+        }
+        let rem_start = full_octs * 8;
+        for (idx, &v) in chunk[rem_start..].iter().enumerate() {
+            if cmp_u32(v, op, rhs) {
+                word |= 1u64 << (rem_start + idx);
+            }
+        }
+        words[word_idx] = word;
+    }
+    words_to_bitmap(words, values.len())
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn filter_u32_neon(values: &[u32], op: FilterOp, rhs: u32) -> Bitmap {
+    // SAFETY: NEON target feature is active for this function.
+    unsafe {
+        match op {
+            FilterOp::Eq => filter_u32_neon_op::<0>(values, op, rhs),
+            FilterOp::Ne => filter_u32_neon_op::<1>(values, op, rhs),
+            FilterOp::Lt => filter_u32_neon_op::<2>(values, op, rhs),
+            FilterOp::Le => filter_u32_neon_op::<3>(values, op, rhs),
+            FilterOp::Gt => filter_u32_neon_op::<4>(values, op, rhs),
+            FilterOp::Ge => filter_u32_neon_op::<5>(values, op, rhs),
+        }
+    }
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn filter_f64_neon_op<const OP: u8>(values: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
+    use std::arch::aarch64::*;
+
+    let vrhs = vdupq_n_f64(rhs);
+    // SAFETY: `NEON_WEIGHTS_8` is `[u16; 8]`.
+    let weights = unsafe { vld1q_u16(NEON_WEIGHTS_8.as_ptr()) };
+    let mut words = vec![0u64; values.len().div_ceil(64)];
+
+    for (word_idx, chunk) in values.chunks(64).enumerate() {
+        let mut word = 0u64;
+        let full_octs = chunk.len() / 8;
+        for o in 0..full_octs {
+            // SAFETY: `o * 8 + 8 <= chunk.len()`, so four 2-lane `f64` loads are in bounds.
+            // ARM64 `fcmeq`/`fcmlt`/`fcmle`/`fcmgt`/`fcmge` all return 0 when either operand
+            // is NaN; bitwise-inverting `vceqq_f64` yields all-1s on NaN for `Ne` and 0 for
+            // `-0.0 != +0.0`, matching Rust IEEE-754 semantics bit-for-bit.
+            let m = unsafe {
+                let ptr = chunk.as_ptr().add(o * 8);
+                let v0 = vld1q_f64(ptr);
+                let v1 = vld1q_f64(ptr.add(2));
+                let v2 = vld1q_f64(ptr.add(4));
+                let v3 = vld1q_f64(ptr.add(6));
+                let (c0, c1, c2, c3) = match OP {
+                    0 => (
+                        vceqq_f64(v0, vrhs),
+                        vceqq_f64(v1, vrhs),
+                        vceqq_f64(v2, vrhs),
+                        vceqq_f64(v3, vrhs),
+                    ),
+                    1 => (
+                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(
+                            v0, vrhs,
+                        )))),
+                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(
+                            v1, vrhs,
+                        )))),
+                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(
+                            v2, vrhs,
+                        )))),
+                        vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(vceqq_f64(
+                            v3, vrhs,
+                        )))),
+                    ),
+                    2 => (
+                        vcltq_f64(v0, vrhs),
+                        vcltq_f64(v1, vrhs),
+                        vcltq_f64(v2, vrhs),
+                        vcltq_f64(v3, vrhs),
+                    ),
+                    3 => (
+                        vcleq_f64(v0, vrhs),
+                        vcleq_f64(v1, vrhs),
+                        vcleq_f64(v2, vrhs),
+                        vcleq_f64(v3, vrhs),
+                    ),
+                    4 => (
+                        vcgtq_f64(v0, vrhs),
+                        vcgtq_f64(v1, vrhs),
+                        vcgtq_f64(v2, vrhs),
+                        vcgtq_f64(v3, vrhs),
+                    ),
+                    _ => (
+                        vcgeq_f64(v0, vrhs),
+                        vcgeq_f64(v1, vrhs),
+                        vcgeq_f64(v2, vrhs),
+                        vcgeq_f64(v3, vrhs),
+                    ),
+                };
+                pack_4x2_u64_masks_neon(c0, c1, c2, c3, weights)
+            };
+            word |= m << (o * 8);
+        }
+        let rem_start = full_octs * 8;
+        for (idx, &v) in chunk[rem_start..].iter().enumerate() {
+            if cmp_f64(v, op, rhs) {
+                word |= 1u64 << (rem_start + idx);
+            }
+        }
+        words[word_idx] = word;
+    }
+    words_to_bitmap(words, values.len())
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn filter_f64_neon(values: &[f64], op: FilterOp, rhs: f64) -> Bitmap {
+    // SAFETY: NEON target feature is active for this function.
+    unsafe {
+        match op {
+            FilterOp::Eq => filter_f64_neon_op::<0>(values, op, rhs),
+            FilterOp::Ne => filter_f64_neon_op::<1>(values, op, rhs),
+            FilterOp::Lt => filter_f64_neon_op::<2>(values, op, rhs),
+            FilterOp::Le => filter_f64_neon_op::<3>(values, op, rhs),
+            FilterOp::Gt => filter_f64_neon_op::<4>(values, op, rhs),
+            FilterOp::Ge => filter_f64_neon_op::<5>(values, op, rhs),
+        }
+    }
 }
 
 #[cfg(test)]

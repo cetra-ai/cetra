@@ -127,6 +127,21 @@ impl Sbbf {
                 return;
             }
         }
+        #[cfg(all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_endian = "little",
+            not(miri)
+        ))]
+        {
+            // SAFETY: `target_feature = "neon"` is enabled at compile time and
+            // `block.len() == 8`.
+            unsafe {
+                block_insert_neon(block, key);
+            }
+            return;
+        }
+        #[allow(unreachable_code)]
         block_insert_scalar(block, key);
     }
 
@@ -150,6 +165,18 @@ impl Sbbf {
                 return unsafe { block_check_avx2(block, key) };
             }
         }
+        #[cfg(all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_endian = "little",
+            not(miri)
+        ))]
+        {
+            // SAFETY: `target_feature = "neon"` is enabled at compile time and
+            // `block.len() == 8`.
+            return unsafe { block_check_neon(block, key) };
+        }
+        #[allow(unreachable_code)]
         block_check_scalar(block, key)
     }
 
@@ -446,6 +473,80 @@ unsafe fn block_check_avx2(block: &[u32], key: u32) -> bool {
         let mask = sbbf_mask_avx2(key);
         let cur = _mm256_loadu_si256(block.as_ptr() as *const __m256i);
         _mm256_testc_si256(cur, mask) != 0
+    }
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn sbbf_mask_neon(
+    key: u32,
+) -> (
+    std::arch::aarch64::uint32x4_t,
+    std::arch::aarch64::uint32x4_t,
+) {
+    use std::arch::aarch64::*;
+
+    // SAFETY: `SBBF_SALT` is a `[u32; 8]` (aligned to 4 bytes); both 4-lane loads are in bounds.
+    unsafe {
+        let salt_lo = vld1q_u32(SBBF_SALT.as_ptr());
+        let salt_hi = vld1q_u32(SBBF_SALT.as_ptr().add(4));
+        let k = vdupq_n_u32(key);
+        let ones = vdupq_n_u32(1);
+        let shift_lo = vreinterpretq_s32_u32(vshrq_n_u32::<27>(vmulq_u32(k, salt_lo)));
+        let shift_hi = vreinterpretq_s32_u32(vshrq_n_u32::<27>(vmulq_u32(k, salt_hi)));
+        (vshlq_u32(ones, shift_lo), vshlq_u32(ones, shift_hi))
+    }
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn block_insert_neon(block: &mut [u32], key: u32) {
+    use std::arch::aarch64::*;
+
+    debug_assert_eq!(block.len(), 8);
+    // SAFETY: NEON is active and `block.len() == 8` (two 4-lane `u32` vectors).
+    unsafe {
+        let (mask_lo, mask_hi) = sbbf_mask_neon(key);
+        let ptr = block.as_mut_ptr();
+        let cur_lo = vld1q_u32(ptr);
+        let cur_hi = vld1q_u32(ptr.add(4));
+        vst1q_u32(ptr, vorrq_u32(cur_lo, mask_lo));
+        vst1q_u32(ptr.add(4), vorrq_u32(cur_hi, mask_hi));
+    }
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little",
+    not(miri)
+))]
+#[target_feature(enable = "neon")]
+unsafe fn block_check_neon(block: &[u32], key: u32) -> bool {
+    use std::arch::aarch64::*;
+
+    debug_assert_eq!(block.len(), 8);
+    // SAFETY: NEON is active and `block.len() == 8` (two 4-lane `u32` vectors).
+    // Each lane of `mask_lo`/`mask_hi` has exactly 1 bit set, so `vtstq_u32(cur, mask)`
+    // (`(cur & mask) != 0`) is bit-identical to `(cur & mask) == mask`.
+    unsafe {
+        let (mask_lo, mask_hi) = sbbf_mask_neon(key);
+        let ptr = block.as_ptr();
+        let cur_lo = vld1q_u32(ptr);
+        let cur_hi = vld1q_u32(ptr.add(4));
+        let eq_lo = vtstq_u32(cur_lo, mask_lo);
+        let eq_hi = vtstq_u32(cur_hi, mask_hi);
+        vminvq_u32(vandq_u32(eq_lo, eq_hi)) != 0
     }
 }
 

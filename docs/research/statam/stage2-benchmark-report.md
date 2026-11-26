@@ -440,4 +440,35 @@ Verified **100% row-count parity across all 8 formats** (`pq_default`, `pq_tuned
   - `Hermes`: sweeps **4/4** on `1R` (`0.003 ms`, `0.95 ms`, `0.64 ms`, `0.080 ms`).
 - **Thread-pool takeaway confirmed on M4:** On sub-millisecond queries (`CB_Q1`, `W3_spans point_lookup_narrow`, `W4 time_bucket_agg`), `std::thread::scope` spawns 7 OS threads (~0.5–0.8 ms overhead on Linux `aarch64` VM), making `1R` (`0.008 ms`) far faster than `8R` (`0.90 ms`). Replacing `std::thread::scope` with a shared reusable thread pool + size threshold in Stage 3 eliminates that overhead completely.
 
+---
+
+## 15. ARM64 NEON SIMD (`aarch64`) & Cold Review #11 (`ubuntu-dev`, Apple M4)
+
+Implemented bit-exact little-endian ARM64 NEON kernels (`#[cfg(all(target_arch = "aarch64", target_feature = "neon", target_endian = "little", not(miri)))]`) for all 14 SIMD functions across `crates/statam/src/simd/{bloom,filter,trigram,bitpack}.rs`:
+- **`bloom.rs`:** 2 × `uint32x4_t` SBBF `block_insert_neon` + `vtstq_u32` (`CMTST`) + `vminvq_u32` `block_check_neon`.
+- **`filter.rs`:** Hoisted branchless `<const OP: u8>` NEON `filter_{i64,i64_between,u32,f64}_neon` with `vuzp1q` + `vaddvq_u16` 8-lane bitmask packing and bit-exact IEEE-754 NaN / `-0.0` semantics (`!fcmeq` for `Ne`).
+- **`trigram.rs`:** Unsigned 16-byte `ascii_lowercase_neon` (`vsubq_u8(v, b'A') < 26`) + 12-trigram/load `vqtbl1q_u8` / `vrev32q_u16` `TrigramBloom::insert_bytes_neon`.
+- **`bitpack.rs`:** `bit_width == 32`/`64` direct-copy fast paths, 2 × 128-bit `vld1q_u8`/`vst1q_u8` unaligned-safe FastLanes-1024 `pack`/`unpack` (`u32` and `u64`), and zero-cross-domain-transfer `vzip1q_s64`/`vzip2q_s64` 2×2 in-register transpose `delta_{encode,decode}_i64_tiles_neon`.
+- **Cold Code Review #11 (`inherit`):** **0 Blockers** (all 65 NEON intrinsics verified against Rust `1.99.1` `core_arch`), **2 performance Majors** (2×2 delta transpose + `32`/`64` fast path & single-mask unpack fixed; kept compact loop to avoid L1 I-cache bloat across 105-col ClickBench), and key Minors fixed (including `bitpack_unaligned_buffer_and_dirty_high_bits_match_scalar` test).
+- **Verification:** `cargo clippy -p cetra-statam --all-targets -- -D warnings` (0 warnings) and **131 unit + 2 `fuzz_replay` tests passing** on both `x86_64` and Apple M4 `aarch64` (`0.11 s` release), with **100% bit-for-bit identical file sizes** across all 11 real corpora.
+
+### 15.1 Apple M4 (`ubuntu-dev`) Before (Scalar) vs. After (NEON) Highlights
+- **Zero `1R` regressions across all 63 queries; strictly `1R` Statam wins jumped `53/63 → 55/63` on M4:**
+  - `W1_agents filtered_count`: `0.108 → 0.054 ms` (**`2.00×`**)
+  - `W3_spans filtered_count` (250k spans): `1.151 → 0.649 ms` (**`1.77×`** — now beats Vortex `0.858 ms` on M4!)
+  - `W4_adversarial filtered_count`: `0.053 → 0.031 ms` (**`1.71×`**)
+  - `W3_scores filtered_count`: `0.110 → 0.070 ms` (**`1.57×`**)
+  - `WildChat WC_Q1_model_cnt`: `0.025 → 0.017 ms` (**`1.47×`**)
+  - `JSONBench JB_Q1_posts`: `0.365 → 0.259 ms` (**`1.41×`**)
+  - `ClickBench CB_Q39_range`: `0.312 → 0.232 ms` (**`1.34×`**)
+  - `W3_spans top_k_list`: `5.265 → 4.252 ms` (**`1.24×`** — now beats Lance `4.759 ms` even on 1 thread!)
+  - `RowFilter` (`RF_sel_1pct`, `RF_pt`, `RF_mod_10pct`): **`1.13×–1.22×`** faster.
+- **Write speedups (NEON `TrigramBloom` + `SBBF` + `FastLanes`):**
+  - `W2_chat_4files L1`: `301.4 → 280.1 ms (1W)` / `239.6 → 178.9 ms (8W, 1.34×)`
+  - `W1_agents L1`: `299.8 → 280.9 ms (1W)` / `280.8 → 219.4 ms (8W, 1.28×)`
+  - `W3_spans L1`: `80.0 → 65.1 ms (8W, 1.23×)`
+  - `WildChat-1M L1`: `325.3 → 296.9 ms (1W)` / `213.8 → 179.5 ms (8W, 1.19×)`
+  - `JSONBench L1`: `491.8 → 464.3 ms (1W)` / `285.2 → 253.7 ms (8W, 1.12×)`
+  - `RandomAccess L0/L1 (8W)`: `27.9 → 25.0 ms (1.12×)` / `108.6 → 97.6 ms (1.11×)`
+
 **Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Awaiting explicit user go-ahead for Stage 3 (`cetra-storage` integration).
