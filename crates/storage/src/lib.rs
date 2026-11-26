@@ -73,6 +73,8 @@ mod query_error;
 mod query_text;
 pub(crate) mod read_cache;
 mod reads;
+#[allow(dead_code)] // wired in QE4.2-M7
+pub(crate) mod reads_qe;
 mod snapshot;
 mod sql;
 pub(crate) mod unwind;
@@ -286,6 +288,9 @@ pub struct Storage {
     /// `wal/spans` and `wal/scores` under the data directory, measured by [`Self::stats`].
     wal_dirs: [PathBuf; 2],
     runtime: Arc<RuntimeEnv>,
+    /// Persistent native query engine runtime shared across queries on this `Storage`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    qe_runtime: Arc<QeRuntime>,
     /// Process-wide query memory (spec 03 §6). Each query's pool takes from it.
     memory: Arc<memory::SharedPool>,
     /// What [`Self::query`] admits each query with.
@@ -298,9 +303,55 @@ pub struct Storage {
     hooks: Hooks,
 }
 
+/// Persistent native query engine runtime shared across all queries on one [`Storage`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct QeRuntime {
+    pub(crate) admission: Arc<engine::admission::AsyncAdmissionPool>,
+    workers: std::sync::OnceLock<Arc<cetra_query::exec::WorkerPool>>,
+    workers_init: Mutex<()>,
+    pub(crate) metadata_cache: Arc<engine::metadata_cache::MetadataCache>,
+    pub(crate) spill: Arc<cetra_query::exec::SpillManager>,
+    pub(crate) target_partitions: usize,
+    pub(crate) query_memory: QueryMemory,
+}
+
+impl QeRuntime {
+    /// Lazily initializes and returns the persistent [`cetra_query::exec::WorkerPool`].
+    pub(crate) fn workers(
+        &self,
+    ) -> Result<Arc<cetra_query::exec::WorkerPool>, cetra_query::QueryError> {
+        if let Some(pool) = self.workers.get() {
+            return Ok(Arc::clone(pool));
+        }
+        let _guard = self
+            .workers_init
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(pool) = self.workers.get() {
+            return Ok(Arc::clone(pool));
+        }
+        let pool = Arc::new(cetra_query::exec::WorkerPool::new(self.target_partitions)?);
+        let _ = self.workers.set(Arc::clone(&pool));
+        Ok(pool)
+    }
+}
+
+impl std::fmt::Debug for QeRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QeRuntime")
+            .field("target_partitions", &self.target_partitions)
+            .field("admission_limit", &self.admission.limit())
+            .field("admission_used", &self.admission.used())
+            .field("workers_initialized", &self.workers.get().is_some())
+            .field("metadata_cache_bytes", &self.metadata_cache.bytes())
+            .field("spill", &self.spill)
+            .finish()
+    }
+}
+
 /// What [`Storage::query`] needs to admit a query (spec 03 §6).
 #[derive(Debug, Clone, Copy)]
-struct QueryMemory {
+pub(crate) struct QueryMemory {
     /// Bytes a query takes from the shared pool before it starts.
     initial: usize,
     /// Most memory one query may hold.
@@ -467,6 +518,29 @@ impl Storage {
             );
         }
         let memory = Arc::new(memory::SharedPool::new(total_memory));
+        let qe_runtime = {
+            let admission = Arc::new(engine::admission::AsyncAdmissionPool::new(total_memory));
+            let disk_for_spill = Arc::clone(&disk);
+            let spill = Arc::new(cetra_query::exec::SpillManager::new(
+                spill_dir,
+                Arc::new(move || disk_for_spill.engine_spill_cap()),
+            ));
+            disk.set_engine_spilled(spill.spilled_bytes_counter());
+            let metadata_cache_bytes =
+                usize::try_from(config.query.metadata_cache_bytes.0).unwrap_or(usize::MAX);
+            let metadata_cache = Arc::new(engine::metadata_cache::MetadataCache::new(
+                metadata_cache_bytes,
+            ));
+            Arc::new(QeRuntime {
+                admission,
+                workers: std::sync::OnceLock::new(),
+                workers_init: Mutex::new(()),
+                metadata_cache,
+                spill,
+                target_partitions: target_partitions.get(),
+                query_memory,
+            })
+        };
         let spans_flushed = committer.flushed_seq(Table::Spans).await;
         let scores_flushed = committer.flushed_seq(Table::Scores).await;
         let replay_dir = data_dir.clone();
@@ -660,6 +734,7 @@ impl Storage {
                 data_dir.join("wal").join(Table::Scores.name()),
             ],
             runtime,
+            qe_runtime,
             memory,
             query_memory,
             replayed: [recovered.spans_records, recovered.scores_records],
