@@ -541,7 +541,7 @@ To eliminate Tokio/Rayon thread-pool asymmetry across formats, all 7 formats wer
 
 ### 16.4 Pass 12 Verification & Security
 - **Cold Code Review (`inherit`):** Found 1 Blocker (`p2_l0_needed` in `reader/mod.rs` when `L0Fast` combines `IsNull`/`IsNotNull` with projection), 0 Majors, 4 Minors — all fixed with dedicated regression tests.
-- **Local Checks:** `cargo fmt -p cetra-statam -- --check`, `cargo clippy --offline --locked -p cetra-statam --all-targets -- -D warnings` (0 warnings), `cargo test --offline --locked -p cetra-statam` (**183 unit + 2 `fuzz_replay` tests passing**), `just check-ee`, `just deny-policy` (bans/licenses/sources ok). *(Note: Apple M4 `ubuntu-dev` was unreachable over SSH during Pass 12 wrap-up; Pass 12 touched zero `simd/` files.)*
+- **Local & Apple M4 (`aarch64` NEON) Checks:** `cargo fmt -p cetra-statam -- --check`, `cargo clippy --offline --locked -p cetra-statam --all-targets -- -D warnings` (0 warnings), `cargo test --offline --locked -p cetra-statam` (**183 unit + 2 `fuzz_replay` tests passing** on both local `x86_64` and Apple M4 `macbook-m4-vm` `--release` in `0.69 s`), `just check-ee`, `just deny-policy` (bans/licenses/sources ok).
 - **ASan libFuzzer (`precision-5770-vm`, 90s × 4 workers, 22-seed corpus incl. `seed-21-fsst-subchunked-l1` & `seed-22-binary-blobs-stpk`):** `~285k` total runs (`71,144` runs/worker), **`20,764` cov edges**, **`61,304` features**, **`605 MiB` peak RSS**, **0 crashes, 0 OOMs, 0 ASan errors**.
 
 **Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Awaiting explicit user go-ahead for Stage 3 (`cetra-storage` integration).
