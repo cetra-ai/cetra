@@ -1065,6 +1065,88 @@ impl<'a> FsstBlockView<'a> {
         out_bytes.truncate(pos);
         Ok((out_offsets, out_bytes, Some(out_nulls)))
     }
+
+    /// Decodes only `indices` into compact `indices.len()`-row `(offsets, bytes, nulls)`.
+    pub(crate) fn decode_take(
+        &self,
+        indices: &[usize],
+        nulls: Option<&Bitmap>,
+    ) -> Result<FsstSelectedRows, StatamError> {
+        let row_count = self.len();
+        if nulls.is_some_and(|bm| bm.len() != row_count) {
+            return Err(StatamError::Corrupt {
+                reason: "null bitmap length mismatch",
+            });
+        }
+        if indices
+            .len()
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(size_of::<u32>()))
+            .is_none_or(|b| b > MAX_BLOCK_RAW_BYTES)
+        {
+            return Err(StatamError::BoundsExceeded {
+                reason: "fsst take offsets exceed MAX_BLOCK_RAW_BYTES",
+            });
+        }
+        for &row in indices {
+            if row >= row_count {
+                return Err(StatamError::Corrupt {
+                    reason: "fsst take index out of bounds",
+                });
+            }
+        }
+        if indices.is_empty() {
+            return Ok((vec![0], Vec::new(), None));
+        }
+
+        let avg_coded = self.coded.len() / row_count.max(1);
+        let est_decoded = avg_coded
+            .saturating_mul(indices.len())
+            .saturating_mul(2)
+            .saturating_add(64);
+        let initial_cap = est_decoded.min(MAX_BLOCK_RAW_BYTES) + FSST_MAX_SYM_LEN;
+
+        let mut out_offsets = Vec::with_capacity(indices.len() + 1);
+        out_offsets.push(0u32);
+        let mut out_bytes = vec![0u8; initial_cap];
+        let mut pos = 0usize;
+        let mut out_nulls = if nulls.is_some() {
+            Some(Bitmap::new_ones(indices.len()))
+        } else {
+            None
+        };
+        let mut any_null = false;
+
+        for (out_pos, &row) in indices.iter().enumerate() {
+            if nulls.is_none_or(|bm| bm.get(row)) {
+                let start = self.offsets[row] as usize;
+                let end = self.offsets[row + 1] as usize;
+                self.table.decode_row_fast(
+                    &self.coded[start..end],
+                    &mut out_bytes,
+                    &mut pos,
+                    MAX_BLOCK_RAW_BYTES,
+                )?;
+                if pos > MAX_BLOCK_RAW_BYTES {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                    });
+                }
+            } else {
+                any_null = true;
+                if let Some(bm) = out_nulls.as_mut() {
+                    let _ = bm.set(out_pos, false);
+                }
+            }
+            let end_off = u32::try_from(pos).map_err(|_| StatamError::BoundsExceeded {
+                reason: "fsst decoded size exceeds u32::MAX",
+            })?;
+            out_offsets.push(end_off);
+        }
+        out_bytes.truncate(pos);
+        let final_nulls = if any_null { out_nulls } else { None };
+        Ok((out_offsets, out_bytes, final_nulls))
+    }
 }
 
 /// Decodes an FSST-encoded block body into [`Utf8Data`].
@@ -1102,6 +1184,32 @@ pub fn decode_fsst_binary_selected(
 ) -> Result<(BinaryData, Option<Bitmap>), StatamError> {
     let view = FsstBlockView::parse(src, row_count)?;
     let (offsets, bytes, out_nulls) = view.decode_selected(mask, nulls)?;
+    Ok((BinaryData::try_new(offsets, bytes)?, out_nulls))
+}
+
+/// Decodes only `indices` of an FSST-encoded block body into a compact `indices.len()`-row
+/// `(Utf8Data, nulls)`.
+pub(crate) fn decode_fsst_utf8_take(
+    body: &[u8],
+    row_count: usize,
+    indices: &[usize],
+    nulls: Option<&Bitmap>,
+) -> Result<(Utf8Data, Option<Bitmap>), StatamError> {
+    let view = FsstBlockView::parse(body, row_count)?;
+    let (offsets, bytes, out_nulls) = view.decode_take(indices, nulls)?;
+    Ok((Utf8Data::try_new(offsets, bytes)?, out_nulls))
+}
+
+/// Decodes only `indices` of an FSST-encoded block body into a compact `indices.len()`-row
+/// `(BinaryData, nulls)`.
+pub(crate) fn decode_fsst_binary_take(
+    body: &[u8],
+    row_count: usize,
+    indices: &[usize],
+    nulls: Option<&Bitmap>,
+) -> Result<(BinaryData, Option<Bitmap>), StatamError> {
+    let view = FsstBlockView::parse(body, row_count)?;
+    let (offsets, bytes, out_nulls) = view.decode_take(indices, nulls)?;
     Ok((BinaryData::try_new(offsets, bytes)?, out_nulls))
 }
 

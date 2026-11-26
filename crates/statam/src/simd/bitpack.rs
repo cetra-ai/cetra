@@ -477,6 +477,443 @@ pub fn delta_decode_i64(
     Ok(())
 }
 
+/// Unpacks a single `u64` value at index `idx` in O(1) time from FastLanes-1024 bitpacked `src`.
+pub fn unpack_u64_at(
+    src: &[u8],
+    count: usize,
+    bit_width: u8,
+    idx: usize,
+) -> Result<u64, StatamError> {
+    if bit_width > 64 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid u64 bit_width",
+        });
+    }
+    if count
+        .checked_mul(size_of::<u64>())
+        .is_none_or(|bytes| bytes > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "unpack_u64_at count exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    if idx >= count {
+        return Err(StatamError::BoundsExceeded {
+            reason: "unpack_u64_at index out of bounds",
+        });
+    }
+    let needed = packed_bytes_len(count, bit_width)?;
+    if src.len() < needed {
+        return Err(StatamError::Corrupt {
+            reason: "truncated u64 bitpack input",
+        });
+    }
+    Ok(unpack_u64_at_validated(
+        src,
+        count / FASTLANES_TILE_SIZE,
+        bit_width,
+        idx,
+    ))
+}
+
+/// Unpacks `u64` values at `indices` in O(indices.len()) time from FastLanes-1024 bitpacked `src`.
+pub fn unpack_u64_indices(
+    src: &[u8],
+    count: usize,
+    bit_width: u8,
+    indices: &[usize],
+    out: &mut Vec<u64>,
+) -> Result<(), StatamError> {
+    if bit_width > 64 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid u64 bit_width",
+        });
+    }
+    if count
+        .checked_mul(size_of::<u64>())
+        .is_none_or(|bytes| bytes > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "unpack_u64_indices count exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    if indices
+        .len()
+        .checked_mul(size_of::<u64>())
+        .is_none_or(|bytes| bytes > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "unpack_u64_indices output exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    let needed = packed_bytes_len(count, bit_width)?;
+    if src.len() < needed {
+        return Err(StatamError::Corrupt {
+            reason: "truncated u64 bitpack input",
+        });
+    }
+    for &idx in indices {
+        if idx >= count {
+            return Err(StatamError::BoundsExceeded {
+                reason: "unpack_u64_indices index out of bounds",
+            });
+        }
+    }
+    if indices.is_empty() {
+        return Ok(());
+    }
+    out.reserve(indices.len());
+    if bit_width == 0 {
+        out.resize(out.len() + indices.len(), 0);
+        return Ok(());
+    }
+    let full_tiles = count / FASTLANES_TILE_SIZE;
+    for &idx in indices {
+        out.push(unpack_u64_at_validated(src, full_tiles, bit_width, idx));
+    }
+    Ok(())
+}
+
+/// Unpacks a single `u32` value at index `idx` in O(1) time from FastLanes-1024 bitpacked `src`.
+pub fn unpack_u32_at(
+    src: &[u8],
+    count: usize,
+    bit_width: u8,
+    idx: usize,
+) -> Result<u32, StatamError> {
+    if bit_width > 32 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid u32 bit_width",
+        });
+    }
+    if count
+        .checked_mul(size_of::<u32>())
+        .is_none_or(|bytes| bytes > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "unpack_u32_at count exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    if idx >= count {
+        return Err(StatamError::BoundsExceeded {
+            reason: "unpack_u32_at index out of bounds",
+        });
+    }
+    let needed = packed_bytes_len(count, bit_width)?;
+    if src.len() < needed {
+        return Err(StatamError::Corrupt {
+            reason: "truncated u32 bitpack input",
+        });
+    }
+    Ok(unpack_u32_at_validated(
+        src,
+        count / FASTLANES_TILE_SIZE,
+        bit_width,
+        idx,
+    ))
+}
+
+/// Unpacks `u32` values at `indices` in O(indices.len()) time from FastLanes-1024 bitpacked `src`.
+pub fn unpack_u32_indices(
+    src: &[u8],
+    count: usize,
+    bit_width: u8,
+    indices: &[usize],
+    out: &mut Vec<u32>,
+) -> Result<(), StatamError> {
+    if bit_width > 32 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid u32 bit_width",
+        });
+    }
+    if count
+        .checked_mul(size_of::<u32>())
+        .is_none_or(|bytes| bytes > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "unpack_u32_indices count exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    if indices
+        .len()
+        .checked_mul(size_of::<u32>())
+        .is_none_or(|bytes| bytes > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "unpack_u32_indices output exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    let needed = packed_bytes_len(count, bit_width)?;
+    if src.len() < needed {
+        return Err(StatamError::Corrupt {
+            reason: "truncated u32 bitpack input",
+        });
+    }
+    for &idx in indices {
+        if idx >= count {
+            return Err(StatamError::BoundsExceeded {
+                reason: "unpack_u32_indices index out of bounds",
+            });
+        }
+    }
+    if indices.is_empty() {
+        return Ok(());
+    }
+    out.reserve(indices.len());
+    if bit_width == 0 {
+        out.resize(out.len() + indices.len(), 0);
+        return Ok(());
+    }
+    let full_tiles = count / FASTLANES_TILE_SIZE;
+    for &idx in indices {
+        out.push(unpack_u32_at_validated(src, full_tiles, bit_width, idx));
+    }
+    Ok(())
+}
+
+/// Sparsely delta-decodes `i64` values at `indices` from FastLanes `04261537` `bases` and
+/// bitpacked `packed_deltas`, decoding only the 1024-row tiles (and/or tail) touched by `indices`.
+pub fn delta_decode_i64_indices(
+    bases: &[i64],
+    packed_deltas: &[u8],
+    count: usize,
+    bit_width: u8,
+    is_zigzag: bool,
+    indices: &[usize],
+) -> Result<Vec<i64>, StatamError> {
+    if bit_width > 64 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid u64 bit_width",
+        });
+    }
+    if count
+        .checked_mul(size_of::<i64>())
+        .is_none_or(|bytes| bytes > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "delta_decode_i64_indices count exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    if indices
+        .len()
+        .checked_mul(size_of::<i64>())
+        .is_none_or(|bytes| bytes > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "delta_decode_i64_indices output exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    if bases.len() != delta_bases_len(count) {
+        return Err(StatamError::Corrupt {
+            reason: "delta_decode_i64_indices bases length mismatch",
+        });
+    }
+    let needed = packed_bytes_len(count, bit_width)?;
+    if packed_deltas.len() < needed {
+        return Err(StatamError::Corrupt {
+            reason: "truncated delta_i64 packed deltas",
+        });
+    }
+    for &idx in indices {
+        if idx >= count {
+            return Err(StatamError::BoundsExceeded {
+                reason: "delta_decode_i64_indices index out of bounds",
+            });
+        }
+    }
+    if indices.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::with_capacity(indices.len());
+    let mut raw_u64 = Vec::with_capacity(FASTLANES_TILE_SIZE);
+    let mut deltas_i64 = Vec::with_capacity(FASTLANES_TILE_SIZE);
+    let mut tile_vals = Vec::with_capacity(FASTLANES_TILE_SIZE);
+
+    let full_tiles = count / FASTLANES_TILE_SIZE;
+    let bw = usize::from(bit_width);
+    let mut pos = 0usize;
+    while pos < indices.len() {
+        let tile = indices[pos] / FASTLANES_TILE_SIZE;
+        let mut end = pos + 1;
+        while end < indices.len() && indices[end] / FASTLANES_TILE_SIZE == tile {
+            end += 1;
+        }
+        raw_u64.clear();
+        deltas_i64.clear();
+        tile_vals.clear();
+
+        if tile < full_tiles {
+            let tile_src = if bw == 0 {
+                &[][..]
+            } else {
+                let off = tile * 128 * bw;
+                &packed_deltas[off..off + 128 * bw]
+            };
+            unpack_u64(tile_src, FASTLANES_TILE_SIZE, bit_width, &mut raw_u64)?;
+            if is_zigzag {
+                deltas_i64.extend(raw_u64.iter().map(|&d| zigzag_decode_i64(d)));
+            } else {
+                deltas_i64.extend(raw_u64.iter().map(|&d| d as i64));
+            }
+            delta_decode_i64(
+                &bases[tile * 8..(tile + 1) * 8],
+                &deltas_i64,
+                FASTLANES_TILE_SIZE,
+                &mut tile_vals,
+            )?;
+            let tile_base = tile * FASTLANES_TILE_SIZE;
+            for &idx in &indices[pos..end] {
+                out.push(tile_vals[idx - tile_base]);
+            }
+        } else {
+            let tail_count = count - full_tiles * FASTLANES_TILE_SIZE;
+            let tail_src = if bw == 0 {
+                &[][..]
+            } else {
+                let off = full_tiles * 128 * bw;
+                &packed_deltas[off..needed]
+            };
+            unpack_u64(tail_src, tail_count, bit_width, &mut raw_u64)?;
+            if is_zigzag {
+                deltas_i64.extend(raw_u64.iter().map(|&d| zigzag_decode_i64(d)));
+            } else {
+                deltas_i64.extend(raw_u64.iter().map(|&d| d as i64));
+            }
+            delta_decode_i64(
+                &bases[full_tiles * 8..full_tiles * 8 + 1],
+                &deltas_i64,
+                tail_count,
+                &mut tile_vals,
+            )?;
+            let tail_base = full_tiles * FASTLANES_TILE_SIZE;
+            for &idx in &indices[pos..end] {
+                out.push(tile_vals[idx - tail_base]);
+            }
+        }
+        pos = end;
+    }
+    Ok(out)
+}
+
+#[inline]
+fn unpack_u64_at_validated(src: &[u8], full_tiles: usize, bit_width: u8, idx: usize) -> u64 {
+    if bit_width == 0 {
+        return 0;
+    }
+    let bw = usize::from(bit_width);
+    let mask = if bit_width == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bw) - 1
+    };
+    let tile_elems = full_tiles * FASTLANES_TILE_SIZE;
+    if idx < tile_elems {
+        let tile = idx / FASTLANES_TILE_SIZE;
+        let in_tile = idx % FASTLANES_TILE_SIZE;
+        let k = in_tile / 4;
+        let lane = in_tile % 4;
+        let tile_off = tile * 128 * bw;
+        let bit_off = k * bw;
+        let word_idx = bit_off / 64;
+        let bit_pos = bit_off % 64;
+        let lo_off = tile_off + word_idx * 32 + lane * 8;
+        let lo = u64::from_le_bytes([
+            src[lo_off],
+            src[lo_off + 1],
+            src[lo_off + 2],
+            src[lo_off + 3],
+            src[lo_off + 4],
+            src[lo_off + 5],
+            src[lo_off + 6],
+            src[lo_off + 7],
+        ]);
+        if bit_pos + bw > 64 {
+            let hi_off = tile_off + (word_idx + 1) * 32 + lane * 8;
+            let hi = u64::from_le_bytes([
+                src[hi_off],
+                src[hi_off + 1],
+                src[hi_off + 2],
+                src[hi_off + 3],
+                src[hi_off + 4],
+                src[hi_off + 5],
+                src[hi_off + 6],
+                src[hi_off + 7],
+            ]);
+            ((lo >> bit_pos) | (hi << (64 - bit_pos))) & mask
+        } else {
+            (lo >> bit_pos) & mask
+        }
+    } else {
+        let tail_off = full_tiles * 128 * bw;
+        let t = idx - tile_elems;
+        let bit_off = t * bw;
+        let byte_idx = tail_off + bit_off / 8;
+        let bit_pos = bit_off % 8;
+        let n_bytes = (bit_pos + bw).div_ceil(8);
+        let mut acc = 0u128;
+        for (i, &b) in src[byte_idx..byte_idx + n_bytes].iter().enumerate() {
+            acc |= u128::from(b) << (i * 8);
+        }
+        ((acc >> bit_pos) as u64) & mask
+    }
+}
+
+#[inline]
+fn unpack_u32_at_validated(src: &[u8], full_tiles: usize, bit_width: u8, idx: usize) -> u32 {
+    if bit_width == 0 {
+        return 0;
+    }
+    let bw = usize::from(bit_width);
+    let mask = if bit_width == 32 {
+        u32::MAX
+    } else {
+        (1u32 << bw) - 1
+    };
+    let tile_elems = full_tiles * FASTLANES_TILE_SIZE;
+    if idx < tile_elems {
+        let tile = idx / FASTLANES_TILE_SIZE;
+        let in_tile = idx % FASTLANES_TILE_SIZE;
+        let k = in_tile / 8;
+        let lane = in_tile % 8;
+        let tile_off = tile * 128 * bw;
+        let bit_off = k * bw;
+        let word_idx = bit_off / 32;
+        let bit_pos = bit_off % 32;
+        let lo_off = tile_off + word_idx * 32 + lane * 4;
+        let lo = u32::from_le_bytes([
+            src[lo_off],
+            src[lo_off + 1],
+            src[lo_off + 2],
+            src[lo_off + 3],
+        ]);
+        if bit_pos + bw > 32 {
+            let hi_off = tile_off + (word_idx + 1) * 32 + lane * 4;
+            let hi = u32::from_le_bytes([
+                src[hi_off],
+                src[hi_off + 1],
+                src[hi_off + 2],
+                src[hi_off + 3],
+            ]);
+            ((lo >> bit_pos) | (hi << (32 - bit_pos))) & mask
+        } else {
+            (lo >> bit_pos) & mask
+        }
+    } else {
+        let tail_off = full_tiles * 128 * bw;
+        let t = idx - tile_elems;
+        let bit_off = t * bw;
+        let byte_idx = tail_off + bit_off / 8;
+        let bit_pos = bit_off % 8;
+        let n_bytes = (bit_pos + bw).div_ceil(8);
+        let mut acc = 0u64;
+        for (i, &b) in src[byte_idx..byte_idx + n_bytes].iter().enumerate() {
+            acc |= u64::from(b) << (i * 8);
+        }
+        ((acc >> bit_pos) as u32) & mask
+    }
+}
+
 // --- Portable Scalar Implementations ---
 
 fn pack_u32_tiles_scalar(values: &[u32], bit_width: u8, dst: &mut [u8]) {
@@ -1488,5 +1925,178 @@ mod tests {
             delta_decode_i64(&bases, &deltas, vals.len(), &mut out).unwrap();
             prop_assert_eq!(out, vals);
         }
+    }
+
+    #[test]
+    fn unpack_at_and_indices_match_full_unpack_all_widths_and_boundaries() {
+        for len in [1usize, 7, 1023, 1024, 1025, 2048, 2053] {
+            for bw in 0u8..=32 {
+                let vals = make_u32_values(len, bw);
+                let mut packed = Vec::new();
+                pack_u32(&vals, bw, &mut packed).unwrap();
+                let mut full = Vec::new();
+                unpack_u32(&packed, len, bw, &mut full).unwrap();
+                assert_eq!(full, vals);
+
+                let probe: Vec<usize> = (0..len)
+                    .step_by((len / 29).max(1))
+                    .chain([len - 1])
+                    .collect();
+                let mut batch = Vec::new();
+                unpack_u32_indices(&packed, len, bw, &probe, &mut batch).unwrap();
+                for (pos, &idx) in probe.iter().enumerate() {
+                    let single = unpack_u32_at(&packed, len, bw, idx).unwrap();
+                    assert_eq!(single, full[idx], "u32 len={len} bw={bw} idx={idx}");
+                    assert_eq!(
+                        batch[pos], full[idx],
+                        "u32_indices len={len} bw={bw} idx={idx}"
+                    );
+                }
+            }
+
+            for bw in 0u8..=64 {
+                let vals = make_u64_values(len, bw);
+                let mut packed = Vec::new();
+                pack_u64(&vals, bw, &mut packed).unwrap();
+                let mut full = Vec::new();
+                unpack_u64(&packed, len, bw, &mut full).unwrap();
+                assert_eq!(full, vals);
+
+                let probe: Vec<usize> = (0..len)
+                    .step_by((len / 29).max(1))
+                    .chain([len - 1])
+                    .collect();
+                let mut batch = Vec::new();
+                unpack_u64_indices(&packed, len, bw, &probe, &mut batch).unwrap();
+                for (pos, &idx) in probe.iter().enumerate() {
+                    let single = unpack_u64_at(&packed, len, bw, idx).unwrap();
+                    assert_eq!(single, full[idx], "u64 len={len} bw={bw} idx={idx}");
+                    assert_eq!(
+                        batch[pos], full[idx],
+                        "u64_indices len={len} bw={bw} idx={idx}"
+                    );
+                }
+            }
+        }
+
+        // Exact tile boundary checks (1023, 1024, 1025) on every element of a 2050-len block.
+        let vals64 = make_u64_values(2050, 29);
+        let mut p64 = Vec::new();
+        pack_u64(&vals64, 29, &mut p64).unwrap();
+        for (idx, &expected) in vals64.iter().enumerate().take(1028).skip(1020) {
+            assert_eq!(unpack_u64_at(&p64, 2050, 29, idx).unwrap(), expected);
+        }
+
+        let vals32 = make_u32_values(2050, 19);
+        let mut p32 = Vec::new();
+        pack_u32(&vals32, 19, &mut p32).unwrap();
+        for (idx, &expected) in vals32.iter().enumerate().take(1028).skip(1020) {
+            assert_eq!(unpack_u32_at(&p32, 2050, 19, idx).unwrap(), expected);
+        }
+
+        // Corrupt / out-of-bounds rejection.
+        assert!(matches!(
+            unpack_u64_at(&p64, 2050, 65, 0),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            unpack_u32_at(&p32, 2050, 33, 0),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            unpack_u64_at(&p64, 2050, 29, 2050),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+        assert!(matches!(
+            unpack_u32_at(&p32, 2050, 19, 2050),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+        assert!(matches!(
+            unpack_u64_at(&p64[..p64.len() - 1], 2050, 29, 0),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            unpack_u32_at(&p32[..p32.len() - 1], 2050, 19, 0),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            unpack_u64_indices(&[], usize::MAX, 0, &[0], &mut Vec::new()),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+        assert!(matches!(
+            unpack_u32_indices(&[], usize::MAX, 0, &[0], &mut Vec::new()),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn delta_decode_i64_indices_parity_and_corrupt_rejection() {
+        for is_zigzag in [false, true] {
+            for len in [1usize, 17, 1023, 1024, 1025, 2500] {
+                let vals: Vec<i64> = (0..len)
+                    .map(|i| {
+                        if is_zigzag {
+                            (i as i64) * 13 - ((i % 5) as i64) * 97
+                        } else {
+                            1_000_000 + (i as i64) * 37
+                        }
+                    })
+                    .collect();
+                let mut bases = Vec::new();
+                let mut deltas = Vec::new();
+                delta_encode_i64(&vals, &mut bases, &mut deltas);
+
+                let u64_deltas: Vec<u64> = if is_zigzag {
+                    deltas.iter().map(|&d| zigzag_encode_i64(d)).collect()
+                } else {
+                    deltas.iter().map(|&d| d as u64).collect()
+                };
+                let bw = min_bits_u64(&u64_deltas);
+                let mut packed = Vec::new();
+                pack_u64(&u64_deltas, bw, &mut packed).unwrap();
+
+                // Sparse indices touching tile 0, skipping tile 1 (when len > 2048), touching tail.
+                let mut indices: Vec<usize> = vec![0, len / 3, len - 1];
+                if len > 1025 {
+                    indices.push(1023);
+                    indices.push(1024);
+                    indices.push(1025);
+                }
+                indices.sort_unstable();
+                indices.dedup();
+
+                let got = delta_decode_i64_indices(&bases, &packed, len, bw, is_zigzag, &indices)
+                    .unwrap();
+                let expected: Vec<i64> = indices.iter().map(|&i| vals[i]).collect();
+                assert_eq!(got, expected, "zigzag={is_zigzag} len={len}");
+
+                // Empty indices still validates and returns empty.
+                let empty =
+                    delta_decode_i64_indices(&bases, &packed, len, bw, is_zigzag, &[]).unwrap();
+                assert!(empty.is_empty());
+            }
+        }
+
+        // Corrupt / out-of-bounds checks.
+        assert!(matches!(
+            delta_decode_i64_indices(&[0], &[], 10, 65, false, &[0]),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            delta_decode_i64_indices(&[0, 1], &[], 10, 0, false, &[0]),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            delta_decode_i64_indices(&[0], &[], 10, 1, false, &[0]),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            delta_decode_i64_indices(&[0], &[], 10, 0, false, &[10]),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+        assert!(matches!(
+            delta_decode_i64_indices(&[], &[], usize::MAX, 0, false, &[]),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
     }
 }

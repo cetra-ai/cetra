@@ -411,4 +411,33 @@ Wired **Lance V2.2 (`lance-file 14.0.3`)** into `statam-bench7` (`W1`–`W4`) us
 
 - **Overall Lance V2.2 vs Statam L1 across ALL 11 workloads (68 queries total):** Statam L1 wins **63 / 68 local CPU queries** (`34 / 38` on `W1`–`W4`, `29 / 30` on external suites), **64 / 68 S3 queries**, and is **`1.29×–16.0×` smaller on every single one of the 12 size benchmarks**. Lance's only local wins are uncompressed O(1) `take` on 1-row/110-row `point_lookup_full` (`W1`/`W2`/`W4`), `W2 top_k_list`, and `1T RA_take_100` — and Statam beats Lance on S3 on every single one of those (`1.6×–4.4×` faster).
 
+---
+
+## 14. Pass 11 (Option A) & Full 8-Format Apple M4 (`aarch64`) Verification
+
+Following a `perf` profile of `RA_take_100` (`~50%` Zstd decompression including nearly-incompressible `Plain/Zstd` floats saving only 6%, `~15%` full-block numeric decode, `~4.6%` `Utf8Data::try_new` scanning `8,193` masked offsets per block), implemented four zero-wire-break improvements (audited by Cold Review #10: **0 Blockers, 0 Majors, 4 Minors — all fixed**; **`130` unit tests + `2` `fuzz_replay` tests passing, 0 clippy warnings**):
+1. **`>= 12%` minimum compression-savings guard** (`compress_guarded_min_savings`) on random-accessible fixed-width `Plain`, `ForBitpack`, and `BitpackBool` blocks (`>= 1 KiB`), eliminating wasted Zstd on high-entropy floats (`m_f1`, `m_f2`).
+2. **Zero-copy `read_framed_block_cow`** returning `Cow::Borrowed` for `Codec::None` blocks in `take_rows` and `scan`.
+3. **O(1) FastLanes-1024 element extraction (`unpack_u64_at`, `unpack_u32_at`, `unpack_u64_indices`, `unpack_u32_indices`)** and **tile-skipping `delta_decode_i64_indices`**.
+4. **O(k) sparse numeric `decode_mini_block_selected`** plus **compact `k`-row `decode_mini_block_take` (`Selection::All`)** in `take_rows`.
+
+### 14.1 Pass 11 Delta on `precision-5770-vm` (`x86_64` AVX2)
+- **`RA_take_100` (`statam_l1`):** `21.76 → 13.64 ms (1R)` (`1.60×` faster), **`3.54 → 2.37 ms (8R)`** (**beats Lance V2.2 `2.58 ms`**, completing a **30/30 external query sweep vs Lance at `8R`**!).
+- **`RA_take_1000` (`statam_l1`):** `21.91 → 14.74 ms (1R)`, **`3.66 → 2.39 ms (8R)`** (**`5.15×` faster than Lance `12.32 ms`**).
+- **`random_access_250k` size:** `9,549 → 9,791 KiB` (`+2.5%`, **still #1 smallest of all 7 formats**, `1.98×` smaller than Lance `19,382 KiB`, S3 unchanged at 3 GETs / `170.6 ms`).
+- **Zero regressions across all 10 other workloads** (`W3_spans point_lookup_narrow` `0.29 → 0.18 ms`, `W3_spans map_key_lookup` `1.09 → 0.81 ms`, `W2 point_lookup_full` `3.15 → 2.49 ms`, `W4 point_lookup_full` `1.70 → 1.38 ms`, `RF_pt_0_001pct` `0.13 → 0.10 ms`, `HF_Q2_pt_full` `1.48 → 1.09 ms`; `W1`–`W4`/`JSONBench`/`WildChat`/`Hermes` sizes unchanged within `+0.02%`).
+
+### 14.2 Full 8-Format Apple Silicon M4 (`ubuntu-dev`, `aarch64`, 10 cores, quiet host)
+Verified **100% row-count parity across all 8 formats** (`pq_default`, `pq_tuned`, `pq_cetra`, `vortex 0.95.0`, `lance 14.0.3`, `strata` #158, `statam_l0`, `statam_l1`) on **Apple M4 (`aarch64` Linux, pure-Rust scalar fallbacks — no NEON yet!)** for both `1W/1R` and `8W/8R`:
+- **Strictly `1R` Statam wins `53 / 63` local CPU queries** on M4 against Parquet (`1T`), Vortex (`Tokio`), and Lance (`Tokio`) — e.g.:
+  - `CB_Q1`: **`0.008 ms`** vs PQ `0.231 ms`, Vortex `0.176 ms`, Lance `0.747 ms` (`22×–93×` faster!)
+  - `CB_Q23_like`: **`1.44 ms`** vs PQ `4.52 ms`, Vortex `4.87 ms`, Lance `18.79 ms`
+  - `CB_wide_point` (105 cols): **`0.86 ms`** (`L0 0.62 ms`) vs PQ `3.61 ms`, Vortex `6.84 ms`, Lance `108.3 ms`
+  - `RF_pt_0_001pct`: **`0.041 ms`** (`L0 0.034 ms`) vs PQ `0.42 ms`, Vortex `0.71 ms`, Lance `3.88 ms`, Strata `0.071 ms` (#1 of 8!)
+  - `RA_take_100` / `1000`: **`9.42 / 9.95 ms (1R)`** (beats Vortex `9.89 / 11.39 ms` & PQ `25.2 / 28.6 ms` even on 1 thread!), **`2.90 / 2.97 ms (8R)`** (vs Lance `1.59 / 6.24 ms`)
+  - `W1_agents` (`858 MiB`): `1W` write **`212 ms` (`L0`) / `300 ms` (`L1`)** (both beat `pq_cetra` `330 ms`, `lance` `1,159 ms`, `vortex` `5,107 ms` on 1 core!), `substring_rare` **`13.86 ms (1R)` / `6.76 ms (8R)`**, `substring_absent` **`0.99 ms (1R)` / `0.69 ms (8R)`** (`1,130×` faster than Lance!)
+  - `W3_spans`: `point_lookup_narrow` **`0.100 ms (1R)`**, `point_lookup_full` **`0.650 ms (1R)`** (`87×` faster than PQ, `5×` faster than Vortex, `8.2×` faster than Lance!)
+  - `Hermes`: sweeps **4/4** on `1R` (`0.003 ms`, `0.95 ms`, `0.64 ms`, `0.080 ms`).
+- **Thread-pool takeaway confirmed on M4:** On sub-millisecond queries (`CB_Q1`, `W3_spans point_lookup_narrow`, `W4 time_bucket_agg`), `std::thread::scope` spawns 7 OS threads (~0.5–0.8 ms overhead on Linux `aarch64` VM), making `1R` (`0.008 ms`) far faster than `8R` (`0.90 ms`). Replacing `std::thread::scope` with a shared reusable thread pool + size threshold in Stage 3 eliminates that overhead completely.
+
 **Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Awaiting explicit user go-ahead for Stage 3 (`cetra-storage` integration).

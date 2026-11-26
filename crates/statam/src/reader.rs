@@ -1,6 +1,7 @@
 //! Range-based `.statam` reader with 1-GET cold open, SBBF/zone-map pruning,
 //! two-phase late materialization, `map_keys` shredded projection, and exact substring search.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
@@ -22,8 +23,8 @@ use crate::codec::nested::{
 };
 use crate::codec::numeric::read_optional_nulls;
 use crate::codec::{
-    ZonePred, ZoneValue, decode_mini_block, decode_mini_block_selected, zone_map_always_matches,
-    zone_map_may_match,
+    ZonePred, ZoneValue, decode_mini_block, decode_mini_block_selected, decode_mini_block_take,
+    zone_map_always_matches, zone_map_may_match,
 };
 use crate::format::{
     BLOCK_ENTRY_LEN, BLOCK_FLAG_CONST_EMPTY_COLLECTION, BLOCK_FLAG_HAS_NAN,
@@ -35,7 +36,7 @@ use crate::format::{
     LazyIndexEntry, LazyIndexKind, LocalityGroup, MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES,
     MAX_FRAME_RAW_BYTES, MAX_HOT_TAIL_BYTES, MAX_ROW_PAYLOAD_BYTES, POSTSCRIPT_LEN, Postscript,
     ROW_GROUP_ENTRY_LEN, RowGroupEntry, decode_schema, decompress_checked, read_framed_block,
-    read_framed_pack_frame,
+    read_framed_block_cow, read_framed_pack_frame,
 };
 use crate::io::RangeReader;
 use crate::parallel::{MAX_WRITE_THREADS, parallel_map_in_order};
@@ -1467,7 +1468,7 @@ impl StatamReader {
         sorted_rows.dedup();
 
         // Map each sorted global row index -> (rg_idx, mb_idx, local_row) via binary search.
-        let mut touched_rgs: Vec<(usize, Vec<(usize, Bitmap)>)> = Vec::new();
+        let mut touched_rgs: Vec<(usize, Vec<TouchedMbRows>)> = Vec::new();
         for row_idx in sorted_rows {
             let rg_idx = self
                 .meta
@@ -1509,7 +1510,7 @@ impl StatamReader {
                     })?
                     .1
             };
-            let mask = if mb_list.last().is_some_and(|(m, _)| *m == mb_idx) {
+            let local_indices = if mb_list.last().is_some_and(|(m, _)| *m == mb_idx) {
                 &mut mb_list
                     .last_mut()
                     .ok_or(StatamError::Corrupt {
@@ -1517,7 +1518,7 @@ impl StatamReader {
                     })?
                     .1
             } else {
-                mb_list.push((mb_idx, Bitmap::new_zeroed(mb_blk.row_count as usize)));
+                mb_list.push((mb_idx, Vec::new()));
                 &mut mb_list
                     .last_mut()
                     .ok_or(StatamError::Corrupt {
@@ -1525,12 +1526,12 @@ impl StatamReader {
                     })?
                     .1
             };
-            let _ = mask.set(local_row, true);
+            local_indices.push(local_row);
         }
 
         struct TouchedRgPlan {
             rg_idx: usize,
-            mb_masks: Vec<(usize, Bitmap)>,
+            mb_rows: Vec<(usize, Vec<usize>)>,
             surviving_mbs: Vec<usize>,
             plan: RgIoPlan,
         }
@@ -1538,8 +1539,8 @@ impl StatamReader {
         let empty_map_keys: HashMap<usize, Vec<String>> = HashMap::new();
         let mut dict_cols_set: BTreeSet<usize> = BTreeSet::new();
         let mut touched_with_plans: Vec<TouchedRgPlan> = Vec::with_capacity(touched_rgs.len());
-        for (rg_idx, mb_masks) in touched_rgs {
-            let surviving_mbs: Vec<usize> = mb_masks.iter().map(|(mb, _)| *mb).collect();
+        for (rg_idx, mb_rows) in touched_rgs {
+            let surviving_mbs: Vec<usize> = mb_rows.iter().map(|(mb, _)| *mb).collect();
             let plan = self.build_rg_io_plan(
                 rg_idx,
                 &surviving_mbs,
@@ -1564,7 +1565,7 @@ impl StatamReader {
             }
             touched_with_plans.push(TouchedRgPlan {
                 rg_idx,
-                mb_masks,
+                mb_rows,
                 surviving_mbs,
                 plan,
             });
@@ -1574,10 +1575,14 @@ impl StatamReader {
             self.ensure_dicts_loaded(&dict_cols)?;
         }
 
+        let has_payload_proj = proj_indices
+            .iter()
+            .any(|&cidx| self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload);
+
         let mut out_batches = Vec::new();
         for TouchedRgPlan {
             rg_idx,
-            mb_masks,
+            mb_rows,
             surviving_mbs,
             plan,
         } in touched_with_plans
@@ -1631,9 +1636,9 @@ impl StatamReader {
                 None
             };
 
-            let read_block = |blk: &BlockEntry| -> Result<Vec<u8>, StatamError> {
+            let read_block = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
                 if blk.stored_len == 0 {
-                    return Ok(Vec::new());
+                    return Ok(Cow::Borrowed(&[]));
                 }
                 let end = blk
                     .offset
@@ -1645,27 +1650,47 @@ impl StatamReader {
                 let frame = block_cache.get(&key).ok_or(StatamError::Corrupt {
                     reason: "missing take_rows fetched block",
                 })?;
-                let (_, _, body) = read_framed_block(frame, MAX_BLOCK_RAW_BYTES)?;
+                let (_, _, body) = read_framed_block_cow(frame, MAX_BLOCK_RAW_BYTES)?;
                 Ok(body)
             };
 
-            let mut active_mbs: Vec<(usize, Bitmap, HashMap<usize, DecodedPhase1>)> = mb_masks
-                .into_iter()
-                .map(|(mb_idx, mask)| (mb_idx, mask, HashMap::new()))
-                .collect();
+            let (rg_resolved_chunks, take_mbs) = if has_payload_proj {
+                let mut active_mbs: Vec<(usize, Bitmap, HashMap<usize, DecodedPhase1>)> = mb_rows
+                    .iter()
+                    .map(|(mb_idx, local_indices)| {
+                        let mb_row_count =
+                            self.meta.rg_blocks(0, rg_idx)[*mb_idx].row_count as usize;
+                        let mask = mask_from_indices(mb_row_count, local_indices);
+                        (*mb_idx, mask, HashMap::new())
+                    })
+                    .collect();
+                let chunks = self.resolve_rg_payload_chunks(
+                    rg_idx,
+                    &mut active_mbs,
+                    &proj_indices,
+                    l0_parsed.as_ref(),
+                    &read_block,
+                    read_threads,
+                )?;
+                let mbs = mb_rows
+                    .into_iter()
+                    .zip(active_mbs)
+                    .map(|((mb_idx, local_indices), (_, mask, p1))| {
+                        (mb_idx, local_indices, Some(mask), p1)
+                    })
+                    .collect();
+                (chunks, mbs)
+            } else {
+                let mbs = mb_rows
+                    .into_iter()
+                    .map(|(mb_idx, local_indices)| (mb_idx, local_indices, None, HashMap::new()))
+                    .collect();
+                (HashMap::new(), mbs)
+            };
 
-            let rg_resolved_chunks = self.resolve_rg_payload_chunks(
+            let mut rg_batches = self.materialize_take_mbs(
                 rg_idx,
-                &mut active_mbs,
-                &proj_indices,
-                l0_parsed.as_ref(),
-                &read_block,
-                read_threads,
-            )?;
-
-            let mut rg_batches = self.materialize_phase2_mbs(
-                rg_idx,
-                active_mbs,
+                take_mbs,
                 &plan,
                 &proj_indices,
                 &proj_schema,
@@ -2278,9 +2303,9 @@ impl StatamReader {
             None
         };
 
-        let block_lookup = |blk: &BlockEntry| -> Result<Vec<u8>, StatamError> {
+        let block_lookup = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
             if blk.stored_len == 0 {
-                return Ok(Vec::new());
+                return Ok(Cow::Borrowed(&[]));
             }
             let rel = blk
                 .offset
@@ -2300,7 +2325,7 @@ impl StatamReader {
             let frame = rg_slice.get(rel..end).ok_or(StatamError::Corrupt {
                 reason: "block slice out of Point RG range",
             })?;
-            let (_, _, body) = read_framed_block(frame, MAX_BLOCK_RAW_BYTES)?;
+            let (_, _, body) = read_framed_block_cow(frame, MAX_BLOCK_RAW_BYTES)?;
             Ok(body)
         };
 
@@ -2425,9 +2450,9 @@ impl StatamReader {
             None
         };
 
-        let p1_lookup = |blk: &BlockEntry| -> Result<Vec<u8>, StatamError> {
+        let p1_lookup = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
             if blk.stored_len == 0 {
-                return Ok(Vec::new());
+                return Ok(Cow::Borrowed(&[]));
             }
             let end = blk
                 .offset
@@ -2439,7 +2464,7 @@ impl StatamReader {
             let frame = p1_cache.get(&key).ok_or(StatamError::Corrupt {
                 reason: "missing Phase 1 fetched block",
             })?;
-            let (_, _, body) = read_framed_block(frame, MAX_BLOCK_RAW_BYTES)?;
+            let (_, _, body) = read_framed_block_cow(frame, MAX_BLOCK_RAW_BYTES)?;
             Ok(body)
         };
 
@@ -2536,9 +2561,9 @@ impl StatamReader {
         let l0_ref = l0_from_p1.as_ref().or(l0_from_p2.as_ref());
 
         let p2_lookup =
-            |blk: &BlockEntry| -> Result<Vec<u8>, StatamError> {
+            |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
                 if blk.stored_len == 0 {
-                    return Ok(Vec::new());
+                    return Ok(Cow::Borrowed(&[]));
                 }
                 let end = blk
                     .offset
@@ -2552,7 +2577,7 @@ impl StatamReader {
                         reason: "missing Phase 2 fetched block",
                     },
                 )?;
-                let (_, _, body) = read_framed_block(frame, MAX_BLOCK_RAW_BYTES)?;
+                let (_, _, body) = read_framed_block_cow(frame, MAX_BLOCK_RAW_BYTES)?;
                 Ok(body)
             };
 
@@ -2580,13 +2605,13 @@ impl StatamReader {
         )
     }
 
-    fn resolve_rg_payload_chunks(
+    fn resolve_rg_payload_chunks<'a>(
         &self,
         rg_idx: usize,
         active_mbs: &mut [(usize, Bitmap, HashMap<usize, DecodedPhase1>)],
         proj_indices: &[usize],
         l0_local: Option<&ParsedL0Payload<'_>>,
-        read_block: &(dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError> + Sync),
+        read_block: &BlockReader<'a>,
         read_threads: usize,
     ) -> Result<HashMap<(u16, u32), Vec<u8>>, StatamError> {
         let mut proj_payload_cols: Vec<usize> = proj_indices
@@ -2851,7 +2876,7 @@ impl StatamReader {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn eval_phase1_mbs(
+    fn eval_phase1_mbs<'a>(
         &self,
         rg_idx: usize,
         surviving_mbs: &[usize],
@@ -2863,7 +2888,7 @@ impl StatamReader {
         subs: &[(usize, &SubstringQuery)],
         dict_sub_bitmaps: &[Option<Bitmap>],
         l0_local: Option<&ParsedL0Payload<'_>>,
-        read_block: &(dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError> + Sync),
+        read_block: &BlockReader<'a>,
         limit_remaining: Option<usize>,
         read_threads: usize,
     ) -> Result<Vec<ActiveMiniBlock>, StatamError> {
@@ -2929,7 +2954,7 @@ impl StatamReader {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn materialize_phase2_mbs(
+    fn materialize_phase2_mbs<'a>(
         &self,
         rg_idx: usize,
         active_mbs: Vec<(usize, Bitmap, HashMap<usize, DecodedPhase1>)>,
@@ -2938,7 +2963,7 @@ impl StatamReader {
         proj_schema: &Arc<Schema>,
         map_keys_by_col: &HashMap<usize, Vec<String>>,
         resolved_chunks: &HashMap<(u16, u32), Vec<u8>>,
-        read_block: &(dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError> + Sync),
+        read_block: &BlockReader<'a>,
         read_threads: usize,
     ) -> Result<Vec<Batch>, StatamError> {
         let threads = read_threads.clamp(1, MAX_WRITE_THREADS);
@@ -2986,7 +3011,7 @@ impl StatamReader {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn eval_phase1_mb(
+    fn eval_phase1_mb<'a>(
         &self,
         rg_idx: usize,
         mb_idx: usize,
@@ -2998,7 +3023,7 @@ impl StatamReader {
         subs: &[(usize, &SubstringQuery)],
         dict_sub_bitmaps: &[Option<Bitmap>],
         l0_local: Option<&ParsedL0Payload<'_>>,
-        read_block: &(dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError> + Sync),
+        read_block: &BlockReader<'a>,
         read_threads: usize,
     ) -> Result<(Bitmap, HashMap<usize, DecodedPhase1>), StatamError> {
         let fields = self.meta.schema_meta.schema.fields();
@@ -3259,7 +3284,7 @@ impl StatamReader {
                                 if matches!(blk.encoding, Encoding::ConstNull | Encoding::Const)
                                     || blk.stored_len == 0
                                 {
-                                    Vec::new()
+                                    Cow::Borrowed(&[][..])
                                 } else {
                                     read_block(blk)?
                                 };
@@ -3321,13 +3346,13 @@ impl StatamReader {
         Ok((mask, decoded_p1))
     }
 
-    fn ensure_p1_col(
+    fn ensure_p1_col<'a>(
         &self,
         pidx: usize,
         rg_idx: usize,
         mb_idx: usize,
         mb_row_count: usize,
-        read_block: &(dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError> + Sync),
+        read_block: &BlockReader<'a>,
         decoded_p1: &mut HashMap<usize, DecodedPhase1>,
     ) -> Result<(), StatamError> {
         if decoded_p1.contains_key(&pidx) {
@@ -3358,7 +3383,7 @@ impl StatamReader {
             let raw = if blk.stored_len > 0 {
                 read_block(blk)?
             } else {
-                Vec::new()
+                Cow::Borrowed(&[][..])
             };
             let flat = decode_shredded_residual_block(&raw, blk)?;
             DecodedPhase1::Col(Column::Flat(flat))
@@ -3366,7 +3391,7 @@ impl StatamReader {
             let raw = if blk.stored_len > 0 {
                 read_block(blk)?
             } else {
-                Vec::new()
+                Cow::Borrowed(&[][..])
             };
             let dict = if blk.encoding == Encoding::Dict {
                 self.get_cached_dict(pidx)
@@ -3545,7 +3570,7 @@ impl StatamReader {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn materialize_phase2_mb(
+    fn materialize_phase2_mb<'a>(
         &self,
         rg_idx: usize,
         mb_idx: usize,
@@ -3556,7 +3581,7 @@ impl StatamReader {
         proj_schema: &Arc<Schema>,
         map_keys_by_col: &HashMap<usize, Vec<String>>,
         resolved_chunks: &HashMap<(u16, u32), Vec<u8>>,
-        read_block: &(dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError> + Sync),
+        read_block: &BlockReader<'a>,
         read_threads: usize,
     ) -> Result<Batch, StatamError> {
         let fields = self.meta.schema_meta.schema.fields();
@@ -3878,7 +3903,7 @@ impl StatamReader {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn decode_uncached_p2_non_payload_col(
+    fn decode_uncached_p2_non_payload_col<'a>(
         &self,
         rg_idx: usize,
         mb_idx: usize,
@@ -3889,7 +3914,7 @@ impl StatamReader {
         map_keys_by_col: &HashMap<usize, Vec<String>>,
         decoded_subs: &HashMap<usize, ShreddedSubCol>,
         dict: Option<&FileDict>,
-        read_block: &(dyn Fn(&BlockEntry) -> Result<Vec<u8>, StatamError> + Sync),
+        read_block: &BlockReader<'a>,
     ) -> Result<Column, StatamError> {
         let dt = &self.meta.schema_meta.schema.fields()[cidx].data_type;
         if *dt == DataType::MapUtf8
@@ -3908,7 +3933,7 @@ impl StatamReader {
                 let raw = if blk.stored_len > 0 {
                     read_block(blk)?
                 } else {
-                    Vec::new()
+                    Cow::Borrowed(&[][..])
                 };
                 Some(decode_shredded_residual_block_selected(&raw, blk, mask)?)
             };
@@ -3928,7 +3953,7 @@ impl StatamReader {
         let raw = if blk.stored_len > 0 {
             read_block(blk)?
         } else {
-            Vec::new()
+            Cow::Borrowed(&[][..])
         };
         let col = decode_mini_block_selected(&raw, blk, dt, dict, mask)?;
         if *dt == DataType::MapUtf8
@@ -3938,6 +3963,354 @@ impl StatamReader {
             return Ok(Column::Flat(filter_residual_to_keys(&flat, req_keys)?));
         }
         Ok(col)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_take_mbs<'a>(
+        &self,
+        rg_idx: usize,
+        take_mbs: Vec<TakeMiniBlock>,
+        plan: &RgIoPlan,
+        proj_indices: &[usize],
+        proj_schema: &Arc<Schema>,
+        empty_map_keys: &HashMap<usize, Vec<String>>,
+        resolved_chunks: &HashMap<(u16, u32), Vec<u8>>,
+        read_block: &BlockReader<'a>,
+        read_threads: usize,
+    ) -> Result<Vec<Batch>, StatamError> {
+        let threads = read_threads.clamp(1, MAX_WRITE_THREADS);
+        if threads > 1 && take_mbs.len() >= 2 {
+            let inner_threads = if take_mbs.len() >= threads {
+                1
+            } else {
+                (threads / take_mbs.len()).max(1)
+            };
+            return parallel_map_in_order(
+                take_mbs,
+                threads,
+                |(mb_idx, local_indices, mask_opt, payload_p1)| {
+                    self.materialize_take_mb(
+                        rg_idx,
+                        mb_idx,
+                        &local_indices,
+                        mask_opt,
+                        payload_p1,
+                        plan,
+                        proj_indices,
+                        proj_schema,
+                        empty_map_keys,
+                        resolved_chunks,
+                        read_block,
+                        inner_threads,
+                    )
+                },
+            );
+        }
+
+        let mut batches = Vec::with_capacity(take_mbs.len());
+        for (mb_idx, local_indices, mask_opt, payload_p1) in take_mbs {
+            let batch = self.materialize_take_mb(
+                rg_idx,
+                mb_idx,
+                &local_indices,
+                mask_opt,
+                payload_p1,
+                plan,
+                proj_indices,
+                proj_schema,
+                empty_map_keys,
+                resolved_chunks,
+                read_block,
+                read_threads,
+            )?;
+            batches.push(batch);
+        }
+        Ok(batches)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_take_mb<'a>(
+        &self,
+        rg_idx: usize,
+        mb_idx: usize,
+        local_indices: &[usize],
+        mut mask_opt: Option<Bitmap>,
+        mut payload_p1: HashMap<usize, DecodedPhase1>,
+        plan: &RgIoPlan,
+        proj_indices: &[usize],
+        proj_schema: &Arc<Schema>,
+        empty_map_keys: &HashMap<usize, Vec<String>>,
+        resolved_chunks: &HashMap<(u16, u32), Vec<u8>>,
+        read_block: &BlockReader<'a>,
+        read_threads: usize,
+    ) -> Result<Batch, StatamError> {
+        if proj_indices.is_empty() {
+            return Ok(Batch::try_new(
+                Arc::clone(proj_schema),
+                Vec::new(),
+                local_indices.len(),
+                Selection::All,
+            )?);
+        }
+
+        let fields = self.meta.schema_meta.schema.fields();
+        let mb_row_count = self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
+        let threads = read_threads.clamp(1, MAX_WRITE_THREADS);
+
+        let mut needs_mask = false;
+        let mut uncached_subs: Vec<usize> = Vec::new();
+        for &cidx in proj_indices {
+            if self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload {
+                needs_mask = true;
+            } else if fields[cidx].data_type == DataType::MapUtf8
+                && let Some(sm) = self
+                    .meta
+                    .schema_meta
+                    .shredded_maps
+                    .iter()
+                    .find(|s| s.logical_col_idx as usize == cidx)
+            {
+                needs_mask = true;
+                for ke in &sm.keys {
+                    let sub_pidx = ke.sub_col_idx as usize;
+                    if !uncached_subs.contains(&sub_pidx) {
+                        uncached_subs.push(sub_pidx);
+                    }
+                }
+            }
+        }
+
+        let mask_ref: Option<&Bitmap> = if needs_mask {
+            Some(&*mask_opt.get_or_insert_with(|| mask_from_indices(mb_row_count, local_indices)))
+        } else {
+            None
+        };
+        let u32_indices = if needs_mask {
+            let mut out = Vec::with_capacity(local_indices.len());
+            for &r in local_indices {
+                out.push(u32::try_from(r).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "take_rows local index overflows u32",
+                })?);
+            }
+            Some(out)
+        } else {
+            None
+        };
+
+        let mut decoded_subs: HashMap<usize, ShreddedSubCol> = HashMap::new();
+        if let Some(mask) = mask_ref
+            && !uncached_subs.is_empty()
+        {
+            if threads > 1 && uncached_subs.len() >= 4 {
+                let decoded_pairs = parallel_map_in_order(uncached_subs, threads, |sub_pidx| {
+                    let blk = &self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
+                    let raw = read_block(blk)?;
+                    let sub = decode_shredded_subcol_selected(&raw, mb_row_count, mask)?;
+                    Ok((sub_pidx, sub))
+                })?;
+                for (sub_pidx, sub) in decoded_pairs {
+                    decoded_subs.insert(sub_pidx, sub);
+                }
+            } else {
+                for sub_pidx in uncached_subs {
+                    let blk = &self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
+                    let raw = read_block(blk)?;
+                    let sub = decode_shredded_subcol_selected(&raw, mb_row_count, mask)?;
+                    decoded_subs.insert(sub_pidx, sub);
+                }
+            }
+        }
+
+        let decode_payload_take_col = |cidx: usize,
+                                       cached: Option<DecodedPhase1>,
+                                       mask: &Bitmap,
+                                       u32_idx: &[u32]|
+         -> Result<Column, StatamError> {
+            let is_sparse_payload =
+                !mask.all_ones() && mask.count_ones().saturating_mul(8) < mb_row_count;
+            let full_col = match cached {
+                Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
+                    reconstruct_payload_column_selected(
+                        mb_row_count,
+                        &selected,
+                        mask,
+                        resolved_chunks,
+                    )?
+                }
+                Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
+                    reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks)?
+                }
+                _ => {
+                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    if blk.encoding == Encoding::ConstNull {
+                        return Ok(Column::Const {
+                            value: ScalarValue::Null(DataType::Utf8),
+                            len: local_indices.len(),
+                        });
+                    }
+                    let raw = read_block(blk)?;
+                    if is_sparse_payload {
+                        let selected = decode_payload_refs_selected(
+                            &raw,
+                            mb_row_count,
+                            mask,
+                            MAX_BATCH_DECODED_BYTES,
+                        )?;
+                        reconstruct_payload_column_selected(
+                            mb_row_count,
+                            &selected,
+                            mask,
+                            resolved_chunks,
+                        )?
+                    } else {
+                        let refs =
+                            decode_payload_refs_flat(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
+                        reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks)?
+                    }
+                }
+            };
+            Ok(Column::Flat(full_col.take(u32_idx, None)?))
+        };
+
+        let decode_non_payload_take =
+            |cidx: usize, dict: Option<&FileDict>| -> Result<Column, StatamError> {
+                let dt = &fields[cidx].data_type;
+                if *dt == DataType::MapUtf8
+                    && let Some(sm) = self
+                        .meta
+                        .schema_meta
+                        .shredded_maps
+                        .iter()
+                        .find(|s| s.logical_col_idx as usize == cidx)
+                {
+                    let mask = mask_ref.ok_or(StatamError::Corrupt {
+                        reason: "missing take_rows shredded map mask",
+                    })?;
+                    let u32_idx = u32_indices.as_deref().ok_or(StatamError::Corrupt {
+                        reason: "missing take_rows u32 indices",
+                    })?;
+                    let skip_residual = plan.phase2_map_fast_path.contains(&(mb_idx, cidx));
+                    let residual_flat = if skip_residual {
+                        None
+                    } else {
+                        let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                        let raw = if blk.stored_len > 0 {
+                            read_block(blk)?
+                        } else {
+                            Cow::Borrowed(&[][..])
+                        };
+                        Some(decode_shredded_residual_block_selected(&raw, blk, mask)?)
+                    };
+                    let full_col = self.build_shredded_map_col(
+                        mb_row_count,
+                        cidx,
+                        sm,
+                        skip_residual,
+                        residual_flat.as_ref(),
+                        mask,
+                        empty_map_keys,
+                        &decoded_subs,
+                    )?;
+                    return Ok(Column::Flat(full_col.take(u32_idx, None)?));
+                }
+                let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                let raw = if blk.stored_len > 0 {
+                    read_block(blk)?
+                } else {
+                    Cow::Borrowed(&[][..])
+                };
+                decode_mini_block_take(&raw, blk, dt, dict, local_indices)
+            };
+
+        let out_cols = if threads <= 1 {
+            let mut out_cols = Vec::with_capacity(proj_indices.len());
+            for &cidx in proj_indices {
+                let cd = &self.meta.col_dir[cidx];
+                if cd.locality_group == LocalityGroup::ExternalPayload {
+                    let mask = mask_ref.ok_or(StatamError::Corrupt {
+                        reason: "missing take_rows payload mask",
+                    })?;
+                    let u32_idx = u32_indices.as_deref().ok_or(StatamError::Corrupt {
+                        reason: "missing take_rows payload u32 indices",
+                    })?;
+                    let cached = payload_p1.remove(&cidx);
+                    out_cols.push(decode_payload_take_col(cidx, cached, mask, u32_idx)?);
+                } else {
+                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    let dict = if blk.encoding == Encoding::Dict {
+                        self.get_cached_dict(cidx)
+                    } else {
+                        None
+                    };
+                    out_cols.push(decode_non_payload_take(cidx, dict.as_deref())?);
+                }
+            }
+            out_cols
+        } else {
+            let mut pre_dicts: HashMap<usize, Arc<FileDict>> = HashMap::new();
+            for &cidx in proj_indices {
+                let cd = &self.meta.col_dir[cidx];
+                if cd.locality_group != LocalityGroup::ExternalPayload
+                    && !pre_dicts.contains_key(&cidx)
+                {
+                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    if blk.encoding == Encoding::Dict
+                        && let Some(dict) = self.get_cached_dict(cidx)
+                    {
+                        pre_dicts.insert(cidx, dict);
+                    }
+                }
+            }
+
+            let mut slots: Vec<Option<Column>> = vec![None; proj_indices.len()];
+            let mut parallel_tasks: Vec<(usize, usize, Option<Arc<FileDict>>)> = Vec::new();
+            for (pos, &cidx) in proj_indices.iter().enumerate() {
+                let cd = &self.meta.col_dir[cidx];
+                if cd.locality_group == LocalityGroup::ExternalPayload {
+                    let mask = mask_ref.ok_or(StatamError::Corrupt {
+                        reason: "missing take_rows payload mask",
+                    })?;
+                    let u32_idx = u32_indices.as_deref().ok_or(StatamError::Corrupt {
+                        reason: "missing take_rows payload u32 indices",
+                    })?;
+                    let cached = payload_p1.remove(&cidx);
+                    slots[pos] = Some(decode_payload_take_col(cidx, cached, mask, u32_idx)?);
+                } else {
+                    parallel_tasks.push((pos, cidx, pre_dicts.get(&cidx).map(Arc::clone)));
+                }
+            }
+
+            if parallel_tasks.len() >= 4 {
+                let decoded_cols =
+                    parallel_map_in_order(parallel_tasks, threads, |(pos, cidx, dict)| {
+                        let col = decode_non_payload_take(cidx, dict.as_deref())?;
+                        Ok((pos, col))
+                    })?;
+                for (pos, col) in decoded_cols {
+                    slots[pos] = Some(col);
+                }
+            } else {
+                for (pos, cidx, dict) in parallel_tasks {
+                    slots[pos] = Some(decode_non_payload_take(cidx, dict.as_deref())?);
+                }
+            }
+
+            slots
+                .into_iter()
+                .map(|s| {
+                    s.ok_or(StatamError::Corrupt {
+                        reason: "missing materialized take column",
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        Ok(Batch::try_new(
+            Arc::clone(proj_schema),
+            out_cols,
+            local_indices.len(),
+            Selection::All,
+        )?)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4127,9 +4500,9 @@ impl StatamReader {
             Bytes::new()
         };
 
-        let read_from_rg = |blk: &BlockEntry| -> Result<Vec<u8>, StatamError> {
+        let read_from_rg = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
             if blk.stored_len == 0 {
-                return Ok(Vec::new());
+                return Ok(Cow::Borrowed(&[]));
             }
             let rel = blk
                 .offset
@@ -4149,7 +4522,7 @@ impl StatamReader {
             let frame = rg_slice.get(rel..end).ok_or(StatamError::Corrupt {
                 reason: "block slice out of RG range during GDPR read",
             })?;
-            let (_, _, body) = read_framed_block(frame, MAX_BLOCK_RAW_BYTES)?;
+            let (_, _, body) = read_framed_block_cow(frame, MAX_BLOCK_RAW_BYTES)?;
             Ok(body)
         };
 
@@ -4216,6 +4589,14 @@ impl StatamReader {
 
         Ok(Batch::try_new_all(Arc::clone(schema), cols, rg_rows)?)
     }
+}
+
+fn mask_from_indices(row_count: usize, indices: &[usize]) -> Bitmap {
+    let mut mask = Bitmap::new_zeroed(row_count);
+    for &r in indices {
+        let _ = mask.set(r, true);
+    }
+    mask
 }
 
 fn append_payload_row_to_utf8(
@@ -4471,6 +4852,14 @@ impl RgIoPlan {
 }
 
 type ActiveMiniBlock = (usize, Bitmap, HashMap<usize, DecodedPhase1>);
+type TouchedMbRows = (usize, Vec<usize>);
+type TakeMiniBlock = (
+    usize,
+    Vec<usize>,
+    Option<Bitmap>,
+    HashMap<usize, DecodedPhase1>,
+);
+type BlockReader<'a> = dyn Fn(&BlockEntry) -> Result<Cow<'a, [u8]>, StatamError> + Sync + 'a;
 
 enum DecodedPhase1 {
     Col(Column),
@@ -8478,6 +8867,9 @@ mod tests {
 
             for threads in [1usize, 4] {
                 let taken = reader.take_rows(&indices_100, None, threads).unwrap();
+                for b in &taken {
+                    assert!(matches!(b.selection(), Selection::All));
+                }
                 let got = concat_scanned_batches(&spans_schema, &taken);
                 assert_eq!(got.num_rows(), expected_100.len());
                 for c in 0..spans_schema.len() {
@@ -8544,6 +8936,9 @@ mod tests {
             }
 
             let taken_zero = reader.take_rows(&indices_100, Some(&[]), 1).unwrap();
+            for b in &taken_zero {
+                assert!(matches!(b.selection(), Selection::All));
+            }
             let zero_rows: usize = taken_zero.iter().map(Batch::num_rows).sum();
             assert_eq!(zero_rows, expected_100.len());
         }
@@ -9359,5 +9754,203 @@ mod tests {
                 reason: "multi-chunk row references pack without edge table",
             }
         ));
+    }
+
+    #[test]
+    fn take_rows_random_access_schema_compact_selection_all_and_min_savings_parity() {
+        let schema = Arc::new(
+            Schema::try_new(vec![
+                Field::new("ts", DataType::TimestampNs { utc: true }, false),
+                Field::new("bucket", DataType::I64, true),
+                Field::new("score", DataType::F64, false),
+                Field::new("service", DataType::Utf8, true),
+                Field::new("msg", DataType::Utf8, true),
+                Field::new("ok", DataType::Bool, true),
+            ])
+            .unwrap(),
+        );
+
+        let n = 4200usize; // > 2048 rows across multiple mini-blocks and 2 RGs
+        let mut ts_vals = Vec::with_capacity(n);
+        let mut bucket_vals = Vec::with_capacity(n);
+        let mut bucket_valid = Vec::with_capacity(n);
+        let mut score_vals = Vec::with_capacity(n);
+        let mut service_strs = Vec::with_capacity(n);
+        let mut service_valid = Vec::with_capacity(n);
+        let mut msg_strs = Vec::with_capacity(n);
+        let mut msg_valid = Vec::with_capacity(n);
+        let mut ok_bools = Vec::with_capacity(n);
+        let mut ok_valid = Vec::with_capacity(n);
+
+        let services = [
+            "api-gateway",
+            "auth-svc",
+            "billing-worker",
+            "llm-router",
+            "eval-runner",
+        ];
+        let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;
+        for i in 0..n {
+            ts_vals.push(1_700_000_000_000_000 + (i as i64) * 1_000_000);
+            bucket_vals.push(((i * 7919) % 5000) as i64);
+            bucket_valid.push(i % 13 != 0);
+
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            // High-entropy finite float (mantissa + bounded exponent).
+            let bits = (0x3ff0_0000_0000_0000u64) | (rng & 0x000f_ffff_ffff_ffffu64);
+            score_vals.push(f64::from_bits(bits));
+
+            service_strs.push(services[i % services.len()]);
+            service_valid.push(i % 17 != 0);
+
+            msg_strs.push(format!(
+                "{{\"service\":\"{}\",\"status\":\"ok\",\"req\":\"req-{:06x}\",\"i\":{i}}}",
+                services[i % services.len()],
+                (i * 2654435761) & 0xff_ffff
+            ));
+            msg_valid.push(i % 19 != 0);
+
+            ok_bools.push(i % 3 != 0);
+            ok_valid.push(i % 11 != 0);
+        }
+
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: ts_vals,
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::I64(bucket_vals),
+                        Some(Bitmap::from_bools(&bucket_valid)),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::F64(score_vals), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(service_strs).unwrap()),
+                        Some(Bitmap::from_bools(&service_valid)),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(msg_strs.iter().map(String::as_str)).unwrap(),
+                        ),
+                        Some(Bitmap::from_bools(&msg_valid)),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Bool(Bitmap::from_bools(&ok_bools)),
+                        Some(Bitmap::from_bools(&ok_valid)),
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n,
+        )
+        .unwrap();
+
+        for write_threads in [1usize, 4] {
+            let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+            opts.sort_cols = vec![0];
+            opts.row_group_size = 2100;
+            opts.mini_block_size = 1050;
+            opts.write_threads = write_threads;
+
+            let mut file_bytes = Vec::new();
+            let mut writer = StatamWriter::new(Arc::clone(&schema), opts, None).unwrap();
+            writer.write_batch(&batch).unwrap();
+            writer.finish(&mut file_bytes).unwrap();
+
+            let reader = StatamReader::open(Arc::new(SliceReader::new(file_bytes)), None).unwrap();
+
+            // Verify encodings & min_savings_pct guard on high-entropy Plain F64 blocks.
+            assert!(
+                reader.meta.rg_blocks(0, 0)[0].encoding == Encoding::DeltaBitpack,
+                "ts should be DeltaBitpack"
+            );
+            assert!(
+                reader.meta.rg_blocks(1, 0)[0].encoding == Encoding::ForBitpack,
+                "bucket should be ForBitpack"
+            );
+            let score_blk = &reader.meta.rg_blocks(2, 0)[0];
+            assert_eq!(score_blk.encoding, Encoding::Plain);
+            assert_eq!(
+                score_blk.codec,
+                Codec::None,
+                "high-entropy F64 block should fall back to Codec::None via 12% savings guard"
+            );
+            assert_eq!(reader.meta.rg_blocks(3, 0)[0].encoding, Encoding::Dict);
+            assert_eq!(reader.meta.rg_blocks(4, 0)[0].encoding, Encoding::Fsst);
+            assert_eq!(
+                reader.meta.rg_blocks(5, 0)[0].encoding,
+                Encoding::BitpackBool
+            );
+
+            let full =
+                concat_scanned_batches(&schema, &reader.scan(&ScanRequest::default()).unwrap());
+            assert_eq!(full.num_rows(), n);
+
+            let indices_100: Vec<u64> = (0..100u64).map(|i| (i * 41 + 7) % (n as u64)).collect();
+            let mut sorted_unique = indices_100.clone();
+            sorted_unique.sort_unstable();
+            sorted_unique.dedup();
+            let expected_mask = {
+                let mut bm = Bitmap::new_zeroed(n);
+                for &r in &sorted_unique {
+                    let _ = bm.set(r as usize, true);
+                }
+                bm
+            };
+            let masked = Batch::try_new(
+                Arc::clone(&schema),
+                full.columns().to_vec(),
+                n,
+                Selection::Mask(expected_mask),
+            )
+            .unwrap();
+            let expected = Batch::concat(Arc::clone(&schema), &[&masked], None).unwrap();
+
+            for read_threads in [1usize, 4] {
+                let taken = reader.take_rows(&indices_100, None, read_threads).unwrap();
+                for b in &taken {
+                    assert!(matches!(b.selection(), Selection::All));
+                }
+                let got = concat_scanned_batches(&schema, &taken);
+                assert_eq!(got.num_rows(), sorted_unique.len());
+                for c in 0..schema.len() {
+                    assert!(
+                        got.column(c)
+                            .unwrap()
+                            .semantic_eq(expected.column(c).unwrap()),
+                        "random_access take_rows mismatch col={c} wt={write_threads} rt={read_threads}"
+                    );
+                }
+
+                let taken_zero = reader
+                    .take_rows(&indices_100, Some(&[]), read_threads)
+                    .unwrap();
+                for b in &taken_zero {
+                    assert!(matches!(b.selection(), Selection::All));
+                }
+                let zero_rows: usize = taken_zero.iter().map(Batch::num_rows).sum();
+                assert_eq!(zero_rows, sorted_unique.len());
+            }
+        }
     }
 }

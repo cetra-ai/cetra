@@ -15,17 +15,17 @@ use cetra_column::{
 };
 
 use crate::StatamError;
-use crate::codec::dict::{FileDict, decode_dict_column, encode_dict_codes_body};
+use crate::codec::dict::{FileDict, decode_dict_column, decode_dict_take, encode_dict_codes_body};
 use crate::codec::nested::{decode_nested_column, encode_nested_column};
 use crate::codec::numeric::{
     decode_const_block, decode_inner_flat, decode_narrow_column, decode_narrow_column_selected,
-    decode_plain_varlen_selected, encode_narrow_column_with_locality, read_optional_nulls,
-    try_encode_const_or_null, write_optional_nulls,
+    decode_narrow_column_take, decode_plain_varlen_selected, encode_narrow_column_with_locality,
+    read_optional_nulls, try_encode_const_or_null, write_optional_nulls,
 };
 use crate::codec::zonemap::compute_zone_map;
 use crate::format::{
     BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_HAS_NULLS, BLOCK_FLAG_MIN_MAX_VALID, BlockEntry, Codec,
-    Encoding, MAX_NESTING_DEPTH, write_framed_block,
+    Encoding, MAX_NESTING_DEPTH, write_framed_block_with_min_savings,
 };
 use crate::simd::bitpack::{packed_bytes_len, unpack_u32};
 
@@ -139,6 +139,27 @@ impl EncodedMiniBlock {
         zstd_level: i32,
         out: &mut Vec<u8>,
     ) -> Result<BlockEntry, StatamError> {
+        self.write_framed_entry_with_min_savings(
+            first_row,
+            row_count,
+            base_offset,
+            zstd_level,
+            0,
+            out,
+        )
+    }
+
+    /// Frames this mini-block into `out` (unless inline `ConstNull`/`Const`), requiring at
+    /// least `min_savings_pct` compression savings when `min_savings_pct > 0 && raw_body.len() >= 1024`.
+    pub fn write_framed_entry_with_min_savings(
+        &self,
+        first_row: u32,
+        row_count: u16,
+        base_offset: u64,
+        zstd_level: i32,
+        min_savings_pct: u8,
+        out: &mut Vec<u8>,
+    ) -> Result<BlockEntry, StatamError> {
         if self.encoding == Encoding::ConstNull || self.encoding == Encoding::Const {
             return Ok(BlockEntry {
                 first_row,
@@ -159,11 +180,12 @@ impl EncodedMiniBlock {
         }
 
         let offset = base_offset + out.len() as u64;
-        let info = write_framed_block(
+        let info = write_framed_block_with_min_savings(
             self.encoding,
             &self.raw_body,
             self.preferred_codec,
             zstd_level,
+            min_savings_pct,
             out,
         )?;
         Ok(BlockEntry {
@@ -513,15 +535,105 @@ pub fn decode_mini_block_selected(
             return decode_nested_column_selected(raw_body, entry, dt, MAX_NESTING_DEPTH, mask);
         }
         if entry.encoding == Encoding::Fsst
-            || (entry.encoding == Encoding::Plain
-                && matches!(dt, DataType::Utf8 | DataType::Binary | DataType::MapUtf8)
-                && mask.count_ones().saturating_mul(16) < row_count)
+            || (matches!(
+                entry.encoding,
+                Encoding::Plain
+                    | Encoding::BitpackBool
+                    | Encoding::ForBitpack
+                    | Encoding::DeltaBitpack
+            ) && mask.count_ones().saturating_mul(16) < row_count)
         {
             dt.validate(MAX_NESTING_DEPTH)?;
             return decode_narrow_column_selected(raw_body, entry, dt, mask);
         }
     }
     decode_mini_block(raw_body, entry, dt, file_dict)
+}
+
+/// Decodes only `indices` of one mini-block into a compact `indices.len()`-row [`Column`].
+pub(crate) fn decode_mini_block_take(
+    raw_body: &[u8],
+    entry: &BlockEntry,
+    dt: &DataType,
+    file_dict: Option<&FileDict>,
+    indices: &[usize],
+) -> Result<Column, StatamError> {
+    dt.validate(MAX_NESTING_DEPTH)?;
+    let row_count = entry.row_count as usize;
+    if indices
+        .len()
+        .checked_mul(16)
+        .is_none_or(|b| b > crate::MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "mini-block take indices exceed MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    for &row in indices {
+        if row >= row_count {
+            return Err(StatamError::Corrupt {
+                reason: "mini-block take index out of bounds",
+            });
+        }
+    }
+
+    if entry.encoding == Encoding::ConstNull || entry.encoding == Encoding::Const {
+        let col = decode_const_block(entry, dt)?;
+        return match col {
+            Column::Const { value, .. } => Ok(Column::Const {
+                value,
+                len: indices.len(),
+            }),
+            other => Ok(other),
+        };
+    }
+
+    if row_count == 0 {
+        if !raw_body.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in empty mini-block",
+            });
+        }
+        return Ok(Column::Flat(FlatColumn::empty(dt)));
+    }
+
+    if entry.encoding == Encoding::Dict {
+        let Some(dict) = file_dict else {
+            return Err(StatamError::Corrupt {
+                reason: "Dict mini-block requires FileDict",
+            });
+        };
+        if dict.values().data_type() != *dt {
+            return Err(StatamError::SchemaMismatch {
+                reason: "FileDict DataType mismatch",
+            });
+        }
+        let (nulls, after_nulls) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+        return decode_dict_take(after_nulls, row_count, nulls.as_ref(), dict, indices);
+    }
+
+    if !matches!(
+        entry.encoding,
+        Encoding::ListEncoded
+            | Encoding::ShreddedMap
+            | Encoding::EventsStruct
+            | Encoding::LinksStruct
+    ) && let Some(col) = decode_narrow_column_take(raw_body, entry, dt, indices)?
+    {
+        return Ok(col);
+    }
+
+    let mut mask = Bitmap::new_zeroed(row_count);
+    let mut u32_indices = Vec::with_capacity(indices.len());
+    for &row in indices {
+        let _ = mask.set(row, true);
+        let idx_u32 = u32::try_from(row).map_err(|_| StatamError::BoundsExceeded {
+            reason: "mini-block take index overflows u32",
+        })?;
+        u32_indices.push(idx_u32);
+    }
+    let col = decode_mini_block_selected(raw_body, entry, dt, file_dict, &mask)?;
+    Ok(Column::Flat(col.take(&u32_indices, None)?))
 }
 
 fn decode_rle_block_selected(
@@ -3139,5 +3251,553 @@ mod tests {
             decode_mini_block_selected(truncated, &entry, &DataType::Utf8, None, &empty_mask),
             Err(StatamError::Corrupt { .. })
         ));
+    }
+
+    fn assert_selected_and_take_parity_raw(
+        col: &Column,
+        dt: &DataType,
+        dict: Option<&FileDict>,
+        entry: &BlockEntry,
+        raw: &[u8],
+        sparse_indices: &[usize],
+        dense_indices: &[usize],
+    ) {
+        let n = col.len();
+        let full = decode_mini_block(raw, entry, dt, dict).unwrap();
+        let full_flat = full.materialize(None).unwrap();
+
+        for indices in [&[][..], sparse_indices, dense_indices] {
+            let mut mask = Bitmap::new_zeroed(n);
+            for &r in indices {
+                let _ = mask.set(r, true);
+            }
+            let sel = decode_mini_block_selected(raw, entry, dt, dict, &mask).unwrap();
+            assert_sparse_scalar_parity(col, &full, &sel, &mask);
+
+            let taken = decode_mini_block_take(raw, entry, dt, dict, indices).unwrap();
+            assert_eq!(taken.len(), indices.len(), "compact take len mismatch");
+            let taken_flat = taken.materialize(None).unwrap();
+            for (out_pos, &row) in indices.iter().enumerate() {
+                assert_eq!(
+                    taken_flat.is_null(out_pos),
+                    full_flat.is_null(row),
+                    "take null mismatch at row {row} ({dt:?})"
+                );
+                if !full_flat.is_null(row) {
+                    assert_eq!(
+                        taken_flat.get_scalar(out_pos).unwrap(),
+                        full_flat.get_scalar(row).unwrap(),
+                        "take scalar mismatch at row {row} ({dt:?})"
+                    );
+                }
+            }
+        }
+
+        // Corrupt-input rejection: truncated body and out-of-bounds take index.
+        if !raw.is_empty() {
+            let mut empty_mask = Bitmap::new_zeroed(n);
+            let _ = empty_mask.set(0, false);
+            assert!(
+                decode_mini_block_selected(&raw[..raw.len() - 1], entry, dt, dict, &empty_mask)
+                    .is_err()
+            );
+            assert!(decode_mini_block_take(&raw[..raw.len() - 1], entry, dt, dict, &[0]).is_err());
+        }
+        assert!(decode_mini_block_take(raw, entry, dt, dict, &[n]).is_err());
+    }
+
+    fn assert_selected_and_take_parity(
+        col: &Column,
+        dt: &DataType,
+        profile: WriteProfile,
+        dict: Option<&FileDict>,
+        expected_enc: Option<Encoding>,
+        sparse_indices: &[usize],
+        dense_indices: &[usize],
+    ) {
+        let n = col.len();
+        let enc = encode_mini_block(col, dt, profile, dict).unwrap();
+        if let Some(exp) = expected_enc {
+            assert_eq!(
+                enc.encoding, exp,
+                "unexpected encoding for {dt:?} ({profile:?})"
+            );
+        }
+        let (entry, raw) = frame_raw_body(&enc, n);
+        assert_selected_and_take_parity_raw(
+            col,
+            dt,
+            dict,
+            &entry,
+            &raw,
+            sparse_indices,
+            dense_indices,
+        );
+    }
+
+    fn assert_plain_selected_and_take_parity(
+        flat: &FlatColumn,
+        dt: &DataType,
+        sparse_indices: &[usize],
+        dense_indices: &[usize],
+    ) {
+        let n = flat.len();
+        let raw = numeric::prepend_optional_nulls(
+            flat.nulls(),
+            numeric::encode_plain_body(flat).unwrap(),
+        );
+        let null_count = flat.nulls().map_or(0, |bm| (n - bm.count_ones()) as u16);
+        let entry = BlockEntry {
+            first_row: 0,
+            row_count: n as u16,
+            null_count,
+            offset: 0,
+            stored_len: raw.len() as u32,
+            raw_len: raw.len() as u32,
+            encoding: Encoding::Plain,
+            codec: Codec::None,
+            block_flags: if null_count > 0 {
+                BLOCK_FLAG_HAS_NULLS
+            } else {
+                0
+            },
+            min_inline_len: 0,
+            max_inline_len: 0,
+            reserved: [0; 3],
+            min_inline: [0; 16],
+            max_inline: [0; 16],
+        };
+        let col = Column::Flat(flat.clone());
+        assert_selected_and_take_parity_raw(
+            &col,
+            dt,
+            None,
+            &entry,
+            &raw,
+            sparse_indices,
+            dense_indices,
+        );
+    }
+
+    #[test]
+    fn sparse_selected_and_compact_take_parity_all_numeric_fsst_and_dict() {
+        let n = 1300usize; // > 1024 so both FastLanes tile and scalar tail are covered
+        let sparse = [0usize, 5, 1023, 1024, 1025, n - 1];
+        let dense: Vec<usize> = (0..n).step_by(3).collect();
+
+        let nulls = {
+            let mut v = Vec::with_capacity(n);
+            for i in 0..n {
+                v.push(i % 9 != 0);
+            }
+            Bitmap::from_bools(&v)
+        };
+
+        for with_nulls in [false, true] {
+            let opt_nulls = with_nulls.then(|| nulls.clone());
+
+            // 1. Plain & BitpackBool (Bool)
+            let bool_bm = Bitmap::from_bools(&(0..n).map(|i| (i * 7) % 3 == 0).collect::<Vec<_>>());
+            let bool_flat =
+                FlatColumn::try_new(FlatData::Bool(bool_bm), opt_nulls.clone()).unwrap();
+            assert_plain_selected_and_take_parity(&bool_flat, &DataType::Bool, &sparse, &dense);
+            let bool_col = Column::Flat(bool_flat);
+            assert_selected_and_take_parity(
+                &bool_col,
+                &DataType::Bool,
+                WriteProfile::L0Fast,
+                None,
+                Some(Encoding::BitpackBool),
+                &sparse,
+                &dense,
+            );
+
+            // 2. Plain fixed-width: I64, TimestampNs, F64, Date, Decimal128, Interval, FixedBytes8, FixedBytes16
+            let plain_i64_vals: Vec<i64> = (0..n)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        i64::MIN + (i as i64) * 1_000_003
+                    } else {
+                        i64::MAX - (i as i64) * 1_000_007
+                    }
+                })
+                .collect();
+            let plain_i64_flat =
+                FlatColumn::try_new(FlatData::I64(plain_i64_vals), opt_nulls.clone()).unwrap();
+            assert_plain_selected_and_take_parity(&plain_i64_flat, &DataType::I64, &sparse, &dense);
+
+            let ts_dt = DataType::TimestampNs { utc: true };
+            let plain_ts_vals: Vec<i64> = (0..n)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        i64::MIN + (i as i64) * 10_000_000_000_000
+                    } else {
+                        i64::MAX - (i as i64) * 10_000_000_000_003
+                    }
+                })
+                .collect();
+            let plain_ts_flat = FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: plain_ts_vals,
+                    utc: true,
+                },
+                opt_nulls.clone(),
+            )
+            .unwrap();
+            assert_plain_selected_and_take_parity(&plain_ts_flat, &ts_dt, &sparse, &dense);
+
+            let f64_vals: Vec<f64> = (0..n)
+                .map(|i| ((i * 97 + 13) as f64) * 0.123456789)
+                .collect();
+            let f64_col = Column::Flat(
+                FlatColumn::try_new(FlatData::F64(f64_vals), opt_nulls.clone()).unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &f64_col,
+                &DataType::F64,
+                WriteProfile::L0Fast,
+                None,
+                Some(Encoding::Plain),
+                &sparse,
+                &dense,
+            );
+
+            let plain_date_vals: Vec<i32> = (0..n)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        i32::MIN + (i as i32) * 997
+                    } else {
+                        i32::MAX - (i as i32) * 991
+                    }
+                })
+                .collect();
+            let plain_date_flat =
+                FlatColumn::try_new(FlatData::Date(plain_date_vals), opt_nulls.clone()).unwrap();
+            assert_plain_selected_and_take_parity(
+                &plain_date_flat,
+                &DataType::Date,
+                &sparse,
+                &dense,
+            );
+
+            let dec_dt = DataType::Decimal128 {
+                precision: 38,
+                scale: 6,
+            };
+            let plain_dec_vals: Vec<i128> = (0..n)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        -10_000_000_000_000_000_000_000_000i128 + (i as i128) * 123_456_789
+                    } else {
+                        10_000_000_000_000_000_000_000_000i128 - (i as i128) * 987_654_321
+                    }
+                })
+                .collect();
+            let plain_dec_col = Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Decimal128 {
+                        values: plain_dec_vals,
+                        precision: 38,
+                        scale: 6,
+                    },
+                    opt_nulls.clone(),
+                )
+                .unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &plain_dec_col,
+                &dec_dt,
+                WriteProfile::L0Fast,
+                None,
+                Some(Encoding::Plain),
+                &sparse,
+                &dense,
+            );
+
+            let iv_vals: Vec<Interval> = (0..n)
+                .map(|i| Interval {
+                    months: (i % 12) as i32,
+                    days: (i % 30) as i32,
+                    nanos: (i as i64) * 1000,
+                })
+                .collect();
+            let iv_col = Column::Flat(
+                FlatColumn::try_new(FlatData::Interval(iv_vals), opt_nulls.clone()).unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &iv_col,
+                &DataType::Interval,
+                WriteProfile::L0Fast,
+                None,
+                Some(Encoding::Plain),
+                &sparse,
+                &dense,
+            );
+
+            let f8_vals: Vec<[u8; 8]> = (0..n).map(|i| (i as u64).to_le_bytes()).collect();
+            let f8_col = Column::Flat(
+                FlatColumn::try_new(FlatData::FixedBytes8(f8_vals), opt_nulls.clone()).unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &f8_col,
+                &DataType::FixedBytes8,
+                WriteProfile::L0Fast,
+                None,
+                Some(Encoding::Plain),
+                &sparse,
+                &dense,
+            );
+
+            let f16_vals: Vec<[u8; 16]> = (0..n).map(|i| (i as u128).to_le_bytes()).collect();
+            let f16_col = Column::Flat(
+                FlatColumn::try_new(FlatData::FixedBytes16(f16_vals), opt_nulls.clone()).unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &f16_col,
+                &DataType::FixedBytes16,
+                WriteProfile::L0Fast,
+                None,
+                Some(Encoding::Plain),
+                &sparse,
+                &dense,
+            );
+
+            // 3. ForBitpack (L1Compact): I64, TimestampNs, Date, Decimal128
+            let i64_vals: Vec<i64> = (0..n).map(|i| ((i * 7919) % 10_000) as i64 - 500).collect();
+            let i64_col = Column::Flat(
+                FlatColumn::try_new(FlatData::I64(i64_vals), opt_nulls.clone()).unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &i64_col,
+                &DataType::I64,
+                WriteProfile::L1Compact,
+                None,
+                Some(Encoding::ForBitpack),
+                &sparse,
+                &dense,
+            );
+            let ts_for_vals: Vec<i64> = (0..n)
+                .map(|i| 1_700_000_000_000 + (((i * 7919) % 10_000) as i64))
+                .collect();
+            let ts_for_col = Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::TimestampNs {
+                        values: ts_for_vals,
+                        utc: false,
+                    },
+                    opt_nulls.clone(),
+                )
+                .unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &ts_for_col,
+                &DataType::TimestampNs { utc: false },
+                WriteProfile::L1Compact,
+                None,
+                Some(Encoding::ForBitpack),
+                &sparse,
+                &dense,
+            );
+            let date_vals: Vec<i32> = (0..n).map(|i| 19000 + ((i * 313) % 500) as i32).collect();
+            let date_col = Column::Flat(
+                FlatColumn::try_new(FlatData::Date(date_vals), opt_nulls.clone()).unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &date_col,
+                &DataType::Date,
+                WriteProfile::L1Compact,
+                None,
+                Some(Encoding::ForBitpack),
+                &sparse,
+                &dense,
+            );
+            let dec_vals: Vec<i128> = (0..n)
+                .map(|i| 1_000_000_000_000i128 + ((i * 997) % 50_000) as i128)
+                .collect();
+            let dec_col = Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Decimal128 {
+                        values: dec_vals,
+                        precision: 38,
+                        scale: 6,
+                    },
+                    opt_nulls.clone(),
+                )
+                .unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &dec_col,
+                &dec_dt,
+                WriteProfile::L1Compact,
+                None,
+                Some(Encoding::ForBitpack),
+                &sparse,
+                &dense,
+            );
+
+            // 4. DeltaBitpack (L1Compact): monotonic I64, TimestampNs, Date
+            let mono_i64: Vec<i64> = (0..n).map(|i| 1_000_000_000 + (i as i64) * 17).collect();
+            let mono_i64_col = Column::Flat(
+                FlatColumn::try_new(FlatData::I64(mono_i64), opt_nulls.clone()).unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &mono_i64_col,
+                &DataType::I64,
+                WriteProfile::L1Compact,
+                None,
+                Some(Encoding::DeltaBitpack),
+                &sparse,
+                &dense,
+            );
+            let ts_vals: Vec<i64> = (0..n)
+                .map(|i| 1_700_000_000_000 + (i as i64) * 1_000_003)
+                .collect();
+            let ts_col = Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::TimestampNs {
+                        values: ts_vals,
+                        utc: true,
+                    },
+                    opt_nulls.clone(),
+                )
+                .unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &ts_col,
+                &ts_dt,
+                WriteProfile::L1Compact,
+                None,
+                Some(Encoding::DeltaBitpack),
+                &sparse,
+                &dense,
+            );
+            let mono_date: Vec<i32> = (0..n).map(|i| 19000 + (i / 2) as i32).collect();
+            let mono_date_col = Column::Flat(
+                FlatColumn::try_new(FlatData::Date(mono_date), opt_nulls.clone()).unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &mono_date_col,
+                &DataType::Date,
+                WriteProfile::L1Compact,
+                None,
+                Some(Encoding::DeltaBitpack),
+                &sparse,
+                &dense,
+            );
+
+            // 5. Plain & FSST (Utf8 & Binary)
+            let strs: Vec<String> = (0..n)
+                .map(|i| {
+                    format!(
+                        "{{\"service\":\"checkout-api\",\"trace\":\"{:08x}\",\"idx\":{i}}}",
+                        i * 131
+                    )
+                })
+                .collect();
+            let utf8_col = Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(strs.iter().map(String::as_str)).unwrap(),
+                    ),
+                    opt_nulls.clone(),
+                )
+                .unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &utf8_col,
+                &DataType::Utf8,
+                WriteProfile::L0Fast,
+                None,
+                Some(Encoding::Plain),
+                &sparse,
+                &dense,
+            );
+            assert_selected_and_take_parity(
+                &utf8_col,
+                &DataType::Utf8,
+                WriteProfile::L1Compact,
+                None,
+                Some(Encoding::Fsst),
+                &sparse,
+                &dense,
+            );
+
+            let bin_col = Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Binary(
+                        BinaryData::try_from_slices(strs.iter().map(String::as_bytes)).unwrap(),
+                    ),
+                    opt_nulls.clone(),
+                )
+                .unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &bin_col,
+                &DataType::Binary,
+                WriteProfile::L0Fast,
+                None,
+                Some(Encoding::Plain),
+                &sparse,
+                &dense,
+            );
+            assert_selected_and_take_parity(
+                &bin_col,
+                &DataType::Binary,
+                WriteProfile::L1Compact,
+                None,
+                Some(Encoding::Fsst),
+                &sparse,
+                &dense,
+            );
+
+            // 6. Dict (both ForBitpack & Rle sub-encodings)
+            let dict_vals: Vec<String> = (0..12).map(|k| format!("service-{k:02}")).collect();
+            let file_dict = FileDict::from_flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(dict_vals.iter().map(String::as_str)).unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+                true,
+            )
+            .unwrap();
+            let fb_strs: Vec<&str> = (0..n).map(|i| dict_vals[i % 12].as_str()).collect();
+            let fb_dict_col = Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(fb_strs).unwrap()),
+                    opt_nulls.clone(),
+                )
+                .unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &fb_dict_col,
+                &DataType::Utf8,
+                WriteProfile::L1Compact,
+                Some(&file_dict),
+                Some(Encoding::Dict),
+                &sparse,
+                &dense,
+            );
+
+            let rle_strs: Vec<&str> = (0..n).map(|i| dict_vals[(i / 128) % 12].as_str()).collect();
+            let rle_dict_col = Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(rle_strs).unwrap()),
+                    opt_nulls,
+                )
+                .unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &rle_dict_col,
+                &DataType::Utf8,
+                WriteProfile::L1Compact,
+                Some(&file_dict),
+                Some(Encoding::Dict),
+                &sparse,
+                &dense,
+            );
+        }
     }
 }

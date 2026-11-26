@@ -1,5 +1,6 @@
 //! Statam v0 binary wire format constants, structs, schema codecs, and framing.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
 
@@ -2016,14 +2017,17 @@ fn decode_data_type(cur: &mut Cursor<'_>, remaining_depth: usize) -> Result<Data
     }
 }
 
-/// Compresses `raw` using `codec` only if `compressed.len() + 16 < raw.len()` and
-/// the expansion ratio fits within `MAX_DECOMPRESS_RATIO * stored + MAX_DECOMPRESS_SLACK`.
+/// Compresses `raw` using `codec` only if `compressed.len() + 16 < raw.len()`,
+/// the expansion ratio fits within `MAX_DECOMPRESS_RATIO * stored + MAX_DECOMPRESS_SLACK`,
+/// and (when `min_savings_pct > 0 && raw.len() >= 1024`) the compressed payload saves at
+/// least `min_savings_pct` percent of `raw.len()`.
 ///
 /// Otherwise falls back to `(Codec::None, raw.to_vec())`.
-pub fn compress_guarded(
+pub fn compress_guarded_min_savings(
     raw: &[u8],
     codec: Codec,
     zstd_level: i32,
+    min_savings_pct: u8,
 ) -> Result<(Codec, Vec<u8>), StatamError> {
     if codec == Codec::None || raw.is_empty() {
         return Ok((Codec::None, raw.to_vec()));
@@ -2037,11 +2041,29 @@ pub fn compress_guarded(
         <= (compressed.len() as u64)
             .saturating_mul(MAX_DECOMPRESS_RATIO)
             .saturating_add(MAX_DECOMPRESS_SLACK);
-    if compressed.len().saturating_add(16) < raw.len() && ratio_ok {
+    let savings_ok = if min_savings_pct > 0 && raw.len() >= 1024 {
+        let keep_pct = u64::from(100u8.saturating_sub(min_savings_pct));
+        (compressed.len() as u64).saturating_mul(100) <= (raw.len() as u64).saturating_mul(keep_pct)
+    } else {
+        true
+    };
+    if compressed.len().saturating_add(16) < raw.len() && ratio_ok && savings_ok {
         Ok((codec, compressed))
     } else {
         Ok((Codec::None, raw.to_vec()))
     }
+}
+
+/// Compresses `raw` using `codec` only if `compressed.len() + 16 < raw.len()` and
+/// the expansion ratio fits within `MAX_DECOMPRESS_RATIO * stored + MAX_DECOMPRESS_SLACK`.
+///
+/// Otherwise falls back to `(Codec::None, raw.to_vec())`.
+pub fn compress_guarded(
+    raw: &[u8],
+    codec: Codec,
+    zstd_level: i32,
+) -> Result<(Codec, Vec<u8>), StatamError> {
+    compress_guarded_min_savings(raw, codec, zstd_level, 0)
 }
 
 /// Decompresses `stored` into `raw_len` bytes after enforcing `max_raw` and the
@@ -2308,12 +2330,14 @@ pub struct FramedWriteInfo {
     pub crc32c: u32,
 }
 
-/// Writes a 16-byte `SB` block header followed by the guarded compressed payload.
-pub fn write_framed_block(
+/// Writes a 16-byte `SB` block header followed by the guarded compressed payload,
+/// requiring at least `min_savings_pct` compression savings when `min_savings_pct > 0 && raw.len() >= 1024`.
+pub fn write_framed_block_with_min_savings(
     encoding: Encoding,
     raw: &[u8],
     codec: Codec,
     zstd_level: i32,
+    min_savings_pct: u8,
     out: &mut Vec<u8>,
 ) -> Result<FramedWriteInfo, StatamError> {
     if raw.len() > MAX_BLOCK_RAW_BYTES {
@@ -2324,7 +2348,8 @@ pub fn write_framed_block(
     let raw_len = u32::try_from(raw.len()).map_err(|_| StatamError::BoundsExceeded {
         reason: "block raw_len overflows u32",
     })?;
-    let (actual_codec, stored) = compress_guarded(raw, codec, zstd_level)?;
+    let (actual_codec, stored) =
+        compress_guarded_min_savings(raw, codec, zstd_level, min_savings_pct)?;
     let stored_len = u32::try_from(stored.len()).map_err(|_| StatamError::BoundsExceeded {
         reason: "block stored_len overflows u32",
     })?;
@@ -2347,11 +2372,23 @@ pub fn write_framed_block(
     })
 }
 
-/// Reads, checksum-verifies, and decompresses a framed `.statam` `SB` data block.
-pub fn read_framed_block(
-    frame: &[u8],
+/// Writes a 16-byte `SB` block header followed by the guarded compressed payload.
+pub fn write_framed_block(
+    encoding: Encoding,
+    raw: &[u8],
+    codec: Codec,
+    zstd_level: i32,
+    out: &mut Vec<u8>,
+) -> Result<FramedWriteInfo, StatamError> {
+    write_framed_block_with_min_savings(encoding, raw, codec, zstd_level, 0, out)
+}
+
+/// Reads, checksum-verifies, and decompresses a framed `.statam` `SB` data block,
+/// returning `Cow::Borrowed` without copying when `codec == Codec::None`.
+pub fn read_framed_block_cow<'a>(
+    frame: &'a [u8],
     max_raw: usize,
-) -> Result<(Encoding, Codec, Vec<u8>), StatamError> {
+) -> Result<(Encoding, Codec, Cow<'a, [u8]>), StatamError> {
     if frame.len() < BLOCK_FRAME_HEADER_LEN {
         return Err(StatamError::Corrupt {
             reason: "truncated block frame header",
@@ -2386,8 +2423,30 @@ pub fn read_framed_block(
             context: "data block",
         });
     }
-    let decompressed = decompress_checked(stored, codec, raw_len, max_raw)?;
-    Ok((encoding, codec, decompressed))
+    check_decompress_bounds(raw_len, stored.len(), max_raw)?;
+    let body = match codec {
+        Codec::None => {
+            if stored.len() != raw_len {
+                return Err(StatamError::Corrupt {
+                    reason: "uncompressed payload length mismatch",
+                });
+            }
+            Cow::Borrowed(stored)
+        }
+        Codec::Lz4 | Codec::Zstd => {
+            Cow::Owned(decompress_checked(stored, codec, raw_len, max_raw)?)
+        }
+    };
+    Ok((encoding, codec, body))
+}
+
+/// Reads, checksum-verifies, and decompresses a framed `.statam` `SB` data block.
+pub fn read_framed_block(
+    frame: &[u8],
+    max_raw: usize,
+) -> Result<(Encoding, Codec, Vec<u8>), StatamError> {
+    let (encoding, codec, body) = read_framed_block_cow(frame, max_raw)?;
+    Ok((encoding, codec, body.into_owned()))
 }
 
 /// Writes a 16-byte `PF` pack frame header followed by the guarded compressed payload.
@@ -3453,5 +3512,77 @@ mod tests {
         assert_eq!(rc, Codec::None);
         assert_eq!(rflags, 0);
         assert_eq!(rdecoded, random_raw);
+    }
+
+    #[test]
+    fn compress_guarded_min_savings_and_cow_zero_copy() {
+        // Construct a 4 KiB payload where Zstd saves ~5-9% (>16 bytes, <12% savings).
+        let mut mild_entropy = vec![0u8; 4096];
+        let mut state: u64 = 0x1234_5678_9abc_def0;
+        for b in &mut mild_entropy[..3750] {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *b = (state >> 16) as u8;
+        }
+        // Remaining 346 bytes are 0u8 (~8.4% compressible).
+        let (codec_0, stored_0) =
+            compress_guarded_min_savings(&mild_entropy, Codec::Zstd, 3, 0).unwrap();
+        assert_eq!(codec_0, Codec::Zstd);
+        assert!(stored_0.len() + 16 < mild_entropy.len());
+        assert!(stored_0.len() * 100 > mild_entropy.len() * 88);
+
+        // With 12% minimum savings guard, falls back to Codec::None.
+        let (codec_12, stored_12) =
+            compress_guarded_min_savings(&mild_entropy, Codec::Zstd, 3, 12).unwrap();
+        assert_eq!(codec_12, Codec::None);
+        assert_eq!(stored_12, mild_entropy);
+
+        // Truly compressible payload (>= 12% savings) keeps Codec::Zstd.
+        let compressible = vec![b'A'; 4096];
+        let (codec_comp, stored_comp) =
+            compress_guarded_min_savings(&compressible, Codec::Zstd, 3, 12).unwrap();
+        assert_eq!(codec_comp, Codec::Zstd);
+        assert!(stored_comp.len() * 100 <= compressible.len() * 88);
+
+        // Frame with min_savings_pct=12 writes Codec::None, and read_framed_block_cow borrows zero-copy.
+        let mut raw_frame = Vec::new();
+        let info_none = write_framed_block_with_min_savings(
+            Encoding::Plain,
+            &mild_entropy,
+            Codec::Zstd,
+            3,
+            12,
+            &mut raw_frame,
+        )
+        .unwrap();
+        assert_eq!(info_none.codec, Codec::None);
+        let (enc, c, cow_none) = read_framed_block_cow(&raw_frame, MAX_BLOCK_RAW_BYTES).unwrap();
+        assert_eq!(enc, Encoding::Plain);
+        assert_eq!(c, Codec::None);
+        assert!(matches!(cow_none, Cow::Borrowed(_)));
+        assert_eq!(cow_none.as_ref(), mild_entropy.as_slice());
+        assert_eq!(
+            cow_none.as_ptr(),
+            raw_frame[BLOCK_FRAME_HEADER_LEN..].as_ptr()
+        );
+
+        // Frame with Codec::Zstd returns Cow::Owned.
+        let mut zstd_frame = Vec::new();
+        let info_zstd = write_framed_block_with_min_savings(
+            Encoding::Plain,
+            &compressible,
+            Codec::Zstd,
+            3,
+            12,
+            &mut zstd_frame,
+        )
+        .unwrap();
+        assert_eq!(info_zstd.codec, Codec::Zstd);
+        let (enc_z, c_z, cow_z) = read_framed_block_cow(&zstd_frame, MAX_BLOCK_RAW_BYTES).unwrap();
+        assert_eq!(enc_z, Encoding::Plain);
+        assert_eq!(c_z, Codec::Zstd);
+        assert!(matches!(cow_z, Cow::Owned(_)));
+        assert_eq!(cow_z.as_ref(), compressible.as_slice());
     }
 }

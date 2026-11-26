@@ -8,8 +8,8 @@ use cetra_column::{
 
 use crate::codec::alp::{decode_alp_body, encode_alp_body};
 use crate::codec::fsst::{
-    decode_fsst_binary, decode_fsst_binary_selected, decode_fsst_utf8, decode_fsst_utf8_selected,
-    encode_fsst_body,
+    decode_fsst_binary, decode_fsst_binary_selected, decode_fsst_binary_take, decode_fsst_utf8,
+    decode_fsst_utf8_selected, decode_fsst_utf8_take, encode_fsst_body,
 };
 use crate::codec::zonemap::{ZoneMapSummary, compute_zone_map};
 use crate::codec::{EncodedMiniBlock, WriteProfile, preferred_block_codec};
@@ -18,8 +18,9 @@ use crate::format::{
     Codec, Encoding,
 };
 use crate::simd::bitpack::{
-    delta_bases_len, delta_decode_i64, delta_encode_i64, min_bits_u32, min_bits_u64, pack_u32,
-    pack_u64, packed_bytes_len, unpack_u32, unpack_u64, zigzag_decode_i64, zigzag_encode_i64,
+    delta_bases_len, delta_decode_i64, delta_decode_i64_indices, delta_encode_i64, min_bits_u32,
+    min_bits_u64, pack_u32, pack_u64, packed_bytes_len, unpack_u32, unpack_u32_at, unpack_u64,
+    unpack_u64_at, zigzag_decode_i64, zigzag_encode_i64,
 };
 use crate::{MAX_BLOCK_RAW_BYTES, StatamError};
 
@@ -1287,7 +1288,8 @@ pub(crate) fn encode_plain_utf8(u: &Utf8Data) -> Vec<u8> {
 }
 
 /// Decodes a narrow scalar mini-block, decoding only `mask`-selected rows for
-/// encodings that support sparse selective decode (`Fsst`, and sparse `Plain` varlen/map).
+/// encodings that support sparse selective decode (`Fsst`, sparse `Plain`, `BitpackBool`,
+/// `ForBitpack`, and `DeltaBitpack`).
 pub(crate) fn decode_narrow_column_selected(
     raw_body: &[u8],
     entry: &BlockEntry,
@@ -1331,12 +1333,263 @@ pub(crate) fn decode_narrow_column_selected(
         return Ok(Column::Flat(FlatColumn::try_new(data, out_nulls)?));
     }
 
-    if entry.encoding == Encoding::Plain
-        && !mask.all_ones()
-        && mask.count_ones().saturating_mul(16) < row_count
-    {
-        match dt {
-            DataType::Utf8 => {
+    if !mask.all_ones() && mask.count_ones().saturating_mul(16) < row_count {
+        match (entry.encoding, dt) {
+            (Encoding::BitpackBool | Encoding::Plain, DataType::Bool) => {
+                let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+                let expected = row_count.div_ceil(8);
+                if body.len() != expected {
+                    return Err(StatamError::Corrupt {
+                        reason: "bool block byte length mismatch",
+                    });
+                }
+                let mut bm = Bitmap::new_zeroed(row_count);
+                for row in mask.iter_ones() {
+                    if row >= row_count {
+                        break;
+                    }
+                    if nulls.as_ref().is_none_or(|nbm| nbm.get(row))
+                        && ((body[row / 8] >> (row % 8)) & 1) != 0
+                    {
+                        let _ = bm.set(row, true);
+                    }
+                }
+                return Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::Bool(bm),
+                    nulls,
+                )?));
+            }
+            (Encoding::Plain, DataType::I64 | DataType::TimestampNs { .. }) => {
+                let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+                let expected = check_mul(row_count, 8, "plain i64 size overflow")?;
+                if body.len() != expected {
+                    return Err(StatamError::Corrupt {
+                        reason: "plain i64 byte length mismatch",
+                    });
+                }
+                let mut vals = vec![0i64; row_count];
+                for row in mask.iter_ones() {
+                    if row >= row_count {
+                        break;
+                    }
+                    if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                        let off = row * 8;
+                        vals[row] = i64::from_le_bytes([
+                            body[off],
+                            body[off + 1],
+                            body[off + 2],
+                            body[off + 3],
+                            body[off + 4],
+                            body[off + 5],
+                            body[off + 6],
+                            body[off + 7],
+                        ]);
+                    }
+                }
+                let data = match dt {
+                    DataType::I64 => FlatData::I64(vals),
+                    DataType::TimestampNs { utc } => FlatData::TimestampNs {
+                        values: vals,
+                        utc: *utc,
+                    },
+                    _ => unreachable!(),
+                };
+                return Ok(Column::Flat(FlatColumn::try_new(data, nulls)?));
+            }
+            (Encoding::Plain, DataType::F64) => {
+                let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+                let expected = check_mul(row_count, 8, "plain f64 size overflow")?;
+                if body.len() != expected {
+                    return Err(StatamError::Corrupt {
+                        reason: "plain f64 byte length mismatch",
+                    });
+                }
+                let mut vals = vec![0.0f64; row_count];
+                for row in mask.iter_ones() {
+                    if row >= row_count {
+                        break;
+                    }
+                    if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                        let off = row * 8;
+                        let bits = u64::from_le_bytes([
+                            body[off],
+                            body[off + 1],
+                            body[off + 2],
+                            body[off + 3],
+                            body[off + 4],
+                            body[off + 5],
+                            body[off + 6],
+                            body[off + 7],
+                        ]);
+                        vals[row] = f64::from_bits(bits);
+                    }
+                }
+                return Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::F64(vals),
+                    nulls,
+                )?));
+            }
+            (Encoding::Plain, DataType::Date) => {
+                let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+                let expected = check_mul(row_count, 4, "plain date size overflow")?;
+                if body.len() != expected {
+                    return Err(StatamError::Corrupt {
+                        reason: "plain date byte length mismatch",
+                    });
+                }
+                let mut vals = vec![0i32; row_count];
+                for row in mask.iter_ones() {
+                    if row >= row_count {
+                        break;
+                    }
+                    if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                        let off = row * 4;
+                        vals[row] = i32::from_le_bytes([
+                            body[off],
+                            body[off + 1],
+                            body[off + 2],
+                            body[off + 3],
+                        ]);
+                    }
+                }
+                return Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::Date(vals),
+                    nulls,
+                )?));
+            }
+            (Encoding::Plain, DataType::Decimal128 { precision, scale }) => {
+                let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+                let expected = check_mul(row_count, 16, "plain decimal128 size overflow")?;
+                if body.len() != expected {
+                    return Err(StatamError::Corrupt {
+                        reason: "plain decimal128 byte length mismatch",
+                    });
+                }
+                let mut vals = vec![0i128; row_count];
+                for row in mask.iter_ones() {
+                    if row >= row_count {
+                        break;
+                    }
+                    if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                        let off = row * 16;
+                        let arr: [u8; 16] =
+                            body[off..off + 16]
+                                .try_into()
+                                .map_err(|_| StatamError::Corrupt {
+                                    reason: "plain decimal128 slice mismatch",
+                                })?;
+                        vals[row] = i128::from_le_bytes(arr);
+                    }
+                }
+                return Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::Decimal128 {
+                        values: vals,
+                        precision: *precision,
+                        scale: *scale,
+                    },
+                    nulls,
+                )?));
+            }
+            (Encoding::Plain, DataType::Interval) => {
+                let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+                let expected = check_mul(row_count, 16, "plain interval size overflow")?;
+                if body.len() != expected {
+                    return Err(StatamError::Corrupt {
+                        reason: "plain interval byte length mismatch",
+                    });
+                }
+                let mut vals = vec![
+                    Interval {
+                        months: 0,
+                        days: 0,
+                        nanos: 0,
+                    };
+                    row_count
+                ];
+                for row in mask.iter_ones() {
+                    if row >= row_count {
+                        break;
+                    }
+                    if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                        let off = row * 16;
+                        vals[row] = Interval {
+                            months: i32::from_le_bytes([
+                                body[off],
+                                body[off + 1],
+                                body[off + 2],
+                                body[off + 3],
+                            ]),
+                            days: i32::from_le_bytes([
+                                body[off + 4],
+                                body[off + 5],
+                                body[off + 6],
+                                body[off + 7],
+                            ]),
+                            nanos: i64::from_le_bytes([
+                                body[off + 8],
+                                body[off + 9],
+                                body[off + 10],
+                                body[off + 11],
+                                body[off + 12],
+                                body[off + 13],
+                                body[off + 14],
+                                body[off + 15],
+                            ]),
+                        };
+                    }
+                }
+                return Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::Interval(vals),
+                    nulls,
+                )?));
+            }
+            (Encoding::Plain, DataType::FixedBytes8) => {
+                let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+                let expected = check_mul(row_count, 8, "plain FixedBytes8 size overflow")?;
+                if body.len() != expected {
+                    return Err(StatamError::Corrupt {
+                        reason: "plain FixedBytes8 byte length mismatch",
+                    });
+                }
+                let mut vals = vec![[0u8; 8]; row_count];
+                for row in mask.iter_ones() {
+                    if row >= row_count {
+                        break;
+                    }
+                    if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                        let off = row * 8;
+                        vals[row].copy_from_slice(&body[off..off + 8]);
+                    }
+                }
+                return Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::FixedBytes8(vals),
+                    nulls,
+                )?));
+            }
+            (Encoding::Plain, DataType::FixedBytes16) => {
+                let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+                let expected = check_mul(row_count, 16, "plain FixedBytes16 size overflow")?;
+                if body.len() != expected {
+                    return Err(StatamError::Corrupt {
+                        reason: "plain FixedBytes16 byte length mismatch",
+                    });
+                }
+                let mut vals = vec![[0u8; 16]; row_count];
+                for row in mask.iter_ones() {
+                    if row >= row_count {
+                        break;
+                    }
+                    if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                        let off = row * 16;
+                        vals[row].copy_from_slice(&body[off..off + 16]);
+                    }
+                }
+                return Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::FixedBytes16(vals),
+                    nulls,
+                )?));
+            }
+            (Encoding::Plain, DataType::Utf8) => {
                 let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
                 let (offsets, data_bytes) =
                     decode_plain_varlen_selected(body, row_count, mask, nulls.as_ref())?;
@@ -1345,7 +1598,7 @@ pub(crate) fn decode_narrow_column_selected(
                     nulls,
                 )?));
             }
-            DataType::Binary => {
+            (Encoding::Plain, DataType::Binary) => {
                 let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
                 let (offsets, data_bytes) =
                     decode_plain_varlen_selected(body, row_count, mask, nulls.as_ref())?;
@@ -1354,9 +1607,126 @@ pub(crate) fn decode_narrow_column_selected(
                     nulls,
                 )?));
             }
-            DataType::MapUtf8 => {
+            (Encoding::Plain, DataType::MapUtf8) => {
                 let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
                 let data = decode_plain_map_selected(body, row_count, mask)?;
+                return Ok(Column::Flat(FlatColumn::try_new(data, nulls)?));
+            }
+            (Encoding::ForBitpack, DataType::I64 | DataType::TimestampNs { .. }) => {
+                let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+                let (base, bw, packed) = parse_for_i64_header(body, row_count)?;
+                let mut vals = vec![0i64; row_count];
+                for row in mask.iter_ones() {
+                    if row >= row_count {
+                        break;
+                    }
+                    if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                        let d = unpack_u64_at(packed, row_count, bw, row)?;
+                        vals[row] = base.wrapping_add(d as i64);
+                    }
+                }
+                let data = match dt {
+                    DataType::I64 => FlatData::I64(vals),
+                    DataType::TimestampNs { utc } => FlatData::TimestampNs {
+                        values: vals,
+                        utc: *utc,
+                    },
+                    _ => unreachable!(),
+                };
+                return Ok(Column::Flat(FlatColumn::try_new(data, nulls)?));
+            }
+            (Encoding::ForBitpack, DataType::Date) => {
+                let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+                let (base, bw, packed) = parse_for_date_header(body, row_count)?;
+                let mut vals = vec![0i32; row_count];
+                for row in mask.iter_ones() {
+                    if row >= row_count {
+                        break;
+                    }
+                    if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                        let d = unpack_u32_at(packed, row_count, bw, row)?;
+                        vals[row] = base.wrapping_add(d as i32);
+                    }
+                }
+                return Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::Date(vals),
+                    nulls,
+                )?));
+            }
+            (Encoding::ForBitpack, DataType::Decimal128 { precision, scale }) => {
+                let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+                let (base, bw, packed) = parse_for_decimal128_header(body, row_count)?;
+                let mut vals = vec![0i128; row_count];
+                for row in mask.iter_ones() {
+                    if row >= row_count {
+                        break;
+                    }
+                    if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                        let d = unpack_u64_at(packed, row_count, bw, row)?;
+                        vals[row] = base.wrapping_add(i128::from(d));
+                    }
+                }
+                return Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::Decimal128 {
+                        values: vals,
+                        precision: *precision,
+                        scale: *scale,
+                    },
+                    nulls,
+                )?));
+            }
+            (
+                Encoding::DeltaBitpack,
+                DataType::I64 | DataType::TimestampNs { .. } | DataType::Date,
+            ) => {
+                let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+                let hdr = parse_delta_i64_header(body, row_count)?;
+                let selected_rows: Vec<usize> =
+                    mask.iter_ones().take_while(|&r| r < row_count).collect();
+                let decoded = delta_decode_i64_indices(
+                    &hdr.bases,
+                    hdr.packed,
+                    row_count,
+                    hdr.bw,
+                    hdr.is_zigzag,
+                    &selected_rows,
+                )?;
+                let data = match dt {
+                    DataType::I64 => {
+                        let mut vals = vec![0i64; row_count];
+                        for (&row, val) in selected_rows.iter().zip(decoded) {
+                            if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                                vals[row] = val;
+                            }
+                        }
+                        FlatData::I64(vals)
+                    }
+                    DataType::TimestampNs { utc } => {
+                        let mut vals = vec![0i64; row_count];
+                        for (&row, val) in selected_rows.iter().zip(decoded) {
+                            if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                                vals[row] = val;
+                            }
+                        }
+                        FlatData::TimestampNs {
+                            values: vals,
+                            utc: *utc,
+                        }
+                    }
+                    DataType::Date => {
+                        let mut vals = vec![0i32; row_count];
+                        for (&row, val) in selected_rows.iter().zip(decoded) {
+                            if nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                                vals[row] =
+                                    i32::try_from(val).map_err(|_| StatamError::Corrupt {
+                                        reason: "delta decoded Date out of i32 range",
+                                    })?;
+                            }
+                        }
+                        FlatData::Date(vals)
+                    }
+                    _ => unreachable!(),
+                };
                 return Ok(Column::Flat(FlatColumn::try_new(data, nulls)?));
             }
             _ => {}
@@ -1364,6 +1734,480 @@ pub(crate) fn decode_narrow_column_selected(
     }
 
     decode_narrow_column(raw_body, entry, dt)
+}
+
+/// Decodes only `indices` of a narrow scalar mini-block directly into a compact
+/// `indices.len()`-row [`Column`], returning `Ok(None)` when the encoding/type should
+/// fall back to `decode_mini_block_selected` + `Column::take`.
+pub(crate) fn decode_narrow_column_take(
+    raw_body: &[u8],
+    entry: &BlockEntry,
+    dt: &DataType,
+    indices: &[usize],
+) -> Result<Option<Column>, StatamError> {
+    let row_count = entry.row_count as usize;
+    if indices
+        .len()
+        .checked_mul(16)
+        .is_none_or(|b| b > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "narrow take indices exceed MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    for &row in indices {
+        if row >= row_count {
+            return Err(StatamError::Corrupt {
+                reason: "narrow take index out of bounds",
+            });
+        }
+    }
+
+    if entry.encoding == Encoding::ConstNull || entry.encoding == Encoding::Const {
+        let col = decode_const_block(entry, dt)?;
+        return match col {
+            Column::Const { value, .. } => Ok(Some(Column::Const {
+                value,
+                len: indices.len(),
+            })),
+            other => Ok(Some(other)),
+        };
+    }
+
+    if row_count == 0 {
+        if !raw_body.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in empty narrow block",
+            });
+        }
+        return Ok(Some(Column::Flat(FlatColumn::empty(dt))));
+    }
+
+    if matches!(entry.encoding, Encoding::Rle | Encoding::Alp)
+        || (entry.encoding == Encoding::Plain && *dt == DataType::MapUtf8)
+    {
+        return Ok(None);
+    }
+
+    let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+    let compact_nulls = gather_nulls(nulls.as_ref(), indices);
+
+    let data = match (entry.encoding, dt) {
+        (Encoding::Plain, DataType::Null) => {
+            if !body.is_empty() {
+                return Err(StatamError::Corrupt {
+                    reason: "non-empty Plain Null block",
+                });
+            }
+            FlatData::Null(indices.len())
+        }
+        (Encoding::BitpackBool | Encoding::Plain, DataType::Bool) => {
+            let expected = row_count.div_ceil(8);
+            if body.len() != expected {
+                return Err(StatamError::Corrupt {
+                    reason: "bool block byte length mismatch",
+                });
+            }
+            let mut bm = Bitmap::new_zeroed(indices.len());
+            for (pos, &row) in indices.iter().enumerate() {
+                if nulls.as_ref().is_none_or(|nbm| nbm.get(row))
+                    && ((body[row / 8] >> (row % 8)) & 1) != 0
+                {
+                    let _ = bm.set(pos, true);
+                }
+            }
+            FlatData::Bool(bm)
+        }
+        (Encoding::Plain, DataType::I64 | DataType::TimestampNs { .. }) => {
+            let expected = check_mul(row_count, 8, "plain i64 size overflow")?;
+            if body.len() != expected {
+                return Err(StatamError::Corrupt {
+                    reason: "plain i64 byte length mismatch",
+                });
+            }
+            let mut vals = Vec::with_capacity(indices.len());
+            for &row in indices {
+                if nulls.as_ref().is_some_and(|bm| !bm.get(row)) {
+                    vals.push(0);
+                } else {
+                    let off = row * 8;
+                    vals.push(i64::from_le_bytes([
+                        body[off],
+                        body[off + 1],
+                        body[off + 2],
+                        body[off + 3],
+                        body[off + 4],
+                        body[off + 5],
+                        body[off + 6],
+                        body[off + 7],
+                    ]));
+                }
+            }
+            match dt {
+                DataType::I64 => FlatData::I64(vals),
+                DataType::TimestampNs { utc } => FlatData::TimestampNs {
+                    values: vals,
+                    utc: *utc,
+                },
+                _ => unreachable!(),
+            }
+        }
+        (Encoding::Plain, DataType::F64) => {
+            let expected = check_mul(row_count, 8, "plain f64 size overflow")?;
+            if body.len() != expected {
+                return Err(StatamError::Corrupt {
+                    reason: "plain f64 byte length mismatch",
+                });
+            }
+            let mut vals = Vec::with_capacity(indices.len());
+            for &row in indices {
+                if nulls.as_ref().is_some_and(|bm| !bm.get(row)) {
+                    vals.push(0.0);
+                } else {
+                    let off = row * 8;
+                    let bits = u64::from_le_bytes([
+                        body[off],
+                        body[off + 1],
+                        body[off + 2],
+                        body[off + 3],
+                        body[off + 4],
+                        body[off + 5],
+                        body[off + 6],
+                        body[off + 7],
+                    ]);
+                    vals.push(f64::from_bits(bits));
+                }
+            }
+            FlatData::F64(vals)
+        }
+        (Encoding::Plain, DataType::Date) => {
+            let expected = check_mul(row_count, 4, "plain date size overflow")?;
+            if body.len() != expected {
+                return Err(StatamError::Corrupt {
+                    reason: "plain date byte length mismatch",
+                });
+            }
+            let mut vals = Vec::with_capacity(indices.len());
+            for &row in indices {
+                if nulls.as_ref().is_some_and(|bm| !bm.get(row)) {
+                    vals.push(0);
+                } else {
+                    let off = row * 4;
+                    vals.push(i32::from_le_bytes([
+                        body[off],
+                        body[off + 1],
+                        body[off + 2],
+                        body[off + 3],
+                    ]));
+                }
+            }
+            FlatData::Date(vals)
+        }
+        (Encoding::Plain, DataType::Decimal128 { precision, scale }) => {
+            let expected = check_mul(row_count, 16, "plain decimal128 size overflow")?;
+            if body.len() != expected {
+                return Err(StatamError::Corrupt {
+                    reason: "plain decimal128 byte length mismatch",
+                });
+            }
+            let mut vals = Vec::with_capacity(indices.len());
+            for &row in indices {
+                if nulls.as_ref().is_some_and(|bm| !bm.get(row)) {
+                    vals.push(0);
+                } else {
+                    let off = row * 16;
+                    let arr: [u8; 16] =
+                        body[off..off + 16]
+                            .try_into()
+                            .map_err(|_| StatamError::Corrupt {
+                                reason: "plain decimal128 slice mismatch",
+                            })?;
+                    vals.push(i128::from_le_bytes(arr));
+                }
+            }
+            FlatData::Decimal128 {
+                values: vals,
+                precision: *precision,
+                scale: *scale,
+            }
+        }
+        (Encoding::Plain, DataType::Interval) => {
+            let expected = check_mul(row_count, 16, "plain interval size overflow")?;
+            if body.len() != expected {
+                return Err(StatamError::Corrupt {
+                    reason: "plain interval byte length mismatch",
+                });
+            }
+            let mut vals = Vec::with_capacity(indices.len());
+            for &row in indices {
+                if nulls.as_ref().is_some_and(|bm| !bm.get(row)) {
+                    vals.push(Interval {
+                        months: 0,
+                        days: 0,
+                        nanos: 0,
+                    });
+                } else {
+                    let off = row * 16;
+                    vals.push(Interval {
+                        months: i32::from_le_bytes([
+                            body[off],
+                            body[off + 1],
+                            body[off + 2],
+                            body[off + 3],
+                        ]),
+                        days: i32::from_le_bytes([
+                            body[off + 4],
+                            body[off + 5],
+                            body[off + 6],
+                            body[off + 7],
+                        ]),
+                        nanos: i64::from_le_bytes([
+                            body[off + 8],
+                            body[off + 9],
+                            body[off + 10],
+                            body[off + 11],
+                            body[off + 12],
+                            body[off + 13],
+                            body[off + 14],
+                            body[off + 15],
+                        ]),
+                    });
+                }
+            }
+            FlatData::Interval(vals)
+        }
+        (Encoding::Plain, DataType::FixedBytes8) => {
+            let expected = check_mul(row_count, 8, "plain FixedBytes8 size overflow")?;
+            if body.len() != expected {
+                return Err(StatamError::Corrupt {
+                    reason: "plain FixedBytes8 byte length mismatch",
+                });
+            }
+            let mut vals = Vec::with_capacity(indices.len());
+            for &row in indices {
+                if nulls.as_ref().is_some_and(|bm| !bm.get(row)) {
+                    vals.push([0u8; 8]);
+                } else {
+                    let off = row * 8;
+                    let arr: [u8; 8] =
+                        body[off..off + 8]
+                            .try_into()
+                            .map_err(|_| StatamError::Corrupt {
+                                reason: "plain FixedBytes8 slice mismatch",
+                            })?;
+                    vals.push(arr);
+                }
+            }
+            FlatData::FixedBytes8(vals)
+        }
+        (Encoding::Plain, DataType::FixedBytes16) => {
+            let expected = check_mul(row_count, 16, "plain FixedBytes16 size overflow")?;
+            if body.len() != expected {
+                return Err(StatamError::Corrupt {
+                    reason: "plain FixedBytes16 byte length mismatch",
+                });
+            }
+            let mut vals = Vec::with_capacity(indices.len());
+            for &row in indices {
+                if nulls.as_ref().is_some_and(|bm| !bm.get(row)) {
+                    vals.push([0u8; 16]);
+                } else {
+                    let off = row * 16;
+                    let arr: [u8; 16] =
+                        body[off..off + 16]
+                            .try_into()
+                            .map_err(|_| StatamError::Corrupt {
+                                reason: "plain FixedBytes16 slice mismatch",
+                            })?;
+                    vals.push(arr);
+                }
+            }
+            FlatData::FixedBytes16(vals)
+        }
+        (Encoding::Plain, DataType::Utf8) => {
+            let (offsets, bytes) =
+                decode_plain_varlen_take(body, row_count, indices, nulls.as_ref())?;
+            FlatData::Utf8(Utf8Data::try_new(offsets, bytes)?)
+        }
+        (Encoding::Plain, DataType::Binary) => {
+            let (offsets, bytes) =
+                decode_plain_varlen_take(body, row_count, indices, nulls.as_ref())?;
+            FlatData::Binary(BinaryData::try_new(offsets, bytes)?)
+        }
+        (Encoding::Fsst, DataType::Utf8) => {
+            let (u, fsst_nulls) = decode_fsst_utf8_take(body, row_count, indices, nulls.as_ref())?;
+            return Ok(Some(Column::Flat(FlatColumn::try_new(
+                FlatData::Utf8(u),
+                fsst_nulls,
+            )?)));
+        }
+        (Encoding::Fsst, DataType::Binary) => {
+            let (b, fsst_nulls) =
+                decode_fsst_binary_take(body, row_count, indices, nulls.as_ref())?;
+            return Ok(Some(Column::Flat(FlatColumn::try_new(
+                FlatData::Binary(b),
+                fsst_nulls,
+            )?)));
+        }
+        (Encoding::ForBitpack, DataType::I64 | DataType::TimestampNs { .. }) => {
+            let vals = if indices.len().saturating_mul(16) < row_count {
+                let (base, bw, packed) = parse_for_i64_header(body, row_count)?;
+                let mut deltas = Vec::with_capacity(indices.len());
+                crate::simd::bitpack::unpack_u64_indices(
+                    packed,
+                    row_count,
+                    bw,
+                    indices,
+                    &mut deltas,
+                )?;
+                let mut out = Vec::with_capacity(indices.len());
+                for (&row, d) in indices.iter().zip(deltas) {
+                    if nulls.as_ref().is_some_and(|bm| !bm.get(row)) {
+                        out.push(0);
+                    } else {
+                        out.push(base.wrapping_add(d as i64));
+                    }
+                }
+                out
+            } else {
+                let all = decode_for_i64_body(body, row_count, nulls.as_ref())?;
+                indices.iter().map(|&r| all[r]).collect()
+            };
+            match dt {
+                DataType::I64 => FlatData::I64(vals),
+                DataType::TimestampNs { utc } => FlatData::TimestampNs {
+                    values: vals,
+                    utc: *utc,
+                },
+                _ => unreachable!(),
+            }
+        }
+        (Encoding::ForBitpack, DataType::Date) => {
+            let vals = if indices.len().saturating_mul(16) < row_count {
+                let (base, bw, packed) = parse_for_date_header(body, row_count)?;
+                let mut deltas = Vec::with_capacity(indices.len());
+                crate::simd::bitpack::unpack_u32_indices(
+                    packed,
+                    row_count,
+                    bw,
+                    indices,
+                    &mut deltas,
+                )?;
+                let mut out = Vec::with_capacity(indices.len());
+                for (&row, d) in indices.iter().zip(deltas) {
+                    if nulls.as_ref().is_some_and(|bm| !bm.get(row)) {
+                        out.push(0);
+                    } else {
+                        out.push(base.wrapping_add(d as i32));
+                    }
+                }
+                out
+            } else {
+                let all = decode_for_date_body(body, row_count, nulls.as_ref())?;
+                indices.iter().map(|&r| all[r]).collect()
+            };
+            FlatData::Date(vals)
+        }
+        (Encoding::ForBitpack, DataType::Decimal128 { precision, scale }) => {
+            let vals = if indices.len().saturating_mul(16) < row_count {
+                let (base, bw, packed) = parse_for_decimal128_header(body, row_count)?;
+                let mut deltas = Vec::with_capacity(indices.len());
+                crate::simd::bitpack::unpack_u64_indices(
+                    packed,
+                    row_count,
+                    bw,
+                    indices,
+                    &mut deltas,
+                )?;
+                let mut out = Vec::with_capacity(indices.len());
+                for (&row, d) in indices.iter().zip(deltas) {
+                    if nulls.as_ref().is_some_and(|bm| !bm.get(row)) {
+                        out.push(0);
+                    } else {
+                        out.push(base.wrapping_add(i128::from(d)));
+                    }
+                }
+                out
+            } else {
+                let all = decode_for_decimal128_body(body, row_count, nulls.as_ref())?;
+                indices.iter().map(|&r| all[r]).collect()
+            };
+            FlatData::Decimal128 {
+                values: vals,
+                precision: *precision,
+                scale: *scale,
+            }
+        }
+        (Encoding::DeltaBitpack, DataType::I64 | DataType::TimestampNs { .. } | DataType::Date) => {
+            let decoded_i64 = if indices.len().saturating_mul(16) < row_count {
+                let hdr = parse_delta_i64_header(body, row_count)?;
+                let mut vals = delta_decode_i64_indices(
+                    &hdr.bases,
+                    hdr.packed,
+                    row_count,
+                    hdr.bw,
+                    hdr.is_zigzag,
+                    indices,
+                )?;
+                if let Some(bm) = nulls.as_ref() {
+                    for (&row, slot) in indices.iter().zip(vals.iter_mut()) {
+                        if !bm.get(row) {
+                            *slot = 0;
+                        }
+                    }
+                }
+                vals
+            } else {
+                let all = decode_delta_i64_body(body, row_count, nulls.as_ref())?;
+                indices.iter().map(|&r| all[r]).collect()
+            };
+            match dt {
+                DataType::I64 => FlatData::I64(decoded_i64),
+                DataType::TimestampNs { utc } => FlatData::TimestampNs {
+                    values: decoded_i64,
+                    utc: *utc,
+                },
+                DataType::Date => {
+                    let mut dates = Vec::with_capacity(indices.len());
+                    for (&row, &v) in indices.iter().zip(decoded_i64.iter()) {
+                        if nulls.as_ref().is_some_and(|bm| !bm.get(row)) {
+                            dates.push(0);
+                        } else {
+                            let d = i32::try_from(v).map_err(|_| StatamError::Corrupt {
+                                reason: "delta decoded Date out of i32 range",
+                            })?;
+                            dates.push(d);
+                        }
+                    }
+                    FlatData::Date(dates)
+                }
+                _ => unreachable!(),
+            }
+        }
+        _ => {
+            return Err(StatamError::Corrupt {
+                reason: "incompatible encoding for DataType",
+            });
+        }
+    };
+
+    Ok(Some(Column::Flat(FlatColumn::try_new(
+        data,
+        compact_nulls,
+    )?)))
+}
+
+fn gather_nulls(nulls: Option<&Bitmap>, indices: &[usize]) -> Option<Bitmap> {
+    let bm = nulls?;
+    let mut out = Bitmap::new_ones(indices.len());
+    let mut any_null = false;
+    for (pos, &row) in indices.iter().enumerate() {
+        if !bm.get(row) {
+            let _ = out.set(pos, false);
+            any_null = true;
+        }
+    }
+    if any_null { Some(out) } else { None }
 }
 
 /// Decodes a narrow scalar mini-block (`ConstNull`, `Const`, `Rle`, `ForBitpack`,
@@ -2128,11 +2972,65 @@ pub(crate) fn decode_plain_map_selected(
     Ok(FlatData::MapUtf8(Box::new(map)))
 }
 
-fn decode_for_i64_body(
+fn decode_plain_varlen_take(
     body: &[u8],
     row_count: usize,
+    indices: &[usize],
     nulls: Option<&Bitmap>,
-) -> Result<Vec<i64>, StatamError> {
+) -> Result<(Vec<u32>, Vec<u8>), StatamError> {
+    if nulls.is_some_and(|bm| bm.len() != row_count) {
+        return Err(StatamError::Corrupt {
+            reason: "null bitmap length mismatch",
+        });
+    }
+    let offsets_count = row_count
+        .checked_add(1)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "plain varlen offsets count overflow",
+        })?;
+    let offsets_bytes = check_mul(offsets_count, 4, "plain varlen offsets size overflow")?;
+    if body.len() < offsets_bytes {
+        return Err(StatamError::Corrupt {
+            reason: "truncated plain varlen offsets",
+        });
+    }
+    let data_len = body.len() - offsets_bytes;
+    if data_len > MAX_BLOCK_RAW_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "plain varlen data exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    let off_raw = &body[..offsets_bytes];
+    validate_plain_offsets_raw(off_raw, data_len)?;
+    let data = &body[offsets_bytes..];
+
+    let mut out_offsets = Vec::with_capacity(indices.len() + 1);
+    out_offsets.push(0u32);
+    let mut out_bytes = Vec::new();
+    for &row in indices {
+        if nulls.is_none_or(|bm| bm.get(row)) {
+            let start = read_u32_le_at(off_raw, row);
+            let end = read_u32_le_at(off_raw, row + 1);
+            if out_bytes
+                .len()
+                .checked_add(end - start)
+                .is_none_or(|n| n > MAX_BLOCK_RAW_BYTES)
+            {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "plain varlen take exceeds MAX_BLOCK_RAW_BYTES",
+                });
+            }
+            out_bytes.extend_from_slice(&data[start..end]);
+        }
+        let off = u32::try_from(out_bytes.len()).map_err(|_| StatamError::BoundsExceeded {
+            reason: "plain varlen take offset exceeds u32::MAX",
+        })?;
+        out_offsets.push(off);
+    }
+    Ok((out_offsets, out_bytes))
+}
+
+fn parse_for_i64_header(body: &[u8], row_count: usize) -> Result<(i64, u8, &[u8]), StatamError> {
     check_mul(row_count, 8, "ForBitpack i64 exceeds MAX_BLOCK_RAW_BYTES")?;
     if body.len() < 9 {
         return Err(StatamError::Corrupt {
@@ -2143,30 +3041,21 @@ fn decode_for_i64_body(
         body[0], body[1], body[2], body[3], body[4], body[5], body[6], body[7],
     ]);
     let bw = body[8];
+    if bw > 64 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid u64 bit_width",
+        });
+    }
     let needed = packed_bytes_len(row_count, bw)?;
     if body.len() != 9 + needed {
         return Err(StatamError::Corrupt {
             reason: "ForBitpack i64 length mismatch",
         });
     }
-    let mut deltas = Vec::with_capacity(row_count);
-    unpack_u64(&body[9..], row_count, bw, &mut deltas)?;
-    let mut out = Vec::with_capacity(row_count);
-    for (i, d) in deltas.into_iter().enumerate() {
-        if nulls.is_some_and(|bm| !bm.get(i)) {
-            out.push(0);
-        } else {
-            out.push(base.wrapping_add(d as i64));
-        }
-    }
-    Ok(out)
+    Ok((base, bw, &body[9..]))
 }
 
-fn decode_for_date_body(
-    body: &[u8],
-    row_count: usize,
-    nulls: Option<&Bitmap>,
-) -> Result<Vec<i32>, StatamError> {
+fn parse_for_date_header(body: &[u8], row_count: usize) -> Result<(i32, u8, &[u8]), StatamError> {
     check_mul(row_count, 4, "ForBitpack Date exceeds MAX_BLOCK_RAW_BYTES")?;
     if body.len() < 5 {
         return Err(StatamError::Corrupt {
@@ -2175,30 +3064,24 @@ fn decode_for_date_body(
     }
     let base = i32::from_le_bytes([body[0], body[1], body[2], body[3]]);
     let bw = body[4];
+    if bw > 32 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid u32 bit_width",
+        });
+    }
     let needed = packed_bytes_len(row_count, bw)?;
     if body.len() != 5 + needed {
         return Err(StatamError::Corrupt {
             reason: "ForBitpack Date length mismatch",
         });
     }
-    let mut deltas = Vec::with_capacity(row_count);
-    unpack_u32(&body[5..], row_count, bw, &mut deltas)?;
-    let mut out = Vec::with_capacity(row_count);
-    for (i, d) in deltas.into_iter().enumerate() {
-        if nulls.is_some_and(|bm| !bm.get(i)) {
-            out.push(0);
-        } else {
-            out.push(base.wrapping_add(d as i32));
-        }
-    }
-    Ok(out)
+    Ok((base, bw, &body[5..]))
 }
 
-fn decode_for_decimal128_body(
+fn parse_for_decimal128_header(
     body: &[u8],
     row_count: usize,
-    nulls: Option<&Bitmap>,
-) -> Result<Vec<i128>, StatamError> {
+) -> Result<(i128, u8, &[u8]), StatamError> {
     check_mul(
         row_count,
         16,
@@ -2214,30 +3097,31 @@ fn decode_for_decimal128_body(
     })?;
     let base = i128::from_le_bytes(base_arr);
     let bw = body[16];
+    if bw > 64 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid u64 bit_width",
+        });
+    }
     let needed = packed_bytes_len(row_count, bw)?;
     if body.len() != 17 + needed {
         return Err(StatamError::Corrupt {
             reason: "ForBitpack Decimal128 length mismatch",
         });
     }
-    let mut deltas = Vec::with_capacity(row_count);
-    unpack_u64(&body[17..], row_count, bw, &mut deltas)?;
-    let mut out = Vec::with_capacity(row_count);
-    for (i, d) in deltas.into_iter().enumerate() {
-        if nulls.is_some_and(|bm| !bm.get(i)) {
-            out.push(0);
-        } else {
-            out.push(base.wrapping_add(i128::from(d)));
-        }
-    }
-    Ok(out)
+    Ok((base, bw, &body[17..]))
 }
 
-fn decode_delta_i64_body(
+struct DeltaI64Header<'a> {
+    is_zigzag: bool,
+    bw: u8,
+    bases: Vec<i64>,
+    packed: &'a [u8],
+}
+
+fn parse_delta_i64_header(
     body: &[u8],
     row_count: usize,
-    nulls: Option<&Bitmap>,
-) -> Result<Vec<i64>, StatamError> {
+) -> Result<DeltaI64Header<'_>, StatamError> {
     check_mul(row_count, 8, "DeltaBitpack i64 exceeds MAX_BLOCK_RAW_BYTES")?;
     if body.len() < 2 {
         return Err(StatamError::Corrupt {
@@ -2273,15 +3157,85 @@ fn decode_delta_i64_body(
             reason: "DeltaBitpack byte length mismatch",
         });
     }
-
     let mut bases = Vec::with_capacity(num_bases);
     for &chunk in body[2..2 + bases_bytes].as_chunks::<8>().0 {
         bases.push(i64::from_le_bytes(chunk));
     }
-    let mut packed_deltas = Vec::with_capacity(row_count);
-    unpack_u64(&body[2 + bases_bytes..], row_count, bw, &mut packed_deltas)?;
+    Ok(DeltaI64Header {
+        is_zigzag,
+        bw,
+        bases,
+        packed: &body[2 + bases_bytes..],
+    })
+}
+
+fn decode_for_i64_body(
+    body: &[u8],
+    row_count: usize,
+    nulls: Option<&Bitmap>,
+) -> Result<Vec<i64>, StatamError> {
+    let (base, bw, packed) = parse_for_i64_header(body, row_count)?;
     let mut deltas = Vec::with_capacity(row_count);
-    if is_zigzag {
+    unpack_u64(packed, row_count, bw, &mut deltas)?;
+    let mut out = Vec::with_capacity(row_count);
+    for (i, d) in deltas.into_iter().enumerate() {
+        if nulls.is_some_and(|bm| !bm.get(i)) {
+            out.push(0);
+        } else {
+            out.push(base.wrapping_add(d as i64));
+        }
+    }
+    Ok(out)
+}
+
+fn decode_for_date_body(
+    body: &[u8],
+    row_count: usize,
+    nulls: Option<&Bitmap>,
+) -> Result<Vec<i32>, StatamError> {
+    let (base, bw, packed) = parse_for_date_header(body, row_count)?;
+    let mut deltas = Vec::with_capacity(row_count);
+    unpack_u32(packed, row_count, bw, &mut deltas)?;
+    let mut out = Vec::with_capacity(row_count);
+    for (i, d) in deltas.into_iter().enumerate() {
+        if nulls.is_some_and(|bm| !bm.get(i)) {
+            out.push(0);
+        } else {
+            out.push(base.wrapping_add(d as i32));
+        }
+    }
+    Ok(out)
+}
+
+fn decode_for_decimal128_body(
+    body: &[u8],
+    row_count: usize,
+    nulls: Option<&Bitmap>,
+) -> Result<Vec<i128>, StatamError> {
+    let (base, bw, packed) = parse_for_decimal128_header(body, row_count)?;
+    let mut deltas = Vec::with_capacity(row_count);
+    unpack_u64(packed, row_count, bw, &mut deltas)?;
+    let mut out = Vec::with_capacity(row_count);
+    for (i, d) in deltas.into_iter().enumerate() {
+        if nulls.is_some_and(|bm| !bm.get(i)) {
+            out.push(0);
+        } else {
+            out.push(base.wrapping_add(i128::from(d)));
+        }
+    }
+    Ok(out)
+}
+
+fn decode_delta_i64_body(
+    body: &[u8],
+    row_count: usize,
+    nulls: Option<&Bitmap>,
+) -> Result<Vec<i64>, StatamError> {
+    let hdr = parse_delta_i64_header(body, row_count)?;
+    let mut packed_deltas = Vec::with_capacity(row_count);
+    unpack_u64(hdr.packed, row_count, hdr.bw, &mut packed_deltas)?;
+    let mut deltas = Vec::with_capacity(row_count);
+    if hdr.is_zigzag {
         for d in packed_deltas {
             deltas.push(zigzag_decode_i64(d));
         }
@@ -2292,7 +3246,7 @@ fn decode_delta_i64_body(
     }
 
     let mut out = Vec::with_capacity(row_count);
-    delta_decode_i64(&bases, &deltas, row_count, &mut out)?;
+    delta_decode_i64(&hdr.bases, &deltas, row_count, &mut out)?;
     if let Some(bm) = nulls {
         for (i, slot) in out.iter_mut().enumerate() {
             if !bm.get(i) {

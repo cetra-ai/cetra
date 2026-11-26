@@ -3622,11 +3622,32 @@ fn encode_scalar_or_nested_col_into(
         }
         null_count_total = null_count_total.saturating_add(u32::from(enc.null_count));
 
-        let entry = enc.write_framed_entry(
+        let min_savings_pct =
+            if matches!(enc.encoding, Encoding::ForBitpack | Encoding::BitpackBool)
+                || (enc.encoding == Encoding::Plain
+                    && matches!(
+                        dt,
+                        DataType::Bool
+                            | DataType::I64
+                            | DataType::F64
+                            | DataType::TimestampNs { .. }
+                            | DataType::Date
+                            | DataType::Decimal128 { .. }
+                            | DataType::Interval
+                            | DataType::FixedBytes8
+                            | DataType::FixedBytes16
+                    ))
+            {
+                12
+            } else {
+                0
+            };
+        let entry = enc.write_framed_entry_with_min_savings(
             mb_first_row,
             mb_len as u16,
             base_offset,
             zstd_level,
+            min_savings_pct,
             out_buf,
         )?;
         out_blocks.push(entry);
