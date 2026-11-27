@@ -43,7 +43,7 @@ thiserror.workspace = true
 [dev-dependencies]
 arrow = { workspace = true, features = ["prettyprint"] }
 flate2.workspace = true
-parquet.workspace = true
+parquet = { workspace = true, features = ["arrow", "zstd", "lz4", "snap", "flate2-zlib-rs"] }
 proptest.workspace = true
 rand.workspace = true
 serde_json.workspace = true
