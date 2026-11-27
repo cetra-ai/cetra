@@ -11,8 +11,8 @@ use sqlparser::ast::{
     Join, JoinConstraint, JoinOperator, JsonPathElem, LimitClause, ListAggOnOverflow,
     NamedWindowExpr, ObjectName, ObjectNamePart, OrderBy, OrderByExpr, OrderByKind, Query, Select,
     SelectItem, SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Spanned,
-    Statement, Subscript, TableFactor, TopQuantity, WildcardAdditionalOptions, WindowFrame,
-    WindowFrameBound, WindowFrameUnits, WindowSpec, WindowType,
+    Statement, Subscript, TableAlias, TableFactor, TopQuantity, WildcardAdditionalOptions,
+    WindowFrame, WindowFrameBound, WindowFrameUnits, WindowSpec, WindowType,
 };
 use sqlparser::tokenizer::{Span, Token};
 
@@ -46,6 +46,22 @@ pub fn parse_and_validate_sql(
             "pipe syntax (`|>`) is not allowed",
             Some(position_of(pipe.span.start.line, pipe.span.start.column)),
         ));
+    }
+    for token in &tokens {
+        if let Token::Word(w) = &token.token {
+            if w.quote_style.is_some() && w.value.is_empty() {
+                return Err(InvalidQuery::new(
+                    "empty identifier is not allowed",
+                    Some(position_of(token.span.start.line, token.span.start.column)),
+                ));
+            }
+            if w.value.contains('\0') {
+                return Err(InvalidQuery::new(
+                    "identifier must not contain NUL byte",
+                    Some(position_of(token.span.start.line, token.span.start.column)),
+                ));
+            }
+        }
     }
 
     let mut parsed = parser(tokens);
@@ -234,12 +250,17 @@ impl<'a> Walk<'a> {
                 WorkItem::SetExpr(body) => self.visit_set_expr(body, &mut stack)?,
                 WorkItem::Select(select) => self.visit_select(select, &mut stack)?,
                 WorkItem::TableFactor(factor) => self.visit_table_factor(factor, &mut stack)?,
-                WorkItem::Join(join) => push_join_children(join, &mut stack),
+                WorkItem::Join(join) => self.visit_join(join, &mut stack)?,
                 WorkItem::Expr(expr) => self.visit_expr(expr, &mut stack)?,
                 WorkItem::OrderBy(ob) => push_order_by_children(ob, &mut stack),
                 WorkItem::OrderByExpr(obe) => push_order_by_expr_children(obe, &mut stack),
                 WorkItem::LimitClause(lc) => push_limit_clause_children(lc, &mut stack),
-                WorkItem::WindowSpec(ws) => push_window_spec_children(ws, &mut stack),
+                WorkItem::WindowSpec(ws) => {
+                    if let Some(wn) = &ws.window_name {
+                        validate_ident(wn)?;
+                    }
+                    push_window_spec_children(ws, &mut stack);
+                }
             }
         }
         Ok(())
@@ -250,11 +271,19 @@ impl<'a> Walk<'a> {
         query: &'a Query,
         stack: &mut Vec<WorkItem<'a>>,
     ) -> Result<(), InvalidQuery> {
-        if query.with.as_ref().is_some_and(|with| with.recursive) {
-            return Err(InvalidQuery::new(
-                "recursive queries are not allowed",
-                at(query.span()),
-            ));
+        if let Some(with) = &query.with {
+            if with.recursive {
+                return Err(InvalidQuery::new(
+                    "recursive queries are not allowed",
+                    at(query.span()),
+                ));
+            }
+            for cte in &with.cte_tables {
+                validate_ident(&cte.alias.name)?;
+                for col in &cte.alias.columns {
+                    validate_ident(&col.name)?;
+                }
+            }
         }
         if !query.pipe_operators.is_empty() {
             return Err(InvalidQuery::new(
@@ -366,14 +395,75 @@ impl<'a> Walk<'a> {
                 }
             }
         }
+        for item in &select.projection {
+            match item {
+                SelectItem::ExprWithAlias { alias, .. } => validate_ident(alias)?,
+                SelectItem::ExprWithAliases { aliases, .. } => {
+                    for alias in aliases {
+                        validate_ident(alias)?;
+                    }
+                }
+                SelectItem::QualifiedWildcard(
+                    SelectItemQualifiedWildcardKind::ObjectName(obj),
+                    _,
+                ) => validate_object_name_idents(obj)?,
+                SelectItem::UnnamedExpr(_)
+                | SelectItem::QualifiedWildcard(SelectItemQualifiedWildcardKind::Expr(_), _)
+                | SelectItem::Wildcard(_) => {}
+            }
+        }
         for named in &select.named_window {
-            if let NamedWindowExpr::WindowSpec(spec) = &named.1
-                && let Some(frame) = &spec.window_frame
-            {
-                validate_window_frame(frame, named.0.span)?;
+            validate_ident(&named.0)?;
+            match &named.1 {
+                NamedWindowExpr::NamedWindow(ref_ident) => validate_ident(ref_ident)?,
+                NamedWindowExpr::WindowSpec(spec) => {
+                    if let Some(wn) = &spec.window_name {
+                        validate_ident(wn)?;
+                    }
+                    if let Some(frame) = &spec.window_frame {
+                        validate_window_frame(frame, named.0.span)?;
+                    }
+                }
             }
         }
         push_select_children(select, stack);
+        Ok(())
+    }
+
+    fn visit_join(
+        &mut self,
+        join: &'a Join,
+        stack: &mut Vec<WorkItem<'a>>,
+    ) -> Result<(), InvalidQuery> {
+        let constraint = match &join.join_operator {
+            JoinOperator::Join(c)
+            | JoinOperator::Inner(c)
+            | JoinOperator::Left(c)
+            | JoinOperator::LeftOuter(c)
+            | JoinOperator::Right(c)
+            | JoinOperator::RightOuter(c)
+            | JoinOperator::FullOuter(c)
+            | JoinOperator::CrossJoin(c)
+            | JoinOperator::Semi(c)
+            | JoinOperator::LeftSemi(c)
+            | JoinOperator::RightSemi(c)
+            | JoinOperator::Anti(c)
+            | JoinOperator::LeftAnti(c)
+            | JoinOperator::RightAnti(c)
+            | JoinOperator::StraightJoin(c)
+            | JoinOperator::AsOf { constraint: c, .. } => Some(c),
+            JoinOperator::CrossApply
+            | JoinOperator::OuterApply
+            | JoinOperator::ArrayJoin
+            | JoinOperator::LeftArrayJoin
+            | JoinOperator::InnerArrayJoin => None,
+        };
+        if let Some(JoinConstraint::Using(cols)) = constraint {
+            for obj in cols {
+                validate_object_name_idents(obj)?;
+            }
+        }
+        push_join_children(join, stack);
         Ok(())
     }
 
@@ -389,7 +479,7 @@ impl<'a> Walk<'a> {
             TableFactor::Derived {
                 lateral,
                 subquery: _,
-                alias: _,
+                alias,
                 sample,
             } => {
                 if *lateral {
@@ -404,16 +494,18 @@ impl<'a> Walk<'a> {
                         at(factor.span()),
                     ));
                 }
+                validate_table_alias(alias.as_ref())?;
                 push_table_factor_children(factor, stack);
                 Ok(())
             }
-            TableFactor::NestedJoin { .. } | TableFactor::UNNEST { .. } => {
+            TableFactor::NestedJoin { alias, .. } | TableFactor::UNNEST { alias, .. } => {
+                validate_table_alias(alias.as_ref())?;
                 push_table_factor_children(factor, stack);
                 Ok(())
             }
             TableFactor::Table {
                 name,
-                alias: _,
+                alias,
                 args,
                 with_hints,
                 version,
@@ -471,6 +563,7 @@ impl<'a> Walk<'a> {
                         at(factor.span()),
                     ));
                 }
+                validate_table_alias(alias.as_ref())?;
                 self.relation(name)
             }
             TableFactor::TableFunction { .. } => Err(InvalidQuery::new(
@@ -526,30 +619,48 @@ impl<'a> Walk<'a> {
                 at(expr.span()),
             ));
         }
-        if let Expr::Function(function) = expr {
-            let Some(name) = bare_name(&function.name) else {
-                return Err(InvalidQuery::new(
-                    "qualified function names are not supported",
-                    at(expr.span()),
-                ));
-            };
-            if DENIED_FUNCTIONS.contains(&name.as_str()) {
-                return Err(InvalidQuery::new(
-                    format!("function `{name}` is not available in the SQL console"),
-                    at(expr.span()),
-                ));
+        match expr {
+            Expr::Identifier(ident) => validate_ident(ident)?,
+            Expr::CompoundIdentifier(parts) => {
+                for ident in parts {
+                    validate_ident(ident)?;
+                }
             }
-            if matches!(name.as_str(), "score" | "score_label" | "has_score") {
-                return Err(InvalidQuery::new(
-                    "score functions are only available in filters; join the scores view instead",
-                    at(expr.span()),
-                ));
+            Expr::QualifiedWildcard(obj, _) => validate_object_name_idents(obj)?,
+            Expr::Function(function) => {
+                validate_object_name_idents(&function.name)?;
+                let Some(name) = bare_name(&function.name) else {
+                    return Err(InvalidQuery::new(
+                        "qualified function names are not supported",
+                        at(expr.span()),
+                    ));
+                };
+                if DENIED_FUNCTIONS.contains(&name.as_str()) {
+                    return Err(InvalidQuery::new(
+                        format!("function `{name}` is not available in the SQL console"),
+                        at(expr.span()),
+                    ));
+                }
+                if matches!(name.as_str(), "score" | "score_label" | "has_score") {
+                    return Err(InvalidQuery::new(
+                        "score functions are only available in filters; join the scores view instead",
+                        at(expr.span()),
+                    ));
+                }
+                match &function.over {
+                    Some(WindowType::NamedWindow(ident)) => validate_ident(ident)?,
+                    Some(WindowType::WindowSpec(spec)) => {
+                        if let Some(wn) = &spec.window_name {
+                            validate_ident(wn)?;
+                        }
+                        if let Some(frame) = &spec.window_frame {
+                            validate_window_frame(frame, expr.span())?;
+                        }
+                    }
+                    None => {}
+                }
             }
-            if let Some(WindowType::WindowSpec(spec)) = &function.over
-                && let Some(frame) = &spec.window_frame
-            {
-                validate_window_frame(frame, expr.span())?;
-            }
+            _ => {}
         }
         push_expr_children(expr, stack);
         Ok(())
@@ -1209,6 +1320,7 @@ impl Walk<'_> {
                 at(name.span()),
             ));
         };
+        validate_ident(ident)?;
         let known = if ident.quote_style.is_some() {
             self.registered.contains(&ident.value) || self.ctes.contains(ident)
         } else {
@@ -1237,6 +1349,41 @@ impl Walk<'_> {
             .find(&needle)
             .map(|index| position_at(self.text, index))
     }
+}
+
+fn validate_ident(ident: &Ident) -> Result<(), InvalidQuery> {
+    if ident.value.is_empty() {
+        return Err(InvalidQuery::new(
+            "empty identifier is not allowed",
+            at(ident.span),
+        ));
+    }
+    if ident.value.contains('\0') {
+        return Err(InvalidQuery::new(
+            "identifier must not contain NUL byte",
+            at(ident.span),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_table_alias(alias: Option<&TableAlias>) -> Result<(), InvalidQuery> {
+    if let Some(ta) = alias {
+        validate_ident(&ta.name)?;
+        for col in &ta.columns {
+            validate_ident(&col.name)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_object_name_idents(name: &ObjectName) -> Result<(), InvalidQuery> {
+    for part in &name.0 {
+        if let ObjectNamePart::Identifier(ident) = part {
+            validate_ident(ident)?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_window_frame(frame: &WindowFrame, span: Span) -> Result<(), InvalidQuery> {
@@ -1566,5 +1713,73 @@ mod tests {
             })
             .unwrap();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn rejects_empty_and_nul_identifiers_in_parser_and_ast_validator() {
+        let reg = registered();
+        let empty_cases = [
+            r#"SELECT 1 AS """#,
+            r#"WITH "" AS (SELECT 1 AS x) SELECT * FROM spans"#,
+            r#"WITH c("") AS (SELECT 1 AS x) SELECT * FROM c"#,
+            r#"SELECT * FROM spans AS """#,
+            r#"SELECT * FROM (SELECT 1 AS x) AS t("")"#,
+            r#"SELECT * FROM spans a JOIN traces b USING ("")"#,
+            r#"SELECT row_number() OVER "" FROM spans WINDOW "" AS (ORDER BY start_time)"#,
+            r#"SELECT "" FROM spans"#,
+            r#"SELECT spans."" FROM spans"#,
+            r#"SELECT ""(name) FROM spans"#,
+        ];
+        for sql in empty_cases {
+            let err = parse_and_validate_sql(sql, &reg).expect_err(sql);
+            assert!(
+                err.message.contains("empty identifier"),
+                "expected empty identifier error for `{sql}`, got: {}",
+                err.message
+            );
+        }
+
+        let nul_cases = [
+            "SELECT 1 AS \"a\0b\"",
+            "WITH \"a\0b\" AS (SELECT 1 AS x) SELECT * FROM spans",
+            "WITH c(\"a\0b\") AS (SELECT 1 AS x) SELECT * FROM c",
+            "SELECT * FROM spans AS \"a\0b\"",
+            "SELECT * FROM (SELECT 1 AS x) AS t(\"a\0b\")",
+            "SELECT * FROM spans a JOIN traces b USING (\"a\0b\")",
+            "SELECT row_number() OVER \"a\0b\" FROM spans WINDOW \"a\0b\" AS (ORDER BY start_time)",
+            "SELECT \"a\0b\" FROM spans",
+            "SELECT spans.\"a\0b\" FROM spans",
+            "SELECT \"a\0b\"(name) FROM spans",
+        ];
+        for sql in nul_cases {
+            let err = parse_and_validate_sql(sql, &reg).expect_err(sql);
+            assert!(
+                err.message.contains("NUL byte"),
+                "expected NUL byte error for `{sql}`, got: {}",
+                err.message
+            );
+        }
+
+        // Direct `validate_statement` path (bypassing token pre-check) also rejects empty & NUL idents.
+        let mut parsed =
+            parser(tokenize("SELECT 1 AS a FROM spans", &SQL_LIMITS, TextKind::Sql).unwrap());
+        let mut stmt = parsed.parse_statement().unwrap();
+        if let Statement::Query(ref mut q) = stmt
+            && let SetExpr::Select(ref mut sel) = *q.body
+            && let Some(SelectItem::ExprWithAlias { alias, .. }) = sel.projection.first_mut()
+        {
+            *alias = Ident::with_quote('"', String::new());
+        }
+        let err = validate_statement(&stmt, &reg, "", None).unwrap_err();
+        assert_eq!(err.message, "empty identifier is not allowed");
+
+        if let Statement::Query(ref mut q) = stmt
+            && let SetExpr::Select(ref mut sel) = *q.body
+            && let Some(SelectItem::ExprWithAlias { alias, .. }) = sel.projection.first_mut()
+        {
+            *alias = Ident::with_quote('"', "\0__cetra_agg_0".to_owned());
+        }
+        let err = validate_statement(&stmt, &reg, "", None).unwrap_err();
+        assert_eq!(err.message, "identifier must not contain NUL byte");
     }
 }

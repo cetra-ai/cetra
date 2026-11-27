@@ -60,219 +60,223 @@ pub(super) fn fmt_indent(depth: usize, out: &mut String) {
 }
 
 fn fmt_node(plan: &LogicalPlan, depth: usize, out: &mut String) {
-    if !out.is_empty() {
-        out.push('\n');
-    }
-    fmt_indent(depth, out);
+    let mut stack = vec![(plan, depth)];
+    while let Some((cur, d)) = stack.pop() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        fmt_indent(d, out);
 
-    match plan {
-        LogicalPlan::Scan {
-            table,
-            projection,
-            filters,
-            time_range,
-            id_lookups,
-            substrings,
-            map_projections,
-            limit,
-            schema,
-            ..
-        } => {
-            let proj_names: Vec<&str> = schema.fields().iter().map(|f| f.name.as_str()).collect();
-            let _ = write!(out, "Scan: {table} projection=[{}]", proj_names.join(", "));
-            if let Some(proj) = projection {
-                let _ = write!(out, " (cols={})", proj.len());
+        match cur {
+            LogicalPlan::Scan {
+                table,
+                projection,
+                filters,
+                time_range,
+                id_lookups,
+                substrings,
+                map_projections,
+                limit,
+                schema,
+                ..
+            } => {
+                let proj_names: Vec<&str> =
+                    schema.fields().iter().map(|f| f.name.as_str()).collect();
+                let _ = write!(out, "Scan: {table} projection=[{}]", proj_names.join(", "));
+                if let Some(proj) = projection {
+                    let _ = write!(out, " (cols={})", proj.len());
+                }
+                if !filters.is_empty() {
+                    let rendered: Vec<String> = filters.iter().map(Expr::fmt_plan).collect();
+                    let _ = write!(out, " filters=[{}]", rendered.join(", "));
+                }
+                if has_time_range(*time_range) {
+                    let _ = write!(
+                        out,
+                        " time_range=(min={:?}, max={:?}, around={:?})",
+                        time_range.min_ns, time_range.max_ns, time_range.around_ns
+                    );
+                }
+                if !id_lookups.is_empty() {
+                    let _ = write!(out, " id_lookups={id_lookups:?}");
+                }
+                if !substrings.is_empty() {
+                    let _ = write!(out, " substrings={substrings:?}");
+                }
+                if !map_projections.is_empty() {
+                    let _ = write!(out, " map_projections={}", map_projections.len());
+                }
+                if let Some(lim) = limit {
+                    let _ = write!(out, " limit={lim}");
+                }
             }
-            if !filters.is_empty() {
-                let rendered: Vec<String> = filters.iter().map(Expr::fmt_plan).collect();
-                let _ = write!(out, " filters=[{}]", rendered.join(", "));
+            LogicalPlan::Values { schema, rows } => {
+                let _ = write!(out, "Values: rows={}, cols={}", rows.len(), schema.len());
             }
-            if has_time_range(*time_range) {
+            LogicalPlan::EmptyRow { .. } => {
+                out.push_str("EmptyRow");
+            }
+            LogicalPlan::Filter { input, predicate } => {
+                let _ = write!(out, "Filter: {}", predicate.fmt_plan());
+                stack.push((input, d + 1));
+            }
+            LogicalPlan::Project {
+                input,
+                exprs,
+                schema,
+            } => {
+                let items: Vec<String> = exprs
+                    .iter()
+                    .zip(schema.fields().iter())
+                    .map(|(expr, field)| {
+                        let rendered = expr.fmt_plan();
+                        if rendered == field.name {
+                            rendered
+                        } else {
+                            format!("{rendered} AS {}", field.name)
+                        }
+                    })
+                    .collect();
+                let _ = write!(out, "Project: [{}]", items.join(", "));
+                stack.push((input, d + 1));
+            }
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggs,
+                ..
+            } => {
+                let groups: Vec<String> = group_by
+                    .iter()
+                    .map(|(name, expr)| {
+                        let rendered = expr.fmt_plan();
+                        if rendered == *name {
+                            rendered
+                        } else {
+                            format!("{rendered} AS {name}")
+                        }
+                    })
+                    .collect();
+                let agg_strs: Vec<String> = aggs.iter().map(fmt_agg).collect();
                 let _ = write!(
                     out,
-                    " time_range=(min={:?}, max={:?}, around={:?})",
-                    time_range.min_ns, time_range.max_ns, time_range.around_ns
+                    "Aggregate: group_by=[{}], aggs=[{}]",
+                    groups.join(", "),
+                    agg_strs.join(", ")
                 );
+                stack.push((input, d + 1));
             }
-            if !id_lookups.is_empty() {
-                let _ = write!(out, " id_lookups={id_lookups:?}");
+            LogicalPlan::Window {
+                input,
+                partition_by,
+                order_by,
+                specs,
+                ..
+            } => {
+                let parts: Vec<String> = partition_by.iter().map(Expr::fmt_plan).collect();
+                let ords: Vec<String> = order_by.iter().map(fmt_sort_key).collect();
+                let spec_strs: Vec<String> = specs.iter().map(fmt_window_spec).collect();
+                let _ = write!(
+                    out,
+                    "Window: partition_by=[{}], order_by=[{}], specs=[{}]",
+                    parts.join(", "),
+                    ords.join(", "),
+                    spec_strs.join(", ")
+                );
+                stack.push((input, d + 1));
             }
-            if !substrings.is_empty() {
-                let _ = write!(out, " substrings={substrings:?}");
+            LogicalPlan::Sort { input, keys } => {
+                let key_strs: Vec<String> = keys.iter().map(fmt_sort_key).collect();
+                let _ = write!(out, "Sort: [{}]", key_strs.join(", "));
+                stack.push((input, d + 1));
             }
-            if !map_projections.is_empty() {
-                let _ = write!(out, " map_projections={}", map_projections.len());
-            }
-            if let Some(lim) = limit {
-                let _ = write!(out, " limit={lim}");
-            }
-        }
-        LogicalPlan::Values { schema, rows } => {
-            let _ = write!(out, "Values: rows={}, cols={}", rows.len(), schema.len());
-        }
-        LogicalPlan::EmptyRow { .. } => {
-            out.push_str("EmptyRow");
-        }
-        LogicalPlan::Filter { input, predicate } => {
-            let _ = write!(out, "Filter: {}", predicate.fmt_plan());
-            fmt_node(input, depth + 1, out);
-        }
-        LogicalPlan::Project {
-            input,
-            exprs,
-            schema,
-        } => {
-            let items: Vec<String> = exprs
-                .iter()
-                .zip(schema.fields().iter())
-                .map(|(expr, field)| {
-                    let rendered = expr.fmt_plan();
-                    if rendered == field.name {
-                        rendered
-                    } else {
-                        format!("{rendered} AS {}", field.name)
+            LogicalPlan::Limit { input, skip, fetch } => {
+                match fetch {
+                    Some(n) => {
+                        let _ = write!(out, "Limit: skip={skip}, fetch={n}");
                     }
-                })
-                .collect();
-            let _ = write!(out, "Project: [{}]", items.join(", "));
-            fmt_node(input, depth + 1, out);
-        }
-        LogicalPlan::Aggregate {
-            input,
-            group_by,
-            aggs,
-            ..
-        } => {
-            let groups: Vec<String> = group_by
-                .iter()
-                .map(|(name, expr)| {
-                    let rendered = expr.fmt_plan();
-                    if rendered == *name {
-                        rendered
-                    } else {
-                        format!("{rendered} AS {name}")
+                    None => {
+                        let _ = write!(out, "Limit: skip={skip}, fetch=none");
                     }
-                })
-                .collect();
-            let agg_strs: Vec<String> = aggs.iter().map(fmt_agg).collect();
-            let _ = write!(
-                out,
-                "Aggregate: group_by=[{}], aggs=[{}]",
-                groups.join(", "),
-                agg_strs.join(", ")
-            );
-            fmt_node(input, depth + 1, out);
-        }
-        LogicalPlan::Window {
-            input,
-            partition_by,
-            order_by,
-            specs,
-            ..
-        } => {
-            let parts: Vec<String> = partition_by.iter().map(Expr::fmt_plan).collect();
-            let ords: Vec<String> = order_by.iter().map(fmt_sort_key).collect();
-            let spec_strs: Vec<String> = specs.iter().map(fmt_window_spec).collect();
-            let _ = write!(
-                out,
-                "Window: partition_by=[{}], order_by=[{}], specs=[{}]",
-                parts.join(", "),
-                ords.join(", "),
-                spec_strs.join(", ")
-            );
-            fmt_node(input, depth + 1, out);
-        }
-        LogicalPlan::Sort { input, keys } => {
-            let key_strs: Vec<String> = keys.iter().map(fmt_sort_key).collect();
-            let _ = write!(out, "Sort: [{}]", key_strs.join(", "));
-            fmt_node(input, depth + 1, out);
-        }
-        LogicalPlan::Limit { input, skip, fetch } => {
-            match fetch {
-                Some(n) => {
-                    let _ = write!(out, "Limit: skip={skip}, fetch={n}");
                 }
-                None => {
-                    let _ = write!(out, "Limit: skip={skip}, fetch=none");
+                stack.push((input, d + 1));
+            }
+            LogicalPlan::TopK {
+                input,
+                keys,
+                limit,
+                offset,
+            } => {
+                let key_strs: Vec<String> = keys.iter().map(fmt_sort_key).collect();
+                let _ = write!(
+                    out,
+                    "TopK: limit={limit}, offset={offset}, keys=[{}]",
+                    key_strs.join(", ")
+                );
+                stack.push((input, d + 1));
+            }
+            LogicalPlan::Distinct { input } => {
+                out.push_str("Distinct");
+                stack.push((input, d + 1));
+            }
+            LogicalPlan::Join {
+                left,
+                right,
+                kind,
+                left_keys,
+                right_keys,
+                null_equals_null,
+                residual,
+                ..
+            } => {
+                let kind_str = match kind {
+                    LogicalJoinKind::Inner => "Inner",
+                    LogicalJoinKind::Left => "Left",
+                    LogicalJoinKind::Right => "Right",
+                    LogicalJoinKind::Full => "Full",
+                    LogicalJoinKind::Semi => "Semi",
+                    LogicalJoinKind::Anti => "Anti",
+                    LogicalJoinKind::AntiNullAware => "AntiNullAware",
+                    LogicalJoinKind::Cross => "Cross",
+                };
+                let pairs: Vec<String> = left_keys
+                    .iter()
+                    .zip(right_keys.iter())
+                    .map(|(l, r)| format!("{} = {}", l.fmt_plan(), r.fmt_plan()))
+                    .collect();
+                let _ = write!(
+                    out,
+                    "Join ({kind_str}): on=[{}], null_equals_null={null_equals_null}",
+                    pairs.join(", ")
+                );
+                if let Some(res) = residual {
+                    let _ = write!(out, ", filter={}", res.fmt_plan());
+                }
+                stack.push((right, d + 1));
+                stack.push((left, d + 1));
+            }
+            LogicalPlan::Union { inputs, all, .. } => {
+                let _ = write!(out, "Union (all={all})");
+                for branch in inputs.iter().rev() {
+                    stack.push((branch, d + 1));
                 }
             }
-            fmt_node(input, depth + 1, out);
-        }
-        LogicalPlan::TopK {
-            input,
-            keys,
-            limit,
-            offset,
-        } => {
-            let key_strs: Vec<String> = keys.iter().map(fmt_sort_key).collect();
-            let _ = write!(
-                out,
-                "TopK: limit={limit}, offset={offset}, keys=[{}]",
-                key_strs.join(", ")
-            );
-            fmt_node(input, depth + 1, out);
-        }
-        LogicalPlan::Distinct { input } => {
-            out.push_str("Distinct");
-            fmt_node(input, depth + 1, out);
-        }
-        LogicalPlan::Join {
-            left,
-            right,
-            kind,
-            left_keys,
-            right_keys,
-            null_equals_null,
-            residual,
-            ..
-        } => {
-            let kind_str = match kind {
-                LogicalJoinKind::Inner => "Inner",
-                LogicalJoinKind::Left => "Left",
-                LogicalJoinKind::Right => "Right",
-                LogicalJoinKind::Full => "Full",
-                LogicalJoinKind::Semi => "Semi",
-                LogicalJoinKind::Anti => "Anti",
-                LogicalJoinKind::AntiNullAware => "AntiNullAware",
-                LogicalJoinKind::Cross => "Cross",
-            };
-            let pairs: Vec<String> = left_keys
-                .iter()
-                .zip(right_keys.iter())
-                .map(|(l, r)| format!("{} = {}", l.fmt_plan(), r.fmt_plan()))
-                .collect();
-            let _ = write!(
-                out,
-                "Join ({kind_str}): on=[{}], null_equals_null={null_equals_null}",
-                pairs.join(", ")
-            );
-            if let Some(res) = residual {
-                let _ = write!(out, ", filter={}", res.fmt_plan());
+            LogicalPlan::Unnest {
+                input,
+                columns,
+                preserve_nulls,
+                ..
+            } => {
+                let _ = write!(
+                    out,
+                    "Unnest: columns={columns:?}, preserve_nulls={preserve_nulls}"
+                );
+                stack.push((input, d + 1));
             }
-            fmt_node(left, depth + 1, out);
-            fmt_node(right, depth + 1, out);
-        }
-        LogicalPlan::Union { inputs, all, .. } => {
-            let _ = write!(out, "Union (all={all})");
-            for branch in inputs {
-                fmt_node(branch, depth + 1, out);
+            LogicalPlan::Explain { inner, .. } => {
+                out.push_str("Explain");
+                stack.push((inner, d + 1));
             }
-        }
-        LogicalPlan::Unnest {
-            input,
-            columns,
-            preserve_nulls,
-            ..
-        } => {
-            let _ = write!(
-                out,
-                "Unnest: columns={columns:?}, preserve_nulls={preserve_nulls}"
-            );
-            fmt_node(input, depth + 1, out);
-        }
-        LogicalPlan::Explain { inner, .. } => {
-            out.push_str("Explain");
-            fmt_node(inner, depth + 1, out);
         }
     }
 }
@@ -535,5 +539,38 @@ mod tests {
         assert!(out.contains("Explain"));
         assert!(out.contains("TopK: limit=5, offset=2"));
         assert!(out.contains("Values: rows=1, cols=1"));
+    }
+
+    #[test]
+    fn format_logical_plan_preserves_join_and_union_child_order_iteratively() {
+        let s = Schema::try_new_arc(vec![Field::new("n", DataType::I64, false)]).unwrap();
+        let make_val = |rows_n: usize| LogicalPlan::Values {
+            schema: Arc::clone(&s),
+            rows: vec![vec![Expr::Literal(ScalarValue::I64(1))]; rows_n],
+        };
+        let join = LogicalPlan::Join {
+            left: Box::new(make_val(1)),
+            right: Box::new(make_val(2)),
+            kind: LogicalJoinKind::Inner,
+            left_keys: Vec::new(),
+            right_keys: Vec::new(),
+            null_equals_null: false,
+            residual: None,
+            schema: Arc::clone(&s),
+        };
+        let union = LogicalPlan::Union {
+            inputs: vec![join, make_val(3), make_val(4)],
+            all: true,
+            schema: s,
+        };
+        let rendered = format_logical_plan(&union);
+        let expected = "\
+Union (all=true)
+  Join (Inner): on=[], null_equals_null=false
+    Values: rows=1, cols=1
+    Values: rows=2, cols=1
+  Values: rows=3, cols=1
+  Values: rows=4, cols=1";
+        assert_eq!(rendered, expected);
     }
 }

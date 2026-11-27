@@ -263,25 +263,94 @@ pub enum LogicalPlan {
 }
 
 impl LogicalPlan {
-    /// Output [`Schema`] of this plan node.
+    /// Output [`Schema`] of this plan node (iterative).
     pub fn schema(&self) -> &Arc<Schema> {
-        match self {
-            Self::Scan { schema, .. }
-            | Self::Values { schema, .. }
-            | Self::EmptyRow { schema }
-            | Self::Project { schema, .. }
-            | Self::Aggregate { schema, .. }
-            | Self::Window { schema, .. }
-            | Self::Join { schema, .. }
-            | Self::Union { schema, .. }
-            | Self::Unnest { schema, .. }
-            | Self::Explain { schema, .. } => schema,
-            Self::Filter { input, .. }
-            | Self::Sort { input, .. }
-            | Self::Limit { input, .. }
-            | Self::TopK { input, .. }
-            | Self::Distinct { input } => input.schema(),
+        let mut cur = self;
+        loop {
+            match cur {
+                Self::Scan { schema, .. }
+                | Self::Values { schema, .. }
+                | Self::EmptyRow { schema }
+                | Self::Project { schema, .. }
+                | Self::Aggregate { schema, .. }
+                | Self::Window { schema, .. }
+                | Self::Join { schema, .. }
+                | Self::Union { schema, .. }
+                | Self::Unnest { schema, .. }
+                | Self::Explain { schema, .. } => return schema,
+                Self::Filter { input, .. }
+                | Self::Sort { input, .. }
+                | Self::Limit { input, .. }
+                | Self::TopK { input, .. }
+                | Self::Distinct { input } => cur = input,
+            }
         }
+    }
+
+    /// Total number of nodes in this plan tree (iterative).
+    pub(crate) fn node_count(&self) -> usize {
+        let mut count = 0usize;
+        let mut stack = vec![self];
+        while let Some(cur) = stack.pop() {
+            count += 1;
+            match cur {
+                Self::Scan { .. } | Self::Values { .. } | Self::EmptyRow { .. } => {}
+                Self::Filter { input, .. }
+                | Self::Project { input, .. }
+                | Self::Aggregate { input, .. }
+                | Self::Window { input, .. }
+                | Self::Sort { input, .. }
+                | Self::Limit { input, .. }
+                | Self::TopK { input, .. }
+                | Self::Distinct { input }
+                | Self::Unnest { input, .. } => stack.push(input),
+                Self::Explain { inner, .. } => stack.push(inner),
+                Self::Join { left, right, .. } => {
+                    stack.push(left);
+                    stack.push(right);
+                }
+                Self::Union { inputs, .. } => {
+                    for inp in inputs {
+                        stack.push(inp);
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// Maximum root-to-leaf node depth of this plan tree (leaf = 1, iterative).
+    pub(crate) fn depth(&self) -> usize {
+        let mut max_depth = 0usize;
+        let mut stack = vec![(self, 1usize)];
+        while let Some((cur, d)) = stack.pop() {
+            if d > max_depth {
+                max_depth = d;
+            }
+            match cur {
+                Self::Scan { .. } | Self::Values { .. } | Self::EmptyRow { .. } => {}
+                Self::Filter { input, .. }
+                | Self::Project { input, .. }
+                | Self::Aggregate { input, .. }
+                | Self::Window { input, .. }
+                | Self::Sort { input, .. }
+                | Self::Limit { input, .. }
+                | Self::TopK { input, .. }
+                | Self::Distinct { input }
+                | Self::Unnest { input, .. } => stack.push((input, d + 1)),
+                Self::Explain { inner, .. } => stack.push((inner, d + 1)),
+                Self::Join { left, right, .. } => {
+                    stack.push((left, d + 1));
+                    stack.push((right, d + 1));
+                }
+                Self::Union { inputs, .. } => {
+                    for inp in inputs {
+                        stack.push((inp, d + 1));
+                    }
+                }
+            }
+        }
+        max_depth
     }
 }
 
@@ -479,5 +548,44 @@ mod tests {
         let dbg = format!("{plan:?}");
         assert!(!dbg.contains("secret-user-payload"), "leaked in {dbg}");
         assert!(dbg.contains("rows_len: 1"));
+    }
+
+    #[test]
+    fn iterative_schema_node_count_and_depth_handle_deep_plans() {
+        let leaf_schema = Schema::try_new_arc(vec![Field::new("x", DataType::I64, false)]).unwrap();
+        let mut plan = LogicalPlan::Values {
+            schema: Arc::clone(&leaf_schema),
+            rows: vec![vec![Expr::Literal(ScalarValue::I64(1))]],
+        };
+        assert_eq!(plan.node_count(), 1);
+        assert_eq!(plan.depth(), 1);
+        assert_eq!(plan.schema().as_ref(), leaf_schema.as_ref());
+
+        for _ in 0..100 {
+            plan = LogicalPlan::Filter {
+                input: Box::new(plan),
+                predicate: Expr::Literal(ScalarValue::Bool(true)),
+            };
+        }
+        assert_eq!(plan.node_count(), 101);
+        assert_eq!(plan.depth(), 101);
+        assert_eq!(plan.schema().as_ref(), leaf_schema.as_ref());
+
+        let right = LogicalPlan::Values {
+            schema: Arc::clone(&leaf_schema),
+            rows: vec![vec![Expr::Literal(ScalarValue::I64(2))]],
+        };
+        let joined = LogicalPlan::Join {
+            left: Box::new(plan),
+            right: Box::new(right),
+            kind: LogicalJoinKind::Semi,
+            left_keys: Vec::new(),
+            right_keys: Vec::new(),
+            null_equals_null: false,
+            residual: None,
+            schema: Arc::clone(&leaf_schema),
+        };
+        assert_eq!(joined.node_count(), 103);
+        assert_eq!(joined.depth(), 102);
     }
 }

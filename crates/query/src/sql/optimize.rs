@@ -1154,7 +1154,10 @@ fn push_filter(conjuncts: Vec<Expr>, plan: LogicalPlan) -> Result<LogicalPlan, Q
                     if !is_infallible(proj) {
                         return false;
                     }
-                    if cnt > 1 && !matches!(proj, Expr::Column { .. } | Expr::Literal(_)) {
+                    if cnt > 1
+                        && !matches!(proj, Expr::Column { .. } | Expr::Literal(_))
+                        && !is_hex_encoded_column(proj)
+                    {
                         return false;
                     }
                     true
@@ -2059,6 +2062,19 @@ fn rewrite_hex_expr(expr: Expr) -> Expr {
     })
 }
 
+fn is_hex_encoded_column(expr: &Expr) -> bool {
+    matches!(
+        encoded_hex_id(expr),
+        Some((
+            Expr::Column {
+                data_type: DataType::FixedBytes8 | DataType::FixedBytes16,
+                ..
+            },
+            _,
+        ))
+    )
+}
+
 fn encoded_hex_id(expr: &Expr) -> Option<(Expr, usize)> {
     let Expr::Call {
         func: ScalarFn::Encode,
@@ -2649,6 +2665,121 @@ fn expr_timestamp_ns(expr: &Expr) -> Option<i64> {
     }
 }
 
+fn extract_single_id_lookup(node: &Expr, full_schema: &Schema) -> Option<IdLookupHint> {
+    match node {
+        Expr::Binary {
+            left,
+            op: BinaryOp::Eq,
+            right,
+            ..
+        } => {
+            let (col_idx, lit) = match (left.as_ref(), right.as_ref()) {
+                (Expr::Column { index, .. }, Expr::Literal(sv)) => (*index, sv),
+                (Expr::Literal(sv), Expr::Column { index, .. }) => (*index, sv),
+                _ => return None,
+            };
+            let field = full_schema.fields().get(col_idx)?;
+            match lit {
+                ScalarValue::FixedBytes16(b) if field.data_type == DataType::FixedBytes16 => {
+                    Some(IdLookupHint::Fixed16 {
+                        column: field.name.clone(),
+                        values: vec![*b],
+                    })
+                }
+                ScalarValue::FixedBytes8(b) if field.data_type == DataType::FixedBytes8 => {
+                    Some(IdLookupHint::Fixed8 {
+                        column: field.name.clone(),
+                        values: vec![*b],
+                    })
+                }
+                ScalarValue::Utf8(s)
+                    if field.data_type == DataType::Utf8 && is_utf8_id_column(&field.name) =>
+                {
+                    Some(IdLookupHint::Utf8 {
+                        column: field.name.clone(),
+                        values: vec![s.clone()],
+                    })
+                }
+                _ => None,
+            }
+        }
+        Expr::InList {
+            expr: inner,
+            list,
+            negated: false,
+            redacted: false,
+        } => {
+            let Expr::Column { index, .. } = inner.as_ref() else {
+                return None;
+            };
+            let field = full_schema.fields().get(*index)?;
+            match &field.data_type {
+                DataType::FixedBytes16 => {
+                    let mut vals = Vec::new();
+                    for item in list {
+                        let Expr::Literal(sv) = item else {
+                            return None;
+                        };
+                        match sv {
+                            ScalarValue::Null(_) => {}
+                            ScalarValue::FixedBytes16(b) => vals.push(*b),
+                            _ => return None,
+                        }
+                    }
+                    Some(IdLookupHint::Fixed16 {
+                        column: field.name.clone(),
+                        values: vals,
+                    })
+                }
+                DataType::FixedBytes8 => {
+                    let mut vals = Vec::new();
+                    for item in list {
+                        let Expr::Literal(sv) = item else {
+                            return None;
+                        };
+                        match sv {
+                            ScalarValue::Null(_) => {}
+                            ScalarValue::FixedBytes8(b) => vals.push(*b),
+                            _ => return None,
+                        }
+                    }
+                    Some(IdLookupHint::Fixed8 {
+                        column: field.name.clone(),
+                        values: vals,
+                    })
+                }
+                DataType::Utf8 if is_utf8_id_column(&field.name) => {
+                    let mut vals = Vec::new();
+                    for item in list {
+                        let Expr::Literal(sv) = item else {
+                            return None;
+                        };
+                        match sv {
+                            ScalarValue::Null(_) => {}
+                            ScalarValue::Utf8(s) => vals.push(s.clone()),
+                            _ => return None,
+                        }
+                    }
+                    Some(IdLookupHint::Utf8 {
+                        column: field.name.clone(),
+                        values: vals,
+                    })
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn extend_unique<T: PartialEq>(dst: &mut Vec<T>, src: Vec<T>) {
+    for item in src {
+        if !dst.contains(&item) {
+            dst.push(item);
+        }
+    }
+}
+
 fn extract_id_lookups_from_expr(expr: &Expr, full_schema: &Schema, out: &mut Vec<IdLookupHint>) {
     let mut stack = vec![expr];
     while let Some(node) = stack.pop() {
@@ -2664,132 +2795,99 @@ fn extract_id_lookups_from_expr(expr: &Expr, full_schema: &Schema, out: &mut Vec
             }
             Expr::Binary {
                 left,
-                op: BinaryOp::Eq,
+                op: BinaryOp::Or,
                 right,
                 ..
             } => {
-                let (col_idx, lit) = match (left.as_ref(), right.as_ref()) {
-                    (Expr::Column { index, .. }, Expr::Literal(sv)) => (*index, sv),
-                    (Expr::Literal(sv), Expr::Column { index, .. }) => (*index, sv),
-                    _ => continue,
-                };
-                let Some(field) = full_schema.fields().get(col_idx) else {
-                    continue;
-                };
-                let hint = match lit {
-                    ScalarValue::FixedBytes16(b) if field.data_type == DataType::FixedBytes16 => {
-                        IdLookupHint::Fixed16 {
-                            column: field.name.clone(),
-                            values: vec![*b],
+                let mut or_stack = vec![right.as_ref(), left.as_ref()];
+                let mut merged: Option<IdLookupHint> = None;
+                let mut valid = true;
+                while let Some(disjunct) = or_stack.pop() {
+                    if let Expr::Binary {
+                        left: dl,
+                        op: BinaryOp::Or,
+                        right: dr,
+                        ..
+                    } = disjunct
+                    {
+                        or_stack.push(dr);
+                        or_stack.push(dl);
+                        continue;
+                    }
+                    let Some(hint) = extract_single_id_lookup(disjunct, full_schema) else {
+                        valid = false;
+                        break;
+                    };
+                    match (&mut merged, hint) {
+                        (None, IdLookupHint::Fixed16 { column, values }) => {
+                            let mut dedup = Vec::with_capacity(values.len());
+                            extend_unique(&mut dedup, values);
+                            merged = Some(IdLookupHint::Fixed16 {
+                                column,
+                                values: dedup,
+                            });
+                        }
+                        (None, IdLookupHint::Fixed8 { column, values }) => {
+                            let mut dedup = Vec::with_capacity(values.len());
+                            extend_unique(&mut dedup, values);
+                            merged = Some(IdLookupHint::Fixed8 {
+                                column,
+                                values: dedup,
+                            });
+                        }
+                        (None, IdLookupHint::Utf8 { column, values }) => {
+                            let mut dedup = Vec::with_capacity(values.len());
+                            extend_unique(&mut dedup, values);
+                            merged = Some(IdLookupHint::Utf8 {
+                                column,
+                                values: dedup,
+                            });
+                        }
+                        (
+                            Some(IdLookupHint::Fixed16 {
+                                column: c1,
+                                values: v1,
+                            }),
+                            IdLookupHint::Fixed16 {
+                                column: c2,
+                                values: v2,
+                            },
+                        ) if *c1 == c2 => extend_unique(v1, v2),
+                        (
+                            Some(IdLookupHint::Fixed8 {
+                                column: c1,
+                                values: v1,
+                            }),
+                            IdLookupHint::Fixed8 {
+                                column: c2,
+                                values: v2,
+                            },
+                        ) if *c1 == c2 => extend_unique(v1, v2),
+                        (
+                            Some(IdLookupHint::Utf8 {
+                                column: c1,
+                                values: v1,
+                            }),
+                            IdLookupHint::Utf8 {
+                                column: c2,
+                                values: v2,
+                            },
+                        ) if *c1 == c2 => extend_unique(v1, v2),
+                        _ => {
+                            valid = false;
+                            break;
                         }
                     }
-                    ScalarValue::FixedBytes8(b) if field.data_type == DataType::FixedBytes8 => {
-                        IdLookupHint::Fixed8 {
-                            column: field.name.clone(),
-                            values: vec![*b],
-                        }
-                    }
-                    ScalarValue::Utf8(s) if is_utf8_id_column(&field.name) => IdLookupHint::Utf8 {
-                        column: field.name.clone(),
-                        values: vec![s.clone()],
-                    },
-                    _ => continue,
-                };
-                push_unique_id_lookup(out, hint);
+                }
+                if valid && let Some(hint) = merged {
+                    push_unique_id_lookup(out, hint);
+                }
             }
-            Expr::InList {
-                expr: inner,
-                list,
-                negated: false,
-                redacted: false,
-            } => {
-                let Expr::Column { index, .. } = inner.as_ref() else {
-                    continue;
-                };
-                let Some(field) = full_schema.fields().get(*index) else {
-                    continue;
-                };
-                let hint = match &field.data_type {
-                    DataType::FixedBytes16 => {
-                        let mut vals = Vec::new();
-                        let mut valid = true;
-                        for item in list {
-                            let Expr::Literal(sv) = item else {
-                                valid = false;
-                                break;
-                            };
-                            match sv {
-                                ScalarValue::Null(_) => {}
-                                ScalarValue::FixedBytes16(b) => vals.push(*b),
-                                _ => {
-                                    valid = false;
-                                    break;
-                                }
-                            }
-                        }
-                        if !valid {
-                            continue;
-                        }
-                        IdLookupHint::Fixed16 {
-                            column: field.name.clone(),
-                            values: vals,
-                        }
-                    }
-                    DataType::FixedBytes8 => {
-                        let mut vals = Vec::new();
-                        let mut valid = true;
-                        for item in list {
-                            let Expr::Literal(sv) = item else {
-                                valid = false;
-                                break;
-                            };
-                            match sv {
-                                ScalarValue::Null(_) => {}
-                                ScalarValue::FixedBytes8(b) => vals.push(*b),
-                                _ => {
-                                    valid = false;
-                                    break;
-                                }
-                            }
-                        }
-                        if !valid {
-                            continue;
-                        }
-                        IdLookupHint::Fixed8 {
-                            column: field.name.clone(),
-                            values: vals,
-                        }
-                    }
-                    DataType::Utf8 if is_utf8_id_column(&field.name) => {
-                        let mut vals = Vec::new();
-                        let mut valid = true;
-                        for item in list {
-                            let Expr::Literal(sv) = item else {
-                                valid = false;
-                                break;
-                            };
-                            match sv {
-                                ScalarValue::Null(_) => {}
-                                ScalarValue::Utf8(s) => vals.push(s.clone()),
-                                _ => {
-                                    valid = false;
-                                    break;
-                                }
-                            }
-                        }
-                        if !valid {
-                            continue;
-                        }
-                        IdLookupHint::Utf8 {
-                            column: field.name.clone(),
-                            values: vals,
-                        }
-                    }
-                    _ => continue,
-                };
-                push_unique_id_lookup(out, hint);
+            _ => {
+                if let Some(hint) = extract_single_id_lookup(node, full_schema) {
+                    push_unique_id_lookup(out, hint);
+                }
             }
-            _ => {}
         }
     }
 }
@@ -6700,5 +6798,160 @@ mod tests {
             scans[1].get("metadata"),
             Some(&MapProjection::Keys(right_keys))
         );
+    }
+
+    #[test]
+    fn or_hex_id_pushdown_and_id_lookup_hint_merging() {
+        let hex1 = "0102030405060708090a0b0c0d0e0f10";
+        let hex2 = "1112131415161718191a1b1c1d1e1f20";
+        let b1 = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10,
+        ];
+        let b2 = [
+            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+            0x1f, 0x20,
+        ];
+        let span1 = "0102030405060708";
+        let span2 = "1112131415161718";
+        let s1 = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let s2 = [0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18];
+
+        let find_scan_lookups = |plan: &LogicalPlan| -> Vec<IdLookupHint> {
+            let mut stack = vec![plan];
+            while let Some(node) = stack.pop() {
+                match node {
+                    LogicalPlan::Scan { id_lookups, .. } => return id_lookups.clone(),
+                    LogicalPlan::Filter { input, .. }
+                    | LogicalPlan::Project { input, .. }
+                    | LogicalPlan::Aggregate { input, .. }
+                    | LogicalPlan::Window { input, .. }
+                    | LogicalPlan::Sort { input, .. }
+                    | LogicalPlan::Limit { input, .. }
+                    | LogicalPlan::TopK { input, .. }
+                    | LogicalPlan::Distinct { input }
+                    | LogicalPlan::Unnest { input, .. }
+                    | LogicalPlan::Explain { inner: input, .. } => stack.push(input),
+                    LogicalPlan::Join { left, right, .. } => {
+                        stack.push(right);
+                        stack.push(left);
+                    }
+                    LogicalPlan::Union { inputs, .. } => {
+                        for b in inputs {
+                            stack.push(b);
+                        }
+                    }
+                    LogicalPlan::Values { .. } | LogicalPlan::EmptyRow { .. } => {}
+                }
+            }
+            Vec::new()
+        };
+
+        // 1. trace_id OR pushes through view Project and merges into one Fixed16 IdLookupHint.
+        let plan_or = bind_and_opt(&format!(
+            "SELECT name FROM spans WHERE trace_id = '{hex1}' OR trace_id = '{hex2}'"
+        ));
+        assert_eq!(
+            find_scan_lookups(&plan_or),
+            vec![IdLookupHint::Fixed16 {
+                column: "trace_id".to_owned(),
+                values: vec![b1, b2],
+            }]
+        );
+
+        // 2. Deduplicates values across Eq OR InList.
+        let plan_dedup = bind_and_opt(&format!(
+            "SELECT name FROM spans WHERE trace_id = '{hex1}' OR trace_id IN ('{hex1}', '{hex2}')"
+        ));
+        assert_eq!(
+            find_scan_lookups(&plan_dedup),
+            vec![IdLookupHint::Fixed16 {
+                column: "trace_id".to_owned(),
+                values: vec![b1, b2],
+            }]
+        );
+
+        // 3. span_id Fixed8 OR merges into one Fixed8 IdLookupHint.
+        let plan_span = bind_and_opt(&format!(
+            "SELECT name FROM spans WHERE span_id = '{span1}' OR span_id = '{span2}'"
+        ));
+        assert_eq!(
+            find_scan_lookups(&plan_span),
+            vec![IdLookupHint::Fixed8 {
+                column: "span_id".to_owned(),
+                values: vec![s1, s2],
+            }]
+        );
+
+        // 4. Utf8 ID column OR merges into one Utf8 IdLookupHint.
+        let plan_user =
+            bind_and_opt("SELECT name FROM spans WHERE user_id = 'alice' OR user_id = 'bob'");
+        assert_eq!(
+            find_scan_lookups(&plan_user),
+            vec![IdLookupHint::Utf8 {
+                column: "user_id".to_owned(),
+                values: vec!["alice".to_owned(), "bob".to_owned()],
+            }]
+        );
+
+        // 5. Negative cases: mismatched columns, non-ID disjuncts, or negations emit no hint.
+        for sql in [
+            format!("SELECT name FROM spans WHERE trace_id = '{hex1}' OR span_id = '{span1}'"),
+            format!("SELECT name FROM spans WHERE trace_id = '{hex1}' OR name = 'foo'"),
+            format!("SELECT name FROM spans WHERE trace_id = '{hex1}' OR trace_id != '{hex2}'"),
+            format!(
+                "SELECT name FROM spans WHERE trace_id = '{hex1}' OR NOT (trace_id = '{hex2}')"
+            ),
+            format!(
+                "SELECT name FROM spans WHERE trace_id = '{hex1}' OR trace_id NOT IN ('{hex2}')"
+            ),
+            format!("SELECT name FROM spans WHERE trace_id = '{hex1}' OR trace_id = 'not-hex'"),
+        ] {
+            let plan = bind_and_opt(&sql);
+            assert!(
+                find_scan_lookups(&plan).is_empty(),
+                "expected no IdLookupHint for `{sql}`, got {:?}",
+                find_scan_lookups(&plan)
+            );
+        }
+
+        // 6. Redacted InList in OR must never be extracted into IdLookupHint.
+        let raw_spans = raw_spans_schema();
+        let uid_idx = raw_spans.index_of("user_id").unwrap();
+        let uid_col = Expr::Column {
+            index: uid_idx,
+            name: "user_id".to_owned(),
+            data_type: DataType::Utf8,
+        };
+        let redacted_or = Expr::Binary {
+            left: Box::new(Expr::Binary {
+                left: Box::new(uid_col.clone()),
+                op: BinaryOp::Eq,
+                right: Box::new(Expr::Literal(ScalarValue::Utf8("alice".to_owned()))),
+                data_type: DataType::Bool,
+            }),
+            op: BinaryOp::Or,
+            right: Box::new(Expr::InList {
+                expr: Box::new(uid_col),
+                list: vec![Expr::Literal(ScalarValue::Utf8("secret".to_owned()))],
+                negated: false,
+                redacted: true,
+            }),
+            data_type: DataType::Bool,
+        };
+        let mut hints = Vec::new();
+        extract_id_lookups_from_expr(&redacted_or, &raw_spans, &mut hints);
+        assert!(hints.is_empty(), "redacted OR leaked hint: {hints:?}");
+
+        // 7. `is_hex_encoded_column` rejects non-column `encode(expr, 'hex')`.
+        let non_col_encode = Expr::Call {
+            func: ScalarFn::Encode,
+            args: vec![
+                Expr::Literal(ScalarValue::FixedBytes16(b1)),
+                Expr::Literal(ScalarValue::Utf8("hex".to_owned())),
+            ],
+            data_type: DataType::Utf8,
+        };
+        assert!(!is_hex_encoded_column(&non_col_encode));
     }
 }

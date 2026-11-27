@@ -39,6 +39,9 @@ use super::params::{Placeholder, SqlParamValue, coerce_param_value};
 
 const MAX_AST_DEPTH: usize = 64;
 const MAX_PLAN_NODES: usize = 4_096;
+const MAX_PLAN_DEPTH: usize = 128;
+const MAX_WINDOW_GROUPS: usize = 32;
+const MAX_SUBQUERY_JOINS: usize = 32;
 
 /// Parameter binding input for [`bind_statement`]: either declared [`Placeholder`] types
 /// (for schema/`EXPLAIN` checks without runtime values) or concrete [`SqlParamValue`]s.
@@ -69,6 +72,7 @@ pub fn bind_statement(
     params: &BoundParams<'_>,
 ) -> Result<LogicalPlan, QueryError> {
     let plan_nodes = Cell::new(0usize);
+    let subquery_joins = Cell::new(0usize);
     let ctx = BindCtx {
         catalog,
         params,
@@ -76,10 +80,12 @@ pub fn bind_statement(
         outer_scopes: Vec::new(),
         depth: 0,
         plan_nodes: &plan_nodes,
+        subquery_joins: &subquery_joins,
     };
     match stmt {
         Statement::Query(query) => {
             let plan = bind_query(query, &ctx)?;
+            ctx.check_plan_depth(plan.depth(), None)?;
             unique_names(plan.schema())?;
             Ok(plan)
         }
@@ -108,6 +114,8 @@ pub fn bind_statement(
             };
             let inner = bind_query(query, &ctx)?;
             unique_names(inner.schema())?;
+            ctx.record_plan_nodes(1, None)?;
+            ctx.check_plan_depth(inner.depth().saturating_add(1), None)?;
             Ok(LogicalPlan::Explain {
                 inner: Box::new(inner),
                 schema: explain_schema(),
@@ -128,6 +136,7 @@ pub fn bind_statement(
 struct CteDef {
     plan: LogicalPlan,
     node_count: usize,
+    depth: usize,
 }
 
 #[derive(Clone)]
@@ -138,6 +147,7 @@ struct BindCtx<'a> {
     outer_scopes: Vec<&'a Scope>,
     depth: usize,
     plan_nodes: &'a Cell<usize>,
+    subquery_joins: &'a Cell<usize>,
 }
 
 impl<'a> BindCtx<'a> {
@@ -149,6 +159,7 @@ impl<'a> BindCtx<'a> {
             outer_scopes: self.outer_scopes.clone(),
             depth: self.depth,
             plan_nodes: self.plan_nodes,
+            subquery_joins: self.subquery_joins,
         }
     }
 
@@ -160,6 +171,7 @@ impl<'a> BindCtx<'a> {
             outer_scopes: self.outer_scopes.clone(),
             depth,
             plan_nodes: self.plan_nodes,
+            subquery_joins: self.subquery_joins,
         }
     }
 
@@ -174,6 +186,7 @@ impl<'a> BindCtx<'a> {
             outer_scopes,
             depth: self.depth + 1,
             plan_nodes: self.plan_nodes,
+            subquery_joins: self.subquery_joins,
         }
     }
 
@@ -189,6 +202,30 @@ impl<'a> BindCtx<'a> {
         self.plan_nodes.set(next);
         Ok(())
     }
+
+    fn record_subquery_join(&self, pos: Option<Position>) -> Result<(), QueryError> {
+        let next = self.subquery_joins.get().saturating_add(1);
+        if next > MAX_SUBQUERY_JOINS {
+            return Err(InvalidQuery::new(
+                format!("query exceeds maximum of {MAX_SUBQUERY_JOINS} subquery filters"),
+                pos,
+            )
+            .into());
+        }
+        self.subquery_joins.set(next);
+        Ok(())
+    }
+
+    fn check_plan_depth(&self, depth: usize, pos: Option<Position>) -> Result<(), QueryError> {
+        if depth > MAX_PLAN_DEPTH {
+            return Err(InvalidQuery::new(
+                format!("query plan exceeds maximum depth of {MAX_PLAN_DEPTH}"),
+                pos,
+            )
+            .into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -199,6 +236,7 @@ struct ScopeCol {
     nullable: bool,
     index: usize,
     hidden_in_star: bool,
+    internal: bool,
 }
 
 #[derive(Clone, Default)]
@@ -219,6 +257,7 @@ impl Scope {
                 nullable: field.nullable,
                 index,
                 hidden_in_star: false,
+                internal: false,
             })
             .collect();
         Self { cols }
@@ -240,7 +279,7 @@ impl Scope {
             ));
         }
         for (col, def) in self.cols.iter_mut().zip(aliases) {
-            col.name = ident_canonical(&def.name);
+            col.name = require_valid_ident(&def.name)?;
         }
         Ok(())
     }
@@ -261,11 +300,27 @@ impl Scope {
         match parts {
             [ident] => {
                 let pos = at_ident(ident);
-                let mut matches = self
-                    .cols
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, c)| !c.hidden_in_star && ident_matches(&c.name, ident));
+                if let Some(internal_name) = internal_ident_name(ident) {
+                    let mut matches = self
+                        .cols
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| c.internal && c.name == internal_name);
+                    let Some(first) = matches.next() else {
+                        return Ok(None);
+                    };
+                    if matches.next().is_some() {
+                        return Err(InvalidQuery::new(
+                            format!("ambiguous column `{}`", ident_display(ident)),
+                            pos,
+                        ));
+                    }
+                    return Ok(Some(first));
+                }
+                require_valid_ident(ident)?;
+                let mut matches = self.cols.iter().enumerate().filter(|(_, c)| {
+                    !c.internal && !c.hidden_in_star && ident_matches(&c.name, ident)
+                });
                 let Some(first) = matches.next() else {
                     return Ok(None);
                 };
@@ -278,9 +333,12 @@ impl Scope {
                 Ok(Some(first))
             }
             [tbl, col] => {
+                require_valid_ident(tbl)?;
+                require_valid_ident(col)?;
                 let pos = at_ident(col);
                 let mut matches = self.cols.iter().enumerate().filter(|(_, c)| {
-                    c.qualifier.as_ref().is_some_and(|q| ident_matches(q, tbl))
+                    !c.internal
+                        && c.qualifier.as_ref().is_some_and(|q| ident_matches(q, tbl))
                         && ident_matches(&c.name, col)
                 });
                 let Some(first) = matches.next() else {
@@ -343,6 +401,38 @@ impl Scope {
     }
 }
 
+fn internal_ident(name: &str) -> Ident {
+    Ident::with_quote('"', format!("\0{name}"))
+}
+
+fn is_internal_ident(ident: &Ident) -> bool {
+    ident.quote_style == Some('"') && ident.value.starts_with('\0')
+}
+
+fn internal_ident_name(ident: &Ident) -> Option<&str> {
+    if is_internal_ident(ident) {
+        ident.value.strip_prefix('\0')
+    } else {
+        None
+    }
+}
+
+fn require_valid_ident(ident: &Ident) -> Result<String, InvalidQuery> {
+    if ident.value.is_empty() {
+        return Err(InvalidQuery::new(
+            "empty identifier is not allowed",
+            at_ident(ident),
+        ));
+    }
+    if ident.value.contains('\0') {
+        return Err(InvalidQuery::new(
+            "identifier must not contain NUL byte",
+            at_ident(ident),
+        ));
+    }
+    Ok(ident_canonical(ident))
+}
+
 fn ident_canonical(ident: &Ident) -> String {
     if ident.quote_style.is_some() {
         ident.value.clone()
@@ -352,7 +442,11 @@ fn ident_canonical(ident: &Ident) -> String {
 }
 
 fn ident_display(ident: &Ident) -> String {
-    ident_canonical(ident)
+    if let Some(name) = internal_ident_name(ident) {
+        name.to_owned()
+    } else {
+        ident_canonical(ident)
+    }
 }
 
 fn ident_matches(candidate: &str, ident: &Ident) -> bool {
@@ -378,6 +472,7 @@ impl ExprResolver for ScopeResolver<'_> {
             Ok(expr) => Ok(expr),
             Err(err) => {
                 if parts.len() == 1
+                    && !is_internal_ident(&parts[0])
                     && let Some(aliases) = self.select_aliases
                 {
                     let ident = &parts[0];
@@ -502,26 +597,754 @@ fn bind_sql_expr_with_prebound(
 }
 
 fn clone_sql_expr(expr: &SqlExpr) -> SqlExpr {
-    let mut spine = Vec::new();
-    let mut cur = expr;
-    while let SqlExpr::BinaryOp { left, op, right } = cur {
-        spine.push((op.clone(), right.as_ref()));
-        cur = left.as_ref();
+    enum Step<'a> {
+        Nested,
+        BinaryLeft(sqlparser::ast::BinaryOperator, &'a SqlExpr),
+        BinaryRight(&'a SqlExpr, sqlparser::ast::BinaryOperator),
     }
-    let mut acc = cur.clone();
-    for (op, right) in spine.into_iter().rev() {
-        let right_cloned = if matches!(right, SqlExpr::BinaryOp { .. }) {
-            clone_sql_expr(right)
-        } else {
-            right.clone()
-        };
-        acc = SqlExpr::BinaryOp {
-            left: Box::new(acc),
-            op,
-            right: Box::new(right_cloned),
+
+    let mut steps = Vec::new();
+    let mut cur = expr;
+    loop {
+        match cur {
+            SqlExpr::Nested(inner) => {
+                steps.push(Step::Nested);
+                cur = inner.as_ref();
+            }
+            SqlExpr::BinaryOp { left, op, right } => {
+                if matches!(left.as_ref(), SqlExpr::BinaryOp { .. } | SqlExpr::Nested(_)) {
+                    steps.push(Step::BinaryLeft(op.clone(), right.as_ref()));
+                    cur = left.as_ref();
+                } else if matches!(
+                    right.as_ref(),
+                    SqlExpr::BinaryOp { .. } | SqlExpr::Nested(_)
+                ) {
+                    steps.push(Step::BinaryRight(left.as_ref(), op.clone()));
+                    cur = right.as_ref();
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    let mut acc = clone_sql_expr_node(cur);
+    for step in steps.into_iter().rev() {
+        acc = match step {
+            Step::Nested => SqlExpr::Nested(Box::new(acc)),
+            Step::BinaryLeft(op, right) => SqlExpr::BinaryOp {
+                left: Box::new(acc),
+                op,
+                right: Box::new(clone_sql_expr(right)),
+            },
+            Step::BinaryRight(left, op) => SqlExpr::BinaryOp {
+                left: Box::new(clone_sql_expr(left)),
+                op,
+                right: Box::new(acc),
+            },
         };
     }
     acc
+}
+
+fn clone_sql_expr_node(expr: &SqlExpr) -> SqlExpr {
+    match expr {
+        SqlExpr::UnaryOp { op, expr } => SqlExpr::UnaryOp {
+            op: *op,
+            expr: Box::new(clone_sql_expr(expr)),
+        },
+        SqlExpr::IsNull(inner) => SqlExpr::IsNull(Box::new(clone_sql_expr(inner))),
+        SqlExpr::IsNotNull(inner) => SqlExpr::IsNotNull(Box::new(clone_sql_expr(inner))),
+        SqlExpr::IsUnknown(inner) => SqlExpr::IsUnknown(Box::new(clone_sql_expr(inner))),
+        SqlExpr::IsNotUnknown(inner) => SqlExpr::IsNotUnknown(Box::new(clone_sql_expr(inner))),
+        SqlExpr::IsTrue(inner) => SqlExpr::IsTrue(Box::new(clone_sql_expr(inner))),
+        SqlExpr::IsFalse(inner) => SqlExpr::IsFalse(Box::new(clone_sql_expr(inner))),
+        SqlExpr::IsNotTrue(inner) => SqlExpr::IsNotTrue(Box::new(clone_sql_expr(inner))),
+        SqlExpr::IsNotFalse(inner) => SqlExpr::IsNotFalse(Box::new(clone_sql_expr(inner))),
+        SqlExpr::IsDistinctFrom(left, right) => SqlExpr::IsDistinctFrom(
+            Box::new(clone_sql_expr(left)),
+            Box::new(clone_sql_expr(right)),
+        ),
+        SqlExpr::IsNotDistinctFrom(left, right) => SqlExpr::IsNotDistinctFrom(
+            Box::new(clone_sql_expr(left)),
+            Box::new(clone_sql_expr(right)),
+        ),
+        SqlExpr::BinaryOp { left, op, right } => SqlExpr::BinaryOp {
+            left: Box::new(clone_sql_expr(left)),
+            op: op.clone(),
+            right: Box::new(clone_sql_expr(right)),
+        },
+        SqlExpr::Cast {
+            kind,
+            expr,
+            data_type,
+            array,
+            format,
+        } => SqlExpr::Cast {
+            kind: kind.clone(),
+            expr: Box::new(clone_sql_expr(expr)),
+            data_type: data_type.clone(),
+            array: *array,
+            format: format.clone(),
+        },
+        SqlExpr::Ceil { expr, field } => SqlExpr::Ceil {
+            expr: Box::new(clone_sql_expr(expr)),
+            field: field.clone(),
+        },
+        SqlExpr::Floor { expr, field } => SqlExpr::Floor {
+            expr: Box::new(clone_sql_expr(expr)),
+            field: field.clone(),
+        },
+        SqlExpr::Extract {
+            field,
+            syntax,
+            expr,
+        } => SqlExpr::Extract {
+            field: field.clone(),
+            syntax: syntax.clone(),
+            expr: Box::new(clone_sql_expr(expr)),
+        },
+        SqlExpr::Position { expr, r#in } => SqlExpr::Position {
+            expr: Box::new(clone_sql_expr(expr)),
+            r#in: Box::new(clone_sql_expr(r#in)),
+        },
+        SqlExpr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => SqlExpr::Between {
+            expr: Box::new(clone_sql_expr(expr)),
+            negated: *negated,
+            low: Box::new(clone_sql_expr(low)),
+            high: Box::new(clone_sql_expr(high)),
+        },
+        SqlExpr::InList {
+            expr,
+            list,
+            negated,
+        } => SqlExpr::InList {
+            expr: Box::new(clone_sql_expr(expr)),
+            list: list.iter().map(clone_sql_expr).collect(),
+            negated: *negated,
+        },
+        SqlExpr::Like {
+            negated,
+            any,
+            expr,
+            pattern,
+            escape_char,
+        } => SqlExpr::Like {
+            negated: *negated,
+            any: *any,
+            expr: Box::new(clone_sql_expr(expr)),
+            pattern: Box::new(clone_sql_expr(pattern)),
+            escape_char: escape_char.clone(),
+        },
+        SqlExpr::ILike {
+            negated,
+            any,
+            expr,
+            pattern,
+            escape_char,
+        } => SqlExpr::ILike {
+            negated: *negated,
+            any: *any,
+            expr: Box::new(clone_sql_expr(expr)),
+            pattern: Box::new(clone_sql_expr(pattern)),
+            escape_char: escape_char.clone(),
+        },
+        SqlExpr::Case {
+            case_token,
+            end_token,
+            operand,
+            conditions,
+            else_result,
+        } => SqlExpr::Case {
+            case_token: case_token.clone(),
+            end_token: end_token.clone(),
+            operand: operand.as_deref().map(|e| Box::new(clone_sql_expr(e))),
+            conditions: conditions
+                .iter()
+                .map(|cw| sqlparser::ast::CaseWhen {
+                    condition: clone_sql_expr(&cw.condition),
+                    result: clone_sql_expr(&cw.result),
+                })
+                .collect(),
+            else_result: else_result.as_deref().map(|e| Box::new(clone_sql_expr(e))),
+        },
+        SqlExpr::Array(arr) => SqlExpr::Array(sqlparser::ast::Array {
+            elem: arr.elem.iter().map(clone_sql_expr).collect(),
+            named: arr.named,
+        }),
+        SqlExpr::Substring {
+            expr,
+            substring_from,
+            substring_for,
+            special,
+            shorthand,
+        } => SqlExpr::Substring {
+            expr: Box::new(clone_sql_expr(expr)),
+            substring_from: substring_from
+                .as_deref()
+                .map(|e| Box::new(clone_sql_expr(e))),
+            substring_for: substring_for
+                .as_deref()
+                .map(|e| Box::new(clone_sql_expr(e))),
+            special: *special,
+            shorthand: *shorthand,
+        },
+        SqlExpr::Trim {
+            trim_where,
+            trim_what,
+            expr,
+            trim_characters,
+        } => SqlExpr::Trim {
+            trim_where: *trim_where,
+            trim_what: trim_what.as_deref().map(|e| Box::new(clone_sql_expr(e))),
+            expr: Box::new(clone_sql_expr(expr)),
+            trim_characters: trim_characters
+                .as_ref()
+                .map(|chars| chars.iter().map(clone_sql_expr).collect()),
+        },
+        SqlExpr::CompoundFieldAccess { root, access_chain } => SqlExpr::CompoundFieldAccess {
+            root: Box::new(clone_sql_expr(root)),
+            access_chain: access_chain
+                .iter()
+                .map(|acc| match acc {
+                    sqlparser::ast::AccessExpr::Dot(e) => {
+                        sqlparser::ast::AccessExpr::Dot(clone_sql_expr(e))
+                    }
+                    sqlparser::ast::AccessExpr::Subscript(sqlparser::ast::Subscript::Index {
+                        index,
+                    }) => sqlparser::ast::AccessExpr::Subscript(sqlparser::ast::Subscript::Index {
+                        index: clone_sql_expr(index),
+                    }),
+                    sqlparser::ast::AccessExpr::Subscript(sqlparser::ast::Subscript::Slice {
+                        lower_bound,
+                        upper_bound,
+                        stride,
+                    }) => sqlparser::ast::AccessExpr::Subscript(sqlparser::ast::Subscript::Slice {
+                        lower_bound: lower_bound.as_ref().map(clone_sql_expr),
+                        upper_bound: upper_bound.as_ref().map(clone_sql_expr),
+                        stride: stride.as_ref().map(clone_sql_expr),
+                    }),
+                })
+                .collect(),
+        },
+        SqlExpr::JsonAccess { value, path } => SqlExpr::JsonAccess {
+            value: Box::new(clone_sql_expr(value)),
+            path: sqlparser::ast::JsonPath {
+                path: path
+                    .path
+                    .iter()
+                    .map(|elem| match elem {
+                        sqlparser::ast::JsonPathElem::Bracket { key } => {
+                            sqlparser::ast::JsonPathElem::Bracket {
+                                key: clone_sql_expr(key),
+                            }
+                        }
+                        sqlparser::ast::JsonPathElem::ColonBracket { key } => {
+                            sqlparser::ast::JsonPathElem::ColonBracket {
+                                key: clone_sql_expr(key),
+                            }
+                        }
+                        other => other.clone(),
+                    })
+                    .collect(),
+            },
+        },
+        SqlExpr::Function(f) => SqlExpr::Function(Function {
+            name: f.name.clone(),
+            uses_odbc_syntax: f.uses_odbc_syntax,
+            parameters: clone_function_arguments(&f.parameters),
+            args: clone_function_arguments(&f.args),
+            filter: f.filter.as_deref().map(|e| Box::new(clone_sql_expr(e))),
+            null_treatment: f.null_treatment,
+            over: f.over.as_ref().map(|w| match w {
+                WindowType::WindowSpec(spec) => WindowType::WindowSpec(clone_window_spec(spec)),
+                WindowType::NamedWindow(id) => WindowType::NamedWindow(id.clone()),
+            }),
+            within_group: f.within_group.iter().map(clone_order_by_expr).collect(),
+        }),
+        SqlExpr::Interval(iv) => SqlExpr::Interval(sqlparser::ast::Interval {
+            value: Box::new(clone_sql_expr(&iv.value)),
+            leading_field: iv.leading_field.clone(),
+            leading_precision: iv.leading_precision,
+            last_field: iv.last_field.clone(),
+            fractional_seconds_precision: iv.fractional_seconds_precision,
+        }),
+        SqlExpr::Tuple(exprs) => SqlExpr::Tuple(exprs.iter().map(clone_sql_expr).collect()),
+        SqlExpr::InSubquery {
+            expr,
+            subquery,
+            negated,
+        } => SqlExpr::InSubquery {
+            expr: Box::new(clone_sql_expr(expr)),
+            subquery: Box::new(clone_query(subquery)),
+            negated: *negated,
+        },
+        SqlExpr::Exists { subquery, negated } => SqlExpr::Exists {
+            subquery: Box::new(clone_query(subquery)),
+            negated: *negated,
+        },
+        SqlExpr::Subquery(subquery) => SqlExpr::Subquery(Box::new(clone_query(subquery))),
+        SqlExpr::InUnnest {
+            expr,
+            array_expr,
+            negated,
+        } => SqlExpr::InUnnest {
+            expr: Box::new(clone_sql_expr(expr)),
+            array_expr: Box::new(clone_sql_expr(array_expr)),
+            negated: *negated,
+        },
+        SqlExpr::AtTimeZone {
+            timestamp,
+            time_zone,
+        } => SqlExpr::AtTimeZone {
+            timestamp: Box::new(clone_sql_expr(timestamp)),
+            time_zone: Box::new(clone_sql_expr(time_zone)),
+        },
+        SqlExpr::SimilarTo {
+            negated,
+            expr,
+            pattern,
+            escape_char,
+        } => SqlExpr::SimilarTo {
+            negated: *negated,
+            expr: Box::new(clone_sql_expr(expr)),
+            pattern: Box::new(clone_sql_expr(pattern)),
+            escape_char: escape_char.clone(),
+        },
+        SqlExpr::RLike {
+            negated,
+            expr,
+            pattern,
+            regexp,
+        } => SqlExpr::RLike {
+            negated: *negated,
+            expr: Box::new(clone_sql_expr(expr)),
+            pattern: Box::new(clone_sql_expr(pattern)),
+            regexp: *regexp,
+        },
+        SqlExpr::AnyOp {
+            left,
+            compare_op,
+            right,
+            is_some,
+        } => SqlExpr::AnyOp {
+            left: Box::new(clone_sql_expr(left)),
+            compare_op: compare_op.clone(),
+            right: Box::new(clone_sql_expr(right)),
+            is_some: *is_some,
+        },
+        SqlExpr::AllOp {
+            left,
+            compare_op,
+            right,
+        } => SqlExpr::AllOp {
+            left: Box::new(clone_sql_expr(left)),
+            compare_op: compare_op.clone(),
+            right: Box::new(clone_sql_expr(right)),
+        },
+        SqlExpr::Overlay {
+            expr,
+            overlay_what,
+            overlay_from,
+            overlay_for,
+        } => SqlExpr::Overlay {
+            expr: Box::new(clone_sql_expr(expr)),
+            overlay_what: Box::new(clone_sql_expr(overlay_what)),
+            overlay_from: Box::new(clone_sql_expr(overlay_from)),
+            overlay_for: overlay_for.as_deref().map(|e| Box::new(clone_sql_expr(e))),
+        },
+        SqlExpr::Convert {
+            is_try,
+            expr,
+            data_type,
+            charset,
+            target_before_value,
+            styles,
+        } => SqlExpr::Convert {
+            is_try: *is_try,
+            expr: Box::new(clone_sql_expr(expr)),
+            data_type: data_type.clone(),
+            charset: charset.clone(),
+            target_before_value: *target_before_value,
+            styles: styles.iter().map(clone_sql_expr).collect(),
+        },
+        SqlExpr::Collate { expr, collation } => SqlExpr::Collate {
+            expr: Box::new(clone_sql_expr(expr)),
+            collation: collation.clone(),
+        },
+        SqlExpr::IsNormalized {
+            expr,
+            form,
+            negated,
+        } => SqlExpr::IsNormalized {
+            expr: Box::new(clone_sql_expr(expr)),
+            form: *form,
+            negated: *negated,
+        },
+        other => other.clone(),
+    }
+}
+
+fn clone_query(query: &Query) -> Query {
+    Query {
+        with: query.with.as_ref().map(|w| sqlparser::ast::With {
+            with_token: w.with_token.clone(),
+            recursive: w.recursive,
+            cte_tables: w
+                .cte_tables
+                .iter()
+                .map(|cte| sqlparser::ast::Cte {
+                    alias: cte.alias.clone(),
+                    query: Box::new(clone_query(&cte.query)),
+                    from: cte.from.clone(),
+                    materialized: cte.materialized,
+                    closing_paren_token: cte.closing_paren_token.clone(),
+                })
+                .collect(),
+        }),
+        body: Box::new(clone_set_expr(&query.body)),
+        order_by: query.order_by.as_ref().map(clone_order_by),
+        limit_clause: query.limit_clause.as_ref().map(clone_limit_clause),
+        fetch: query.fetch.as_ref().map(|f| sqlparser::ast::Fetch {
+            with_ties: f.with_ties,
+            percent: f.percent,
+            quantity: f.quantity.as_ref().map(clone_sql_expr),
+        }),
+        locks: query.locks.clone(),
+        for_clause: query.for_clause.clone(),
+        settings: query.settings.as_ref().map(|ss| {
+            ss.iter()
+                .map(|s| sqlparser::ast::Setting {
+                    key: s.key.clone(),
+                    value: clone_sql_expr(&s.value),
+                })
+                .collect()
+        }),
+        format_clause: query.format_clause.clone(),
+        pipe_operators: query.pipe_operators.clone(),
+    }
+}
+
+fn clone_set_expr(body: &SetExpr) -> SetExpr {
+    // Flatten left-deep `SetOperation` spines iteratively so deep `UNION` chains stay O(1) stack.
+    let mut spine = Vec::new();
+    let mut cur = body;
+    while let SetExpr::SetOperation {
+        op,
+        set_quantifier,
+        left,
+        right,
+    } = cur
+    {
+        spine.push((*op, *set_quantifier, right.as_ref()));
+        cur = left.as_ref();
+    }
+    let mut acc = match cur {
+        SetExpr::Select(select) => SetExpr::Select(Box::new(clone_select(select))),
+        SetExpr::Query(query) => SetExpr::Query(Box::new(clone_query(query))),
+        SetExpr::Values(values) => SetExpr::Values(Values {
+            explicit_row: values.explicit_row,
+            value_keyword: values.value_keyword,
+            rows: values
+                .rows
+                .iter()
+                .map(|row| sqlparser::ast::Parens {
+                    opening_token: row.opening_token.clone(),
+                    content: row.content.iter().map(clone_sql_expr).collect(),
+                    closing_token: row.closing_token.clone(),
+                })
+                .collect(),
+        }),
+        other => other.clone(),
+    };
+    while let Some((op, set_quantifier, right)) = spine.pop() {
+        acc = SetExpr::SetOperation {
+            op,
+            set_quantifier,
+            left: Box::new(acc),
+            right: Box::new(clone_set_expr(right)),
+        };
+    }
+    acc
+}
+
+fn clone_select(select: &Select) -> Select {
+    Select {
+        select_token: select.select_token.clone(),
+        optimizer_hints: select.optimizer_hints.clone(),
+        distinct: select.distinct.as_ref().map(|d| match d {
+            Distinct::Distinct => Distinct::Distinct,
+            Distinct::All => Distinct::All,
+            Distinct::On(exprs) => Distinct::On(exprs.iter().map(clone_sql_expr).collect()),
+        }),
+        select_modifiers: select.select_modifiers.clone(),
+        top: select.top.clone(),
+        top_before_distinct: select.top_before_distinct,
+        projection: select
+            .projection
+            .iter()
+            .map(|item| match item {
+                SelectItem::UnnamedExpr(e) => SelectItem::UnnamedExpr(clone_sql_expr(e)),
+                SelectItem::ExprWithAlias { expr, alias } => SelectItem::ExprWithAlias {
+                    expr: clone_sql_expr(expr),
+                    alias: alias.clone(),
+                },
+                SelectItem::ExprWithAliases { expr, aliases } => SelectItem::ExprWithAliases {
+                    expr: clone_sql_expr(expr),
+                    aliases: aliases.clone(),
+                },
+                other => other.clone(),
+            })
+            .collect(),
+        exclude: select.exclude.clone(),
+        into: select.into.clone(),
+        from: select.from.iter().map(clone_table_with_joins).collect(),
+        lateral_views: select.lateral_views.clone(),
+        prewhere: select.prewhere.as_ref().map(clone_sql_expr),
+        selection: select.selection.as_ref().map(clone_sql_expr),
+        connect_by: select.connect_by.clone(),
+        group_by: match &select.group_by {
+            GroupByExpr::All(m) => GroupByExpr::All(m.clone()),
+            GroupByExpr::Expressions(exprs, m) => {
+                GroupByExpr::Expressions(exprs.iter().map(clone_sql_expr).collect(), m.clone())
+            }
+        },
+        cluster_by: select.cluster_by.iter().map(clone_sql_expr).collect(),
+        distribute_by: select.distribute_by.iter().map(clone_sql_expr).collect(),
+        sort_by: select.sort_by.iter().map(clone_order_by_expr).collect(),
+        having: select.having.as_ref().map(clone_sql_expr),
+        named_window: clone_named_window_defs(&select.named_window),
+        qualify: select.qualify.as_ref().map(clone_sql_expr),
+        window_before_qualify: select.window_before_qualify,
+        value_table_mode: select.value_table_mode,
+        flavor: select.flavor,
+    }
+}
+
+fn clone_table_with_joins(twj: &TableWithJoins) -> TableWithJoins {
+    TableWithJoins {
+        relation: clone_table_factor(&twj.relation),
+        joins: twj.joins.iter().map(clone_join).collect(),
+    }
+}
+
+fn clone_table_factor(factor: &TableFactor) -> TableFactor {
+    match factor {
+        TableFactor::Derived {
+            lateral,
+            subquery,
+            alias,
+            sample,
+        } => TableFactor::Derived {
+            lateral: *lateral,
+            subquery: Box::new(clone_query(subquery)),
+            alias: alias.clone(),
+            sample: sample.clone(),
+        },
+        TableFactor::NestedJoin {
+            table_with_joins,
+            alias,
+        } => TableFactor::NestedJoin {
+            table_with_joins: Box::new(clone_table_with_joins(table_with_joins)),
+            alias: alias.clone(),
+        },
+        TableFactor::UNNEST {
+            alias,
+            array_exprs,
+            with_offset,
+            with_offset_alias,
+            with_ordinality,
+        } => TableFactor::UNNEST {
+            alias: alias.clone(),
+            array_exprs: array_exprs.iter().map(clone_sql_expr).collect(),
+            with_offset: *with_offset,
+            with_offset_alias: with_offset_alias.clone(),
+            with_ordinality: *with_ordinality,
+        },
+        other => other.clone(),
+    }
+}
+
+fn clone_join(join: &Join) -> Join {
+    let clone_constraint = |c: &JoinConstraint| match c {
+        JoinConstraint::On(e) => JoinConstraint::On(clone_sql_expr(e)),
+        other => other.clone(),
+    };
+    let join_operator = match &join.join_operator {
+        JoinOperator::Join(c) => JoinOperator::Join(clone_constraint(c)),
+        JoinOperator::Inner(c) => JoinOperator::Inner(clone_constraint(c)),
+        JoinOperator::Left(c) => JoinOperator::Left(clone_constraint(c)),
+        JoinOperator::LeftOuter(c) => JoinOperator::LeftOuter(clone_constraint(c)),
+        JoinOperator::Right(c) => JoinOperator::Right(clone_constraint(c)),
+        JoinOperator::RightOuter(c) => JoinOperator::RightOuter(clone_constraint(c)),
+        JoinOperator::FullOuter(c) => JoinOperator::FullOuter(clone_constraint(c)),
+        JoinOperator::CrossJoin(c) => JoinOperator::CrossJoin(clone_constraint(c)),
+        JoinOperator::Semi(c) => JoinOperator::Semi(clone_constraint(c)),
+        JoinOperator::LeftSemi(c) => JoinOperator::LeftSemi(clone_constraint(c)),
+        JoinOperator::RightSemi(c) => JoinOperator::RightSemi(clone_constraint(c)),
+        JoinOperator::Anti(c) => JoinOperator::Anti(clone_constraint(c)),
+        JoinOperator::LeftAnti(c) => JoinOperator::LeftAnti(clone_constraint(c)),
+        JoinOperator::RightAnti(c) => JoinOperator::RightAnti(clone_constraint(c)),
+        JoinOperator::StraightJoin(c) => JoinOperator::StraightJoin(clone_constraint(c)),
+        JoinOperator::AsOf {
+            match_condition,
+            constraint,
+        } => JoinOperator::AsOf {
+            match_condition: clone_sql_expr(match_condition),
+            constraint: clone_constraint(constraint),
+        },
+        other => other.clone(),
+    };
+    Join {
+        relation: clone_table_factor(&join.relation),
+        global: join.global,
+        join_operator,
+    }
+}
+
+fn clone_limit_clause(lc: &LimitClause) -> LimitClause {
+    match lc {
+        LimitClause::LimitOffset {
+            limit,
+            offset,
+            limit_by,
+        } => LimitClause::LimitOffset {
+            limit: limit.as_ref().map(clone_sql_expr),
+            offset: offset.as_ref().map(|off| sqlparser::ast::Offset {
+                value: clone_sql_expr(&off.value),
+                rows: off.rows,
+            }),
+            limit_by: limit_by.iter().map(clone_sql_expr).collect(),
+        },
+        LimitClause::OffsetCommaLimit { offset, limit } => LimitClause::OffsetCommaLimit {
+            offset: clone_sql_expr(offset),
+            limit: clone_sql_expr(limit),
+        },
+    }
+}
+
+fn clone_function_arguments(args: &FunctionArguments) -> FunctionArguments {
+    match args {
+        FunctionArguments::None => FunctionArguments::None,
+        FunctionArguments::Subquery(q) => FunctionArguments::Subquery(Box::new(clone_query(q))),
+        FunctionArguments::List(list) => {
+            FunctionArguments::List(sqlparser::ast::FunctionArgumentList {
+                duplicate_treatment: list.duplicate_treatment,
+                args: list.args.iter().map(clone_function_arg).collect(),
+                clauses: list
+                    .clauses
+                    .iter()
+                    .map(|clause| match clause {
+                        sqlparser::ast::FunctionArgumentClause::OrderBy(obes) => {
+                            sqlparser::ast::FunctionArgumentClause::OrderBy(
+                                obes.iter().map(clone_order_by_expr).collect(),
+                            )
+                        }
+                        sqlparser::ast::FunctionArgumentClause::Limit(e) => {
+                            sqlparser::ast::FunctionArgumentClause::Limit(clone_sql_expr(e))
+                        }
+                        other => other.clone(),
+                    })
+                    .collect(),
+            })
+        }
+    }
+}
+
+fn clone_function_arg(arg: &FunctionArg) -> FunctionArg {
+    match arg {
+        FunctionArg::Unnamed(inner) => FunctionArg::Unnamed(clone_function_arg_expr(inner)),
+        FunctionArg::Named {
+            name,
+            arg,
+            operator,
+        } => FunctionArg::Named {
+            name: name.clone(),
+            arg: clone_function_arg_expr(arg),
+            operator: operator.clone(),
+        },
+        FunctionArg::ExprNamed {
+            name,
+            arg,
+            operator,
+        } => FunctionArg::ExprNamed {
+            name: clone_sql_expr(name),
+            arg: clone_function_arg_expr(arg),
+            operator: operator.clone(),
+        },
+    }
+}
+
+fn clone_function_arg_expr(arg: &FunctionArgExpr) -> FunctionArgExpr {
+    match arg {
+        FunctionArgExpr::Expr(e) => FunctionArgExpr::Expr(clone_sql_expr(e)),
+        other => other.clone(),
+    }
+}
+
+fn clone_window_frame_bound(bound: &WindowFrameBound) -> WindowFrameBound {
+    match bound {
+        WindowFrameBound::CurrentRow => WindowFrameBound::CurrentRow,
+        WindowFrameBound::Preceding(expr) => {
+            WindowFrameBound::Preceding(expr.as_deref().map(|e| Box::new(clone_sql_expr(e))))
+        }
+        WindowFrameBound::Following(expr) => {
+            WindowFrameBound::Following(expr.as_deref().map(|e| Box::new(clone_sql_expr(e))))
+        }
+    }
+}
+
+fn clone_window_frame(frame: &sqlparser::ast::WindowFrame) -> sqlparser::ast::WindowFrame {
+    sqlparser::ast::WindowFrame {
+        units: frame.units,
+        start_bound: clone_window_frame_bound(&frame.start_bound),
+        end_bound: frame.end_bound.as_ref().map(clone_window_frame_bound),
+    }
+}
+
+fn clone_order_by_expr(e: &OrderByExpr) -> OrderByExpr {
+    OrderByExpr {
+        expr: clone_sql_expr(&e.expr),
+        options: e.options,
+        with_fill: e.with_fill.as_ref().map(|wf| sqlparser::ast::WithFill {
+            from: wf.from.as_ref().map(clone_sql_expr),
+            to: wf.to.as_ref().map(clone_sql_expr),
+            step: wf.step.as_ref().map(clone_sql_expr),
+        }),
+    }
+}
+
+fn clone_window_spec(spec: &AstWindowSpec) -> AstWindowSpec {
+    AstWindowSpec {
+        window_name: spec.window_name.clone(),
+        partition_by: spec.partition_by.iter().map(clone_sql_expr).collect(),
+        order_by: spec.order_by.iter().map(clone_order_by_expr).collect(),
+        window_frame: spec.window_frame.as_ref().map(clone_window_frame),
+    }
+}
+
+fn clone_named_window_defs(
+    defs: &[sqlparser::ast::NamedWindowDefinition],
+) -> Vec<sqlparser::ast::NamedWindowDefinition> {
+    defs.iter()
+        .map(|def| {
+            let expr = match &def.1 {
+                sqlparser::ast::NamedWindowExpr::NamedWindow(id) => {
+                    sqlparser::ast::NamedWindowExpr::NamedWindow(id.clone())
+                }
+                sqlparser::ast::NamedWindowExpr::WindowSpec(spec) => {
+                    sqlparser::ast::NamedWindowExpr::WindowSpec(clone_window_spec(spec))
+                }
+            };
+            sqlparser::ast::NamedWindowDefinition(def.0.clone(), expr)
+        })
+        .collect()
 }
 
 fn bind_sql_expr(
@@ -1226,45 +2049,59 @@ fn precoerce_expr(
             }
         }
         SqlExpr::CompoundFieldAccess { root, access_chain } => {
-            let root_dt = if !contains_placeholder(root) {
-                Some(bind_sql_expr(root, scope, ctx, select_aliases)?.data_type())
-            } else {
-                precoerce_expr(
-                    root,
-                    None,
-                    scope,
-                    ctx,
-                    select_aliases,
-                    prebound,
-                    counter,
-                    depth + 1,
-                )?;
-                None
-            };
-            for (i, acc) in access_chain.iter_mut().enumerate() {
-                if let sqlparser::ast::AccessExpr::Subscript(sqlparser::ast::Subscript::Index {
-                    index,
-                }) = acc
-                {
-                    let idx_target = if i == 0 {
-                        match root_dt {
-                            Some(DataType::MapUtf8) => Some(DataType::Utf8),
-                            Some(DataType::List(_)) => Some(DataType::I64),
-                            _ => None,
-                        }
+            let (mut cur_dt, start_idx) = match (root.as_ref(), access_chain.first()) {
+                (
+                    SqlExpr::Identifier(tbl),
+                    Some(sqlparser::ast::AccessExpr::Dot(SqlExpr::Identifier(col))),
+                ) => {
+                    let resolved =
+                        scope.resolve_ident(&[tbl.clone(), col.clone()], &ctx.outer_scopes)?;
+                    (Some(resolved.data_type()), 1usize)
+                }
+                _ => {
+                    let root_dt = if !contains_placeholder(root) {
+                        Some(bind_sql_expr(root, scope, ctx, select_aliases)?.data_type())
                     } else {
+                        precoerce_expr(
+                            root,
+                            None,
+                            scope,
+                            ctx,
+                            select_aliases,
+                            prebound,
+                            counter,
+                            depth + 1,
+                        )?;
                         None
                     };
-                    precoerce_expr(
+                    (root_dt, 0usize)
+                }
+            };
+            for acc in &mut access_chain[start_idx..] {
+                match acc {
+                    sqlparser::ast::AccessExpr::Subscript(sqlparser::ast::Subscript::Index {
                         index,
-                        idx_target.as_ref(),
-                        scope,
-                        ctx,
-                        select_aliases,
-                        prebound,
-                        counter,
-                        depth + 1,
-                    )?;
+                    }) => {
+                        let (idx_target, next_dt) = match cur_dt.take() {
+                            Some(DataType::MapUtf8) => (Some(DataType::Utf8), Some(DataType::Utf8)),
+                            Some(DataType::List(inner)) => (Some(DataType::I64), Some(*inner)),
+                            _ => (None, None),
+                        };
+                        precoerce_expr(
+                            index,
+                            idx_target.as_ref(),
+                            scope,
+                            ctx,
+                            select_aliases,
+                            prebound,
+                            counter,
+                            depth + 1,
+                        )?;
+                        cur_dt = next_dt;
+                    }
+                    _ => {
+                        cur_dt = None;
+                    }
                 }
             }
         }
@@ -1878,7 +2715,7 @@ fn bind_query(query: &Query, ctx: &BindCtx<'_>) -> Result<LogicalPlan, QueryErro
         let mut ctes = ctx.ctes.clone();
         let mut local_names = HashSet::new();
         for cte in &with.cte_tables {
-            let key = ident_canonical(&cte.alias.name);
+            let key = require_valid_ident(&cte.alias.name)?;
             if !local_names.insert(key.clone()) {
                 return Err(InvalidQuery::new(
                     format!("duplicate CTE name `{key}`"),
@@ -1889,9 +2726,9 @@ fn bind_query(query: &Query, ctx: &BindCtx<'_>) -> Result<LogicalPlan, QueryErro
             let sub_ctx = cte_ctx.with_ctes(ctes.clone()).with_depth(ctx.depth + 1);
             let mut plan = bind_query(&cte.query, &sub_ctx)?;
             if !cte.alias.columns.is_empty() {
-                plan = apply_column_aliases(plan, &cte.alias.columns)?;
+                plan = apply_column_aliases(plan, &cte.alias.columns, &sub_ctx)?;
             }
-            let node_count = plan_node_count(&plan);
+            let node_count = plan.node_count();
             if node_count > MAX_PLAN_NODES {
                 return Err(InvalidQuery::new(
                     format!("query plan exceeds maximum size of {MAX_PLAN_NODES} nodes"),
@@ -1899,7 +2736,16 @@ fn bind_query(query: &Query, ctx: &BindCtx<'_>) -> Result<LogicalPlan, QueryErro
                 )
                 .into());
             }
-            ctes.insert(key, CteDef { plan, node_count });
+            let depth = plan.depth();
+            ctx.check_plan_depth(depth, at(cte.query.as_ref()))?;
+            ctes.insert(
+                key,
+                CteDef {
+                    plan,
+                    node_count,
+                    depth,
+                },
+            );
         }
         cte_ctx = cte_ctx.with_ctes(ctes);
     }
@@ -1934,6 +2780,8 @@ fn bind_query(query: &Query, ctx: &BindCtx<'_>) -> Result<LogicalPlan, QueryErro
             fields.push(f.clone());
         }
         let schema = Schema::try_new_arc(fields)?;
+        ctx.check_plan_depth(plan.depth().saturating_add(1), pos)?;
+        ctx.record_plan_nodes(1, pos)?;
         return Ok(LogicalPlan::Project {
             input: Box::new(plan),
             exprs,
@@ -2009,6 +2857,7 @@ fn bind_set_operation_chain(body: &SetExpr, ctx: &BindCtx<'_>) -> Result<Logical
     }
 
     let (mut acc, _) = bind_set_expr(cur, ctx, None)?;
+    let mut acc_depth = acc.depth();
     for (op, quantifier, right_ast, pos) in chain.into_iter().rev() {
         if matches!(
             quantifier,
@@ -2017,18 +2866,34 @@ fn bind_set_operation_chain(body: &SetExpr, ctx: &BindCtx<'_>) -> Result<Logical
             return Err(InvalidQuery::new("BY NAME set operations are not supported", pos).into());
         }
         let (right_plan, _) = bind_set_expr(right_ast, ctx, None)?;
-        acc = combine_set_plans(acc, right_plan, *op, *quantifier, pos)?;
+        let right_depth = right_plan.depth();
+        let (combined, combined_depth) = combine_set_plans(
+            acc,
+            acc_depth,
+            right_plan,
+            right_depth,
+            *op,
+            *quantifier,
+            pos,
+            ctx,
+        )?;
+        acc = combined;
+        acc_depth = combined_depth;
     }
     Ok(acc)
 }
 
+#[expect(clippy::too_many_arguments)]
 fn combine_set_plans(
     left: LogicalPlan,
+    mut left_depth: usize,
     right: LogicalPlan,
+    mut right_depth: usize,
     op: SetOperator,
     quantifier: SetQuantifier,
     pos: Option<Position>,
-) -> Result<LogicalPlan, QueryError> {
+    ctx: &BindCtx<'_>,
+) -> Result<(LogicalPlan, usize), QueryError> {
     let l_schema = left.schema().clone();
     let r_schema = right.schema().clone();
     if l_schema.len() != r_schema.len() {
@@ -2070,7 +2935,9 @@ fn combine_set_plans(
     let out_schema = Schema::try_new_arc(out_fields)?;
 
     let left = if need_left_cast {
-        cast_plan_columns(left, &out_schema)?
+        left_depth = left_depth.saturating_add(1);
+        ctx.check_plan_depth(left_depth, pos)?;
+        cast_plan_columns(left, &out_schema, ctx, pos)?
     } else {
         left
     };
@@ -2080,7 +2947,9 @@ fn combine_set_plans(
         } else {
             Arc::clone(&out_schema)
         };
-        cast_plan_columns(right, &right_schema)?
+        right_depth = right_depth.saturating_add(1);
+        ctx.check_plan_depth(right_depth, pos)?;
+        cast_plan_columns(right, &right_schema, ctx, pos)?
     } else {
         right
     };
@@ -2103,18 +2972,29 @@ fn combine_set_plans(
                 } if *prev_all == all && *prev_schema == out_schema
             );
             if can_merge && let LogicalPlan::Union { mut inputs, .. } = left {
+                let new_depth = left_depth.max(right_depth.saturating_add(1));
+                ctx.check_plan_depth(new_depth, pos)?;
                 inputs.push(right);
-                return Ok(LogicalPlan::Union {
-                    inputs,
+                return Ok((
+                    LogicalPlan::Union {
+                        inputs,
+                        all,
+                        schema: out_schema,
+                    },
+                    new_depth,
+                ));
+            }
+            let new_depth = 1usize.saturating_add(left_depth.max(right_depth));
+            ctx.check_plan_depth(new_depth, pos)?;
+            ctx.record_plan_nodes(1, pos)?;
+            Ok((
+                LogicalPlan::Union {
+                    inputs: vec![left, right],
                     all,
                     schema: out_schema,
-                });
-            }
-            Ok(LogicalPlan::Union {
-                inputs: vec![left, right],
-                all,
-                schema: out_schema,
-            })
+                },
+                new_depth,
+            ))
         }
         SetOperator::Intersect | SetOperator::Except | SetOperator::Minus => {
             if matches!(quantifier, SetQuantifier::All) {
@@ -2129,6 +3009,10 @@ fn combine_set_plans(
             } else {
                 LogicalJoinKind::Anti
             };
+            let distinct_depth = left_depth.saturating_add(1);
+            let new_depth = 1usize.saturating_add(distinct_depth.max(right_depth));
+            ctx.check_plan_depth(new_depth, pos)?;
+            ctx.record_plan_nodes(2, pos)?;
             let distinct_left = LogicalPlan::Distinct {
                 input: Box::new(left),
             };
@@ -2153,16 +3037,19 @@ fn combine_set_plans(
                     data_type: f.data_type.clone(),
                 })
                 .collect();
-            Ok(LogicalPlan::Join {
-                left: Box::new(distinct_left),
-                right: Box::new(right),
-                kind,
-                left_keys,
-                right_keys,
-                null_equals_null: true,
-                residual: None,
-                schema: out_schema,
-            })
+            Ok((
+                LogicalPlan::Join {
+                    left: Box::new(distinct_left),
+                    right: Box::new(right),
+                    kind,
+                    left_keys,
+                    right_keys,
+                    null_equals_null: true,
+                    residual: None,
+                    schema: out_schema,
+                },
+                new_depth,
+            ))
         }
     }
 }
@@ -2183,6 +3070,8 @@ fn common_set_type(
 fn cast_plan_columns(
     plan: LogicalPlan,
     target_schema: &Arc<Schema>,
+    ctx: &BindCtx<'_>,
+    pos: Option<Position>,
 ) -> Result<LogicalPlan, QueryError> {
     let in_schema = plan.schema();
     let mut exprs = Vec::with_capacity(in_schema.len());
@@ -2199,6 +3088,7 @@ fn cast_plan_columns(
         };
         exprs.push(coerce_expr(col_expr, &tgt_f.data_type, None)?);
     }
+    ctx.record_plan_nodes(1, pos)?;
     Ok(LogicalPlan::Project {
         input: Box::new(plan),
         exprs,
@@ -2254,6 +3144,7 @@ fn bind_values(values: &Values, ctx: &BindCtx<'_>) -> Result<LogicalPlan, QueryE
     }
 
     let schema = Schema::try_new_arc(fields)?;
+    ctx.record_plan_nodes(1, pos)?;
     Ok(LogicalPlan::Values {
         schema,
         rows: coerced_rows,
@@ -2263,6 +3154,7 @@ fn bind_values(values: &Values, ctx: &BindCtx<'_>) -> Result<LogicalPlan, QueryE
 fn apply_column_aliases(
     plan: LogicalPlan,
     aliases: &[TableAliasColumnDef],
+    ctx: &BindCtx<'_>,
 ) -> Result<LogicalPlan, QueryError> {
     let in_schema = plan.schema();
     if aliases.len() > in_schema.len() {
@@ -2276,11 +3168,12 @@ fn apply_column_aliases(
         )
         .into());
     }
+    let pos = aliases.first().and_then(|a| at_ident(&a.name));
     let mut fields = Vec::with_capacity(in_schema.len());
     let mut exprs = Vec::with_capacity(in_schema.len());
     for (idx, field) in in_schema.fields().iter().enumerate() {
         let name = if let Some(alias) = aliases.get(idx) {
-            ident_canonical(&alias.name)
+            require_valid_ident(&alias.name)?
         } else {
             field.name.clone()
         };
@@ -2292,6 +3185,8 @@ fn apply_column_aliases(
         });
     }
     let schema = Schema::try_new_arc(fields)?;
+    ctx.check_plan_depth(plan.depth().saturating_add(1), pos)?;
+    ctx.record_plan_nodes(1, pos)?;
     Ok(LogicalPlan::Project {
         input: Box::new(plan),
         exprs,
@@ -2303,68 +3198,43 @@ fn apply_column_aliases(
 // Base Views & FROM / Joins / UNNEST
 // ---------------------------------------------------------------------------
 
-fn plan_node_count(plan: &LogicalPlan) -> usize {
-    let mut count = 0usize;
-    let mut stack = vec![plan];
-    while let Some(cur) = stack.pop() {
-        count += 1;
-        match cur {
-            LogicalPlan::Scan { .. }
-            | LogicalPlan::Values { .. }
-            | LogicalPlan::EmptyRow { .. } => {}
-            LogicalPlan::Filter { input, .. }
-            | LogicalPlan::Project { input, .. }
-            | LogicalPlan::Aggregate { input, .. }
-            | LogicalPlan::Window { input, .. }
-            | LogicalPlan::Sort { input, .. }
-            | LogicalPlan::Limit { input, .. }
-            | LogicalPlan::TopK { input, .. }
-            | LogicalPlan::Distinct { input }
-            | LogicalPlan::Unnest { input, .. } => stack.push(input),
-            LogicalPlan::Explain { inner, .. } => stack.push(inner),
-            LogicalPlan::Join { left, right, .. } => {
-                stack.push(left);
-                stack.push(right);
-            }
-            LogicalPlan::Union { inputs, .. } => {
-                for inp in inputs {
-                    stack.push(inp);
-                }
-            }
-        }
-    }
-    count
-}
-
 fn expand_table(name: &Ident, ctx: &BindCtx<'_>) -> Result<LogicalPlan, QueryError> {
-    let lookup_name = ident_canonical(name);
+    let lookup_name = require_valid_ident(name)?;
+    let pos = at_ident(name);
     if let Some(cte) = ctx.ctes.get(&lookup_name) {
-        ctx.record_plan_nodes(cte.node_count, at_ident(name))?;
+        ctx.record_plan_nodes(cte.node_count, pos)?;
+        ctx.check_plan_depth(cte.depth, pos)?;
         return Ok(cte.plan.clone());
     }
     let Some(def) = ctx.catalog.get(&lookup_name) else {
-        return Err(
-            InvalidQuery::new(format!("unknown table `{}`", name.value), at_ident(name)).into(),
-        );
+        return Err(InvalidQuery::new(format!("unknown table `{}`", name.value), pos).into());
     };
-    expand_view_def(def, ctx.catalog)
+    expand_view_def(def, ctx, pos)
 }
 
-fn expand_view_def(def: &SqlTableDef, catalog: &SqlCatalog) -> Result<LogicalPlan, QueryError> {
+fn expand_view_def(
+    def: &SqlTableDef,
+    ctx: &BindCtx<'_>,
+    pos: Option<Position>,
+) -> Result<LogicalPlan, QueryError> {
+    let catalog = ctx.catalog;
     match def.kind {
-        SqlViewKind::Batch => Ok(LogicalPlan::Scan {
-            table: def.name.clone(),
-            kind: SqlViewKind::Batch,
-            full_schema: Arc::clone(&def.schema),
-            projection: None,
-            filters: Vec::new(),
-            time_range: TimeRangeHint::default(),
-            id_lookups: Vec::new(),
-            substrings: Vec::new(),
-            map_projections: BTreeMap::new(),
-            limit: None,
-            schema: Arc::clone(&def.schema),
-        }),
+        SqlViewKind::Batch => {
+            ctx.record_plan_nodes(1, pos)?;
+            Ok(LogicalPlan::Scan {
+                table: def.name.clone(),
+                kind: SqlViewKind::Batch,
+                full_schema: Arc::clone(&def.schema),
+                projection: None,
+                filters: Vec::new(),
+                time_range: TimeRangeHint::default(),
+                id_lookups: Vec::new(),
+                substrings: Vec::new(),
+                map_projections: BTreeMap::new(),
+                limit: None,
+                schema: Arc::clone(&def.schema),
+            })
+        }
         SqlViewKind::Spans => {
             let scan = build_windowed_scan(
                 def,
@@ -2372,6 +3242,8 @@ fn expand_view_def(def: &SqlTableDef, catalog: &SqlCatalog) -> Result<LogicalPla
                 "start_time",
                 catalog.window(),
                 catalog.visible_from(),
+                ctx,
+                pos,
             )?;
             let raw = raw_spans_schema();
             let mut exprs = Vec::with_capacity(56);
@@ -2394,13 +3266,14 @@ fn expand_view_def(def: &SqlTableDef, catalog: &SqlCatalog) -> Result<LogicalPla
                     }
                 }
             }
+            ctx.record_plan_nodes(1, pos)?;
             Ok(LogicalPlan::Project {
                 input: Box::new(scan),
                 exprs,
                 schema: spans_view_schema(),
             })
         }
-        SqlViewKind::Traces => expand_traces_view(def, catalog),
+        SqlViewKind::Traces => expand_traces_view(def, ctx, pos),
         SqlViewKind::Scores => {
             let scan = build_windowed_scan(
                 def,
@@ -2408,6 +3281,8 @@ fn expand_view_def(def: &SqlTableDef, catalog: &SqlCatalog) -> Result<LogicalPla
                 "created_at",
                 catalog.window(),
                 catalog.visible_from(),
+                ctx,
+                pos,
             )?;
             let raw = raw_scores_schema();
             let mut exprs = Vec::with_capacity(23);
@@ -2427,6 +3302,7 @@ fn expand_view_def(def: &SqlTableDef, catalog: &SqlCatalog) -> Result<LogicalPla
                     exprs.push(col_expr);
                 }
             }
+            ctx.record_plan_nodes(1, pos)?;
             Ok(LogicalPlan::Project {
                 input: Box::new(scan),
                 exprs,
@@ -2437,7 +3313,7 @@ fn expand_view_def(def: &SqlTableDef, catalog: &SqlCatalog) -> Result<LogicalPla
             let traces_def = catalog.get("traces").ok_or_else(|| {
                 QueryError::internal("traces view must be registered for sessions view")
             })?;
-            let traces_plan = expand_traces_view(traces_def, catalog)?;
+            let traces_plan = expand_traces_view(traces_def, ctx, pos)?;
             let t_schema = traces_plan.schema().clone();
             let col_of = |name: &str| -> Result<Expr, QueryError> {
                 let idx = t_schema
@@ -2460,6 +3336,7 @@ fn expand_view_def(def: &SqlTableDef, catalog: &SqlCatalog) -> Result<LogicalPla
             let user_col = col_of("user_id")?;
             let tags_col = col_of("tags")?;
 
+            ctx.record_plan_nodes(3, pos)?;
             let filtered = LogicalPlan::Filter {
                 input: Box::new(traces_plan),
                 predicate: Expr::Unary {
@@ -2608,13 +3485,20 @@ fn expand_view_def(def: &SqlTableDef, catalog: &SqlCatalog) -> Result<LogicalPla
     }
 }
 
-fn expand_traces_view(def: &SqlTableDef, catalog: &SqlCatalog) -> Result<LogicalPlan, QueryError> {
+fn expand_traces_view(
+    def: &SqlTableDef,
+    ctx: &BindCtx<'_>,
+    pos: Option<Position>,
+) -> Result<LogicalPlan, QueryError> {
+    let catalog = ctx.catalog;
     let scan = build_windowed_scan(
         def,
         raw_traces_schema(),
         "start_time",
         catalog.window(),
         catalog.visible_from(),
+        ctx,
+        pos,
     )?;
     let raw = raw_traces_schema();
     let start_idx = raw
@@ -2664,6 +3548,7 @@ fn expand_traces_view(def: &SqlTableDef, catalog: &SqlCatalog) -> Result<Logical
             }
         }
     }
+    ctx.record_plan_nodes(1, pos)?;
     Ok(LogicalPlan::Project {
         input: Box::new(scan),
         exprs,
@@ -2677,6 +3562,8 @@ fn build_windowed_scan(
     window_col: &str,
     window: Option<TimeWindow>,
     visible_from: Option<i64>,
+    ctx: &BindCtx<'_>,
+    pos: Option<Position>,
 ) -> Result<LogicalPlan, QueryError> {
     let idx = full_schema
         .index_of(window_col)
@@ -2719,6 +3606,7 @@ fn build_windowed_scan(
             data_type: DataType::Bool,
         });
     }
+    ctx.record_plan_nodes(1, pos)?;
     Ok(LogicalPlan::Scan {
         table: def.name.clone(),
         kind: def.kind,
@@ -2761,6 +3649,7 @@ fn bind_from(
 ) -> Result<(LogicalPlan, Scope), QueryError> {
     if from.is_empty() {
         let empty_schema = Schema::try_new_arc(Vec::new())?;
+        ctx.record_plan_nodes(1, None)?;
         return Ok((
             LogicalPlan::EmptyRow {
                 schema: empty_schema,
@@ -2774,23 +3663,38 @@ fn bind_from(
         .next()
         .ok_or_else(|| QueryError::internal("empty from slice"))?;
     let (mut plan, mut scope) = bind_table_with_joins(first, ctx)?;
+    let mut plan_depth = plan.depth();
     for twj in iter {
         if let TableFactor::UNNEST { .. } = &twj.relation {
-            let (mut next_plan, mut next_scope) =
-                bind_unnest_over(plan, scope, &twj.relation, ctx)?;
+            let (mut next_plan, mut next_scope, mut next_depth) =
+                bind_unnest_over(plan, plan_depth, scope, &twj.relation, ctx)?;
             for join in &twj.joins {
-                let (joined, joined_scope) = bind_join(next_plan, next_scope, join, ctx)?;
+                let (joined, joined_scope, joined_depth) =
+                    bind_join(next_plan, next_depth, next_scope, join, ctx)?;
                 next_plan = joined;
                 next_scope = joined_scope;
+                next_depth = joined_depth;
             }
             plan = next_plan;
             scope = next_scope;
+            plan_depth = next_depth;
             continue;
         }
         let (right_plan, right_scope) = bind_table_with_joins(twj, ctx)?;
-        let (joined, joined_scope) = cross_join(plan, scope, right_plan, right_scope)?;
+        let right_depth = right_plan.depth();
+        let (joined, joined_scope, joined_depth) = cross_join(
+            plan,
+            plan_depth,
+            scope,
+            right_plan,
+            right_depth,
+            right_scope,
+            ctx,
+            at(&twj.relation),
+        )?;
         plan = joined;
         scope = joined_scope;
+        plan_depth = joined_depth;
     }
     Ok((plan, scope))
 }
@@ -2800,10 +3704,13 @@ fn bind_table_with_joins(
     ctx: &BindCtx<'_>,
 ) -> Result<(LogicalPlan, Scope), QueryError> {
     let (mut left_plan, mut left_scope) = bind_table_factor(&twj.relation, ctx)?;
+    let mut left_depth = left_plan.depth();
     for join in &twj.joins {
-        let (next_plan, next_scope) = bind_join(left_plan, left_scope, join, ctx)?;
+        let (next_plan, next_scope, next_depth) =
+            bind_join(left_plan, left_depth, left_scope, join, ctx)?;
         left_plan = next_plan;
         left_scope = next_scope;
+        left_depth = next_depth;
     }
     Ok((left_plan, left_scope))
 }
@@ -2837,9 +3744,10 @@ fn bind_table_factor(
                 )
                 .into());
             };
+            let table_name = require_valid_ident(ident)?;
             let plan = expand_table(ident, ctx)?;
-            let mut scope = Scope::from_schema(plan.schema(), Some(&ident_canonical(ident)));
-            let plan = apply_table_alias(plan, &mut scope, alias.as_ref())?;
+            let mut scope = Scope::from_schema(plan.schema(), Some(&table_name));
+            let plan = apply_table_alias(plan, &mut scope, alias.as_ref(), ctx)?;
             Ok((plan, scope))
         }
         TableFactor::Derived {
@@ -2854,7 +3762,7 @@ fn bind_table_factor(
             let sub_ctx = ctx.with_depth(ctx.depth + 1);
             let plan = bind_query(subquery, &sub_ctx)?;
             let mut scope = Scope::from_schema(plan.schema(), None);
-            let plan = apply_table_alias(plan, &mut scope, alias.as_ref())?;
+            let plan = apply_table_alias(plan, &mut scope, alias.as_ref(), ctx)?;
             Ok((plan, scope))
         }
         TableFactor::NestedJoin {
@@ -2884,6 +3792,8 @@ fn bind_table_factor(
                         new_cols.push(col);
                     }
                     let schema = Schema::try_new_arc(fields)?;
+                    ctx.check_plan_depth(plan.depth().saturating_add(1), pos)?;
+                    ctx.record_plan_nodes(1, pos)?;
                     plan = LogicalPlan::Project {
                         input: Box::new(plan),
                         exprs,
@@ -2891,16 +3801,18 @@ fn bind_table_factor(
                     };
                     scope = Scope { cols: new_cols };
                 }
-                plan = apply_table_alias(plan, &mut scope, Some(table_alias))?;
+                plan = apply_table_alias(plan, &mut scope, Some(table_alias), ctx)?;
             }
             Ok((plan, scope))
         }
         TableFactor::UNNEST { .. } => {
             let empty_schema = Schema::try_new_arc(Vec::new())?;
+            ctx.record_plan_nodes(1, pos)?;
             let empty = LogicalPlan::EmptyRow {
                 schema: empty_schema,
             };
-            bind_unnest_over(empty, Scope::default(), factor, ctx)
+            let (plan, scope, _) = bind_unnest_over(empty, 1, Scope::default(), factor, ctx)?;
+            Ok((plan, scope))
         }
         _ => Err(InvalidQuery::new("unsupported table factor in FROM", pos).into()),
     }
@@ -2910,25 +3822,27 @@ fn apply_table_alias(
     plan: LogicalPlan,
     scope: &mut Scope,
     alias: Option<&TableAlias>,
+    ctx: &BindCtx<'_>,
 ) -> Result<LogicalPlan, QueryError> {
     let Some(table_alias) = alias else {
         return Ok(plan);
     };
-    let qualifier = ident_canonical(&table_alias.name);
+    let qualifier = require_valid_ident(&table_alias.name)?;
     scope.set_qualifier(Some(&qualifier));
     if table_alias.columns.is_empty() {
         return Ok(plan);
     }
     scope.rename_prefix(&table_alias.columns)?;
-    apply_column_aliases(plan, &table_alias.columns)
+    apply_column_aliases(plan, &table_alias.columns, ctx)
 }
 
 fn bind_unnest_over(
     left_plan: LogicalPlan,
+    left_depth: usize,
     mut left_scope: Scope,
     factor: &TableFactor,
     ctx: &BindCtx<'_>,
-) -> Result<(LogicalPlan, Scope), QueryError> {
+) -> Result<(LogicalPlan, Scope, usize), QueryError> {
     let pos = at(factor);
     let TableFactor::UNNEST {
         alias,
@@ -2981,7 +3895,10 @@ fn bind_unnest_over(
 
     let mut unnest_col_indices = Vec::with_capacity(array_exprs.len());
     let mut out_fields = left_plan.schema().fields().to_vec();
-    let qualifier = alias.as_ref().map(|a| ident_canonical(&a.name));
+    let qualifier = match alias {
+        Some(a) => Some(require_valid_ident(&a.name)?),
+        None => None,
+    };
     let mut new_scope_cols = Vec::with_capacity(array_exprs.len());
 
     for (i, expr_ast) in array_exprs.iter().enumerate() {
@@ -2998,9 +3915,9 @@ fn bind_unnest_over(
         };
         let col_name = if let Some(ta) = alias {
             if let Some(c) = ta.columns.get(i) {
-                ident_canonical(&c.name)
+                require_valid_ident(&c.name)?
             } else if array_exprs.len() == 1 {
-                ident_canonical(&ta.name)
+                require_valid_ident(&ta.name)?
             } else {
                 format!("unnest_{i}")
             }
@@ -3023,10 +3940,14 @@ fn bind_unnest_over(
             nullable: true,
             index: col_idx,
             hidden_in_star: false,
+            internal: false,
         });
     }
     left_scope.cols.extend(new_scope_cols);
 
+    let new_depth = left_depth.saturating_add(2);
+    ctx.check_plan_depth(new_depth, pos)?;
+    ctx.record_plan_nodes(2, pos)?;
     let proj_schema = Schema::try_new_arc(proj_fields)?;
     let projected = LogicalPlan::Project {
         input: Box::new(left_plan),
@@ -3040,15 +3961,23 @@ fn bind_unnest_over(
         preserve_nulls: false,
         schema: out_schema,
     };
-    Ok((unnested, left_scope))
+    Ok((unnested, left_scope, new_depth))
 }
 
+#[expect(clippy::too_many_arguments)]
 fn cross_join(
     left_plan: LogicalPlan,
+    left_depth: usize,
     left_scope: Scope,
     right_plan: LogicalPlan,
+    right_depth: usize,
     right_scope: Scope,
-) -> Result<(LogicalPlan, Scope), QueryError> {
+    ctx: &BindCtx<'_>,
+    pos: Option<Position>,
+) -> Result<(LogicalPlan, Scope, usize), QueryError> {
+    let new_depth = 1usize.saturating_add(left_depth.max(right_depth));
+    ctx.check_plan_depth(new_depth, pos)?;
+    ctx.record_plan_nodes(1, pos)?;
     let left_len = left_scope.len();
     let schema = join_output_schema(JoinType::Cross, left_plan.schema(), right_plan.schema());
     let mut combined = left_scope;
@@ -3066,22 +3995,23 @@ fn cross_join(
         residual: None,
         schema,
     };
-    Ok((plan, combined))
+    Ok((plan, combined, new_depth))
 }
 
 fn bind_join(
     left_plan: LogicalPlan,
+    left_depth: usize,
     left_scope: Scope,
     join: &Join,
     ctx: &BindCtx<'_>,
-) -> Result<(LogicalPlan, Scope), QueryError> {
+) -> Result<(LogicalPlan, Scope, usize), QueryError> {
     let pos = at(&join.relation);
     if matches!(
         join.join_operator,
         JoinOperator::CrossJoin(JoinConstraint::None)
     ) && matches!(&join.relation, TableFactor::UNNEST { .. })
     {
-        return bind_unnest_over(left_plan, left_scope, &join.relation, ctx);
+        return bind_unnest_over(left_plan, left_depth, left_scope, &join.relation, ctx);
     }
 
     let (kind, constraint) = match &join.join_operator {
@@ -3091,7 +4021,17 @@ fn bind_join(
         JoinOperator::FullOuter(c) => (LogicalJoinKind::Full, c),
         JoinOperator::CrossJoin(JoinConstraint::None) => {
             let (right_plan, right_scope) = bind_table_factor(&join.relation, ctx)?;
-            return cross_join(left_plan, left_scope, right_plan, right_scope);
+            let right_depth = right_plan.depth();
+            return cross_join(
+                left_plan,
+                left_depth,
+                left_scope,
+                right_plan,
+                right_depth,
+                right_scope,
+                ctx,
+                pos,
+            );
         }
         JoinOperator::CrossJoin(_) => {
             return Err(InvalidQuery::new("CROSS JOIN does not take ON or USING", pos).into());
@@ -3102,6 +4042,8 @@ fn bind_join(
     };
 
     let (right_plan, right_scope) = bind_table_factor(&join.relation, ctx)?;
+    let right_depth = right_plan.depth();
+    let join_depth = 1usize.saturating_add(left_depth.max(right_depth));
     let left_len = left_scope.len();
     let mut combined_scope = left_scope.clone();
     for mut c in right_scope.cols.iter().cloned() {
@@ -3152,6 +4094,14 @@ fn bind_join(
 
             if left_keys.is_empty() {
                 if kind == LogicalJoinKind::Inner {
+                    let out_depth = if residual.is_some() {
+                        join_depth.saturating_add(1)
+                    } else {
+                        join_depth
+                    };
+                    let added_nodes = if residual.is_some() { 2 } else { 1 };
+                    ctx.check_plan_depth(out_depth, pos)?;
+                    ctx.record_plan_nodes(added_nodes, pos)?;
                     let cross_schema = join_output_schema(
                         JoinType::Cross,
                         left_plan.schema(),
@@ -3174,7 +4124,7 @@ fn bind_join(
                         },
                         None => cross,
                     };
-                    return Ok((out, combined_scope));
+                    return Ok((out, combined_scope, out_depth));
                 }
                 return Err(InvalidQuery::new(
                     "OUTER JOIN requires at least one equality predicate in ON",
@@ -3183,6 +4133,8 @@ fn bind_join(
                 .into());
             }
 
+            ctx.check_plan_depth(join_depth, pos)?;
+            ctx.record_plan_nodes(1, pos)?;
             let schema =
                 join_output_schema(exec_join_type, left_plan.schema(), right_plan.schema());
             let plan = LogicalPlan::Join {
@@ -3195,7 +4147,7 @@ fn bind_join(
                 residual,
                 schema,
             };
-            Ok((plan, combined_scope))
+            Ok((plan, combined_scope, join_depth))
         }
         JoinConstraint::Using(cols) => {
             if cols.is_empty() {
@@ -3252,6 +4204,15 @@ fn bind_join(
                 using_pairs.push((l_idx, left_len + r_idx, common));
             }
 
+            let out_depth = if kind == LogicalJoinKind::Full {
+                join_depth.saturating_add(1)
+            } else {
+                join_depth
+            };
+            let added_nodes = if kind == LogicalJoinKind::Full { 2 } else { 1 };
+            ctx.check_plan_depth(out_depth, pos)?;
+            ctx.record_plan_nodes(added_nodes, pos)?;
+
             let schema =
                 join_output_schema(exec_join_type, left_plan.schema(), right_plan.schema());
             if matches!(kind, LogicalJoinKind::Left | LogicalJoinKind::Full) {
@@ -3277,13 +4238,13 @@ fn bind_join(
                     for &(_, r_combined, _) in &using_pairs {
                         combined_scope.cols[r_combined].hidden_in_star = true;
                     }
-                    Ok((join_plan, combined_scope))
+                    Ok((join_plan, combined_scope, out_depth))
                 }
                 LogicalJoinKind::Right => {
                     for &(l_combined, _, _) in &using_pairs {
                         combined_scope.cols[l_combined].hidden_in_star = true;
                     }
-                    Ok((join_plan, combined_scope))
+                    Ok((join_plan, combined_scope, out_depth))
                 }
                 LogicalJoinKind::Full => {
                     // Project merged `coalesce(left.k, right.k) AS k` columns appended so `*` and
@@ -3338,6 +4299,7 @@ fn bind_join(
                             nullable: true,
                             index: base_len + offset,
                             hidden_in_star: false,
+                            internal: false,
                         });
                     }
                     let proj_schema = Schema::try_new_arc(proj_fields)?;
@@ -3348,9 +4310,10 @@ fn bind_join(
                             schema: proj_schema,
                         },
                         combined_scope,
+                        out_depth,
                     ))
                 }
-                _ => Ok((join_plan, combined_scope)),
+                _ => Ok((join_plan, combined_scope, out_depth)),
             }
         }
         JoinConstraint::Natural => {
@@ -3493,9 +4456,11 @@ fn apply_filter_with_subqueries(
         }
     }
 
+    let mut cur_depth = plan.depth();
     let mut plain_exprs = Vec::new();
     let sub_ctx = ctx.child_with_outer(scope);
     for conj in conjuncts {
+        let conj_pos = at(conj);
         let (node, outer_negated) = unwrap_not_subquery(conj);
         match node {
             SqlExpr::InSubquery {
@@ -3503,9 +4468,13 @@ fn apply_filter_with_subqueries(
                 subquery,
                 negated,
             } => {
+                ctx.record_subquery_join(conj_pos)?;
                 if !plain_exprs.is_empty()
                     && let Some(pred) = combine_conjuncts(std::mem::take(&mut plain_exprs))
                 {
+                    cur_depth = cur_depth.saturating_add(1);
+                    ctx.check_plan_depth(cur_depth, conj_pos)?;
+                    ctx.record_plan_nodes(1, conj_pos)?;
                     plan = LogicalPlan::Filter {
                         input: Box::new(plan),
                         predicate: pred,
@@ -3513,6 +4482,7 @@ fn apply_filter_with_subqueries(
                 }
                 let effective_neg = *negated ^ outer_negated;
                 let mut right_plan = bind_query(subquery, &sub_ctx)?;
+                let mut right_depth = right_plan.depth();
                 let r_schema = right_plan.schema().clone();
                 if r_schema.len() != 1 {
                     return Err(InvalidQuery::new(
@@ -3520,7 +4490,7 @@ fn apply_filter_with_subqueries(
                             "IN subquery must return exactly 1 column, got {}",
                             r_schema.len()
                         ),
-                        at(conj),
+                        conj_pos,
                     )
                     .into());
                 }
@@ -3544,15 +4514,18 @@ fn apply_filter_with_subqueries(
                 } else {
                     bind_plain(expr, scope, ctx)?
                 };
-                let common = coerce_comparison_many(&[&left_expr, &r_col], at(conj))?;
-                let left_key = coerce_expr(left_expr, &common, at(conj))?;
+                let common = coerce_comparison_many(&[&left_expr, &r_col], conj_pos)?;
+                let left_key = coerce_expr(left_expr, &common, conj_pos)?;
                 let right_key = if r_col.data_type() != common {
-                    let cast_expr = coerce_expr(r_col, &common, at(conj))?;
+                    let cast_expr = coerce_expr(r_col, &common, conj_pos)?;
                     let new_schema = Schema::try_new_arc(vec![Field::new(
                         r_schema.fields()[0].name.clone(),
                         common.clone(),
                         r_schema.fields()[0].nullable,
                     )])?;
+                    right_depth = right_depth.saturating_add(1);
+                    ctx.check_plan_depth(right_depth, conj_pos)?;
+                    ctx.record_plan_nodes(1, conj_pos)?;
                     right_plan = LogicalPlan::Project {
                         input: Box::new(right_plan),
                         exprs: vec![cast_expr],
@@ -3566,6 +4539,9 @@ fn apply_filter_with_subqueries(
                 } else {
                     r_col
                 };
+                cur_depth = 1usize.saturating_add(cur_depth.max(right_depth));
+                ctx.check_plan_depth(cur_depth, conj_pos)?;
+                ctx.record_plan_nodes(1, conj_pos)?;
                 let schema = Arc::clone(plan.schema());
                 plan = LogicalPlan::Join {
                     left: Box::new(plan),
@@ -3583,9 +4559,13 @@ fn apply_filter_with_subqueries(
                 };
             }
             SqlExpr::Exists { subquery, negated } => {
+                ctx.record_subquery_join(conj_pos)?;
                 if !plain_exprs.is_empty()
                     && let Some(pred) = combine_conjuncts(std::mem::take(&mut plain_exprs))
                 {
+                    cur_depth = cur_depth.saturating_add(1);
+                    ctx.check_plan_depth(cur_depth, conj_pos)?;
+                    ctx.record_plan_nodes(1, conj_pos)?;
                     plan = LogicalPlan::Filter {
                         input: Box::new(plan),
                         predicate: pred,
@@ -3593,6 +4573,11 @@ fn apply_filter_with_subqueries(
                 }
                 let effective_neg = *negated ^ outer_negated;
                 let sub_plan = bind_query(subquery, &sub_ctx)?;
+                let limited_depth = sub_plan.depth().saturating_add(1);
+                ctx.check_plan_depth(limited_depth, conj_pos)?;
+                let next_depth = 1usize.saturating_add(cur_depth.max(limited_depth));
+                ctx.check_plan_depth(next_depth, conj_pos)?;
+                ctx.record_plan_nodes(2, conj_pos)?;
                 let limited = LogicalPlan::Limit {
                     input: Box::new(sub_plan),
                     skip: 0,
@@ -3614,12 +4599,13 @@ fn apply_filter_with_subqueries(
                     residual: None,
                     schema,
                 };
+                cur_depth = next_depth;
             }
             _ => {
                 if contains_subquery(conj) {
                     return Err(InvalidQuery::new(
                         "subqueries are only supported as top-level AND conjuncts with IN, NOT IN, EXISTS, or NOT EXISTS in WHERE/HAVING",
-                        at(conj),
+                        conj_pos,
                     )
                     .into());
                 }
@@ -3633,13 +4619,16 @@ fn apply_filter_with_subqueries(
                 } else {
                     bind_plain(conj, scope, ctx)?
                 };
-                let bool_expr = expect_bool_or_null(bound, at(conj))?;
+                let bool_expr = expect_bool_or_null(bound, conj_pos)?;
                 plain_exprs.push(bool_expr);
             }
         }
     }
 
     if let Some(pred) = combine_conjuncts(plain_exprs) {
+        cur_depth = cur_depth.saturating_add(1);
+        ctx.check_plan_depth(cur_depth, at(predicate_ast))?;
+        ctx.record_plan_nodes(1, at(predicate_ast))?;
         plan = LogicalPlan::Filter {
             input: Box::new(plan),
             predicate: pred,
@@ -3882,6 +4871,10 @@ fn bind_select(
         || select.named_window.iter().any(named_window_has_aggregate)
         || outer_order_by.is_some_and(order_by_has_aggregate);
 
+    for def in &select.named_window {
+        require_valid_ident(&def.0)?;
+    }
+
     // Build expanded SelectItem list against `scope`
     let mut expanded_items =
         expand_select_items(&select.projection, &scope, !select.from.is_empty())?;
@@ -3892,13 +4885,13 @@ fn bind_select(
     };
     let mut named_windows_cloned: Option<Vec<sqlparser::ast::NamedWindowDefinition>> =
         if has_agg && !select.named_window.is_empty() {
-            Some(select.named_window.clone())
+            Some(clone_named_window_defs(&select.named_window))
         } else {
             None
         };
 
     if has_agg {
-        let mut having_cloned = select.having.clone();
+        let mut having_cloned = select.having.as_ref().map(clone_sql_expr);
         let (agg_plan, agg_scope) = bind_aggregate_phase(
             plan,
             &scope,
@@ -3953,7 +4946,7 @@ fn bind_select(
             source_hint: item.source_hint,
         });
     }
-    let mut order_exprs_rewritten: Option<Vec<(OrderByExpr, Option<QualHint>)>> = None;
+    let mut order_exprs_rewritten: Option<Vec<(OrderByExpr, Option<OrderQualIdent>)>> = None;
     if let Some(ob) = effective_order_by {
         let OrderByKind::Expressions(exprs) = &ob.kind else {
             return Err(InvalidQuery::new("ORDER BY ALL is not supported", at(ob)).into());
@@ -3968,20 +4961,16 @@ fn bind_select(
                     InvalidQuery::new("ORDER BY WITH FILL is not supported", at(ob_expr)).into(),
                 );
             }
-            let mut cloned_ob = OrderByExpr {
-                expr: clone_sql_expr(&ob_expr.expr),
-                options: ob_expr.options,
-                with_fill: ob_expr.with_fill.clone(),
-            };
-            let qual_hint = extract_qual_hint(&cloned_ob.expr);
+            let mut cloned_ob = clone_order_by_expr(ob_expr);
+            let qual_ident = extract_order_qual_ident(&cloned_ob.expr);
             extract_windows_in_expr(&mut cloned_ob.expr, &scope, ctx, &mut win_state)?;
-            rewritten.push((cloned_ob, qual_hint));
+            rewritten.push((cloned_ob, qual_ident));
         }
         order_exprs_rewritten = Some(rewritten);
     }
 
     if !win_state.specs.is_empty() {
-        let (win_plan, win_scope) = apply_window_groups(plan, scope, win_state)?;
+        let (win_plan, win_scope) = apply_window_groups(plan, scope, win_state, ctx, pos)?;
         plan = win_plan;
         scope = win_scope;
     }
@@ -3990,6 +4979,11 @@ fn bind_select(
     let mut select_bound: Vec<BoundSelectItem> = Vec::with_capacity(items_after_window.len());
     let mut select_fields = Vec::with_capacity(items_after_window.len());
     for item in &items_after_window {
+        if item.name.is_empty() {
+            return Err(
+                InvalidQuery::new("empty identifier is not allowed", at(&item.expr)).into(),
+            );
+        }
         let bound = bind_sql_expr(&item.expr, &scope, ctx, None)?;
         let nullable = expr_nullable(&bound, &scope);
         select_fields.push(Field::new(item.name.clone(), bound.data_type(), nullable));
@@ -4012,6 +5006,8 @@ fn bind_select(
             // Project -> Distinct -> Sort (ORDER BY must resolve against SELECT outputs)
             let select_schema = Schema::try_new_arc(select_fields)?;
             let select_exprs: Vec<Expr> = select_bound.iter().map(|b| b.expr.clone()).collect();
+            ctx.check_plan_depth(plan.depth().saturating_add(3), pos)?;
+            ctx.record_plan_nodes(3, pos)?;
             let proj = LogicalPlan::Project {
                 input: Box::new(plan),
                 exprs: select_exprs,
@@ -4022,10 +5018,10 @@ fn bind_select(
             };
 
             let mut sort_keys = Vec::with_capacity(ob_list.len());
-            for (ob_expr, qual_hint) in &ob_list {
+            for (ob_expr, qual_ident) in &ob_list {
                 let key_expr = resolve_distinct_order_expr(
                     &ob_expr.expr,
-                    qual_hint.as_ref(),
+                    qual_ident.as_ref(),
                     &select_bound,
                     &select_alias_pairs,
                     &scope,
@@ -4095,6 +5091,8 @@ fn bind_select(
             });
         }
 
+        ctx.check_plan_depth(plan.depth().saturating_add(2), pos)?;
+        ctx.record_plan_nodes(2, pos)?;
         let ext_schema = Schema::try_new_arc(all_fields)?;
         let proj = LogicalPlan::Project {
             input: Box::new(plan),
@@ -4116,6 +5114,9 @@ fn bind_select(
         ));
     }
 
+    let added = if is_distinct { 2 } else { 1 };
+    ctx.check_plan_depth(plan.depth().saturating_add(added), pos)?;
+    ctx.record_plan_nodes(added, pos)?;
     let select_schema = Schema::try_new_arc(select_fields)?;
     let select_exprs: Vec<Expr> = select_bound.into_iter().map(|b| b.expr).collect();
     let mut out = LogicalPlan::Project {
@@ -4163,6 +5164,7 @@ fn bind_plain_where_expr(
 // ---------------------------------------------------------------------------
 
 type QualHint = (Option<String>, String);
+type OrderQualIdent = (Option<Ident>, Ident);
 
 struct BoundSelectItem {
     name: String,
@@ -4200,7 +5202,7 @@ fn expand_select_items(
                     );
                 }
                 for col in &scope.cols {
-                    if col.hidden_in_star {
+                    if col.hidden_in_star || col.internal {
                         continue;
                     }
                     let expr = match &col.qualifier {
@@ -4232,10 +5234,13 @@ fn expand_select_items(
                         InvalidQuery::new("qualified wildcard must be `alias.*`", at(obj)).into(),
                     );
                 };
+                require_valid_ident(tbl)?;
                 let matched: Vec<&ScopeCol> = scope
                     .cols
                     .iter()
-                    .filter(|c| c.qualifier.as_ref().is_some_and(|q| ident_matches(q, tbl)))
+                    .filter(|c| {
+                        !c.internal && c.qualifier.as_ref().is_some_and(|q| ident_matches(q, tbl))
+                    })
                     .collect();
                 if matched.is_empty() {
                     return Err(InvalidQuery::new(
@@ -4270,7 +5275,7 @@ fn expand_select_items(
             SelectItem::ExprWithAlias { expr, alias } => {
                 let source_hint = extract_qual_hint(expr);
                 out.push(ExpandedItem {
-                    name: ident_canonical(alias),
+                    name: require_valid_ident(alias)?,
                     expr: clone_sql_expr(expr),
                     explicit_alias: true,
                     source_hint,
@@ -4308,16 +5313,9 @@ fn reject_wildcard_opts(
 
 fn clone_order_by(ob: &OrderBy) -> OrderBy {
     let kind = match &ob.kind {
-        OrderByKind::Expressions(exprs) => OrderByKind::Expressions(
-            exprs
-                .iter()
-                .map(|e| OrderByExpr {
-                    expr: clone_sql_expr(&e.expr),
-                    options: e.options,
-                    with_fill: e.with_fill.clone(),
-                })
-                .collect(),
-        ),
+        OrderByKind::Expressions(exprs) => {
+            OrderByKind::Expressions(exprs.iter().map(clone_order_by_expr).collect())
+        }
         other => other.clone(),
     };
     OrderBy {
@@ -4369,6 +5367,23 @@ fn extract_qual_hint(mut expr: &SqlExpr) -> Option<(Option<String>, String)> {
         SqlExpr::Identifier(ident) => Some((None, ident_canonical(ident))),
         SqlExpr::CompoundIdentifier(parts) if parts.len() == 2 => {
             Some((Some(ident_canonical(&parts[0])), ident_canonical(&parts[1])))
+        }
+        _ => None,
+    }
+}
+
+fn extract_order_qual_ident(mut expr: &SqlExpr) -> Option<OrderQualIdent> {
+    while let SqlExpr::Nested(inner) = expr {
+        expr = inner;
+    }
+    match expr {
+        SqlExpr::Identifier(ident) if !is_internal_ident(ident) => Some((None, ident.clone())),
+        SqlExpr::CompoundIdentifier(parts)
+            if parts.len() == 2
+                && !is_internal_ident(&parts[0])
+                && !is_internal_ident(&parts[1]) =>
+        {
+            Some((Some(parts[0].clone()), parts[1].clone()))
         }
         _ => None,
     }
@@ -4674,7 +5689,6 @@ fn push_expr_children<'a>(node: &'a SqlExpr, stack: &mut Vec<&'a SqlExpr>) {
 
 struct GroupEntry {
     name: String,
-    qualifier: Option<String>,
     from_expr: Expr,
     bin_op_count: usize,
     nullable: bool,
@@ -4735,12 +5749,12 @@ fn bind_aggregate_phase(
         reject_agg_or_window_in_clause(resolved_ast, "GROUP BY")?;
         let bound = bind_sql_expr(resolved_ast, from_scope, ctx, None)?;
         let nullable = expr_nullable(&bound, from_scope);
-        let (qualifier, name) = if let Expr::Column { index, .. } = &bound
+        let name = if let Expr::Column { index, .. } = &bound
             && let Some(sc) = from_scope.cols.get(*index)
         {
-            (sc.qualifier.clone(), sc.name.clone())
+            sc.name.clone()
         } else {
-            (None, default_expr_name(resolved_ast))
+            default_expr_name(resolved_ast)
         };
         let bin_op_count = ir_bin_count(&bound);
         group_entries.push(GroupEntry {
@@ -4749,7 +5763,6 @@ fn bind_aggregate_phase(
             } else {
                 name
             },
-            qualifier,
             from_expr: bound,
             bin_op_count,
             nullable,
@@ -4820,12 +5833,13 @@ fn bind_aggregate_phase(
         agg_fields.push(Field::new(g.name.clone(), dt.clone(), g.nullable));
         group_by_pairs.push((g.name.clone(), g.from_expr.clone()));
         agg_scope_cols.push(ScopeCol {
-            qualifier: g.qualifier.clone(),
+            qualifier: None,
             name: g.synth_name.clone(),
             data_type: dt,
             nullable: g.nullable,
             index: idx,
             hidden_in_star: false,
+            internal: true,
         });
     }
 
@@ -4844,10 +5858,13 @@ fn bind_aggregate_phase(
             nullable: field.nullable,
             index: gb_len + a_idx,
             hidden_in_star: false,
+            internal: true,
         });
     }
 
     let agg_schema = Schema::try_new_arc(agg_fields)?;
+    ctx.check_plan_depth(plan.depth().saturating_add(1), None)?;
+    ctx.record_plan_nodes(1, None)?;
     let mut agg_plan = LogicalPlan::Aggregate {
         input: Box::new(plan),
         group_by: group_by_pairs,
@@ -5183,7 +6200,7 @@ fn rewrite_agg_expr(
                 if let Some((total_steps, match_idx, ref synth_name)) = best
                     && hop == total_steps - 1 - match_idx
                 {
-                    *cur_mut = SqlExpr::Identifier(Ident::with_quote('"', synth_name.clone()));
+                    *cur_mut = SqlExpr::Identifier(internal_ident(synth_name));
                     break;
                 }
                 match cur_mut {
@@ -5214,7 +6231,7 @@ fn rewrite_agg_expr(
                     .iter()
                     .find(|g| g.from_expr == bound_from)
             {
-                *node = SqlExpr::Identifier(Ident::with_quote('"', g.synth_name.clone()));
+                *node = SqlExpr::Identifier(internal_ident(&g.synth_name));
                 continue;
             }
 
@@ -5275,7 +6292,7 @@ fn rewrite_agg_expr(
         {
             let (agg_func, filter, out_dt, nullable) = bind_agg_call(kind, f, from_scope, ctx)?;
             let synth = collector.register_agg(agg_func, filter, out_dt, nullable);
-            *node = SqlExpr::Identifier(Ident::with_quote('"', synth));
+            *node = SqlExpr::Identifier(internal_ident(&synth));
             continue;
         }
 
@@ -5296,6 +6313,72 @@ fn rewrite_agg_expr(
                             work.push((e, depth + 1));
                         }
                     }
+                }
+            }
+            SqlExpr::CompoundFieldAccess { root, access_chain } => {
+                let qualified = match (root.as_ref(), access_chain.first()) {
+                    (
+                        SqlExpr::Identifier(tbl),
+                        Some(sqlparser::ast::AccessExpr::Dot(SqlExpr::Identifier(col))),
+                    ) => Some((tbl.clone(), col.clone())),
+                    _ => None,
+                };
+                if let Some((tbl, col)) = qualified {
+                    if let Some((_, sc)) = from_scope.resolve_local(&[tbl.clone(), col.clone()])? {
+                        let col_expr = Expr::Column {
+                            index: sc.index,
+                            name: sc.name.clone(),
+                            data_type: sc.data_type.clone(),
+                        };
+                        if let Some(g) = collector
+                            .group_entries
+                            .iter()
+                            .find(|g| g.from_expr == col_expr)
+                        {
+                            **root = SqlExpr::Identifier(internal_ident(&g.synth_name));
+                            access_chain.remove(0);
+                            for acc in access_chain.iter_mut().rev() {
+                                if let sqlparser::ast::AccessExpr::Subscript(
+                                    sqlparser::ast::Subscript::Index { index },
+                                ) = acc
+                                {
+                                    work.push((index, depth + 1));
+                                }
+                            }
+                        } else {
+                            return Err(InvalidQuery::new(
+                                format!(
+                                    "column `{}.{}` must appear in the GROUP BY clause or be used in an aggregate function",
+                                    ident_display(&tbl),
+                                    ident_display(&col)
+                                ),
+                                at_ident(&tbl),
+                            )
+                            .into());
+                        }
+                    } else {
+                        // Outer or unknown qualified reference: leave `root` + `Dot` intact so
+                        // `root` is never mistaken for an inner column of the same name, and still
+                        // rewrite subscript index expressions.
+                        for acc in access_chain[1..].iter_mut().rev() {
+                            if let sqlparser::ast::AccessExpr::Subscript(
+                                sqlparser::ast::Subscript::Index { index },
+                            ) = acc
+                            {
+                                work.push((index, depth + 1));
+                            }
+                        }
+                    }
+                } else {
+                    for acc in access_chain.iter_mut().rev() {
+                        if let sqlparser::ast::AccessExpr::Subscript(
+                            sqlparser::ast::Subscript::Index { index },
+                        ) = acc
+                        {
+                            work.push((index, depth + 1));
+                        }
+                    }
+                    work.push((root.as_mut(), depth + 1));
                 }
             }
             _ => {
@@ -5640,8 +6723,10 @@ fn extract_select_unnests(
                 return Err(InvalidQuery::new("unnest() takes 1 expression argument", pos).into());
             };
             let synth = format!("__cetra_unnest_{}", collector.exprs.len());
-            collector.exprs.push((synth.clone(), arg_ast.clone()));
-            *node = SqlExpr::Identifier(Ident::with_quote('"', synth));
+            collector
+                .exprs
+                .push((synth.clone(), clone_sql_expr(arg_ast)));
+            *node = SqlExpr::Identifier(internal_ident(&synth));
             continue;
         }
         push_expr_children_mut(node, &mut stack);
@@ -5696,10 +6781,13 @@ fn apply_select_unnests(
             nullable: true,
             index: col_idx,
             hidden_in_star: false,
+            internal: true,
         });
     }
     scope.cols.extend(new_scope_cols);
 
+    ctx.check_plan_depth(plan.depth().saturating_add(2), None)?;
+    ctx.record_plan_nodes(2, None)?;
     let proj_schema = Schema::try_new_arc(proj_fields)?;
     let proj = LogicalPlan::Project {
         input: Box::new(plan),
@@ -5845,7 +6933,7 @@ fn extract_windows_in_expr(
                 };
                 let field = Field::new(output_name.clone(), out_dt, nullable);
                 collector.specs.push((spec, field));
-                *node = SqlExpr::Identifier(Ident::with_quote('"', output_name));
+                *node = SqlExpr::Identifier(internal_ident(&output_name));
             }
             SqlExpr::Function(f) => {
                 if let Some(name) = bare_object_name(&f.name)
@@ -5910,7 +6998,7 @@ fn resolve_named_window(
 ) -> Result<AstWindowSpec, QueryError> {
     let mut cur = ident.clone();
     loop {
-        let key = ident_canonical(&cur);
+        let key = require_valid_ident(&cur)?;
         if visited.iter().any(|v| v == &key) {
             return Err(InvalidQuery::new(
                 format!(
@@ -5950,7 +7038,7 @@ fn merge_window_spec(
     pos: Option<Position>,
 ) -> Result<AstWindowSpec, QueryError> {
     let Some(base_name) = &spec.window_name else {
-        return Ok(spec.clone());
+        return Ok(clone_window_spec(spec));
     };
     let mut merged = resolve_named_window(base_name, named, visited, pos)?;
     if !spec.partition_by.is_empty() {
@@ -5985,10 +7073,10 @@ fn merge_window_spec(
     }
     merged.window_name = None;
     if merged.order_by.is_empty() {
-        merged.order_by = spec.order_by.clone();
+        merged.order_by = spec.order_by.iter().map(clone_order_by_expr).collect();
     }
     if merged.window_frame.is_none() {
-        merged.window_frame = spec.window_frame.clone();
+        merged.window_frame = spec.window_frame.as_ref().map(clone_window_frame);
     }
     Ok(merged)
 }
@@ -6282,6 +7370,8 @@ fn apply_window_groups(
     mut plan: LogicalPlan,
     mut scope: Scope,
     collector: WindowCollector<'_>,
+    ctx: &BindCtx<'_>,
+    pos: Option<Position>,
 ) -> Result<(LogicalPlan, Scope), QueryError> {
     let mut groups: Vec<WindowGroup> = Vec::new();
     for (spec, field) in collector.specs {
@@ -6291,6 +7381,15 @@ fn apply_window_groups(
         {
             group.items.push((spec, field));
         } else {
+            if groups.len() >= MAX_WINDOW_GROUPS {
+                return Err(InvalidQuery::new(
+                    format!(
+                        "SELECT exceeds maximum of {MAX_WINDOW_GROUPS} distinct window specifications"
+                    ),
+                    pos,
+                )
+                .into());
+            }
             let partition_by = spec.partition_by.clone();
             let order_by = spec.order_by.clone();
             groups.push(WindowGroup {
@@ -6300,6 +7399,9 @@ fn apply_window_groups(
             });
         }
     }
+
+    ctx.check_plan_depth(plan.depth().saturating_add(groups.len()), pos)?;
+    ctx.record_plan_nodes(groups.len(), pos)?;
 
     for group in groups {
         let base_len = plan.schema().len();
@@ -6314,6 +7416,7 @@ fn apply_window_groups(
                 nullable: field.nullable,
                 index: base_len + offset,
                 hidden_in_star: false,
+                internal: true,
             });
             specs.push(spec);
         }
@@ -6351,7 +7454,9 @@ fn unwrap_bare_ident(mut expr: &SqlExpr) -> Option<&Ident> {
     while let SqlExpr::Nested(inner) = expr {
         expr = inner;
     }
-    if let SqlExpr::Identifier(ident) = expr {
+    if let SqlExpr::Identifier(ident) = expr
+        && !is_internal_ident(ident)
+    {
         Some(ident)
     } else {
         None
@@ -6383,7 +7488,10 @@ fn resolve_select_order_expr(
         return Ok(select_bound[ord - 1].expr.clone());
     }
 
-    if let SqlExpr::Identifier(ident) = cur {
+    if let SqlExpr::Identifier(ident) = cur
+        && !is_internal_ident(ident)
+    {
+        require_valid_ident(ident)?;
         let mut alias_matches = select_bound
             .iter()
             .filter(|b| ident_matches(&b.name, ident));
@@ -6404,7 +7512,7 @@ fn resolve_select_order_expr(
 
 fn resolve_distinct_order_expr(
     ast: &SqlExpr,
-    qual_hint: Option<&QualHint>,
+    qual_ident: Option<&OrderQualIdent>,
     select_bound: &[BoundSelectItem],
     select_aliases: &[(String, Expr)],
     scope: &Scope,
@@ -6434,19 +7542,23 @@ fn resolve_distinct_order_expr(
         });
     }
 
-    if let Some((q_opt, name)) = qual_hint {
+    if let Some((q_opt, name_ident)) = qual_ident {
+        if let Some(q_ident) = q_opt {
+            require_valid_ident(q_ident)?;
+        }
+        require_valid_ident(name_ident)?;
         let matches: Vec<usize> = select_bound
             .iter()
             .enumerate()
             .filter(|(_, b)| {
-                if let Some(q) = q_opt {
+                if let Some(q_ident) = q_opt {
                     b.source_hint.as_ref().is_some_and(|(sq, sn)| {
                         sq.as_ref()
-                            .is_some_and(|sq_str| sq_str.eq_ignore_ascii_case(q))
-                            && sn.eq_ignore_ascii_case(name)
+                            .is_some_and(|sq_str| ident_matches(sq_str, q_ident))
+                            && ident_matches(sn, name_ident)
                     })
                 } else {
-                    b.name.eq_ignore_ascii_case(name)
+                    ident_matches(&b.name, name_ident)
                 }
             })
             .map(|(i, _)| i)
@@ -6461,8 +7573,14 @@ fn resolve_distinct_order_expr(
             });
         }
         if matches.len() > 1 {
+            let label = match q_opt {
+                Some(q_ident) => {
+                    format!("{}.{}", ident_display(q_ident), ident_display(name_ident))
+                }
+                None => ident_display(name_ident),
+            };
             return Err(
-                InvalidQuery::new(format!("ORDER BY `{name}` is ambiguous"), at(ast)).into(),
+                InvalidQuery::new(format!("ORDER BY `{label}` is ambiguous"), at(ast)).into(),
             );
         }
     }
@@ -6489,13 +7607,12 @@ fn apply_order_by_plain(
     order_by: &OrderBy,
     ctx: &BindCtx<'_>,
 ) -> Result<LogicalPlan, QueryError> {
+    let pos = at(order_by);
     let OrderByKind::Expressions(exprs) = &order_by.kind else {
-        return Err(InvalidQuery::new("ORDER BY ALL is not supported", at(order_by)).into());
+        return Err(InvalidQuery::new("ORDER BY ALL is not supported", pos).into());
     };
     if order_by.interpolate.is_some() {
-        return Err(
-            InvalidQuery::new("ORDER BY INTERPOLATE is not supported", at(order_by)).into(),
-        );
+        return Err(InvalidQuery::new("ORDER BY INTERPOLATE is not supported", pos).into());
     }
     let scope = Scope::from_schema(plan.schema(), None);
     let mut keys = Vec::with_capacity(exprs.len());
@@ -6536,6 +7653,8 @@ fn apply_order_by_plain(
             nulls_first,
         });
     }
+    ctx.check_plan_depth(plan.depth().saturating_add(1), pos)?;
+    ctx.record_plan_nodes(1, pos)?;
     Ok(LogicalPlan::Sort {
         input: Box::new(plan),
         keys,
@@ -6547,6 +7666,7 @@ fn apply_limit_clause(
     limit_clause: &LimitClause,
     ctx: &BindCtx<'_>,
 ) -> Result<LogicalPlan, QueryError> {
+    let pos = at(limit_clause);
     let (limit_ast, offset_ast) = match limit_clause {
         LimitClause::LimitOffset {
             limit,
@@ -6587,6 +7707,8 @@ fn apply_limit_clause(
         return Ok(plan);
     }
 
+    ctx.check_plan_depth(plan.depth().saturating_add(1), pos)?;
+    ctx.record_plan_nodes(1, pos)?;
     Ok(LogicalPlan::Limit {
         input: Box::new(plan),
         skip,
@@ -7724,5 +8846,310 @@ mod tests {
                 "{unsortable}"
             );
         }
+    }
+
+    #[test]
+    fn enforces_plan_depth_window_group_and_subquery_bounds_on_2mib_stack() {
+        let handle = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                // Trigger 1: > MAX_WINDOW_GROUPS distinct window specs rejected cleanly.
+                let win_items: Vec<String> = (0..40)
+                    .map(|i| {
+                        format!("sum(duration_ns) OVER (PARTITION BY duration_ns, {i}) AS w{i}")
+                    })
+                    .collect();
+                let win_sql = format!("SELECT {} FROM spans", win_items.join(", "));
+                let err = bind_sql(&win_sql).unwrap_err();
+                assert!(
+                    matches!(err, QueryError::Invalid(ref e) if e.message.contains("32")),
+                    "expected window group cap error, got: {err:?}"
+                );
+
+                // Trigger 2: > MAX_SUBQUERY_JOINS EXISTS filters in WHERE rejected cleanly.
+                let exists_clauses = vec!["EXISTS (SELECT 1)"; 40].join(" AND ");
+                let subq_sql = format!("SELECT name FROM spans WHERE {exists_clauses}");
+                let err = bind_sql(&subq_sql).unwrap_err();
+                assert!(
+                    matches!(err, QueryError::Invalid(ref e) if e.message.contains("32")),
+                    "expected subquery filter cap error, got: {err:?}"
+                );
+
+                // Trigger 3: deep alternating non-merging UNION / UNION ALL chain exceeds MAX_PLAN_DEPTH.
+                let mut alt_union = String::from("SELECT 1 AS x");
+                for i in 0..140 {
+                    if i % 2 == 0 {
+                        alt_union.push_str(" UNION SELECT 1");
+                    } else {
+                        alt_union.push_str(" UNION ALL SELECT 1");
+                    }
+                }
+                let err = bind_sql(&alt_union).unwrap_err();
+                assert!(
+                    matches!(err, QueryError::Invalid(ref e) if e.message.contains("depth")),
+                    "expected plan depth error for alternating UNION, got: {err:?}"
+                );
+
+                // Merging UNION ALL stays flat (depth 3) and succeeds for 200 branches.
+                let flat_union = vec!["SELECT 1 AS x"; 200].join(" UNION ALL ");
+                let plan = bind_sql(&flat_union).unwrap();
+                assert!(
+                    plan.depth() <= 4,
+                    "expected flat Union, got depth {}",
+                    plan.depth()
+                );
+
+                // Trigger 4: deep FROM cross-join chain exceeds MAX_PLAN_DEPTH.
+                let cat = catalog();
+                let (base_stmt, _) =
+                    parse_and_validate_sql("SELECT 1 AS x FROM spans", &cat.registered_names())
+                        .unwrap();
+                let Statement::Query(mut deep_from_query) = base_stmt else {
+                    panic!("expected Query");
+                };
+                if let SetExpr::Select(ref mut sel) = *deep_from_query.body {
+                    let base_twj = sel.from[0].clone();
+                    for _ in 0..140 {
+                        sel.from.push(base_twj.clone());
+                    }
+                }
+                let err = bind_statement(
+                    &Statement::Query(deep_from_query),
+                    &cat,
+                    &BoundParams::Values(&[]),
+                )
+                .unwrap_err();
+                assert!(
+                    matches!(err, QueryError::Invalid(ref e) if e.message.contains("depth")),
+                    "expected plan depth error for deep FROM, got: {err:?}"
+                );
+            })
+            .unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn handles_qualified_subscripts_in_precoerce_and_group_by() {
+        // P1-1: qualified map & list subscripts with coerced placeholders.
+        bind_sql_with_params(
+            "SELECT s.attributes[{k:Int}] FROM spans s",
+            json!({"k": 42}),
+        )
+        .unwrap();
+        bind_sql_with_params(
+            "SELECT t.tags[{idx:String}] FROM traces t",
+            json!({"idx": "1"}),
+        )
+        .unwrap();
+
+        // P1-1: correlated outer qualified subscript reports correlated subquery error, not unknown column `s`.
+        let err = bind_sql_with_params(
+            "SELECT name FROM spans s WHERE EXISTS (SELECT 1 FROM scores WHERE s.attributes[{k:Int}] = 'v')",
+            json!({"k": 1}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, QueryError::Invalid(ref e) if e.message.contains("correlated")),
+            "expected correlated subquery error, got: {err:?}"
+        );
+
+        // P1-2: qualified subscript over grouped column & grouped subscript expression.
+        bind_sql("SELECT s.attributes['env'], count(*) FROM spans s GROUP BY s.attributes")
+            .unwrap();
+        bind_sql("SELECT s.attributes['env'], count(*) FROM spans s GROUP BY s.attributes['env']")
+            .unwrap();
+
+        // P1-2: ungrouped qualified subscript rejected with GROUP BY error.
+        let err = bind_sql("SELECT s.attributes['env'], count(*) FROM spans s GROUP BY s.name")
+            .unwrap_err();
+        assert!(
+            matches!(err, QueryError::Invalid(ref e) if e.message.contains("GROUP BY")),
+            "expected GROUP BY error, got: {err:?}"
+        );
+
+        // P1-2: outer qualified subscript in GROUP BY subquery does not collide with inner column sharing alias name.
+        let err = bind_sql(
+            "WITH inner_t AS (SELECT 'x' AS s, 1 AS v) \
+             SELECT name FROM spans s \
+             WHERE EXISTS (SELECT s.attributes['env'], count(*) FROM inner_t GROUP BY s)",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, QueryError::Invalid(ref e) if e.message.contains("correlated")),
+            "expected correlated subquery error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn isolates_internal_synthetic_identifiers_and_rejects_empty_or_nul_idents() {
+        // P1-3: direct bind_statement rejects empty and NUL identifiers as 400 InvalidQuery (never Internal).
+        let cat = catalog();
+        let (base_stmt, _) =
+            parse_and_validate_sql("SELECT 1 AS a FROM spans", &cat.registered_names()).unwrap();
+        let mut empty_alias_stmt = base_stmt.clone();
+        if let Statement::Query(ref mut q) = empty_alias_stmt
+            && let SetExpr::Select(ref mut sel) = *q.body
+            && let Some(SelectItem::ExprWithAlias { alias, .. }) = sel.projection.first_mut()
+        {
+            *alias = Ident::with_quote('"', String::new());
+        }
+        let err = bind_statement(&empty_alias_stmt, &cat, &BoundParams::Values(&[])).unwrap_err();
+        assert!(
+            matches!(err, QueryError::Invalid(ref e) if e.message.contains("empty identifier")),
+            "expected InvalidQuery for empty alias, got: {err:?}"
+        );
+
+        let mut nul_alias_stmt = base_stmt;
+        if let Statement::Query(ref mut q) = nul_alias_stmt
+            && let SetExpr::Select(ref mut sel) = *q.body
+            && let Some(SelectItem::ExprWithAlias { alias, .. }) = sel.projection.first_mut()
+        {
+            *alias = Ident::with_quote('"', "\0__cetra_agg_0".to_owned());
+        }
+        let err = bind_statement(&nul_alias_stmt, &cat, &BoundParams::Values(&[])).unwrap_err();
+        assert!(
+            matches!(err, QueryError::Invalid(ref e) if e.message.contains("NUL byte")),
+            "expected InvalidQuery for NUL alias, got: {err:?}"
+        );
+
+        // P2-19: user columns literally named `__cetra_*` never collide with synthetic columns.
+        bind_sql(
+            "WITH t AS (SELECT 'a' AS __cetra_gb_0, 10 AS __cetra_agg_0) \
+             SELECT __cetra_gb_0, count(*) FROM t GROUP BY __cetra_gb_0",
+        )
+        .unwrap();
+        bind_sql(
+            "WITH t AS (SELECT ARRAY['a', 'b'] AS tags, 'u' AS __cetra_unnest_0) \
+             SELECT __cetra_unnest_0, unnest(tags) AS tag FROM t",
+        )
+        .unwrap();
+
+        // User cannot directly reference synthetic `__cetra_agg_0` or `spans.__cetra_gb_0` in HAVING.
+        let err = bind_sql("SELECT count(*) FROM spans HAVING __cetra_agg_0 > 0").unwrap_err();
+        assert!(
+            matches!(err, QueryError::Invalid(ref e) if e.message.contains("unknown column")),
+            "expected unknown column for synthetic agg in HAVING, got: {err:?}"
+        );
+        let err = bind_sql(
+            "SELECT name, count(*) FROM spans GROUP BY name HAVING spans.__cetra_gb_0 = 'x'",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, QueryError::Invalid(ref e) if e.message.contains("unknown column")),
+            "expected unknown column for qualified synthetic gb in HAVING, got: {err:?}"
+        );
+
+        // User alias `__cetra_win_0` (Utf8) does not shadow ORDER BY window (`row_number() OVER ()`, I64).
+        let win_alias_plan =
+            bind_sql("SELECT name AS __cetra_win_0 FROM spans ORDER BY row_number() OVER ()")
+                .unwrap();
+        let LogicalPlan::Project { input: sort_in, .. } = win_alias_plan else {
+            panic!("expected outer trim Project");
+        };
+        let LogicalPlan::Sort { keys, .. } = sort_in.as_ref() else {
+            panic!("expected Sort");
+        };
+        assert_eq!(keys[0].expr.data_type(), DataType::I64);
+    }
+
+    #[test]
+    fn distinct_order_by_respects_quoted_identifier_case_sensitivity() {
+        // P2-20: quoted ORDER BY disambiguates case-distinct SELECT aliases.
+        let plan_upper = bind_sql(
+            r#"SELECT DISTINCT name AS "Name", model AS "name" FROM spans ORDER BY "Name""#,
+        )
+        .unwrap();
+        let LogicalPlan::Sort { keys, .. } = plan_upper else {
+            panic!("expected Sort");
+        };
+        assert!(matches!(
+            &keys[0].expr,
+            Expr::Column { index: 0, name, .. } if name == "Name"
+        ));
+
+        let plan_lower = bind_sql(
+            r#"SELECT DISTINCT name AS "Name", model AS "name" FROM spans ORDER BY "name""#,
+        )
+        .unwrap();
+        let LogicalPlan::Sort { keys, .. } = plan_lower else {
+            panic!("expected Sort");
+        };
+        assert!(matches!(
+            &keys[0].expr,
+            Expr::Column { index: 1, name, .. } if name == "name"
+        ));
+
+        // Unquoted ORDER BY matches both case-insensitively and reports ambiguity.
+        let err =
+            bind_sql(r#"SELECT DISTINCT name AS "Name", model AS "name" FROM spans ORDER BY name"#)
+                .unwrap_err();
+        assert!(
+            matches!(err, QueryError::Invalid(ref e) if e.message.contains("ambiguous")),
+            "expected ambiguity error, got: {err:?}"
+        );
+
+        // Quoted table qualifier disambiguates case-distinct table aliases.
+        let plan_qual = bind_sql(
+            r#"SELECT DISTINCT "A".name AS n1, "a".name AS n2 FROM spans "A" JOIN spans "a" ON "A".trace_id = "a".trace_id ORDER BY "A".name"#,
+        )
+        .unwrap();
+        let LogicalPlan::Sort { keys, .. } = plan_qual else {
+            panic!("expected Sort");
+        };
+        assert!(matches!(&keys[0].expr, Expr::Column { index: 0, .. }));
+    }
+
+    #[test]
+    fn clones_deep_binary_spines_in_having_window_unnest_and_case_on_2mib_stack() {
+        let handle = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let sum_400 = vec!["1"; 401].join(" + ");
+
+                // Deep BinaryOp inside HAVING (cloned in bind_select)
+                let having_sql =
+                    format!("SELECT name FROM spans GROUP BY name HAVING (({sum_400}) > 0)");
+                bind_sql(&having_sql).unwrap();
+
+                // Deep BinaryOp inside named WINDOW (PARTITION BY + ORDER BY + frame bound + inheritance)
+                let sum_120 = vec!["1"; 121].join(" + ");
+                let win_sql = format!(
+                    "SELECT name, sum(duration_ns) OVER (w ROWS BETWEEN ({sum_120}) PRECEDING AND CURRENT ROW) AS s \
+                     FROM spans GROUP BY name, duration_ns \
+                     WINDOW w AS (PARTITION BY ({sum_120}) ORDER BY ({sum_120}))"
+                );
+                bind_sql(&win_sql).unwrap();
+
+                // Deep BinaryOp inside select-list UNNEST
+                let unnest_sql = format!("SELECT unnest(ARRAY[{sum_400}]) AS v FROM spans");
+                bind_sql(&unnest_sql).unwrap();
+
+                // Deep BinaryOp inside CASE + Nested with placeholder (exercises clone_sql_expr)
+                let case_sql = format!(
+                    "SELECT CASE WHEN (({sum_400}) > {{n:String}}) THEN 1 ELSE 0 END FROM spans"
+                );
+                bind_sql_with_params(&case_sql, json!({"n": "10"})).unwrap();
+
+                // Deep BinaryOp inside HAVING IN (SELECT ...) and HAVING EXISTS (SELECT ...)
+                let having_in_sql =
+                    format!("SELECT name FROM spans GROUP BY name HAVING ({sum_400}) IN (SELECT 1)");
+                bind_sql(&having_in_sql).unwrap();
+
+                let having_exists_sql = format!(
+                    "SELECT name FROM spans GROUP BY name HAVING EXISTS (SELECT ({sum_400}))"
+                );
+                bind_sql(&having_exists_sql).unwrap();
+
+                // Invalid subquery-in-SELECT still clones safely and returns 400 InvalidQuery
+                let select_in_sql =
+                    format!("SELECT ({sum_400}) IN (SELECT 1) AS x FROM spans");
+                let err = bind_sql(&select_in_sql).unwrap_err();
+                assert!(
+                    matches!(err, QueryError::Invalid(_)),
+                    "expected InvalidQuery, got: {err:?}"
+                );
+            })
+            .unwrap();
+        handle.join().unwrap();
     }
 }

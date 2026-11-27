@@ -1117,250 +1117,254 @@ fn reconcile_res(
 // ---------------------------------------------------------------------------
 
 fn fmt_physical_node(plan: &LogicalPlan, sources: &SqlSources, depth: usize, out: &mut String) {
-    if !out.is_empty() {
-        out.push('\n');
-    }
-    fmt_indent(depth, out);
+    let mut stack = vec![(plan, depth)];
+    while let Some((cur, d)) = stack.pop() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        fmt_indent(d, out);
 
-    match plan {
-        LogicalPlan::Scan {
-            table,
-            projection,
-            filters,
-            time_range,
-            id_lookups,
-            substrings,
-            map_projections,
-            limit,
-            schema,
-            ..
-        } => {
-            let spec = ScanSpec {
-                projection: projection.clone(),
-                map_projections: map_projections.clone(),
-                time_range: *time_range,
-                id_lookups: id_lookups.clone(),
-                filters: filters.clone(),
-                substrings: substrings.clone(),
-                sort_hints: Vec::new(),
-                limit: *limit,
-            };
-            let source_summary = sources
-                .get(table)
-                .map_or_else(|| "MissingSource".to_owned(), |s| s.explain_summary(&spec));
-            let proj_names: Vec<&str> = schema.fields().iter().map(|f| f.name.as_str()).collect();
-            let _ = write!(
-                out,
-                "ScanExec: {table} ({source_summary}) projection=[{}]",
-                proj_names.join(", ")
-            );
-            if !filters.is_empty() {
-                let rendered: Vec<String> = filters.iter().map(Expr::fmt_plan).collect();
-                let _ = write!(out, " filters=[{}]", rendered.join(", "));
-            }
-            if has_time_range(*time_range) {
+        match cur {
+            LogicalPlan::Scan {
+                table,
+                projection,
+                filters,
+                time_range,
+                id_lookups,
+                substrings,
+                map_projections,
+                limit,
+                schema,
+                ..
+            } => {
+                let spec = ScanSpec {
+                    projection: projection.clone(),
+                    map_projections: map_projections.clone(),
+                    time_range: *time_range,
+                    id_lookups: id_lookups.clone(),
+                    filters: filters.clone(),
+                    substrings: substrings.clone(),
+                    sort_hints: Vec::new(),
+                    limit: *limit,
+                };
+                let source_summary = sources
+                    .get(table)
+                    .map_or_else(|| "MissingSource".to_owned(), |s| s.explain_summary(&spec));
+                let proj_names: Vec<&str> =
+                    schema.fields().iter().map(|f| f.name.as_str()).collect();
                 let _ = write!(
                     out,
-                    " time_range=(min={:?}, max={:?}, around={:?})",
-                    time_range.min_ns, time_range.max_ns, time_range.around_ns
+                    "ScanExec: {table} ({source_summary}) projection=[{}]",
+                    proj_names.join(", ")
+                );
+                if !filters.is_empty() {
+                    let rendered: Vec<String> = filters.iter().map(Expr::fmt_plan).collect();
+                    let _ = write!(out, " filters=[{}]", rendered.join(", "));
+                }
+                if has_time_range(*time_range) {
+                    let _ = write!(
+                        out,
+                        " time_range=(min={:?}, max={:?}, around={:?})",
+                        time_range.min_ns, time_range.max_ns, time_range.around_ns
+                    );
+                }
+                if !id_lookups.is_empty() {
+                    let _ = write!(out, " id_lookups={id_lookups:?}");
+                }
+                if !substrings.is_empty() {
+                    let _ = write!(out, " substrings={substrings:?}");
+                }
+                if !map_projections.is_empty() {
+                    let _ = write!(out, " map_projections={}", map_projections.len());
+                }
+                if let Some(lim) = limit {
+                    let _ = write!(out, " limit={lim}");
+                }
+            }
+            LogicalPlan::Values { schema, rows } => {
+                let _ = write!(
+                    out,
+                    "ValuesExec: rows={}, cols={}",
+                    rows.len(),
+                    schema.len()
                 );
             }
-            if !id_lookups.is_empty() {
-                let _ = write!(out, " id_lookups={id_lookups:?}");
+            LogicalPlan::EmptyRow { .. } => {
+                out.push_str("EmptyRowExec");
             }
-            if !substrings.is_empty() {
-                let _ = write!(out, " substrings={substrings:?}");
+            LogicalPlan::Filter { input, predicate } => {
+                let _ = write!(out, "FilterExec: {}", predicate.fmt_plan());
+                stack.push((input, d + 1));
             }
-            if !map_projections.is_empty() {
-                let _ = write!(out, " map_projections={}", map_projections.len());
+            LogicalPlan::Project {
+                input,
+                exprs,
+                schema,
+            } => {
+                let items: Vec<String> = exprs
+                    .iter()
+                    .zip(schema.fields().iter())
+                    .map(|(expr, field)| {
+                        let rendered = expr.fmt_plan();
+                        if rendered == field.name {
+                            rendered
+                        } else {
+                            format!("{rendered} AS {}", field.name)
+                        }
+                    })
+                    .collect();
+                let _ = write!(out, "ProjectExec: [{}]", items.join(", "));
+                stack.push((input, d + 1));
             }
-            if let Some(lim) = limit {
-                let _ = write!(out, " limit={lim}");
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggs,
+                ..
+            } => {
+                let groups: Vec<String> = group_by
+                    .iter()
+                    .map(|(name, expr)| {
+                        let rendered = expr.fmt_plan();
+                        if rendered == *name {
+                            rendered
+                        } else {
+                            format!("{rendered} AS {name}")
+                        }
+                    })
+                    .collect();
+                let agg_strs: Vec<String> = aggs.iter().map(fmt_agg).collect();
+                let _ = write!(
+                    out,
+                    "HashAggExec: group_by=[{}], aggs=[{}]",
+                    groups.join(", "),
+                    agg_strs.join(", ")
+                );
+                stack.push((input, d + 1));
             }
-        }
-        LogicalPlan::Values { schema, rows } => {
-            let _ = write!(
-                out,
-                "ValuesExec: rows={}, cols={}",
-                rows.len(),
-                schema.len()
-            );
-        }
-        LogicalPlan::EmptyRow { .. } => {
-            out.push_str("EmptyRowExec");
-        }
-        LogicalPlan::Filter { input, predicate } => {
-            let _ = write!(out, "FilterExec: {}", predicate.fmt_plan());
-            fmt_physical_node(input, sources, depth + 1, out);
-        }
-        LogicalPlan::Project {
-            input,
-            exprs,
-            schema,
-        } => {
-            let items: Vec<String> = exprs
-                .iter()
-                .zip(schema.fields().iter())
-                .map(|(expr, field)| {
-                    let rendered = expr.fmt_plan();
-                    if rendered == field.name {
-                        rendered
-                    } else {
-                        format!("{rendered} AS {}", field.name)
+            LogicalPlan::Window {
+                input,
+                partition_by,
+                order_by,
+                specs,
+                ..
+            } => {
+                let parts: Vec<String> = partition_by.iter().map(Expr::fmt_plan).collect();
+                let ords: Vec<String> = order_by.iter().map(fmt_sort_key).collect();
+                let spec_strs: Vec<String> = specs.iter().map(fmt_window_spec).collect();
+                let _ = write!(
+                    out,
+                    "WindowExec: partition_by=[{}], order_by=[{}], specs=[{}]",
+                    parts.join(", "),
+                    ords.join(", "),
+                    spec_strs.join(", ")
+                );
+                stack.push((input, d + 1));
+            }
+            LogicalPlan::Sort { input, keys } => {
+                let key_strs: Vec<String> = keys.iter().map(fmt_sort_key).collect();
+                let _ = write!(out, "ExternalSortExec: [{}]", key_strs.join(", "));
+                stack.push((input, d + 1));
+            }
+            LogicalPlan::Limit { input, skip, fetch } => {
+                match fetch {
+                    Some(n) => {
+                        let _ = write!(
+                            out,
+                            "LimitExec: skip={skip}, fetch={n}, coalesce={}",
+                            *skip > 0
+                        );
                     }
-                })
-                .collect();
-            let _ = write!(out, "ProjectExec: [{}]", items.join(", "));
-            fmt_physical_node(input, sources, depth + 1, out);
-        }
-        LogicalPlan::Aggregate {
-            input,
-            group_by,
-            aggs,
-            ..
-        } => {
-            let groups: Vec<String> = group_by
-                .iter()
-                .map(|(name, expr)| {
-                    let rendered = expr.fmt_plan();
-                    if rendered == *name {
-                        rendered
-                    } else {
-                        format!("{rendered} AS {name}")
+                    None => {
+                        let _ = write!(
+                            out,
+                            "LimitExec: skip={skip}, fetch=none, coalesce={}",
+                            *skip > 0
+                        );
                     }
-                })
-                .collect();
-            let agg_strs: Vec<String> = aggs.iter().map(fmt_agg).collect();
-            let _ = write!(
-                out,
-                "HashAggExec: group_by=[{}], aggs=[{}]",
-                groups.join(", "),
-                agg_strs.join(", ")
-            );
-            fmt_physical_node(input, sources, depth + 1, out);
-        }
-        LogicalPlan::Window {
-            input,
-            partition_by,
-            order_by,
-            specs,
-            ..
-        } => {
-            let parts: Vec<String> = partition_by.iter().map(Expr::fmt_plan).collect();
-            let ords: Vec<String> = order_by.iter().map(fmt_sort_key).collect();
-            let spec_strs: Vec<String> = specs.iter().map(fmt_window_spec).collect();
-            let _ = write!(
-                out,
-                "WindowExec: partition_by=[{}], order_by=[{}], specs=[{}]",
-                parts.join(", "),
-                ords.join(", "),
-                spec_strs.join(", ")
-            );
-            fmt_physical_node(input, sources, depth + 1, out);
-        }
-        LogicalPlan::Sort { input, keys } => {
-            let key_strs: Vec<String> = keys.iter().map(fmt_sort_key).collect();
-            let _ = write!(out, "ExternalSortExec: [{}]", key_strs.join(", "));
-            fmt_physical_node(input, sources, depth + 1, out);
-        }
-        LogicalPlan::Limit { input, skip, fetch } => {
-            match fetch {
-                Some(n) => {
-                    let _ = write!(
-                        out,
-                        "LimitExec: skip={skip}, fetch={n}, coalesce={}",
-                        *skip > 0
-                    );
                 }
-                None => {
-                    let _ = write!(
-                        out,
-                        "LimitExec: skip={skip}, fetch=none, coalesce={}",
-                        *skip > 0
-                    );
+                stack.push((input, d + 1));
+            }
+            LogicalPlan::TopK {
+                input,
+                keys,
+                limit,
+                offset,
+            } => {
+                let key_strs: Vec<String> = keys.iter().map(fmt_sort_key).collect();
+                let _ = write!(
+                    out,
+                    "TopKExec: limit={limit}, offset={offset}, keys=[{}]",
+                    key_strs.join(", ")
+                );
+                stack.push((input, d + 1));
+            }
+            LogicalPlan::Distinct { input } => {
+                out.push_str("DistinctHashAggExec");
+                stack.push((input, d + 1));
+            }
+            LogicalPlan::Join {
+                left,
+                right,
+                kind,
+                left_keys,
+                right_keys,
+                null_equals_null,
+                residual,
+                ..
+            } => {
+                let kind_str = match kind {
+                    LogicalJoinKind::Inner => "Inner",
+                    LogicalJoinKind::Left => "Left",
+                    LogicalJoinKind::Right => "Right",
+                    LogicalJoinKind::Full => "Full",
+                    LogicalJoinKind::Semi => "LeftSemi",
+                    LogicalJoinKind::Anti => "LeftAnti",
+                    LogicalJoinKind::AntiNullAware => "LeftAntiNullAware",
+                    LogicalJoinKind::Cross => "Cross",
+                };
+                let pairs: Vec<String> = left_keys
+                    .iter()
+                    .zip(right_keys.iter())
+                    .map(|(l, r)| format!("{} = {}", l.fmt_plan(), r.fmt_plan()))
+                    .collect();
+                let _ = write!(
+                    out,
+                    "HashJoinExec ({kind_str}): on=[{}], null_equals_null={null_equals_null}",
+                    pairs.join(", ")
+                );
+                if let Some(res) = residual {
+                    let _ = write!(out, ", filter={}", res.fmt_plan());
+                }
+                stack.push((right, d + 1));
+                stack.push((left, d + 1));
+            }
+            LogicalPlan::Union { inputs, all, .. } => {
+                if *all {
+                    out.push_str("UnionExec (all=true)");
+                } else {
+                    out.push_str("DistinctHashAggExec -> UnionExec (all=false)");
+                }
+                for branch in inputs.iter().rev() {
+                    stack.push((branch, d + 1));
                 }
             }
-            fmt_physical_node(input, sources, depth + 1, out);
-        }
-        LogicalPlan::TopK {
-            input,
-            keys,
-            limit,
-            offset,
-        } => {
-            let key_strs: Vec<String> = keys.iter().map(fmt_sort_key).collect();
-            let _ = write!(
-                out,
-                "TopKExec: limit={limit}, offset={offset}, keys=[{}]",
-                key_strs.join(", ")
-            );
-            fmt_physical_node(input, sources, depth + 1, out);
-        }
-        LogicalPlan::Distinct { input } => {
-            out.push_str("DistinctHashAggExec");
-            fmt_physical_node(input, sources, depth + 1, out);
-        }
-        LogicalPlan::Join {
-            left,
-            right,
-            kind,
-            left_keys,
-            right_keys,
-            null_equals_null,
-            residual,
-            ..
-        } => {
-            let kind_str = match kind {
-                LogicalJoinKind::Inner => "Inner",
-                LogicalJoinKind::Left => "Left",
-                LogicalJoinKind::Right => "Right",
-                LogicalJoinKind::Full => "Full",
-                LogicalJoinKind::Semi => "LeftSemi",
-                LogicalJoinKind::Anti => "LeftAnti",
-                LogicalJoinKind::AntiNullAware => "LeftAntiNullAware",
-                LogicalJoinKind::Cross => "Cross",
-            };
-            let pairs: Vec<String> = left_keys
-                .iter()
-                .zip(right_keys.iter())
-                .map(|(l, r)| format!("{} = {}", l.fmt_plan(), r.fmt_plan()))
-                .collect();
-            let _ = write!(
-                out,
-                "HashJoinExec ({kind_str}): on=[{}], null_equals_null={null_equals_null}",
-                pairs.join(", ")
-            );
-            if let Some(res) = residual {
-                let _ = write!(out, ", filter={}", res.fmt_plan());
+            LogicalPlan::Unnest {
+                input,
+                columns,
+                preserve_nulls,
+                ..
+            } => {
+                let _ = write!(
+                    out,
+                    "UnnestExec: columns={columns:?}, preserve_nulls={preserve_nulls}"
+                );
+                stack.push((input, d + 1));
             }
-            fmt_physical_node(left, sources, depth + 1, out);
-            fmt_physical_node(right, sources, depth + 1, out);
-        }
-        LogicalPlan::Union { inputs, all, .. } => {
-            if *all {
-                out.push_str("UnionExec (all=true)");
-            } else {
-                out.push_str("DistinctHashAggExec -> UnionExec (all=false)");
+            LogicalPlan::Explain { inner, .. } => {
+                out.push_str("ExplainExec");
+                stack.push((inner, d + 1));
             }
-            for branch in inputs {
-                fmt_physical_node(branch, sources, depth + 1, out);
-            }
-        }
-        LogicalPlan::Unnest {
-            input,
-            columns,
-            preserve_nulls,
-            ..
-        } => {
-            let _ = write!(
-                out,
-                "UnnestExec: columns={columns:?}, preserve_nulls={preserve_nulls}"
-            );
-            fmt_physical_node(input, sources, depth + 1, out);
-        }
-        LogicalPlan::Explain { inner, .. } => {
-            out.push_str("ExplainExec");
-            fmt_physical_node(inner, sources, depth + 1, out);
         }
     }
 }
