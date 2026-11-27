@@ -8,11 +8,12 @@ use std::collections::HashSet;
 use sqlparser::ast::{
     AccessExpr, CaseWhen, ConnectByKind, DescribeAlias, Distinct, Expr, FunctionArg,
     FunctionArgExpr, FunctionArgumentClause, FunctionArguments, GroupByExpr, HavingBound, Ident,
-    Join, JoinConstraint, JoinOperator, JsonPathElem, LimitClause, ListAggOnOverflow,
-    NamedWindowExpr, ObjectName, ObjectNamePart, OrderBy, OrderByExpr, OrderByKind, Query, Select,
-    SelectItem, SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Spanned,
-    Statement, Subscript, TableAlias, TableFactor, TopQuantity, WildcardAdditionalOptions,
-    WindowFrame, WindowFrameBound, WindowFrameUnits, WindowSpec, WindowType,
+    InTarget, Join, JoinConstraint, JoinOperator, JsonPathElem, LimitClause, ListAggOnOverflow,
+    NamedWindowExpr, ObjectName, ObjectNamePart, OrderBy, OrderByExpr, OrderByKind, OrderBySort,
+    Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, SetOperator,
+    SetQuantifier, Spanned, Statement, Subscript, TableAlias, TableFactor, TopQuantity,
+    WildcardAdditionalOptions, WindowFrame, WindowFrameBound, WindowFrameUnits, WindowSpec,
+    WindowType,
 };
 use sqlparser::tokenizer::{Span, Token};
 
@@ -253,7 +254,15 @@ impl<'a> Walk<'a> {
                 WorkItem::Join(join) => self.visit_join(join, &mut stack)?,
                 WorkItem::Expr(expr) => self.visit_expr(expr, &mut stack)?,
                 WorkItem::OrderBy(ob) => push_order_by_children(ob, &mut stack),
-                WorkItem::OrderByExpr(obe) => push_order_by_expr_children(obe, &mut stack),
+                WorkItem::OrderByExpr(obe) => {
+                    if matches!(obe.options.sort, Some(OrderBySort::Using(_))) {
+                        return Err(InvalidQuery::new(
+                            "ORDER BY ... USING is not supported",
+                            at(obe.span()),
+                        ));
+                    }
+                    push_order_by_expr_children(obe, &mut stack);
+                }
                 WorkItem::LimitClause(lc) => push_limit_clause_children(lc, &mut stack),
                 WorkItem::WindowSpec(ws) => {
                     if let Some(wn) = &ws.window_name {
@@ -363,10 +372,12 @@ impl<'a> Walk<'a> {
         stack: &mut Vec<WorkItem<'a>>,
     ) -> Result<(), InvalidQuery> {
         if let Some(into) = &select.into {
-            return Err(InvalidQuery::new(
-                "SELECT INTO is not allowed",
-                at(into.name.span()),
-            ));
+            let pos = into
+                .targets
+                .first()
+                .and_then(|e| at(e.span()))
+                .or_else(|| at(select.span()));
+            return Err(InvalidQuery::new("SELECT INTO is not allowed", pos));
         }
         match &select.group_by {
             GroupByExpr::All(_) => {
@@ -458,10 +469,19 @@ impl<'a> Walk<'a> {
             | JoinOperator::LeftArrayJoin
             | JoinOperator::InnerArrayJoin => None,
         };
-        if let Some(JoinConstraint::Using(cols)) = constraint {
-            for obj in cols {
-                validate_object_name_idents(obj)?;
+        match constraint {
+            Some(JoinConstraint::Using(cols)) => {
+                for obj in cols {
+                    validate_object_name_idents(obj)?;
+                }
             }
+            Some(JoinConstraint::UsingAlias(cols, alias)) => {
+                for obj in cols {
+                    validate_object_name_idents(obj)?;
+                }
+                validate_ident(alias)?;
+            }
+            _ => {}
         }
         push_join_children(join, stack);
         Ok(())
@@ -513,7 +533,8 @@ impl<'a> Walk<'a> {
                 partitions,
                 json_path,
                 sample,
-                index_hints,
+                index_directives,
+                inheritance,
             } => {
                 if args.is_some() {
                     return Err(InvalidQuery::new(
@@ -557,9 +578,15 @@ impl<'a> Walk<'a> {
                         at(factor.span()),
                     ));
                 }
-                if !index_hints.is_empty() {
+                if !index_directives.is_empty() {
                     return Err(InvalidQuery::new(
                         "index hints are not supported",
+                        at(factor.span()),
+                    ));
+                }
+                if inheritance.is_some() {
+                    return Err(InvalidQuery::new(
+                        "table inheritance qualifiers are not supported",
                         at(factor.span()),
                     ));
                 }
@@ -586,10 +613,9 @@ impl<'a> Walk<'a> {
                 "`PIVOT` is not allowed in FROM",
                 at(factor.span()),
             )),
-            TableFactor::Unpivot { .. } => Err(InvalidQuery::new(
-                "`UNPIVOT` is not allowed in FROM",
-                at(factor.span()),
-            )),
+            TableFactor::Unpivot { .. } | TableFactor::UnpivotExpr { .. } => Err(
+                InvalidQuery::new("`UNPIVOT` is not allowed in FROM", at(factor.span())),
+            ),
             TableFactor::MatchRecognize { .. } => Err(InvalidQuery::new(
                 "`MATCH_RECOGNIZE` is not allowed in FROM",
                 at(factor.span()),
@@ -658,6 +684,20 @@ impl<'a> Walk<'a> {
                         }
                     }
                     None => {}
+                }
+            }
+            Expr::In { target, global, .. } => {
+                if *global {
+                    return Err(InvalidQuery::new(
+                        "GLOBAL IN is not supported",
+                        at(expr.span()),
+                    ));
+                }
+                if matches!(target, InTarget::Table { .. }) {
+                    return Err(InvalidQuery::new(
+                        "table IN expressions are not supported",
+                        at(expr.span()),
+                    ));
                 }
             }
             _ => {}
@@ -884,6 +924,7 @@ fn push_table_factor_children<'a>(factor: &'a TableFactor, stack: &mut Vec<WorkI
         | TableFactor::OpenJsonTable { .. }
         | TableFactor::Pivot { .. }
         | TableFactor::Unpivot { .. }
+        | TableFactor::UnpivotExpr { .. }
         | TableFactor::MatchRecognize { .. }
         | TableFactor::XmlTable { .. }
         | TableFactor::SemanticView { .. } => {}
@@ -936,7 +977,10 @@ fn push_join_constraint_children<'a>(
 ) {
     match constraint {
         JoinConstraint::On(expr) => stack.push(WorkItem::Expr(expr)),
-        JoinConstraint::Using(_) | JoinConstraint::Natural | JoinConstraint::None => {}
+        JoinConstraint::Using(_)
+        | JoinConstraint::UsingAlias(_, _)
+        | JoinConstraint::Natural
+        | JoinConstraint::None => {}
     }
 }
 
@@ -1029,7 +1073,8 @@ fn push_function_args_children<'a>(args: &'a FunctionArguments, stack: &mut Vec<
                             stack.push(WorkItem::OrderByExpr(obe));
                         }
                     }
-                    FunctionArgumentClause::Limit(e)
+                    FunctionArgumentClause::Where(e)
+                    | FunctionArgumentClause::Limit(e)
                     | FunctionArgumentClause::Having(HavingBound(_, e)) => {
                         stack.push(WorkItem::Expr(e));
                     }
@@ -1122,6 +1167,7 @@ fn push_expr_children<'a>(expr: &'a Expr, stack: &mut Vec<WorkItem<'a>>) {
         | Expr::IsNotNull(inner)
         | Expr::IsUnknown(inner)
         | Expr::IsNotUnknown(inner)
+        | Expr::IsJson { expr: inner, .. }
         | Expr::IsNormalized { expr: inner, .. }
         | Expr::UnaryOp { expr: inner, .. }
         | Expr::Cast { expr: inner, .. }
@@ -1152,20 +1198,21 @@ fn push_expr_children<'a>(expr: &'a Expr, stack: &mut Vec<WorkItem<'a>>) {
             stack.push(WorkItem::Expr(right.as_ref()));
             stack.push(WorkItem::Expr(left.as_ref()));
         }
-        Expr::InList { expr, list, .. } => {
-            for item in list.iter().rev() {
-                stack.push(WorkItem::Expr(item));
+        Expr::In { expr, target, .. } => {
+            match target {
+                InTarget::List(list) => {
+                    for item in list.iter().rev() {
+                        stack.push(WorkItem::Expr(item));
+                    }
+                }
+                InTarget::Subquery(subquery) => {
+                    stack.push(WorkItem::Query(subquery.as_ref()));
+                }
+                InTarget::Unnest(array_expr) => {
+                    stack.push(WorkItem::Expr(array_expr.as_ref()));
+                }
+                InTarget::Table { .. } => {}
             }
-            stack.push(WorkItem::Expr(expr.as_ref()));
-        }
-        Expr::InSubquery { expr, subquery, .. } => {
-            stack.push(WorkItem::Query(subquery.as_ref()));
-            stack.push(WorkItem::Expr(expr.as_ref()));
-        }
-        Expr::InUnnest {
-            expr, array_expr, ..
-        } => {
-            stack.push(WorkItem::Expr(array_expr.as_ref()));
             stack.push(WorkItem::Expr(expr.as_ref()));
         }
         Expr::Between {
@@ -1175,10 +1222,31 @@ fn push_expr_children<'a>(expr: &'a Expr, stack: &mut Vec<WorkItem<'a>>) {
             stack.push(WorkItem::Expr(low.as_ref()));
             stack.push(WorkItem::Expr(expr.as_ref()));
         }
-        Expr::Like { expr, pattern, .. }
-        | Expr::ILike { expr, pattern, .. }
-        | Expr::SimilarTo { expr, pattern, .. }
-        | Expr::RLike { expr, pattern, .. } => {
+        Expr::Like {
+            expr,
+            pattern,
+            escape_char,
+            ..
+        }
+        | Expr::ILike {
+            expr,
+            pattern,
+            escape_char,
+            ..
+        }
+        | Expr::SimilarTo {
+            expr,
+            pattern,
+            escape_char,
+            ..
+        } => {
+            if let Some(esc) = escape_char {
+                stack.push(WorkItem::Expr(esc.as_ref()));
+            }
+            stack.push(WorkItem::Expr(pattern.as_ref()));
+            stack.push(WorkItem::Expr(expr.as_ref()));
+        }
+        Expr::RLike { expr, pattern, .. } => {
             stack.push(WorkItem::Expr(pattern.as_ref()));
             stack.push(WorkItem::Expr(expr.as_ref()));
         }
@@ -1781,5 +1849,68 @@ mod tests {
         }
         let err = validate_statement(&stmt, &reg, "", None).unwrap_err();
         assert_eq!(err.message, "identifier must not contain NUL byte");
+    }
+
+    #[test]
+    fn enforces_sandbox_on_sqlparser_064_ast_constructs() {
+        let reg = registered();
+        let reject_cases = [
+            // Denied function inside LIKE ESCAPE expression
+            (
+                "SELECT name FROM spans WHERE name LIKE '%a%' ESCAPE repeat('x', 1)",
+                "not available",
+            ),
+            // Denied function inside inline aggregate WHERE clause
+            (
+                "SELECT count(name WHERE repeat('x', 1) = 'x') FROM spans",
+                "not available",
+            ),
+            // Denied function inside IS JSON expression
+            ("SELECT repeat('x', 1) IS JSON FROM spans", "not available"),
+            // Table inheritance marker (ONLY)
+            ("SELECT name FROM ONLY spans", "table inheritance"),
+            // SQLite table IN expression (or rejected by GenericDialect parser)
+            ("SELECT name FROM spans WHERE name IN traces", ""),
+            // ClickHouse GLOBAL IN (or rejected by GenericDialect parser)
+            ("SELECT name FROM spans WHERE name GLOBAL IN ('a')", ""),
+            // ORDER BY ... USING <op> (rejected by GenericDialect parser)
+            ("SELECT name FROM spans ORDER BY name USING <", ""),
+        ];
+        for (sql, expected) in reject_cases {
+            let err = parse_and_validate_sql(sql, &reg).expect_err(sql);
+            if !expected.is_empty() {
+                assert!(
+                    err.message.contains(expected),
+                    "expected `{expected}` for `{sql}`, got: {}",
+                    err.message
+                );
+            }
+        }
+
+        // Direct AST validation also rejects OrderBySort::Using even if constructed programmatically.
+        let mut parsed = parser(
+            tokenize(
+                "SELECT name FROM spans ORDER BY name ASC",
+                &SQL_LIMITS,
+                TextKind::Sql,
+            )
+            .unwrap(),
+        );
+        let mut stmt = parsed.parse_statement().unwrap();
+        if let Statement::Query(ref mut q) = stmt
+            && let Some(ref mut ob) = q.order_by
+            && let OrderByKind::Expressions(ref mut exprs) = ob.kind
+            && let Some(first) = exprs.first_mut()
+        {
+            first.options.sort = Some(OrderBySort::Using(ObjectName(vec![
+                ObjectNamePart::Identifier(Ident::new("<")),
+            ])));
+        }
+        let err = validate_statement(&stmt, &reg, "", None).unwrap_err();
+        assert!(
+            err.message.contains("ORDER BY ... USING"),
+            "expected ORDER BY ... USING error, got: {}",
+            err.message
+        );
     }
 }

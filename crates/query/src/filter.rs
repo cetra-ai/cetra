@@ -7,8 +7,8 @@
 use cetra_column::{DataType, Field, Schema};
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, CastKind, DataType as SqlDataType, ExactNumberInfo, Expr, Function,
-    FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Interval, ObjectNamePart, Spanned,
-    Subscript, TimezoneInfo, UnaryOperator, Value,
+    FunctionArg, FunctionArgExpr, FunctionArguments, Ident, InTarget, Interval, ObjectNamePart,
+    Spanned, Subscript, TimezoneInfo, UnaryOperator, Value,
 };
 
 use crate::text::{
@@ -170,12 +170,27 @@ impl Walk<'_> {
                 self.expr(left)?;
                 self.expr(right)
             }
-            Expr::InList { expr, list, .. } => {
-                self.expr(expr)?;
-                for item in list {
-                    self.expr(item)?;
+            Expr::In {
+                expr,
+                target,
+                global,
+                ..
+            } => {
+                if *global {
+                    return Err(forbid(position, "GLOBAL IN"));
                 }
-                Ok(())
+                match target {
+                    InTarget::List(list) => {
+                        self.expr(expr)?;
+                        for item in list {
+                            self.expr(item)?;
+                        }
+                        Ok(())
+                    }
+                    InTarget::Subquery(_) => Err(forbid(position, "a subquery")),
+                    InTarget::Unnest(_) => Err(forbid(position, "IN UNNEST")),
+                    InTarget::Table { .. } => Err(forbid(position, "this expression")),
+                }
             }
             Expr::Between {
                 expr, low, high, ..
@@ -185,22 +200,38 @@ impl Walk<'_> {
                 self.expr(high)
             }
             Expr::Like {
-                any, expr, pattern, ..
+                any,
+                expr,
+                pattern,
+                escape_char,
+                ..
             } => {
                 if *any {
                     return Err(forbid(position, "LIKE ANY"));
                 }
                 self.expr(expr)?;
-                self.expr(pattern)
+                self.expr(pattern)?;
+                if let Some(esc) = escape_char {
+                    self.expr(esc)?;
+                }
+                Ok(())
             }
             Expr::ILike {
-                any, expr, pattern, ..
+                any,
+                expr,
+                pattern,
+                escape_char,
+                ..
             } => {
                 if *any {
                     return Err(forbid(position, "ILIKE ANY"));
                 }
                 self.expr(expr)?;
-                self.expr(pattern)
+                self.expr(pattern)?;
+                if let Some(esc) = escape_char {
+                    self.expr(esc)?;
+                }
+                Ok(())
             }
             Expr::Nested(inner) => self.expr(inner),
             Expr::Value(value) => literal(position, &value.value),
@@ -214,9 +245,7 @@ impl Walk<'_> {
                 }
                 Ok(())
             }
-            Expr::InSubquery { .. } | Expr::Exists { .. } | Expr::Subquery(_) => {
-                Err(forbid(position, "a subquery"))
-            }
+            Expr::Exists { .. } | Expr::Subquery(_) => Err(forbid(position, "a subquery")),
             Expr::Case { .. } => Err(forbid(position, "CASE")),
             _ => Err(forbid(position, "this expression")),
         }
@@ -285,13 +314,10 @@ impl Walk<'_> {
             Expr::Cast {
                 kind,
                 data_type,
-                array,
                 format,
                 ..
             } => {
-                if *array {
-                    Some(forbid(position, "an array cast"))
-                } else if format.is_some() {
+                if format.is_some() {
                     Some(forbid(position, "a cast format"))
                 } else {
                     match kind {

@@ -7,7 +7,7 @@ use cetra_column::{DataType, MAX_DECIMAL_PRECISION, MAX_NESTING_DEPTH, ScalarVal
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, CastKind, CeilFloorKind, DataType as SqlDataType, DateTimeField,
     ExactNumberInfo, Expr as SqlExpr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-    Ident, Interval, JsonPathElem, ObjectNamePart, Spanned, Subscript, TimezoneInfo,
+    Ident, InTarget, Interval, JsonPathElem, ObjectNamePart, Spanned, Subscript, TimezoneInfo,
     TrimWhereField, TypedString, UnaryOperator, Value,
 };
 
@@ -177,11 +177,28 @@ fn bind_node(
             low,
             high,
         } => bind_between(expr, low, high, *negated, resolver, pos, depth),
-        SqlExpr::InList {
+        SqlExpr::In {
             expr,
-            list,
+            target,
             negated,
-        } => bind_in_list(expr, list, *negated, resolver, pos, depth),
+            global,
+        } => {
+            if *global {
+                return Err(InvalidQuery::new("GLOBAL IN is not supported", pos));
+            }
+            match target {
+                InTarget::List(list) => bind_in_list(expr, list, *negated, resolver, pos, depth),
+                InTarget::Subquery(_) => Err(InvalidQuery::new(
+                    "subqueries are not supported in this context",
+                    pos,
+                )),
+                InTarget::Unnest(_) => Err(InvalidQuery::new("IN UNNEST is not supported", pos)),
+                InTarget::Table { .. } => Err(InvalidQuery::new(
+                    "table IN expressions are not supported",
+                    pos,
+                )),
+            }
+        }
         SqlExpr::Like {
             negated,
             any,
@@ -191,7 +208,7 @@ fn bind_node(
         } => bind_like(
             expr,
             pattern,
-            escape_char.as_ref().map(|v| &v.value),
+            escape_char.as_deref(),
             false,
             *negated,
             *any,
@@ -208,7 +225,7 @@ fn bind_node(
         } => bind_like(
             expr,
             pattern,
-            escape_char.as_ref().map(|v| &v.value),
+            escape_char.as_deref(),
             true,
             *negated,
             *any,
@@ -220,12 +237,8 @@ fn bind_node(
             kind,
             expr,
             data_type,
-            array,
             format,
         } => {
-            if *array {
-                return Err(InvalidQuery::new("array casts are not supported", pos));
-            }
             if format.is_some() {
                 return Err(InvalidQuery::new("cast formats are not supported", pos));
             }
@@ -1095,7 +1108,7 @@ fn bind_in_list(
 fn bind_like(
     expr_ast: &SqlExpr,
     pat_ast: &SqlExpr,
-    escape_val: Option<&Value>,
+    escape_expr: Option<&SqlExpr>,
     case_insensitive: bool,
     negated: bool,
     any: bool,
@@ -1111,21 +1124,26 @@ fn bind_like(
     }
     let expr = coerce_to_utf8_from_utf8_or_null(bind_node(expr_ast, resolver, depth + 1)?, pos)?;
     let pattern = coerce_to_utf8_from_utf8_or_null(bind_node(pat_ast, resolver, depth + 1)?, pos)?;
-    let escape = match escape_val {
+    let escape = match escape_expr {
         None => Some('\\'),
-        Some(Value::SingleQuotedString(s)) => {
-            let mut chars = s.chars();
-            match (chars.next(), chars.next()) {
-                (None, _) => None,
-                (Some(c), None) => Some(c),
-                (Some(_), Some(_)) => {
-                    return Err(InvalidQuery::new(
-                        "ESCAPE must be a single character or empty string",
-                        pos,
-                    ));
+        Some(SqlExpr::Value(vws)) => match &vws.value {
+            Value::SingleQuotedString(s) => {
+                let mut chars = s.chars();
+                match (chars.next(), chars.next()) {
+                    (None, _) => None,
+                    (Some(c), None) => Some(c),
+                    (Some(_), Some(_)) => {
+                        return Err(InvalidQuery::new(
+                            "ESCAPE must be a single character or empty string",
+                            pos,
+                        ));
+                    }
                 }
             }
-        }
+            _ => {
+                return Err(InvalidQuery::new("ESCAPE must be a string literal", pos));
+            }
+        },
         Some(_) => {
             return Err(InvalidQuery::new("ESCAPE must be a string literal", pos));
         }
