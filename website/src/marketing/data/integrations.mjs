@@ -31,6 +31,9 @@ const HOW_LANGUAGES = [
   [".NET, ", "dotnet"],
 ];
 
+/** A "How" cell that opens with `Word, ` names a language `HOW_LANGUAGES` may not list. */
+const LEADING_LANGUAGE = /^([A-Z.][A-Za-z0-9.#+]*), /;
+
 /**
  * @typedef {object} Integration
  * @property {string} group     the `## ` heading it sits under, e.g. "Providers"
@@ -89,7 +92,7 @@ function languagesOf(python, typescript, how) {
  * @returns {Integration[]}
  */
 export function parseIntegrations(mdx) {
-  /** @type {Map<string, {languages: Language[], tests: Test[]}>} */
+  /** @type {Map<string, {languages: Language[], unknownLanguage: string | null, tests: Test[]}>} */
   const rows = new Map();
   /** @type {{group: string, title: string, description: string, href: string}[]} */
   const cards = [];
@@ -106,8 +109,11 @@ export function parseIntegrations(mdx) {
       if (rows.has(href)) {
         throw new Error(`integrations: duplicate table row ${href} at ${where}`);
       }
+      const languages = languagesOf(python === "✓", typescript === "✓", how);
+      const leading = languages.length === 0 ? LEADING_LANGUAGE.exec(how) : null;
       rows.set(href, {
-        languages: languagesOf(python === "✓", typescript === "✓", how),
+        languages,
+        unknownLanguage: leading ? leading[1] : null,
         tests: parseTested(tested.replaceAll("`", ""), where),
       });
     } else if (line.startsWith("## ")) {
@@ -138,10 +144,16 @@ export function parseIntegrations(mdx) {
     if (!row) {
       throw new Error(`integrations: no table row for card ${card.href}`);
     }
+    const { unknownLanguage, ...rest } = row;
     if (row.tests.some((test) => test.kind === "setup")) {
       throw new Error(`integrations: card for setup-only row ${card.href}`);
     }
-    return { ...card, ...row, tests: /** @type {Tested[]} */ (row.tests) };
+    if (unknownLanguage !== null) {
+      throw new Error(
+        `integrations: unknown language "${unknownLanguage}" in the How cell of ${card.href}; add it to HOW_LANGUAGES`,
+      );
+    }
+    return { ...card, ...rest, tests: /** @type {Tested[]} */ (rest.tests) };
   });
 }
 

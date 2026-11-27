@@ -96,7 +96,7 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-cetra-…"
     </div>
   </Section>
 
-  <Section tone="raised" divider labelledby="directory-title">
+  <Section tone="raised" pad="md" divider labelledby="directory-title">
     <h2 id="directory-title" class="visually-hidden">All integrations</h2>
     <div class="controls" data-directory-controls hidden>
       <label class="visually-hidden" for="integration-search">Search integrations</label>
@@ -372,7 +372,7 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-cetra-…"
       strip.hidden = anyLanguage.length === 0;
       const total = matched.length + anyLanguage.length;
       empty.hidden = total > 0;
-      count.textContent = `${total} of ${items.length} integrations`;
+      count.textContent = `${total} of ${items.length} shown`;
     };
 
     // Each chip group is a radio-like set: the clicked chip is pressed, its siblings are not.

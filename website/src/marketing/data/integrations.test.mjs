@@ -190,10 +190,34 @@ test("the columns come before the How language", () => {
   assert.deepEqual(parseIntegrations(mdx)[0].languages, ["python", "dotnet"]);
 });
 
+test("a shown row with an unknown leading language throws", () => {
+  const mdx = `## Providers\n\n${card("/docs/integrations/x/")}\n| [X](/docs/integrations/x/) | — | — | Go, a plugin | captured |\n`;
+  assert.throws(() => parseIntegrations(mdx), /unknown language "Go"/);
+});
+
+test("a setup-only row with an unknown leading language parses", () => {
+  const mdx = "| [X](/docs/integrations/x/) | — | — | Go, a plugin | setup only |\n";
+  assert.deepEqual(parseIntegrations(mdx), []);
+});
+
+test("a How cell that is prose does not trip the guard", () => {
+  const mdx = `## Providers\n${card("/docs/integrations/x/")}\n| [X](/docs/integrations/x/) | — | — | OpenAI client with the provider's base URL | captured |\n${card("/docs/integrations/y/")}\n| [X](/docs/integrations/y/) | — | — | Promptfoo's own OpenTelemetry export | captured |\n`;
+  assert.deepEqual(
+    parseIntegrations(mdx).map((item) => item.languages),
+    [[], []],
+  );
+});
+
 test("no item has the old booleans", () => {
   for (const item of loadIntegrations()) {
     assert.equal("python" in item, false, `${item.title} still has python`);
     assert.equal("typescript" in item, false, `${item.title} still has typescript`);
+  }
+});
+
+test("no item carries unknownLanguage", () => {
+  for (const item of loadIntegrations()) {
+    assert.equal("unknownLanguage" in item, false, `${item.title} carries unknownLanguage`);
   }
 });
 
