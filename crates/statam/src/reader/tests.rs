@@ -7572,7 +7572,7 @@ fn pass18_remote_single_wave_folding_normal_l0_and_shredded_map() {
     // Part (a) + (b): Normal filtered scan + L0Payload projected column (matching & 0-match)
     // in BOTH `scan_rgs_filtered_batched` (unbounded) and `scan_rg_late_mat` (`limit: Some(...)`).
     // Ensure file > 192 KiB so data blocks lie before `tail_start` (outside TailCachedReader),
-    // while candidate Phase-2 blocks + L0Payload <= 512 KiB so remote mode folds into 1 wave!
+    // while candidate Phase-2 blocks + L0Payload <= 1.5 MiB so remote mode folds into 1 wave!
     let schema_l0 = Schema::try_new_arc(vec![
         Field::new("id", DataType::I64, false),
         Field::new("score", DataType::I64, false),
@@ -7752,8 +7752,8 @@ fn pass18_remote_single_wave_folding_normal_l0_and_shredded_map() {
 
     // Part (c): `phase2_map_fast_path` shredded map projection!
     // Build a `MapUtf8` column with a shredded key `"env"` (zero residuals) PLUS heavy unshredded
-    // residual keys (> 600 KiB stored) so if `phase2_map_fast_path` were NOT applied when measuring
-    // Phase-2 candidate bytes, it would exceed 512 KiB and fail to fold into 1 wave!
+    // residual keys (> 1.5 MiB stored) so if `phase2_map_fast_path` were NOT applied when measuring
+    // Phase-2 candidate bytes, it would exceed 1.5 MiB and fail to fold into 1 wave!
     let schema_map = Schema::try_new_arc(vec![
         Field::new("id", DataType::I64, false),
         Field::new("attrs", DataType::MapUtf8, false),
@@ -7771,9 +7771,9 @@ fn pass18_remote_single_wave_folding_normal_l0_and_shredded_map() {
         } else {
             "staging".to_owned()
         });
-        // Unique unshredded key with pseudo-random value so residual block is > 1 MiB stored even under Zstd.
+        // Unique unshredded key with pseudo-random value so residual block is > 1.5 MiB stored even under Zstd.
         keys_vec.push(format!("rk_{i:05}"));
-        let mut raw = [0u8; 640];
+        let mut raw = [0u8; 1024];
         for b in &mut raw {
             rng = rng
                 .wrapping_mul(6364136223846793005)
@@ -7834,7 +7834,7 @@ fn pass18_remote_single_wave_folding_normal_l0_and_shredded_map() {
         !r_map_loc.meta().schema_meta.shredded_maps.is_empty(),
         "expected L1Compact map shredding to promote `env` sub-column"
     );
-    // Confirm the residual block of `attrs` (col 1) is > 1 MiB, proving fast-path skipping works!
+    // Confirm the residual block of `attrs` (col 1) is > 1.5 MiB, proving fast-path skipping works!
     let residual_stored: u64 = r_map_loc
         .meta()
         .rg_blocks(1, 0)
@@ -7843,7 +7843,7 @@ fn pass18_remote_single_wave_folding_normal_l0_and_shredded_map() {
         .sum();
     assert!(
         residual_stored > REMOTE_SINGLE_WAVE_P2_MAX_BYTES,
-        "expected map residual stored_len ({residual_stored}) > 1 MiB"
+        "expected map residual stored_len ({residual_stored}) > 1.5 MiB"
     );
 
     let req_map = ScanRequest {
@@ -7867,7 +7867,7 @@ fn pass18_remote_single_wave_folding_normal_l0_and_shredded_map() {
     assert_eq!(map_loc_waves, 2);
     assert_eq!(
         map_rem_waves, 1,
-        "phase2_map_fast_path must skip > 512 KiB residual block and fold shredded subcol into 1 wave"
+        "phase2_map_fast_path must skip > 1.5 MiB residual block and fold shredded subcol into 1 wave"
     );
 }
 
@@ -7881,10 +7881,10 @@ fn pass18_remote_single_wave_folding_budget_fallback_and_dict_dedup() {
     // Part (d): Uncached non-inline lazy dictionaries!
     // Build a 2-RG file with:
     //  - `id`: I64 (Phase 1 filter column)
-    //  - `med_dict`: Utf8 with ~1,900 distinct ~420 B incompressible-prefix strings -> lazy dict ~650-750 KiB
-    //    (non-inline > 192 KiB tail, <= 1 MiB once deduped across 2 RGs, but > 1 MiB if double-counted!)
-    //  - `big_dict`: Utf8 with ~3,500 distinct ~420 B strings -> lazy dict ~1.2 MiB (> 1 MiB budget -> must stay 2 waves!)
-    //  - `big_blob`: Binary with > 1.2 MiB stored blocks (Part (e): > 1 MiB Phase-2 blocks -> must stay 2 waves!)
+    //  - `med_dict`: Utf8 with ~1,900 distinct ~640 B incompressible-prefix strings -> lazy dict ~1.0 MiB
+    //    (non-inline > 192 KiB tail, <= 1.5 MiB once deduped across 2 RGs, but > 1.5 MiB if double-counted!)
+    //  - `big_dict`: Utf8 with ~3,500 distinct ~640 B strings -> lazy dict ~1.8 MiB (> 1.5 MiB budget -> must stay 2 waves!)
+    //  - `big_blob`: Binary with > 1.8 MiB stored blocks (Part (e): > 1.5 MiB Phase-2 blocks -> must stay 2 waves!)
     let schema = Schema::try_new_arc(vec![
         Field::new("id", DataType::I64, false),
         Field::new("med_dict", DataType::Utf8, false),
@@ -7908,10 +7908,10 @@ fn pass18_remote_single_wave_folding_budget_fallback_and_dict_dedup() {
     // Dict cardinality stays well under the 10% distinct-ratio threshold across 40,000 rows
     // (1,900 / 40,000 = 4.75%, 3,500 / 40,000 = 8.75%) so the writer emits FileDict for both!
     let med_vocab: Vec<String> = (0..1_900)
-        .map(|i| format!("med_{i:04}_{}", make_rand_ascii(420)))
+        .map(|i| format!("med_{i:04}_{}", make_rand_ascii(640)))
         .collect();
     let big_vocab: Vec<String> = (0..3_500)
-        .map(|i| format!("big_{i:04}_{}", make_rand_ascii(420)))
+        .map(|i| format!("big_{i:04}_{}", make_rand_ascii(640)))
         .collect();
 
     let n_rgs = 2usize;
@@ -7938,8 +7938,8 @@ fn pass18_remote_single_wave_folding_budget_fallback_and_dict_dedup() {
                 .collect();
             let mut blobs = Vec::with_capacity(rows_per_rg);
             for k in 0..rows_per_rg {
-                // 32 bytes pseudo-random per row -> ~640 KiB per RG -> ~1.28 MiB across 2 RGs (> 1 MiB).
-                let mut b = [0u8; 32];
+                // 48 bytes pseudo-random per row -> ~960 KiB per RG -> ~1.92 MiB across 2 RGs (> 1.5 MiB).
+                let mut b = [0u8; 48];
                 for w8 in b.as_chunks_mut::<8>().0 {
                     rng = rng
                         .wrapping_mul(6364136223846793005)
@@ -8014,14 +8014,14 @@ fn pass18_remote_single_wave_folding_budget_fallback_and_dict_dedup() {
     assert!(
         med_dict_len > REMOTE_SINGLE_WAVE_P2_MAX_BYTES / 2
             && med_dict_len < REMOTE_SINGLE_WAVE_P2_MAX_BYTES,
-        "expected 512 KiB < med_dict_len ({med_dict_len}) < 1 MiB to test cross-RG dedup"
+        "expected 768 KiB < med_dict_len ({med_dict_len}) < 1.5 MiB to test cross-RG dedup"
     );
     assert!(
         big_dict_len > REMOTE_SINGLE_WAVE_P2_MAX_BYTES,
-        "expected big_dict_len ({big_dict_len}) > 1 MiB to test lazy-dict budget fallback"
+        "expected big_dict_len ({big_dict_len}) > 1.5 MiB to test lazy-dict budget fallback"
     );
 
-    // (d1) Shared `med_dict` across 2 RGs: deduped size <= 1 MiB (double-counted would be > 1 MiB!)
+    // (d1) Shared `med_dict` across 2 RGs: deduped size <= 1.5 MiB (double-counted would be > 1.5 MiB!)
     //      -> MUST fold into 1 wave on remote!
     let s3_med_rem = Arc::new(
         SimulatedS3Reader::from_bytes(file_bytes.clone(), no_cache_cfg).with_remote_hint(true),
@@ -8039,10 +8039,10 @@ fn pass18_remote_single_wave_folding_budget_fallback_and_dict_dedup() {
     assert_eq!(
         s3_med_rem.counters().waves,
         1,
-        "deduped shared ~700 KiB lazy dict across 2 RGs must fold into 1 wave"
+        "deduped shared ~1.0 MiB lazy dict across 2 RGs must fold into 1 wave"
     );
 
-    // (d2) Uncached `big_dict` (> 1 MiB): MUST fall back to 2 waves on remote!
+    // (d2) Uncached `big_dict` (> 1.5 MiB): MUST fall back to 2 waves on remote!
     let s3_big_dict_rem = Arc::new(
         SimulatedS3Reader::from_bytes(file_bytes.clone(), no_cache_cfg).with_remote_hint(true),
     );
@@ -8059,11 +8059,11 @@ fn pass18_remote_single_wave_folding_budget_fallback_and_dict_dedup() {
     assert_eq!(
         s3_big_dict_rem.counters().waves,
         2,
-        "uncached > 1 MiB lazy dict must exceed budget and fall back to 2-phase"
+        "uncached > 1.5 MiB lazy dict must exceed budget and fall back to 2-phase"
     );
 
     // Once `big_dict` is cached in `r_big_dict_rem`, a follow-up scan only counts Phase-2 blocks
-    // (<= 1 MiB) and folds into 1 wave!
+    // (<= 1.5 MiB) and folds into 1 wave!
     s3_big_dict_rem.reset_counters();
     let out_big_dict_warm = r_big_dict_rem
         .scan(&ScanRequest {
@@ -8082,7 +8082,7 @@ fn pass18_remote_single_wave_folding_budget_fallback_and_dict_dedup() {
         "cached lazy dict should contribute 0 uncached dict bytes and allow 1-wave folding"
     );
 
-    // (e) Phase-2 blocks > 1 MiB (`big_blob`): MUST fall back to 2 waves on remote!
+    // (e) Phase-2 blocks > 1.5 MiB (`big_blob`): MUST fall back to 2 waves on remote!
     let s3_blob_rem =
         Arc::new(SimulatedS3Reader::from_bytes(file_bytes, no_cache_cfg).with_remote_hint(true));
     let r_blob_rem = StatamReader::open(s3_blob_rem.clone(), None).unwrap();
@@ -8092,7 +8092,7 @@ fn pass18_remote_single_wave_folding_budget_fallback_and_dict_dedup() {
         .sum();
     assert!(
         blob_stored > REMOTE_SINGLE_WAVE_P2_MAX_BYTES,
-        "expected big_blob stored ({blob_stored}) > 1 MiB"
+        "expected big_blob stored ({blob_stored}) > 1.5 MiB"
     );
     s3_blob_rem.reset_counters();
     let out_blob = r_blob_rem
@@ -8106,7 +8106,7 @@ fn pass18_remote_single_wave_folding_budget_fallback_and_dict_dedup() {
     assert_eq!(
         s3_blob_rem.counters().waves,
         2,
-        "> 1 MiB Phase-2 blocks must fall back to 2-phase on remote reader"
+        "> 1.5 MiB Phase-2 blocks must fall back to 2-phase on remote reader"
     );
 }
 
@@ -8590,7 +8590,7 @@ fn pass19_remote_payload_substring_absent_skips_phase2_folding() {
     let inputs: Vec<String> = (0..n_rows)
         .map(|i| format!("payload_row_{i:04}_{}", "normal_text_segment_".repeat(30)))
         .collect();
-    // Phase-2 projected `note` column: ~60 KiB stored (well under 1 MiB, sits before tail).
+    // Phase-2 projected `note` column: ~60 KiB stored (well under 1.5 MiB, sits before tail).
     let notes: Vec<String> = (0..n_rows)
         .map(|i| format!("note_{i:04}_{}", next_ascii(80)))
         .collect();
@@ -8970,4 +8970,285 @@ fn pass19_remote_cross_mb_batched_stpk_substring_dedup_seam_and_retention() {
             "expected exact 1 multi-chunk seam match in MB 1"
         );
     }
+}
+
+#[test]
+fn pass20_remote_bounded_block_coalescing_and_single_wave_1536kib() {
+    use std::ops::Range;
+    use std::sync::Mutex;
+
+    use super::plan::fetch_coalesced_blocks;
+
+    struct RecordingRangeReader {
+        data: Bytes,
+        remote: bool,
+        calls: Mutex<Vec<Vec<Range<u64>>>>,
+    }
+    impl RecordingRangeReader {
+        fn new(len: usize, remote: bool) -> Self {
+            let data: Vec<u8> = (0..len).map(|i| ((i * 31 + 7) & 0xFF) as u8).collect();
+            Self {
+                data: Bytes::from(data),
+                remote,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+        fn take_calls(&self) -> Vec<Vec<Range<u64>>> {
+            std::mem::take(&mut *self.calls.lock().unwrap())
+        }
+    }
+    impl RangeReader for RecordingRangeReader {
+        fn file_len(&self) -> u64 {
+            self.data.len() as u64
+        }
+        fn is_remote(&self) -> bool {
+            self.remote
+        }
+        fn read_range(&self, range: Range<u64>) -> Result<Bytes, StatamError> {
+            self.calls.lock().unwrap().push(vec![range.clone()]);
+            Ok(self.data.slice(range.start as usize..range.end as usize))
+        }
+        fn read_ranges(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>, StatamError> {
+            self.calls.lock().unwrap().push(ranges.to_vec());
+            Ok(ranges
+                .iter()
+                .map(|r| self.data.slice(r.start as usize..r.end as usize))
+                .collect())
+        }
+    }
+
+    let k = 1024u64;
+    let mib = 1024 * k;
+    let rem = RecordingRangeReader::new((6 * mib) as usize, true);
+    let loc = RecordingRangeReader::new((6 * mib) as usize, false);
+
+    // 1. Remote bounded 128 KiB coalescing: 100 KiB gap with useful=110 KiB >= wasted=100 KiB merges!
+    let r_a = (0, 60 * k);
+    let r_b = (160 * k, 210 * k);
+    let got_rem = fetch_coalesced_blocks(&rem, &[r_a, r_b], None).unwrap();
+    assert_eq!(got_rem[&r_a].as_ref(), &rem.data[0..(60 * k) as usize]);
+    assert_eq!(
+        got_rem[&r_b].as_ref(),
+        &rem.data[(160 * k) as usize..(210 * k) as usize]
+    );
+    assert_eq!(rem.take_calls(), vec![vec![0..(210 * k)]]);
+
+    // 2. Same 100 KiB gap on non-remote (!is_remote()) stays split at 64 KiB cap!
+    let got_loc = fetch_coalesced_blocks(&loc, &[r_a, r_b], None).unwrap();
+    assert_eq!(got_loc[&r_a].as_ref(), &loc.data[0..(60 * k) as usize]);
+    assert_eq!(
+        got_loc[&r_b].as_ref(),
+        &loc.data[(160 * k) as usize..(210 * k) as usize]
+    );
+    assert_eq!(
+        loc.take_calls(),
+        vec![vec![0..(60 * k), (160 * k)..(210 * k)]]
+    );
+
+    // Non-remote still coalesces exact 64 KiB gap.
+    let _ = fetch_coalesced_blocks(&loc, &[(0, 60 * k), (124 * k, 184 * k)], None).unwrap();
+    assert_eq!(loc.take_calls(), vec![vec![0..(184 * k)]]);
+
+    // 3. Remote gap > 128 KiB never merges even with large useful bytes.
+    let _ =
+        fetch_coalesced_blocks(&rem, &[(0, 512 * k), (640 * k + 1, 1152 * k + 1)], None).unwrap();
+    assert_eq!(
+        rem.take_calls(),
+        vec![vec![0..(512 * k), (640 * k + 1)..(1152 * k + 1)]]
+    );
+
+    // 4. WD_narrow_3col amplification guard: 10 KiB + 90 KiB gap + 10 KiB (wasted 90 > useful 20) MUST NOT merge!
+    let _ = fetch_coalesced_blocks(&rem, &[(0, 10 * k), (100 * k, 110 * k)], None).unwrap();
+    assert_eq!(
+        rem.take_calls(),
+        vec![vec![0..(10 * k), (100 * k)..(110 * k)]]
+    );
+
+    // Cumulative waste guard: 10 KiB + 60 KiB gap (<= 64 KiB, merges -> useful 20, wasted 60)
+    // followed by 80 KiB gap + 80 KiB useful -> new_useful 100 < new_wasted 140 -> MUST NOT merge!
+    let _ = fetch_coalesced_blocks(
+        &rem,
+        &[(0, 10 * k), (70 * k, 80 * k), (160 * k, 240 * k)],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        rem.take_calls(),
+        vec![vec![0..(80 * k), (160 * k)..(240 * k)]]
+    );
+
+    // 5. Overlap-safe useful-bytes guard:
+    //    [0..50 KiB) + [20..65 KiB) has true union useful = 65 KiB (naive sum = 95 KiB!).
+    //    Followed by [160..180 KiB) (gap = 95 KiB, added = 20 KiB):
+    //    true new_useful = 85 KiB < new_wasted = 95 KiB -> MUST NOT merge!
+    let _ = fetch_coalesced_blocks(
+        &rem,
+        &[(0, 50 * k), (20 * k, 65 * k), (160 * k, 180 * k)],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        rem.take_calls(),
+        vec![vec![0..(65 * k), (160 * k)..(180 * k)]]
+    );
+
+    //    With [20..70 KiB) instead (true union = 70 KiB), [160..180 KiB) has gap = 90 KiB,
+    //    true new_useful = 90 KiB == new_wasted = 90 KiB -> exact boundary MERGES!
+    let _ = fetch_coalesced_blocks(
+        &rem,
+        &[(0, 50 * k), (20 * k, 70 * k), (160 * k, 180 * k)],
+        None,
+    )
+    .unwrap();
+    assert_eq!(rem.take_calls(), vec![vec![0..(180 * k)]]);
+
+    // 6. Unconditional tail-boundary guard: even a tiny 20 KiB gap MUST NOT merge across retained_tail_start!
+    let ts = 500 * k;
+    let _ = fetch_coalesced_blocks(
+        &rem,
+        &[(ts - 40 * k, ts - 10 * k), (ts + 10 * k, ts + 40 * k)],
+        Some(ts),
+    )
+    .unwrap();
+    assert_eq!(
+        rem.take_calls(),
+        vec![vec![
+            (ts - 40 * k)..(ts - 10 * k),
+            (ts + 10 * k)..(ts + 40 * k)
+        ]]
+    );
+
+    // 7. Empty-range guard: empty range at 100 KiB gap has added_useful == 0 -> MUST NOT extend span!
+    let got_empty =
+        fetch_coalesced_blocks(&rem, &[(0, 200 * k), (300 * k, 300 * k)], None).unwrap();
+    assert!(got_empty[&(300 * k, 300 * k)].is_empty());
+    assert_eq!(
+        rem.take_calls(),
+        vec![vec![0..(200 * k), (300 * k)..(300 * k)]]
+    );
+
+    // 8. Span-cap & containment: > 4 MiB single block absorbs contained subrange without duplicating,
+    //    but refuses to extend past 4 MiB for a trailing range.
+    let got_big = fetch_coalesced_blocks(
+        &rem,
+        &[
+            (0, 5 * mib),
+            (mib, 2 * mib),
+            (5 * mib + k, 5 * mib + 10 * k),
+        ],
+        None,
+    )
+    .unwrap();
+    assert_eq!(got_big[&(mib, 2 * mib)].len(), mib as usize);
+    assert_eq!(
+        rem.take_calls(),
+        vec![vec![0..(5 * mib), (5 * mib + k)..(5 * mib + 10 * k)]]
+    );
+
+    // 9. Item 2 + StatamReader::open retained_tail_start wiring:
+    //    ~1.25 MiB Phase-2 binary column (between old 1 MiB and new 1.5 MiB cap) folds into 1 wave
+    //    on remote reader and stays 2 waves on non-remote reader!
+    assert_eq!(REMOTE_SINGLE_WAVE_P2_MAX_BYTES, 1536 * 1024);
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("payload_bin", DataType::Binary, false),
+    ])
+    .unwrap();
+    let n = 40_000usize;
+    let mut rng = 0x2026_1127_cafe_f00du64;
+    let mut blobs = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut b = [0u8; 32];
+        for w8 in b.as_chunks_mut::<8>().0 {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407 ^ (i as u64));
+            *w8 = rng.to_le_bytes();
+        }
+        blobs.push(b);
+    }
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::I64((0..n as i64).map(|x| x % 200).collect()),
+                    None,
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Binary(
+                        BinaryData::try_from_slices(blobs.iter().map(|b| b.as_slice())).unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        n,
+    )
+    .unwrap();
+    let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+    opts.row_group_size = n;
+    opts.mini_block_size = n;
+    let mut file_bytes = Vec::new();
+    {
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut file_bytes),
+            Arc::clone(&schema),
+            opts,
+            None,
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+    }
+
+    let no_cache_cfg = SimulatedS3Config {
+        cache_capacity_blocks: 0,
+        ..SimulatedS3Config::default()
+    };
+    let s3_loc = Arc::new(
+        SimulatedS3Reader::from_bytes(file_bytes.clone(), no_cache_cfg).with_remote_hint(false),
+    );
+    let s3_rem =
+        Arc::new(SimulatedS3Reader::from_bytes(file_bytes, no_cache_cfg).with_remote_hint(true));
+    let r_loc = StatamReader::open(s3_loc.clone(), None).unwrap();
+    let r_rem = StatamReader::open(s3_rem.clone(), None).unwrap();
+    assert!(r_loc.retained_tail_start.is_none());
+    assert!(r_rem.retained_tail_start.is_some());
+    let r_meta_only =
+        StatamReader::open_with_meta(s3_rem.clone(), r_rem.meta().clone(), None).unwrap();
+    assert!(r_meta_only.retained_tail_start.is_none());
+
+    let p2_stored: u64 = r_rem
+        .meta()
+        .rg_blocks(1, 0)
+        .iter()
+        .map(|b| u64::from(b.stored_len))
+        .sum();
+    assert!(
+        p2_stored > 1024 * 1024 && p2_stored < REMOTE_SINGLE_WAVE_P2_MAX_BYTES,
+        "expected 1 MiB < p2_stored ({p2_stored}) < 1.5 MiB"
+    );
+
+    let req = ScanRequest {
+        projection: Some(vec![1]),
+        predicates: vec![Predicate::new("id", ZonePred::Eq(ZoneValue::I64(7)))],
+        ..ScanRequest::default()
+    };
+    s3_loc.reset_counters();
+    let out_loc = r_loc.scan(&req).unwrap();
+    s3_rem.reset_counters();
+    let out_rem = r_rem.scan(&req).unwrap();
+    assert_eq!(out_loc.iter().map(Batch::num_rows).sum::<usize>(), 200);
+    assert_eq!(out_rem.iter().map(Batch::num_rows).sum::<usize>(), 200);
+    assert_eq!(s3_loc.counters().waves, 2);
+    assert_eq!(
+        s3_rem.counters().waves,
+        1,
+        "1.25 MiB Phase-2 candidate must fold into 1 wave under 1.5 MiB remote budget"
+    );
 }

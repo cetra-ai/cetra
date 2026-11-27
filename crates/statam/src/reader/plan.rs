@@ -19,8 +19,8 @@ use crate::simd::trigram::extract_trigram_hashes;
 
 use super::eval::id_lookup_zone_pred;
 use super::{
-    IdLookup, Predicate, SCAN_COALESCE_MAX_GAP, SCAN_COALESCE_MAX_SPAN, StatamReader,
-    SubstringQuery, TimeRange,
+    IdLookup, Predicate, REMOTE_SCAN_COALESCE_MAX_GAP, SCAN_COALESCE_MAX_GAP,
+    SCAN_COALESCE_MAX_SPAN, StatamReader, SubstringQuery, TimeRange,
 };
 
 pub(super) struct RgIoPlan {
@@ -559,6 +559,7 @@ impl StatamReader {
 pub(super) fn fetch_coalesced_blocks(
     reader: &dyn RangeReader,
     raw_ranges: &[(u64, u64)],
+    retained_tail_start: Option<u64>,
 ) -> Result<HashMap<(u64, u64), Bytes>, StatamError> {
     if raw_ranges.is_empty() {
         return Ok(HashMap::new());
@@ -567,26 +568,42 @@ pub(super) fn fetch_coalesced_blocks(
     sorted.sort_unstable();
     sorted.dedup();
 
+    let is_remote = reader.is_remote();
     let mut coalesced: Vec<Range<u64>> = Vec::new();
     let mut groups: Vec<Vec<(u64, u64)>> = Vec::new();
+    let mut span_useful: u64 = 0;
     for &(s, e) in &sorted {
         if s > e {
             return Err(StatamError::Corrupt {
                 reason: "invalid block range with start > end",
             });
         }
-        if let Some(last_r) = coalesced.last_mut()
-            && s <= last_r.end.saturating_add(SCAN_COALESCE_MAX_GAP)
-            && e.saturating_sub(last_r.start) <= SCAN_COALESCE_MAX_SPAN
-        {
-            last_r.end = last_r.end.max(e);
-            if let Some(g) = groups.last_mut() {
-                g.push((s, e));
+        if let Some(last_r) = coalesced.last_mut() {
+            let crosses_tail = retained_tail_start.is_some_and(|ts| last_r.start < ts && s >= ts);
+            let gap = s.saturating_sub(last_r.end);
+            let merged_end = last_r.end.max(e);
+            let new_span_len = merged_end.saturating_sub(last_r.start);
+            let added_useful = e.saturating_sub(s.max(last_r.end));
+            let new_useful = span_useful.saturating_add(added_useful);
+            let new_wasted = new_span_len.saturating_sub(new_useful);
+            let within_span = e <= last_r.end || new_span_len <= SCAN_COALESCE_MAX_SPAN;
+            let within_gap = gap <= SCAN_COALESCE_MAX_GAP
+                || (is_remote
+                    && gap <= REMOTE_SCAN_COALESCE_MAX_GAP
+                    && added_useful > 0
+                    && new_wasted <= new_useful);
+            if !crosses_tail && within_span && within_gap {
+                last_r.end = merged_end;
+                span_useful = new_useful;
+                if let Some(g) = groups.last_mut() {
+                    g.push((s, e));
+                }
+                continue;
             }
-            continue;
         }
         coalesced.push(s..e);
         groups.push(vec![(s, e)]);
+        span_useful = e - s;
     }
 
     let fetched = reader.read_ranges(&coalesced)?;

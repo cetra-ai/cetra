@@ -876,7 +876,8 @@ impl StatamReader {
             all_ranges.push((entry.offset, end));
         }
 
-        let fetched = fetch_coalesced_blocks(self.reader.as_ref(), &all_ranges)?;
+        let fetched =
+            fetch_coalesced_blocks(self.reader.as_ref(), &all_ranges, self.retained_tail_start)?;
 
         if !missing_lazy.is_empty() {
             let mut guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());

@@ -120,6 +120,10 @@ const DICT_MAX_SAMPLE_SLICE: usize = 2_048;
 const MAX_PENDING_RAW_BYTES: usize = 32 * 1024 * 1024;
 /// Default tail prefetch size for `.stpk` chunk packs (256 KiB), capturing TOC + dict + edge table + trigram section in 1 GET.
 const PACK_DEFAULT_TAIL_HINT: u32 = 256 * 1024;
+/// Maximum `.stpk` file length (`4 MiB`) eligible for the adaptive remote `384 KiB` tail prefetch.
+const PACK_REMOTE_ADAPTIVE_TAIL_MAX_FILE_LEN: u64 = 4 * 1024 * 1024;
+/// Adaptive tail prefetch size (`384 KiB`) used on remote readers for small `.stpk` packs (`<= 4 MiB`).
+const PACK_REMOTE_SMALL_TAIL_HINT: u32 = 384 * 1024;
 
 /// Configuration options for [`ChunkPackBuilder`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1925,7 +1929,8 @@ impl fmt::Debug for ChunkPackReader {
 }
 
 impl ChunkPackReader {
-    /// Opens a `.stpk` pack by reading its tail (`PACK_DEFAULT_TAIL_HINT` = 256 KiB) in 1 GET.
+    /// Opens a `.stpk` pack by reading its tail in 1 GET (`384 KiB` on remote readers for packs
+    /// `<= 4 MiB`, else `PACK_DEFAULT_TAIL_HINT` = `256 KiB`).
     pub fn open(reader: Arc<dyn RangeReader>) -> Result<Self, StatamError> {
         Self::open_with_tail_hint(reader, None)
     }
@@ -1943,8 +1948,13 @@ impl ChunkPackReader {
             });
         }
 
-        let hint =
-            u64::from(tail_hint.unwrap_or(PACK_DEFAULT_TAIL_HINT)).max(PACK_POSTSCRIPT_LEN as u64);
+        let default_hint =
+            if reader.is_remote() && file_len <= PACK_REMOTE_ADAPTIVE_TAIL_MAX_FILE_LEN {
+                PACK_REMOTE_SMALL_TAIL_HINT
+            } else {
+                PACK_DEFAULT_TAIL_HINT
+            };
+        let hint = u64::from(tail_hint.unwrap_or(default_hint)).max(PACK_POSTSCRIPT_LEN as u64);
         let tail_start = file_len.saturating_sub(hint);
         let tail = reader.read_range(tail_start..file_len)?;
         if tail.len() as u64 != file_len - tail_start {
@@ -5715,6 +5725,104 @@ mod tests {
             "nearby remote frames + trailing dict should coalesce into fewer spans: got {} spans for {} ranges",
             dict_calls[0].len(),
             dict_cids.len() + 1
+        );
+    }
+
+    #[test]
+    fn pass20_adaptive_remote_tail_hint_4mib_threshold() {
+        struct TailRecorder {
+            data: Bytes,
+            remote: bool,
+            calls: Mutex<Vec<Range<u64>>>,
+        }
+        impl TailRecorder {
+            fn new(data: Vec<u8>, remote: bool) -> Self {
+                Self {
+                    data: Bytes::from(data),
+                    remote,
+                    calls: Mutex::new(Vec::new()),
+                }
+            }
+            fn take_calls(&self) -> Vec<Range<u64>> {
+                std::mem::take(&mut *self.calls.lock().unwrap())
+            }
+        }
+        impl RangeReader for TailRecorder {
+            fn file_len(&self) -> u64 {
+                self.data.len() as u64
+            }
+            fn is_remote(&self) -> bool {
+                self.remote
+            }
+            fn read_range(&self, range: Range<u64>) -> Result<Bytes, StatamError> {
+                self.calls.lock().unwrap().push(range.clone());
+                Ok(self.data.slice(range.start as usize..range.end as usize))
+            }
+        }
+
+        let build_uncompressed_pack = |chunks: u32, chunk_len: usize| -> Vec<u8> {
+            let mut pb = ChunkPackBuilder::new(
+                [0x20u8; 16],
+                PackWriteOptions {
+                    codec: Codec::None,
+                    zstd_level: 1,
+                    target_frame_raw_bytes: 256 * 1024,
+                    enable_trigram_skip: false,
+                    compress_toc_lz4: false,
+                    write_threads: 1,
+                    emit_hash_table: false,
+                },
+            );
+            for i in 0..chunks {
+                let mut chunk = vec![((i * 29) & 0xFF) as u8; chunk_len];
+                chunk[0..4].copy_from_slice(&i.to_le_bytes());
+                pb.intern_chunk(&chunk).unwrap();
+            }
+            let mut out = Vec::new();
+            pb.finish(&mut out).unwrap();
+            out
+        };
+
+        // Small pack (~1.0 MiB, strictly > 384 KiB and <= 4 MiB).
+        let small_pack = build_uncompressed_pack(4, 256 * 1024);
+        let small_len = small_pack.len() as u64;
+        assert!(small_len > u64::from(PACK_REMOTE_SMALL_TAIL_HINT));
+        assert!(small_len <= PACK_REMOTE_ADAPTIVE_TAIL_MAX_FILE_LEN);
+
+        // 1. Remote + tail_hint=None + file_len <= 4 MiB -> uses adaptive 384 KiB tail hint!
+        let rec_rem_small = Arc::new(TailRecorder::new(small_pack.clone(), true));
+        let p_rem_small = ChunkPackReader::open(rec_rem_small.clone()).unwrap();
+        let expected_384 = (small_len - u64::from(PACK_REMOTE_SMALL_TAIL_HINT))..small_len;
+        assert_eq!(rec_rem_small.take_calls(), vec![expected_384.clone()]);
+        assert_eq!(p_rem_small.retained_tail_start, Some(expected_384.start));
+
+        // 2. Non-remote + tail_hint=None + file_len <= 4 MiB -> keeps 256 KiB default hint!
+        let rec_loc_small = Arc::new(TailRecorder::new(small_pack.clone(), false));
+        let p_loc_small = ChunkPackReader::open(rec_loc_small.clone()).unwrap();
+        let expected_256_small = (small_len - u64::from(PACK_DEFAULT_TAIL_HINT))..small_len;
+        assert_eq!(rec_loc_small.take_calls(), vec![expected_256_small]);
+        assert_eq!(p_loc_small.retained_tail_start, None);
+
+        // 3. Remote + explicit Some(128 KiB) + file_len <= 4 MiB -> honors explicit 128 KiB hint!
+        let rec_rem_explicit = Arc::new(TailRecorder::new(small_pack, true));
+        let p_rem_explicit =
+            ChunkPackReader::open_with_tail_hint(rec_rem_explicit.clone(), Some(128 * 1024))
+                .unwrap();
+        let expected_128 = (small_len - 128 * 1024)..small_len;
+        assert_eq!(rec_rem_explicit.take_calls(), vec![expected_128.clone()]);
+        assert_eq!(p_rem_explicit.retained_tail_start, Some(expected_128.start));
+
+        // 4. Remote + tail_hint=None + file_len > 4 MiB -> keeps 256 KiB default hint!
+        let large_pack = build_uncompressed_pack(17, 256 * 1024);
+        let large_len = large_pack.len() as u64;
+        assert!(large_len > PACK_REMOTE_ADAPTIVE_TAIL_MAX_FILE_LEN);
+        let rec_rem_large = Arc::new(TailRecorder::new(large_pack, true));
+        let p_rem_large = ChunkPackReader::open(rec_rem_large.clone()).unwrap();
+        let expected_256_large = (large_len - u64::from(PACK_DEFAULT_TAIL_HINT))..large_len;
+        assert_eq!(rec_rem_large.take_calls(), vec![expected_256_large.clone()]);
+        assert_eq!(
+            p_rem_large.retained_tail_start,
+            Some(expected_256_large.start)
         );
     }
 }

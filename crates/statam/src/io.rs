@@ -377,6 +377,9 @@ pub struct SimulatedS3Config {
     pub max_concurrent_gets: usize,
     /// Simulated per-stream transfer bandwidth in bytes/second (default: `40 MiB/s`).
     pub per_stream_bandwidth_bytes_per_sec: f64,
+    /// Initial per-slot HTTP/TLS/server dispatch stagger in milliseconds for concurrent GETs in a
+    /// wave (default: `0.0`; `7.0` in [`SimulatedS3Config::wan_garage`]).
+    pub per_get_overhead_ms: f64,
 }
 
 impl Default for SimulatedS3Config {
@@ -388,21 +391,24 @@ impl Default for SimulatedS3Config {
             bandwidth_bytes_per_sec: 100.0 * 1024.0 * 1024.0,
             max_concurrent_gets: 16,
             per_stream_bandwidth_bytes_per_sec: 40.0 * 1024.0 * 1024.0,
+            per_get_overhead_ms: 0.0,
         }
     }
 }
 
 impl SimulatedS3Config {
     /// Calibrated WAN S3 profile matching live Garage S3 measurements
-    /// (`59.0 ms` RTT, `75 MiB/s` aggregate, `30 MiB/s` per-stream, `16` concurrent GETs).
+    /// (`59.0 ms` RTT, `80 MiB/s` aggregate, `55 MiB/s` per-stream, `7.0 ms` initial per-slot
+    /// dispatch stagger, `16` concurrent GETs).
     pub fn wan_garage() -> Self {
         Self {
             mode: SimulatedS3Mode::ReadCache1MiB,
             cache_capacity_blocks: 256,
             rtt_ms: 59.0,
-            bandwidth_bytes_per_sec: 75.0 * 1024.0 * 1024.0,
+            bandwidth_bytes_per_sec: 80.0 * 1024.0 * 1024.0,
             max_concurrent_gets: 16,
-            per_stream_bandwidth_bytes_per_sec: 30.0 * 1024.0 * 1024.0,
+            per_stream_bandwidth_bytes_per_sec: 55.0 * 1024.0 * 1024.0,
+            per_get_overhead_ms: 7.0,
         }
     }
 
@@ -434,13 +440,14 @@ fn ms_to_duration(ms: f64) -> Duration {
 }
 
 /// Models the wall-clock latency (ms) of one parallel HTTP GET wave with `get_lens` byte sizes
-/// dispatched in order across up to `config.max_concurrent_gets` concurrent streams, bounded below
+/// dispatched in order across up to `config.max_concurrent_gets` concurrent streams (with initial
+/// per-slot dispatch stagger `idx * per_get_overhead_ms` for the first `c` slots), bounded below
 /// by the aggregate WAN bandwidth floor.
 pub fn simulate_wave_latency_ms(get_lens: &[u64], config: &SimulatedS3Config) -> f64 {
     if get_lens.is_empty() {
         return 0.0;
     }
-    if config.rtt_ms.is_nan() {
+    if config.rtt_ms.is_nan() || config.per_get_overhead_ms.is_nan() {
         return f64::NAN;
     }
     if config.rtt_ms.is_infinite() {
@@ -450,6 +457,15 @@ pub fn simulate_wave_latency_ms(get_lens: &[u64], config: &SimulatedS3Config) ->
             0.0
         };
     }
+    let c = config.max_concurrent_gets.max(1).min(get_lens.len());
+    let overhead = if config.per_get_overhead_ms.is_infinite() {
+        if config.per_get_overhead_ms.is_sign_positive() && c > 1 {
+            return f64::INFINITY;
+        }
+        0.0
+    } else {
+        config.per_get_overhead_ms.max(0.0)
+    };
     let rtt = config.rtt_ms.max(0.0);
     let stream_bw = if config.per_stream_bandwidth_bytes_per_sec.is_finite()
         && config.per_stream_bandwidth_bytes_per_sec > 0.0
@@ -458,22 +474,26 @@ pub fn simulate_wave_latency_ms(get_lens: &[u64], config: &SimulatedS3Config) ->
     } else {
         config.bandwidth_bytes_per_sec
     };
-    let c = config.max_concurrent_gets.max(1).min(get_lens.len());
     let mut slots = vec![0.0f64; c];
     let mut total_bytes = 0.0f64;
 
-    for &len in get_lens {
+    for (idx, &len) in get_lens.iter().enumerate() {
         let len_f = len as f64;
         total_bytes += len_f;
-        let mut best_idx = 0usize;
-        let mut best_val = slots[0];
-        for (s, &val) in slots.iter().enumerate().skip(1) {
-            if val < best_val {
-                best_val = val;
-                best_idx = s;
+        let get_ms = rtt + transfer_ms(len_f, stream_bw);
+        if idx < c {
+            slots[idx] = (idx as f64) * overhead + get_ms;
+        } else {
+            let mut best_idx = 0usize;
+            let mut best_val = slots[0];
+            for (s, &val) in slots.iter().enumerate().skip(1) {
+                if val < best_val {
+                    best_val = val;
+                    best_idx = s;
+                }
             }
+            slots[best_idx] += get_ms;
         }
-        slots[best_idx] += rtt + transfer_ms(len_f, stream_bw);
     }
 
     let parallel_ms = slots.into_iter().fold(0.0f64, f64::max);
@@ -507,7 +527,8 @@ impl IoCounters {
     /// returns that exact accumulated wave latency (use
     /// [`SimulatedS3Reader::simulated_latency_ms_for`] to re-evaluate recorded waves under a
     /// different [`SimulatedS3Config`]). Otherwise, computes a stateless O(1) wave-aware fallback
-    /// `(ceil(gets / max_concurrent_gets) * rtt_ms) + transfer_ms(bytes_from_s3, bandwidth)`.
+    /// `(ceil(gets / c) * rtt_ms) + ((min(gets, c).saturating_sub(1)) * per_get_overhead_ms)
+    /// + transfer_ms(bytes_from_s3, bandwidth)`.
     pub fn simulated_latency_ms(&self, config: &SimulatedS3Config) -> f64 {
         if self.wave_latency_ms > 0.0 || self.wave_latency_ms.is_nan() {
             return self.wave_latency_ms;
@@ -515,7 +536,7 @@ impl IoCounters {
         if self.gets == 0 && self.bytes_from_s3 == 0 {
             return 0.0;
         }
-        if config.rtt_ms.is_nan() {
+        if config.rtt_ms.is_nan() || config.per_get_overhead_ms.is_nan() {
             return f64::NAN;
         }
         if config.rtt_ms.is_infinite() {
@@ -527,8 +548,18 @@ impl IoCounters {
         }
         let rtt = config.rtt_ms.max(0.0);
         let c = config.max_concurrent_gets.max(1) as u64;
+        let stagger_slots = self.gets.min(c).saturating_sub(1);
+        let stagger_ms = if config.per_get_overhead_ms.is_infinite() {
+            if config.per_get_overhead_ms.is_sign_positive() && stagger_slots > 0 {
+                return f64::INFINITY;
+            }
+            0.0
+        } else {
+            (stagger_slots as f64) * config.per_get_overhead_ms.max(0.0)
+        };
         let rounds = self.gets.div_ceil(c);
         (rounds as f64) * rtt
+            + stagger_ms
             + transfer_ms(self.bytes_from_s3 as f64, config.bandwidth_bytes_per_sec)
     }
 
@@ -1493,12 +1524,13 @@ mod tests {
         assert_eq!(garage.mode, SimulatedS3Mode::ReadCache1MiB);
         assert_eq!(garage.cache_capacity_blocks, 256);
         assert_eq!(garage.rtt_ms, 59.0);
-        assert_eq!(garage.bandwidth_bytes_per_sec, 75.0 * 1024.0 * 1024.0);
+        assert_eq!(garage.bandwidth_bytes_per_sec, 80.0 * 1024.0 * 1024.0);
         assert_eq!(garage.max_concurrent_gets, 16);
         assert_eq!(
             garage.per_stream_bandwidth_bytes_per_sec,
-            30.0 * 1024.0 * 1024.0
+            55.0 * 1024.0 * 1024.0
         );
+        assert_eq!(garage.per_get_overhead_ms, 7.0);
         let garage_direct = garage.with_direct_mode(64 * 1024);
         assert_eq!(
             garage_direct.mode,
@@ -1512,23 +1544,34 @@ mod tests {
         let one_11mib = [11 * mib];
         let par_ms = simulate_wave_latency_ms(&ten_1mib, &garage);
         let single_ms = simulate_wave_latency_ms(&one_11mib, &garage);
-        // 10x 1 MiB: parallel stream = 59 + 1/30*1000 = 92.33 ms, agg floor = 59 + 10/75*1000 = 192.33 ms
-        // 1x 11 MiB: single stream = 59 + 11/30*1000 = 425.67 ms
+        // 10x 1 MiB: parallel slot[9] = 9*7 + 59 + 1/55*1000 = 140.18 ms, agg floor = 59 + 10/80*1000 = 184.0 ms
+        // 1x 11 MiB: single stream = 59 + 11/55*1000 = 259.0 ms
         assert!(
             par_ms < single_ms,
             "expected 10x1MiB parallel ({par_ms:.2} ms) < 1x11MiB single-stream ({single_ms:.2} ms)"
         );
-        assert!((par_ms - (59.0 + (10.0 / 75.0) * 1000.0)).abs() < 1e-6);
-        assert!((single_ms - (59.0 + (11.0 / 30.0) * 1000.0)).abs() < 1e-6);
+        assert!((par_ms - (59.0 + (10.0 / 80.0) * 1000.0)).abs() < 1e-6);
+        assert!((single_ms - (59.0 + (11.0 / 55.0) * 1000.0)).abs() < 1e-6);
 
-        // 3. > max_concurrent_gets multi-round batching (20x 64 KiB across 16 slots -> 2 rounds).
+        // 3. > max_concurrent_gets multi-round batching (20x 64 KiB across 16 slots):
+        //    with zero stagger (`default()`), exactly 2 rounds; with `wan_garage()` 7.0 ms stagger,
+        //    slot[15] finishes at 15*7 + one_small_ms > slot[3] at 3*7 + 2*one_small_ms.
         let twenty_small = vec![64 * 1024u64; 20];
-        let two_round_ms = simulate_wave_latency_ms(&twenty_small, &garage);
+        let zero_stagger = SimulatedS3Config {
+            per_get_overhead_ms: 0.0,
+            ..garage
+        };
+        let two_round_zero_ms = simulate_wave_latency_ms(&twenty_small, &zero_stagger);
         let one_small_ms = simulate_wave_latency_ms(&[64 * 1024u64], &garage);
         assert!(
-            (two_round_ms - 2.0 * one_small_ms).abs() < 1e-6,
-            "20 equal GETs across 16 slots must take exactly 2 rounds: got {two_round_ms} vs {}",
+            (two_round_zero_ms - 2.0 * one_small_ms).abs() < 1e-6,
+            "20 equal GETs across 16 slots (0 stagger) must take exactly 2 rounds: got {two_round_zero_ms} vs {}",
             2.0 * one_small_ms
+        );
+        let twenty_stagger_ms = simulate_wave_latency_ms(&twenty_small, &garage);
+        assert!(
+            (twenty_stagger_ms - (15.0 * 7.0 + one_small_ms)).abs() < 1e-6,
+            "20x64KiB under wan_garage() should be dominated by slot[15]: got {twenty_stagger_ms}"
         );
         assert_eq!(simulate_wave_latency_ms(&[], &garage), 0.0);
 
@@ -1643,5 +1686,149 @@ mod tests {
             Duration::MAX
         );
         assert!(max_gets.simulated_latency_ms(&default_cfg).is_finite());
+    }
+
+    #[test]
+    fn pass20_per_slot_dispatch_stagger_and_clamping() {
+        let garage = SimulatedS3Config::wan_garage();
+        let default_cfg = SimulatedS3Config::default();
+        assert_eq!(default_cfg.per_get_overhead_ms, 0.0);
+        assert_eq!(garage.per_get_overhead_ms, 7.0);
+
+        // 1. Exact per-slot dispatch stagger math for 1, 13, 16, and 32 GETs of 64 KiB under wan_garage().
+        let sz = 64 * 1024u64;
+        let single_get_ms = 59.0 + (sz as f64 / (55.0 * 1024.0 * 1024.0)) * 1000.0;
+
+        let ms_1 = simulate_wave_latency_ms(&[sz; 1], &garage);
+        assert!((ms_1 - single_get_ms).abs() < 1e-9);
+
+        let ms_13 = simulate_wave_latency_ms(&[sz; 13], &garage);
+        assert!((ms_13 - (12.0 * 7.0 + single_get_ms)).abs() < 1e-9);
+
+        let ms_16 = simulate_wave_latency_ms(&[sz; 16], &garage);
+        assert!((ms_16 - (15.0 * 7.0 + single_get_ms)).abs() < 1e-9);
+
+        // For 32 equal 64 KiB GETs across 16 slots with 7 ms stagger:
+        // slots 0..9 run 2nd GET, then early slots 0..3 finish 2*single_get_ms (~120.27 ms) before
+        // slots 9..15 finish their 1st GET (~123.14..165.14 ms), so slot 3 finishes 3rd GET at
+        // 3*7 + 3*single_get_ms = 21 + 3*single_get_ms (~201.41 ms), strictly below linear 31*7 + single_get_ms!
+        let ms_32 = simulate_wave_latency_ms(&[sz; 32], &garage);
+        let expected_32 = 21.0 + 3.0 * single_get_ms;
+        assert!(
+            (ms_32 - expected_32).abs() < 1e-9,
+            "32x64KiB stagger schedule mismatch: got {ms_32} vs {expected_32}"
+        );
+        assert!(ms_32 < 31.0 * 7.0 + single_get_ms);
+
+        // 2. Exact O(1) IoCounters::simulated_latency_ms fallback for 1, 13, 16, 32 GETs.
+        let agg_bw = 80.0 * 1024.0 * 1024.0;
+        for (gets, expected_rounds, expected_stagger_slots) in
+            [(1u64, 1u64, 0u64), (13, 1, 12), (16, 1, 15), (32, 2, 15)]
+        {
+            let bytes = gets * sz;
+            let c = IoCounters {
+                gets,
+                bytes_from_s3: bytes,
+                ..IoCounters::default()
+            };
+            let expected = (expected_rounds as f64) * 59.0
+                + (expected_stagger_slots as f64) * 7.0
+                + (bytes as f64 / agg_bw) * 1000.0;
+            let got = c.simulated_latency_ms(&garage);
+            assert!(
+                (got - expected).abs() < 1e-9,
+                "O(1) fallback mismatch for gets={gets}: got {got} vs {expected}"
+            );
+        }
+
+        // 3. NaN / +Inf / -Inf / -1.0 / u64::MAX clamping on per_get_overhead_ms.
+        let nan_oh = SimulatedS3Config {
+            per_get_overhead_ms: f64::NAN,
+            ..garage
+        };
+        assert!(simulate_wave_latency_ms(&[sz], &nan_oh).is_nan());
+        assert!(simulate_wave_latency_ms(&[sz, sz], &nan_oh).is_nan());
+        let two_gets = IoCounters {
+            gets: 2,
+            bytes_from_s3: 2 * sz,
+            ..IoCounters::default()
+        };
+        assert!(two_gets.simulated_latency_ms(&nan_oh).is_nan());
+        assert_eq!(two_gets.simulated_latency(&nan_oh), Duration::ZERO);
+
+        let pos_inf_oh = SimulatedS3Config {
+            per_get_overhead_ms: f64::INFINITY,
+            ..garage
+        };
+        // 1 GET (0 stagger slots) must stay finite (never 0.0 * inf = NaN)!
+        assert!((simulate_wave_latency_ms(&[sz], &pos_inf_oh) - single_get_ms).abs() < 1e-9);
+        assert_eq!(
+            simulate_wave_latency_ms(&[sz, sz], &pos_inf_oh),
+            f64::INFINITY
+        );
+        // Single-slot concurrency (max_concurrent_gets=1) has 0 stagger slots -> finite, never NaN.
+        let single_slot_inf = SimulatedS3Config {
+            max_concurrent_gets: 1,
+            ..pos_inf_oh
+        };
+        assert!(
+            (simulate_wave_latency_ms(&[sz, sz], &single_slot_inf) - 2.0 * single_get_ms).abs()
+                < 1e-9
+        );
+        let one_get = IoCounters {
+            gets: 1,
+            bytes_from_s3: sz,
+            ..IoCounters::default()
+        };
+        assert!(one_get.simulated_latency_ms(&pos_inf_oh).is_finite());
+        assert_eq!(two_gets.simulated_latency_ms(&pos_inf_oh), f64::INFINITY);
+        assert_eq!(two_gets.simulated_latency(&pos_inf_oh), Duration::MAX);
+        let zero_gets_nonzero_bytes = IoCounters {
+            gets: 0,
+            bytes_from_s3: sz,
+            ..IoCounters::default()
+        };
+        assert!(
+            zero_gets_nonzero_bytes
+                .simulated_latency_ms(&pos_inf_oh)
+                .is_finite()
+        );
+
+        let neg_oh = SimulatedS3Config {
+            per_get_overhead_ms: -1.0,
+            ..garage
+        };
+        let neg_inf_oh = SimulatedS3Config {
+            per_get_overhead_ms: f64::NEG_INFINITY,
+            ..garage
+        };
+        let zero_oh = SimulatedS3Config {
+            per_get_overhead_ms: 0.0,
+            ..garage
+        };
+        assert_eq!(
+            simulate_wave_latency_ms(&[sz; 16], &neg_oh),
+            simulate_wave_latency_ms(&[sz; 16], &zero_oh)
+        );
+        assert_eq!(
+            simulate_wave_latency_ms(&[sz; 16], &neg_inf_oh),
+            simulate_wave_latency_ms(&[sz; 16], &zero_oh)
+        );
+        assert_eq!(
+            two_gets.simulated_latency_ms(&neg_oh),
+            two_gets.simulated_latency_ms(&zero_oh)
+        );
+        assert_eq!(
+            two_gets.simulated_latency_ms(&neg_inf_oh),
+            two_gets.simulated_latency_ms(&zero_oh)
+        );
+
+        let max_gets = IoCounters {
+            gets: u64::MAX,
+            bytes_from_s3: u64::MAX,
+            ..IoCounters::default()
+        };
+        assert!(max_gets.simulated_latency_ms(&garage).is_finite());
+        assert_eq!(max_gets.simulated_latency(&pos_inf_oh), Duration::MAX);
     }
 }

@@ -46,8 +46,11 @@ pub(crate) use payload::StreamingL0Payload;
 use payload::{PHASE2_PAYLOAD_WAVE_TARGET_BYTES, ParsedL0Payload};
 use plan::{ActiveMiniBlock, DecodedPhase1, RgIoPlan, TouchedMbRows, find_time_column};
 
-/// Maximum gap (64 KiB) between blocks coalesced into a single `Scan` range read.
+/// Maximum gap (64 KiB) between blocks coalesced unconditionally into a single `Scan` range read.
 const SCAN_COALESCE_MAX_GAP: u64 = 64 * 1024;
+/// Maximum gap (128 KiB) between blocks coalesced on remote readers when wasted gap bytes do not
+/// exceed useful payload bytes (`new_wasted <= new_useful`).
+const REMOTE_SCAN_COALESCE_MAX_GAP: u64 = 128 * 1024;
 /// Maximum total span (4 MiB) of a single coalesced `Scan` range read.
 const SCAN_COALESCE_MAX_SPAN: u64 = 4 * 1024 * 1024;
 /// Maximum cumulative `.statam` byte range volume fetched in a single cross-RG I/O wave (`64 MiB`).
@@ -56,8 +59,8 @@ const IO_WAVE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const P1_WAVE_MAX_RAW_BYTES: u64 = 128 * 1024 * 1024;
 /// Maximum candidate Phase-2 `.statam` bytes (blocks + L0 payload + uncached non-inline lazy
 /// dicts) folded into Wave 1 on remote readers (when `!has_payload_sub`) to eliminate the
-/// Phase-2 round-trip (`1 MiB`).
-const REMOTE_SINGLE_WAVE_P2_MAX_BYTES: u64 = 1024 * 1024;
+/// Phase-2 round-trip (`1.5 MiB`).
+const REMOTE_SINGLE_WAVE_P2_MAX_BYTES: u64 = 1536 * 1024;
 /// Minimum total uncompressed block bytes required before spawning reader worker threads
 /// (48 KiB), avoiding OS thread-spawn overhead on sub-millisecond narrow queries.
 /// Tasks touching `LocalityGroup::ExternalPayload` are exempt from this threshold.
@@ -319,6 +322,7 @@ pub struct StatamReader {
     reader: Arc<dyn RangeReader>,
     meta: StatamFileMeta,
     packs: Option<Arc<dyn PackResolver>>,
+    retained_tail_start: Option<u64>,
     caches: Mutex<ReaderCaches>,
     pack_init_lock: Mutex<()>,
     #[cfg(test)]
@@ -341,15 +345,17 @@ impl StatamReader {
         packs: Option<Arc<dyn PackResolver>>,
     ) -> Result<Self, StatamError> {
         let (meta, tail_start, tail) = StatamFileMeta::read_from_with_tail(reader.as_ref(), None)?;
-        let reader: Arc<dyn RangeReader> = if reader.is_remote()
+        let retain_tail = reader.is_remote()
             && tail_start < meta.hot_tail_start
-            && tail.len() <= crate::io::MAX_RETAINED_TAIL_BYTES
-        {
+            && tail.len() <= crate::io::MAX_RETAINED_TAIL_BYTES;
+        let reader: Arc<dyn RangeReader> = if retain_tail {
             Arc::new(crate::io::TailCachedReader::new(reader, tail_start, tail)?)
         } else {
             reader
         };
-        Self::open_with_meta(reader, meta, packs)
+        let mut this = Self::open_with_meta(reader, meta, packs)?;
+        this.retained_tail_start = retain_tail.then_some(tail_start);
+        Ok(this)
     }
 
     /// Opens a `.statam` file using pre-read [`StatamFileMeta`] (0 extra GETs).
@@ -371,6 +377,7 @@ impl StatamReader {
             reader,
             meta,
             packs,
+            retained_tail_start: None,
             caches: Mutex::new(caches),
             pack_init_lock: Mutex::new(()),
             #[cfg(test)]
@@ -2041,7 +2048,7 @@ impl StatamReader {
             }
 
             // Remote single-wave folding: when `!has_payload_sub` and candidate Phase-2 bytes
-            // (blocks + L0 payload + deduped uncached non-inline lazy dicts) fit within 1 MiB
+            // (blocks + L0 payload + deduped uncached non-inline lazy dicts) fit within 1.5 MiB
             // and combined wave <= 64 MiB, fold Phase 2 into Wave 1 to eliminate the second S3
             // round-trip.
             let mut p2_folded_into_p1 = false;
