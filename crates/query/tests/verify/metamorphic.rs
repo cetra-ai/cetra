@@ -1220,28 +1220,28 @@ fn build_spill_stress_tables() -> Vec<TableSpec> {
     ])
     .expect("valid t_spill_r schema");
 
-    let mut left_rows = Vec::with_capacity(600);
-    for i in 0..600usize {
+    let mut left_rows = Vec::with_capacity(1000);
+    for i in 0..1000usize {
         let grp = if i.is_multiple_of(19) {
             ScalarValue::Null(DataType::Utf8)
         } else {
             ScalarValue::Utf8(format!("group-{:02}", i % 60))
         };
         let k_small = ScalarValue::I64(((i as i64) * 17) % 201 - 100);
-        // ~150 bytes per distinct payload (550 distinct values -> ~82 KiB + table overhead > 64 KiB pool).
+        // ~150 bytes per distinct payload (900 distinct values -> ~150 KiB + table overhead > 128 KiB pool).
         let payload = ScalarValue::Utf8(format!(
             "p{:04}-{}-{}",
-            i % 550,
+            i % 900,
             "abcdefghij".repeat(14),
             i % 13
         ));
         left_rows.push(vec![ScalarValue::I64(i as i64), grp, k_small, payload]);
     }
 
-    // Build side of HashJoin (`BuildRight`): 550 rows × ~160B tag (~88 KiB > 64 KiB pool)
-    // across 60 groups so Grace hash partitioning splits cleanly into <= 32 small partitions.
-    let mut right_rows = Vec::with_capacity(550);
-    for i in 0..550usize {
+    // Build side of HashJoin (`BuildRight`): 900 rows × ~160B tag (~145 KiB > 128 KiB pool)
+    // across 60 groups so Grace hash partitioning splits cleanly into small partitions.
+    let mut right_rows = Vec::with_capacity(900);
+    for i in 0..900usize {
         let grp = if i.is_multiple_of(17) {
             ScalarValue::Null(DataType::Utf8)
         } else {
@@ -1322,17 +1322,17 @@ fn axis_c_parallel_and_forced_spill_equivalence() {
     // Dedicated spill-stress suite guaranteeing disk spills independently on
     // ExternalSort, HashAgg (COUNT(DISTINCT) + DISTINCT), and HashJoin (INNER + LEFT).
     // HashAgg and HashJoin queries intentionally omit ORDER BY so ExternalSort cannot mask spills.
-    // Use small chunks (`MultiChunkFlat(32)`, ~3 KiB/batch) with 2 parallel workers in a 64 KiB
-    // pool so ~100 KiB inputs reliably spill without starving scan/merge headroom.
+    // Use small chunks (`MultiChunkFlat(48)`, ~3.3 KiB/batch) with 2 parallel workers in a 128 KiB
+    // pool so ~150 KiB inputs reliably spill without starving concurrent scan/merge headroom.
     let spill_tables = build_spill_stress_tables();
     let (s_cat_base, s_src_base) =
         make_table_catalog_and_sources(&spill_tables, LayoutVariant::FlatAll, seed ^ 0xC9);
     let (s_cat_multi, s_src_multi) = make_table_catalog_and_sources(
         &spill_tables,
-        LayoutVariant::MultiChunkFlat(32),
+        LayoutVariant::MultiChunkFlat(48),
         seed ^ 0xCA,
     );
-    let ctx_spill = make_exec_ctx(64 * 1024, 32 * 1024 * 1024, 2, 16);
+    let ctx_spill = make_exec_ctx(128 * 1024, 32 * 1024 * 1024, 2, 16);
 
     let spill_queries: &[(&str, &str, bool)] = &[
         (
