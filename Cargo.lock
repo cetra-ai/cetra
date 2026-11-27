@@ -1148,6 +1148,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cetra-sql-diff"
+version = "0.1.0-rc.2"
+dependencies = [
+ "cetra-column",
+ "cetra-query",
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "cetra-storage"
 version = "0.1.0-rc.2"
 dependencies = [

@@ -1,0 +1,29 @@
+[project]
+name = "cetra-sql-diff-py"
+version = "0.0.0"
+requires-python = "==3.13.*"
+dependencies = ["duckdb==2.0.0", "pytz==2026.6"]
+
+[dependency-groups]
+dev = ["ruff==0.17.3", "mypy==2.4.1"]
+
+[tool.uv]
+package = false
+exclude-newer = "7 days"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PT", "ANN", "S", "BLE", "N"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"diff_runner.py" = ["S608"]
+"test_dialect.py" = ["PT009"]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+files = ["dialect.py", "diff_runner.py", "test_dialect.py"]
