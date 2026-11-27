@@ -722,3 +722,206 @@ async fn explain_redacts_tombstone_pii_and_shows_count() {
 
     storage.shutdown().await.unwrap();
 }
+
+/// Byte-level 0-byte GDPR proof across `.statam`, `.stpk`, and `<data_dir>/cache/` (`ReadCache`),
+/// verifying Decision 2A immediate cache eviction and streaming pack erasure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gdpr_erasure_purges_payload_from_statam_stpk_and_read_cache() {
+    use object_store::ObjectStoreExt;
+    use object_store::memory::InMemory;
+    use object_store::path::Path as ObjectPath;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let mut cfg = config_in(dir.path());
+    cfg.compaction.interval = Duration::from_secs(3_600);
+    cfg.compaction.l0_files = 2;
+    cfg.flush.max_age = Duration::from_secs(3_600);
+    cfg.query.read_cache_bytes = Some(ByteSize::mib(32));
+
+    let storage = crate::Storage::open_with_store(
+        cfg.clone(),
+        Arc::clone(&inner) as Arc<dyn object_store::ObjectStore>,
+        crate::objects::PutSizes::S3,
+    )
+    .await
+    .unwrap();
+
+    let erased_user = "erased-user-pii-9876543210";
+    let secret_erased = "GDPR_ERASED_USER_SECRET_TOKEN_9876543210";
+    let secret_kept = "GDPR_KEPT_USER_PAYLOAD_TOKEN_1122334455";
+    let mut s1 = span_row(1, 0, INGEST, INGEST);
+    s1.user_id = Some(erased_user.to_owned());
+    s1.input = Some(format!("{secret_erased} ").repeat(120));
+    s1.input_preview = Some(secret_erased.to_owned());
+    let mut s2 = span_row(2, 0, INGEST + 100, INGEST + 100);
+    s2.user_id = Some("kept-user".to_owned());
+    s2.input = Some(format!("{secret_kept} ").repeat(120));
+    s2.input_preview = Some(secret_kept.to_owned());
+
+    // Flush two L0 files, then compact to L1 so a sibling `.stpk` pack is created.
+    storage
+        .append_spans(project(), span_rows(&[s1]))
+        .await
+        .unwrap();
+    storage.flush_now(Duration::from_secs(10)).await.unwrap();
+    storage
+        .append_spans(project(), span_rows(&[s2]))
+        .await
+        .unwrap();
+    storage.flush_now(Duration::from_secs(10)).await.unwrap();
+
+    let comp = storage.compact(INGEST + 1_000).await.unwrap();
+    assert_eq!((comp.jobs, comp.failed), (1, 0), "{comp:?}");
+    let l1_files = storage.catalog_files(Table::Spans);
+    assert_eq!(l1_files.len(), 1);
+    assert_eq!(l1_files[0].level, 1);
+    assert!(
+        l1_files[0].pack.is_some(),
+        "L1 spans with >4 KiB payloads must own a sibling .stpk pack"
+    );
+
+    // Warm ReadCache for `spans` (`.statam` + `.stpk`) AND `traces` (`user_id` + `input_preview`)
+    // before GDPR deletion.
+    let before = rows(&context(&storage).await, "SELECT input FROM spans").await;
+    assert_eq!(before.len(), 2);
+    let traces_before = rows(
+        &context(&storage).await,
+        "SELECT user_id, input_preview FROM traces",
+    )
+    .await;
+    assert_eq!(traces_before.len(), 2);
+    assert!(
+        traces_before.iter().any(|r| {
+            r["user_id"].as_str() == Some(erased_user)
+                && r["input_preview"]
+                    .as_str()
+                    .is_some_and(|p| p.contains(secret_erased))
+        }),
+        "traces query before deletion must read erased user_id and input_preview"
+    );
+
+    let cache_dir = dir.path().join("cache");
+    let cached_before: Vec<std::ffi::OsString> = std::fs::read_dir(&cache_dir)
+        .expect("ReadCache directory must exist after warming spans + traces")
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert!(
+        cached_before.len() >= 3,
+        "expected spans .statam, .stpk, and traces .statam in ReadCache; got {cached_before:?}"
+    );
+
+    // Register user deletion and apply deletions (triggers streaming GDPR single-file rewrite + Decision 2A cache eviction).
+    storage
+        .register_deletion(Deletion {
+            id: Uuid::now_v7(),
+            project: project(),
+            cutoff: INGEST + 1_000,
+            scope: DeletionScope::User {
+                user_id: erased_user.to_owned(),
+                trace_ids: Vec::new(),
+                session_ids: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+    let del_report = storage.apply_deletions(INGEST + 2_000).await.unwrap();
+    assert_eq!(
+        (del_report.rewritten, del_report.applied, del_report.failed),
+        (1, 1, 0),
+        "{del_report:?}"
+    );
+
+    // Verify new active L1 file + sibling `.stpk` pack exist and contain ZERO bytes of `secret_erased`.
+    let after_files = storage.catalog_files(Table::Spans);
+    assert_eq!(after_files.len(), 1);
+    let active = &after_files[0];
+    assert_ne!(active.id, l1_files[0].id);
+    let statam_bytes = inner
+        .get(&ObjectPath::from(active.path.as_str()))
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert!(
+        !statam_bytes
+            .windows(secret_erased.len())
+            .any(|w| w == secret_erased.as_bytes()),
+        "erased secret leaked into rewritten .statam"
+    );
+    let new_pack = active
+        .pack
+        .as_ref()
+        .expect("kept user payload still lives in rewritten sibling .stpk pack");
+    let pack_bytes = inner
+        .get(&ObjectPath::from(new_pack.path.as_str()))
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert!(
+        !pack_bytes
+            .windows(secret_erased.len())
+            .any(|w| w == secret_erased.as_bytes()),
+        "erased secret leaked into rewritten .stpk"
+    );
+
+    // Verify every replaced ReadCache entry (spans `.statam`, `.stpk`, and `traces` `.statam`)
+    // was evicted immediately (Decision 2A / D-ST-3) and ZERO bytes of erased PII remain.
+    for old_name in &cached_before {
+        assert!(
+            !cache_dir.join(old_name).exists(),
+            "replaced ReadCache entry {:?} was not evicted",
+            old_name
+        );
+    }
+    if cache_dir.exists() {
+        let mut stack = vec![cache_dir];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d).unwrap() {
+                let p = entry.unwrap().path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    let data = std::fs::read(&p).unwrap();
+                    assert!(
+                        !data
+                            .windows(secret_erased.len())
+                            .any(|w| w == secret_erased.as_bytes()),
+                        "erased secret still present in ReadCache file {}",
+                        p.display()
+                    );
+                    assert!(
+                        !data
+                            .windows(erased_user.len())
+                            .any(|w| w == erased_user.as_bytes()),
+                        "erased user_id still present in ReadCache file {}",
+                        p.display()
+                    );
+                }
+            }
+        }
+    }
+
+    // Verify kept user's payload and trace summary are intact via SQL queries.
+    let after = rows(&context(&storage).await, "SELECT input FROM spans").await;
+    assert_eq!(after.len(), 1);
+    let input_val = after[0]["input"].as_str().unwrap();
+    assert!(input_val.contains(secret_kept));
+    assert!(!input_val.contains(secret_erased));
+    let traces_after = rows(
+        &context(&storage).await,
+        "SELECT user_id, input_preview FROM traces",
+    )
+    .await;
+    assert_eq!(traces_after.len(), 1);
+    assert_eq!(traces_after[0]["user_id"].as_str(), Some("kept-user"));
+    let preview_val = traces_after[0]["input_preview"].as_str().unwrap();
+    assert!(preview_val.contains(secret_kept));
+    assert!(!preview_val.contains(secret_erased));
+
+    storage.shutdown().await.unwrap();
+}

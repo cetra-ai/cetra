@@ -13,7 +13,7 @@ use uuid::Uuid;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EngineErrorKind {
     ResourcesExhausted,
-    Parquet,
+    Statam,
     ObjectStore,
     #[cfg(test)]
     Io,
@@ -26,7 +26,7 @@ impl EngineErrorKind {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::ResourcesExhausted => "resources_exhausted",
-            Self::Parquet => "parquet",
+            Self::Statam => "statam",
             Self::ObjectStore => "object_store",
             #[cfg(test)]
             Self::Io => "io",
@@ -39,7 +39,7 @@ impl EngineErrorKind {
     fn message(self) -> &'static str {
         match self {
             Self::ResourcesExhausted => "query memory or spill limit exceeded",
-            Self::Parquet => "corrupt parquet file",
+            Self::Statam => "corrupt statam file",
             Self::ObjectStore => "object store read error",
             #[cfg(test)]
             Self::Io => "query I/O error",
@@ -86,8 +86,8 @@ impl EngineError {
         match self.kind {
             EngineErrorKind::ResourcesExhausted => cetra_query::QueryError::TooLarge,
             EngineErrorKind::Busy => cetra_query::QueryError::Busy,
-            EngineErrorKind::Parquet => {
-                cetra_query::QueryError::CorruptData("corrupt parquet file".to_owned())
+            EngineErrorKind::Statam => {
+                cetra_query::QueryError::CorruptData("corrupt statam file".to_owned())
             }
             EngineErrorKind::ObjectStore => {
                 cetra_query::QueryError::StorageIo("storage read error".to_owned())
@@ -99,7 +99,7 @@ impl EngineError {
     pub(crate) fn from_query(err: &cetra_query::QueryError) -> Self {
         let kind = match err {
             cetra_query::QueryError::TooLarge => EngineErrorKind::ResourcesExhausted,
-            cetra_query::QueryError::CorruptData(_) => EngineErrorKind::Parquet,
+            cetra_query::QueryError::CorruptData(_) => EngineErrorKind::Statam,
             cetra_query::QueryError::StorageIo(_) => EngineErrorKind::ObjectStore,
             cetra_query::QueryError::Column(_) => EngineErrorKind::Column,
             cetra_query::QueryError::Busy => EngineErrorKind::Busy,
@@ -108,11 +108,17 @@ impl EngineError {
         Self { kind }
     }
 
-    pub(crate) fn from_parquet(err: &parquet::errors::ParquetError) -> Self {
-        let kind = if crate::verify::is_store_error(err) {
+    pub(crate) fn from_statam(err: &cetra_statam::StatamError) -> Self {
+        let kind = if err.is_store_error() {
             EngineErrorKind::ObjectStore
+        } else if err.is_corrupt() {
+            EngineErrorKind::Statam
+        } else if matches!(err, cetra_statam::StatamError::MemoryExceeded) {
+            EngineErrorKind::ResourcesExhausted
+        } else if matches!(err, cetra_statam::StatamError::Column(_)) {
+            EngineErrorKind::Column
         } else {
-            EngineErrorKind::Parquet
+            EngineErrorKind::Internal
         };
         Self { kind }
     }
@@ -805,30 +811,30 @@ pub enum ProbeError {
     Unreachable,
 }
 
-/// Encoding a partition as one Parquet file failed.
+/// Encoding a partition as one Statam file failed.
 ///
 /// The message names the table or a static reason. It never includes row content.
 #[derive(Debug, thiserror::Error)]
-pub enum ParquetWriteError {
+pub enum FileWriteError {
     /// The batches cannot be written: empty, the wrong schema, or a bad level.
-    #[error("parquet write: {reason}")]
+    #[error("file write: {reason}")]
     Invalid {
         /// Static reason. Never a cell value.
         reason: &'static str,
     },
     /// Columnar batch preparation or encoding failed.
-    #[error("parquet write: {source}")]
+    #[error("file write: {source}")]
     Column {
         /// The columnar error.
         #[source]
         source: ColumnError,
     },
-    /// The Parquet writer failed.
-    #[error("parquet write: {source}")]
-    Parquet {
-        /// The Parquet error.
+    /// The Statam writer failed.
+    #[error("file write: {source}")]
+    Statam {
+        /// The Statam error.
         #[source]
-        source: Box<parquet::errors::ParquetError>,
+        source: Box<cetra_statam::StatamError>,
     },
 }
 
@@ -844,9 +850,9 @@ pub enum AnchorError {
     /// Columnar batch processing failed.
     #[error("anchor: {0}")]
     Batch(#[from] ColumnError),
-    /// An async Parquet read during the startup rebuild failed.
+    /// Reading a `traces` Statam file during the startup rebuild failed.
     #[error("anchor rebuild: {0}")]
-    Parquet(#[source] Box<parquet::errors::ParquetError>),
+    Statam(#[source] Box<cetra_statam::StatamError>),
 }
 
 impl AnchorError {
@@ -854,8 +860,8 @@ impl AnchorError {
         Self::Column { name }
     }
 
-    pub(crate) fn parquet(source: parquet::errors::ParquetError) -> Self {
-        Self::Parquet(Box::new(source))
+    pub(crate) fn statam(source: cetra_statam::StatamError) -> Self {
+        Self::Statam(Box::new(source))
     }
 
     pub(crate) fn from_column(err: ColumnError) -> Self {
@@ -863,7 +869,7 @@ impl AnchorError {
     }
 
     pub(crate) fn is_store_error(&self) -> bool {
-        matches!(self, Self::Parquet(err) if crate::verify::is_store_error(err))
+        matches!(self, Self::Statam(err) if err.is_store_error())
     }
 }
 
@@ -908,7 +914,7 @@ pub enum CompactionError {
     },
     /// Encoding an output failed.
     #[error(transparent)]
-    Write(#[from] ParquetWriteError),
+    Write(#[from] FileWriteError),
     /// Writing, publishing or deleting an object failed.
     #[error(transparent)]
     Object(#[from] ObjectError),
@@ -1126,11 +1132,11 @@ mod tests {
         );
 
         let corrupt =
-            EngineError::from_query(&QueryError::CorruptData("corrupt parquet file".to_owned()));
+            EngineError::from_query(&QueryError::CorruptData("corrupt statam file".to_owned()));
         assert!(may_be_corrupt(&corrupt));
         assert_eq!(
             CompactionError::Read { source: corrupt }.read_source(),
-            Some("parquet")
+            Some("statam")
         );
 
         let store =
@@ -1141,23 +1147,17 @@ mod tests {
             Some("object_store")
         );
 
-        let string_only = EngineError::from_query(&QueryError::internal("corrupt parquet file"));
+        let string_only = EngineError::from_query(&QueryError::internal("corrupt statam file"));
         assert!(!may_be_corrupt(&string_only));
         assert_eq!(string_only.kind_label(), "internal");
 
-        let anchor_store = AnchorError::parquet(parquet::errors::ParquetError::External(Box::new(
-            object_store::Error::Generic {
-                store: "test",
-                source: "err".into(),
-            },
-        )));
+        let anchor_store = AnchorError::statam(cetra_statam::StatamError::Store {
+            reason: "object store read failed",
+        });
         assert!(anchor_store.is_store_error());
-        let anchor_missing = AnchorError::parquet(parquet::errors::ParquetError::External(
-            Box::new(object_store::Error::NotFound {
-                path: "x".to_owned(),
-                source: "missing".into(),
-            }),
-        ));
+        let anchor_missing = AnchorError::statam(cetra_statam::StatamError::Corrupt {
+            reason: "missing or truncated object",
+        });
         assert!(!anchor_missing.is_store_error());
     }
 }
@@ -1187,7 +1187,7 @@ impl DedupError {
 pub(crate) enum FlushError {
     /// Sorting or encoding the frozen batches failed.
     #[error("flush prepare: {0}")]
-    Prepare(ParquetWriteError),
+    Prepare(FileWriteError),
     /// Anchor partitioning failed.
     #[error("flush anchor: {0}")]
     Anchor(#[from] AnchorError),
@@ -1228,7 +1228,7 @@ impl FlushError {
         Self::Dedup { reason }
     }
 
-    pub(crate) fn prepare(source: ParquetWriteError) -> Self {
+    pub(crate) fn prepare(source: FileWriteError) -> Self {
         Self::Prepare(source)
     }
 
@@ -1249,13 +1249,13 @@ impl FlushError {
     }
 }
 
-impl ParquetWriteError {
+impl FileWriteError {
     pub(crate) fn invalid(reason: &'static str) -> Self {
         Self::Invalid { reason }
     }
 
-    pub(crate) fn parquet(source: parquet::errors::ParquetError) -> Self {
-        Self::Parquet {
+    pub(crate) fn statam(source: cetra_statam::StatamError) -> Self {
+        Self::Statam {
             source: Box::new(source),
         }
     }

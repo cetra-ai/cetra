@@ -1,13 +1,13 @@
 //! Native query execution engine storage adapters (`AsyncAdmissionPool`,
-//! `MetadataCache`, zero-Arrow `ParquetSource`, `MemtableSource`, `TracesSource`,
+//! `MetadataCache`, `StatamSource`, `MemtableSource`, `TracesSource`,
 //! and `ScoresSource`).
 
 pub(crate) mod admission;
 pub(crate) mod mem_source;
 pub(crate) mod metadata_cache;
 pub(crate) mod parquet_export;
-pub(crate) mod parquet_source;
 pub(crate) mod scores_source;
+pub(crate) mod statam_source;
 pub(crate) mod traces_source;
 
 use std::sync::Arc;
@@ -1313,9 +1313,9 @@ mod tests {
         use crate::engine::metadata_cache::MetadataCache;
         use crate::engine::scores_source::ScoresSource;
         use crate::engine::traces_source::{TraceListMode, TracesSource};
-        use crate::file_format::write_file_batch;
         use crate::memtable::Memtable;
         use crate::partials::partials_from_spans_batch;
+        use crate::statam_io::write_file_batch;
         use crate::test_support::{score_row, score_rows, span_row, span_rows};
         use crate::verify::{Suspects, VerifyQueue};
         use crate::wal::Table;
@@ -1554,7 +1554,7 @@ mod tests {
             let mut scores_vec: Vec<Score> = Vec::with_capacity(200);
             for i in 1..=200_u16 {
                 let mut s = span_row(i, 1, base + i64::from(i) * 100, base + 10);
-                s.name = format!("trace-name-{:02}-{}", i % 16, "x".repeat(700));
+                s.name = format!("trace-name-{i:04}-{}", "x".repeat(700));
                 spans_vec.push(s);
 
                 let mut sc = score_row(
@@ -1564,9 +1564,9 @@ mod tests {
                     base + 200,
                     base + 200,
                     false,
-                    &format!("score-{:02}-{}", i % 16, "y".repeat(700)),
+                    &format!("score-{i:04}-{}", "y".repeat(350)),
                 );
-                sc.reason = Some(format!("reason-{:02}-{}", i % 16, "z".repeat(700)));
+                sc.reason = Some(format!("reason-{i:04}-{}", "z".repeat(350)));
                 scores_vec.push(sc);
             }
 
@@ -1611,7 +1611,7 @@ mod tests {
             let (mut tight_trace_ctx, _tdir) = make_ctx(96 * 1024, 16 * 1024 * 1024, 1);
             tight_trace_ctx.batch_size = 16;
             let traces_src = TracesSource::new(
-                Arc::clone(&store),
+                crate::objects::StorageIo::from_store(Arc::clone(&store)),
                 project(),
                 vec![f_trace_a, f_trace_b],
                 crate::deletion::ProjectMemSnapshot::empty(),
@@ -1644,7 +1644,7 @@ mod tests {
             let (mut tight_score_ctx, _sdir) = make_ctx(96 * 1024, 16 * 1024 * 1024, 1);
             tight_score_ctx.batch_size = 16;
             let scores_src = ScoresSource::new(
-                Arc::clone(&store),
+                crate::objects::StorageIo::from_store(Arc::clone(&store)),
                 project(),
                 vec![f_score_a, f_score_b],
                 crate::deletion::ProjectMemSnapshot::empty(),
@@ -1731,7 +1731,7 @@ mod tests {
             };
 
             let traces_src = TracesSource::new(
-                store,
+                crate::objects::StorageIo::from_store(store),
                 project(),
                 vec![f_trace],
                 crate::deletion::ProjectMemSnapshot::empty(),
@@ -1816,7 +1816,7 @@ mod tests {
             )
             .unwrap();
             let traces_src = TracesSource::new(
-                Arc::clone(&store),
+                crate::objects::StorageIo::from_store(Arc::clone(&store)),
                 project(),
                 Vec::new(),
                 projected_spans,
@@ -1850,7 +1850,7 @@ mod tests {
             )
             .unwrap();
             let scores_src = ScoresSource::new(
-                store,
+                crate::objects::StorageIo::from_store(store),
                 project(),
                 Vec::new(),
                 projected_scores,
@@ -2012,7 +2012,7 @@ mod tests {
                 reads: Arc::clone(&path_reads),
             });
             let store: Arc<dyn ObjectStore> = counting;
-            let cache = Arc::new(crate::file_format::FileMetadataCache::new(1024 * 1024));
+            let cache = Arc::new(MetadataCache::new(1024 * 1024));
             let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
 
             let base = 20_000 * DAY_NS;
@@ -2050,7 +2050,7 @@ mod tests {
             );
 
             let scores_src = ScoresSource::new(
-                Arc::clone(&store),
+                crate::objects::StorageIo::from_store(Arc::clone(&store)),
                 project(),
                 vec![f_a, f_b],
                 crate::deletion::ProjectMemSnapshot::empty(),
@@ -2106,16 +2106,15 @@ mod tests {
             };
             let out_sid_hint = run_source(&scores_src, &sid_hint_spec, &ctx).unwrap();
             let total_sid_hint: usize = out_sid_hint.iter().map(Batch::num_rows).sum();
-            assert_eq!(total_sid_hint, 50);
+            assert_eq!(total_sid_hint, 1);
             let reads_after_sid_hint = path_reads.lock().unwrap().clone();
             let a_sid_hint_reads = reads_after_sid_hint
                 .get(path_a)
                 .cloned()
                 .unwrap_or_default();
-            assert_eq!(
-                a_sid_hint_reads.len(),
-                1,
-                "File A should fetch ONLY its score_id bloom filter (1 range): {a_sid_hint_reads:?}"
+            assert!(
+                a_sid_hint_reads.is_empty(),
+                "File A should be pruned in 0 GETs by cached inline score_id bloom filter: {a_sid_hint_reads:?}"
             );
 
             // 3. Query by `trace_id = trace(20)`: `trace_id` is NOT pushed pre-LWW (explicit
@@ -2155,7 +2154,7 @@ mod tests {
                 .build()
                 .unwrap();
             let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let cache = Arc::new(crate::file_format::FileMetadataCache::new(1024 * 1024));
+            let cache = Arc::new(MetadataCache::new(1024 * 1024));
             let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
 
             let base = 20_000 * DAY_NS;
@@ -2226,7 +2225,7 @@ mod tests {
             );
 
             let traces_src = TracesSource::new(
-                Arc::clone(&store),
+                crate::objects::StorageIo::from_store(Arc::clone(&store)),
                 project(),
                 vec![f_trace_a, f_trace_b],
                 crate::deletion::ProjectMemSnapshot::empty(),
@@ -2238,7 +2237,7 @@ mod tests {
             )
             .unwrap();
             let scores_src = ScoresSource::new(
-                store,
+                crate::objects::StorageIo::from_store(store),
                 project(),
                 vec![f_score_a, f_score_b],
                 crate::deletion::ProjectMemSnapshot::empty(),
@@ -2384,7 +2383,7 @@ mod tests {
                 .build()
                 .unwrap();
             let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let cache = Arc::new(crate::file_format::FileMetadataCache::new(1024 * 1024));
+            let cache = Arc::new(MetadataCache::new(1024 * 1024));
             let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
 
             let base = 20_000 * DAY_NS;
@@ -2456,7 +2455,7 @@ mod tests {
             );
 
             let traces_src = TracesSource::new(
-                Arc::clone(&store),
+                crate::objects::StorageIo::from_store(Arc::clone(&store)),
                 project(),
                 vec![f_trace],
                 crate::deletion::ProjectMemSnapshot::empty(),
@@ -2470,7 +2469,7 @@ mod tests {
             .with_visible_from(Some(cutoff));
 
             let scores_src = ScoresSource::new(
-                store,
+                crate::objects::StorageIo::from_store(store),
                 project(),
                 vec![f_score],
                 crate::deletion::ProjectMemSnapshot::empty(),

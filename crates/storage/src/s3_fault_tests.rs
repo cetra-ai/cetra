@@ -126,7 +126,7 @@ async fn open_fails_on_a_store_error_and_a_later_open_succeeds() {
         "the open did not reach the store"
     );
     assert!(
-        matches!(error, OpenError::Anchor(AnchorError::Parquet(_))),
+        matches!(error, OpenError::Anchor(AnchorError::Statam(_))),
         "{error:?}"
     );
 

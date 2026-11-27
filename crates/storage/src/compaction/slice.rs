@@ -2,10 +2,9 @@
 
 use std::sync::Arc;
 
-use object_store::ObjectStore;
-
 use crate::catalog::FileMeta;
 use crate::error::CompactionError;
+use crate::objects::StorageIo;
 
 /// Rows with `lower <= time < upper`. `None` is unbounded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,11 +64,11 @@ pub(crate) fn slices(sorted: &[i64], count: usize) -> Vec<Slice> {
 ///
 /// Memory is 8 bytes per input row, bounded by the job's input size.
 pub(crate) async fn time_values(
-    store: Arc<dyn ObjectStore>,
+    io: StorageIo,
     files: &[Arc<FileMeta>],
     column: &str,
 ) -> Result<Vec<i64>, CompactionError> {
-    crate::file_format::read_time_column(&store, files, column).await
+    crate::statam_io::read_time_column(&io, files, column).await
 }
 
 #[cfg(test)]
@@ -83,8 +82,9 @@ mod tests {
 
     use super::{Slice, slice_count, slices, time_values};
     use crate::catalog::{FileMeta, FileTable};
-    use crate::file_format::write_file_batch;
-    use crate::test_support::{parquet_rows, span_row, span_rows};
+    use crate::objects::StorageIo;
+    use crate::statam_io::write_file_batch;
+    use crate::test_support::{span_row, span_rows, statam_rows};
 
     fn project() -> cetra_core::ids::ProjectId {
         "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap()
@@ -135,7 +135,7 @@ mod tests {
     }
 
     fn read_spans(bytes: bytes::Bytes) -> Batch {
-        parquet_rows(bytes)
+        statam_rows(bytes, None)
     }
 
     /// Reads the store back for one file, so the test can see what was written.
@@ -242,7 +242,7 @@ mod tests {
         let two = read_spans(store_bytes(&store, &second).await);
         assert_eq!(one.num_rows() + two.num_rows(), 3);
         let values = time_values(
-            Arc::clone(&store),
+            StorageIo::from_store(Arc::clone(&store)),
             &[Arc::new(first), Arc::new(second)],
             cetra_core::schema::spans::START_TIME,
         )

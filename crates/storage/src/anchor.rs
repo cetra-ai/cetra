@@ -13,12 +13,11 @@ use cetra_column::{Batch, Column, ColumnError, DataType, FlatData, ScalarValue, 
 use cetra_core::ids::{ProjectId, TraceId};
 use cetra_core::schema::{spans, traces};
 use chrono::{Datelike, NaiveDate};
-use object_store::ObjectStore;
 
 use crate::catalog::{Catalog, FileMeta, FileTable, now_ns};
 use crate::error::AnchorError;
 use crate::memtable::{FrozenView, PartitionKey};
-use crate::objects::Objects;
+use crate::objects::{Objects, StorageIo};
 use crate::verify::VerifyQueue;
 
 /// Nanoseconds in a UTC day.
@@ -230,7 +229,7 @@ impl Anchors {
             .collect();
         let mut rows_read = 0_usize;
         for file in &files {
-            match self.rebuild_file(file, objects.store(), since).await {
+            match self.rebuild_file(file, objects.io(), since).await {
                 Ok(rows) => rows_read = rows_read.saturating_add(rows),
                 Err(error) if error.is_store_error() => {
                     return Err(error);
@@ -259,10 +258,10 @@ impl Anchors {
     pub(crate) async fn rebuild_file(
         &mut self,
         file: &FileMeta,
-        store: Arc<dyn ObjectStore>,
+        io: StorageIo,
         since: i64,
     ) -> Result<usize, AnchorError> {
-        let batches = crate::file_format::read_trace_anchors(&store, file, since).await?;
+        let batches = crate::statam_io::read_trace_anchors(&io, file, since).await?;
         let mut rows = 0_usize;
         for batch in &batches {
             rows = rows.saturating_add(batch.num_rows());

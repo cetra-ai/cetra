@@ -46,8 +46,8 @@ pub(super) const DELETION_USER: Uuid = Uuid::from_u128(0x018f_6b4e_7c1a_7c1a_8c1
 pub(super) const MEDIA: &[u8] = b"cetra golden 16";
 
 /// The read cache entry the scenario writes (step 7 of the scenario).
-pub(super) const CACHE_NAME: &str = "golden-cache.parquet";
-pub(super) const CACHE_LOCATION: &str = "tables/spans/golden-cache.parquet";
+pub(super) const CACHE_NAME: &str = "golden-cache.statam";
+pub(super) const CACHE_LOCATION: &str = "tables/spans/golden-cache.statam";
 pub(super) const CACHE_SIZE: u64 = 4096;
 
 /// Nanoseconds since the Unix epoch at `seconds` after midnight UTC of `day` (`YYYY-MM-DD`).
@@ -211,22 +211,22 @@ fn build_leaves_the_expected_shape() {
         "cache/{CACHE_NAME}/size"
     );
 
-    // Every Parquet file of the tables carries the format version (R8.4).
-    let mut parquet = 0;
-    for file in parquet_files(&dir.join("objects").join("tables")) {
-        let bytes = fs::read(&file).expect("read a Parquet file");
-        let metadata = parquet::file::metadata::ParquetMetaDataReader::new()
-            .parse_and_finish(&bytes::Bytes::from(bytes))
-            .expect("read a Parquet footer");
+    // Every Statam file of the tables carries the Statam format version (R8.4).
+    let mut statam_count = 0;
+    for file in statam_files(&dir.join("objects").join("tables")) {
+        let bytes = fs::read(&file).expect("read a Statam file");
+        let meta =
+            cetra_statam::StatamFileMeta::read_from(&cetra_statam::SliceReader::new(bytes), None)
+                .expect("read a Statam Hot Tail");
         assert_eq!(
-            crate::file_format::file_format_version(&metadata),
-            Some(FORMAT_VERSION),
+            meta.postscript.format_version,
+            cetra_statam::FORMAT_VERSION,
             "the format version of {}",
             file.display()
         );
-        parquet += 1;
+        statam_count += 1;
     }
-    assert!(parquet > 0, "the golden directory has Parquet files");
+    assert!(statam_count > 0, "the golden directory has Statam files");
 
     // The error path reaches the golden data (R8.6): P1 has a non-zero ErrorRate, one of its traces
     // has error_count above zero, and a trace detail has a span with status `error`.
@@ -270,8 +270,8 @@ fn wal_segments(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// Every `.parquet` file under `dir`, sorted.
-fn parquet_files(dir: &Path) -> Vec<PathBuf> {
+/// Every `.statam` file under `dir`, sorted.
+fn statam_files(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut pending = vec![dir.to_path_buf()];
     while let Some(next) = pending.pop() {
@@ -279,7 +279,7 @@ fn parquet_files(dir: &Path) -> Vec<PathBuf> {
             let path = entry.expect("read an objects directory entry").path();
             if path.is_dir() {
                 pending.push(path);
-            } else if path.extension().is_some_and(|ext| ext == "parquet") {
+            } else if path.extension().is_some_and(|ext| ext == "statam") {
                 found.push(path);
             }
         }
@@ -548,11 +548,11 @@ async fn check_dir(dir: &Path) {
         "{name}: step 4: the catalog summary differs from expected.json"
     );
 
-    // 5. The data files: every active or obsolete object is present, and every active Parquet
-    // file's footer carries the format version.
+    // 5. The data files: every active or obsolete object (and sibling `.stpk` pack, if any)
+    // is present, and every active Statam file's Hot Tail carries the format version.
     let files = catalog_rows_of(
         copy.join("catalog.db"),
-        "SELECT path, state FROM data_files WHERE state IN ('active', 'obsolete')",
+        "SELECT path, state, pack_path FROM data_files WHERE state IN ('active', 'obsolete')",
     )
     .await;
     let mut missing = 0;
@@ -565,29 +565,43 @@ async fn check_dir(dir: &Path) {
             missing += 1;
             continue;
         }
+        let pack_path = row[2].as_str().map(|p| copy.join("objects").join(p));
+        if let Some(ref pp) = pack_path
+            && !pp.is_file()
+        {
+            missing += 1;
+            continue;
+        }
         if row[1] == "active" {
-            use parquet::file::reader::FileReader as _;
-            let reader = parquet::file::reader::SerializedFileReader::new(
-                fs::File::open(&path).expect("open an active data file"),
-            )
-            .unwrap_or_else(|error| {
-                panic!("{name}: step 5: read an active Parquet footer: {error}")
+            let rr = cetra_statam::FileReader::open(&path).unwrap_or_else(|error| {
+                panic!("{name}: step 5: open an active Statam file: {error}")
+            });
+            let meta = cetra_statam::StatamFileMeta::read_from(&rr, None).unwrap_or_else(|error| {
+                panic!("{name}: step 5: read an active Statam Hot Tail: {error}")
             });
             assert_eq!(
-                crate::file_format::file_format_version(reader.metadata()),
-                Some(format),
-                "{name}: step 5: the format version of an active Parquet file"
+                meta.postscript.format_version,
+                cetra_statam::FORMAT_VERSION,
+                "{name}: step 5: the format version of an active Statam file"
             );
+            if let Some(ref pp) = pack_path {
+                let pack_rr = cetra_statam::FileReader::open(pp).unwrap_or_else(|error| {
+                    panic!("{name}: step 5: open an active sibling .stpk pack: {error}")
+                });
+                let _ = cetra_statam::PackToc::read_from_with_hint(&pack_rr, None).unwrap_or_else(
+                    |error| panic!("{name}: step 5: read an active .stpk pack TOC: {error}"),
+                );
+            }
             footers += 1;
         }
     }
     assert_eq!(
         missing, 0,
-        "{name}: step 5: data_files rows whose object is missing under objects/"
+        "{name}: step 5: data_files rows whose object or pack is missing under objects/"
     );
     assert!(
         footers > 0,
-        "{name}: step 5: the directory has active Parquet files"
+        "{name}: step 5: the directory has active Statam files"
     );
 
     // 6. The open, with the config of `build`.

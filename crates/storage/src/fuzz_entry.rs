@@ -30,6 +30,7 @@ use crate::config::{CompactionConfig, WalConfig};
 use crate::disk::Disk;
 use crate::hooks::Hooks;
 use crate::memtable::Memtable;
+use crate::objects::StorageIo;
 use crate::read_cache::{BLOCK, CacheStore, ReadCache};
 use crate::read_state::ReadState;
 use crate::verify::{VerifyQueue, verify_file};
@@ -291,7 +292,7 @@ fn seed_midnight() -> i64 {
         .expect("the seed day is in range")
 }
 
-/// The catalog row of the one file a Parquet entry reads, at its fixed path.
+/// The catalog row of the one file a Statam entry reads, at its fixed path.
 pub(crate) fn parquet_meta(table: FileTable, size: u64, footer_size: u64) -> FileMeta {
     FileMeta {
         id: FileId(Uuid::from_u128(1)),
@@ -299,7 +300,7 @@ pub(crate) fn parquet_meta(table: FileTable, size: u64, footer_size: u64) -> Fil
         project: project(),
         day: seed_day(),
         level: 0,
-        path: format!("tables/{}/fuzz.parquet", table.as_str()),
+        path: format!("tables/{}/fuzz.statam", table.as_str()),
         size,
         footer_size,
         rows: 1,
@@ -482,20 +483,19 @@ pub fn parquet_file(data: &[u8]) {
             },
         )
         .await;
-        let _ = verify_file(&store, &meta).await;
+        let io = StorageIo::from_store(Arc::clone(&store));
+        let _ = verify_file(&io, &meta).await;
         match table {
             FileTable::Traces => {
-                let _ = Anchors::new(DAY_NS)
-                    .rebuild_file(&meta, Arc::clone(&store), bound)
-                    .await;
+                let _ = Anchors::new(DAY_NS).rebuild_file(&meta, io, bound).await;
             }
             FileTable::Spans => {
                 let files = [Arc::new(meta.clone())];
-                let _ = time_values(Arc::clone(&store), &files, spans::START_TIME).await;
+                let _ = time_values(io, &files, spans::START_TIME).await;
             }
             FileTable::Scores => {
                 let files = [Arc::new(meta.clone())];
-                let _ = time_values(Arc::clone(&store), &files, scores::CREATED_AT).await;
+                let _ = time_values(io, &files, scores::CREATED_AT).await;
             }
         }
     });
@@ -1044,7 +1044,7 @@ pub(crate) mod tests {
     use chrono::DateTime;
 
     use super::*;
-    use crate::file_format::{WrittenFile, write_file_batch};
+    use crate::statam_io::{WrittenFile, write_file_batch};
     use crate::test_support::{dataset_scores, dataset_spans, score_rows, span_rows, trace_batch};
     use crate::wal::{HEADER_LEN, sample_span_batch};
 

@@ -2,28 +2,37 @@
 //! publish and commit one catalog edit, then publish the catalog to readers.
 
 use std::collections::HashSet;
-use std::io::{Read as _, Seek as _, SeekFrom};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use cetra_column::Batch;
+use cetra_column::{Batch, Bitmap, CancelToken, Column, FlatData, ScalarValue};
+use cetra_core::schema::spans;
 use cetra_query::tombstone::{TombstoneTable, covered_predicate};
+use cetra_query::{EvalContext, Expr, eval_filter};
+use cetra_statam::{
+    ChunkPackBuilder, PackWriteOptions, StatamError, gdpr_rewrite_single_file_streaming,
+};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
-use crate::catalog::{CatalogEdit, Committer, FileId, FileMeta, FileState, FileTable, now_ns};
+use crate::catalog::{
+    CatalogEdit, Committer, FileId, FileMeta, FileState, FileTable, PackMeta, now_ns,
+};
 use crate::compaction::merge::{MergeContext, merge_slice};
 use crate::compaction::plan::{Job, JobKind, Policy, plan};
 use crate::compaction::slice::{slice_count, slices, time_values};
 use crate::counters::CompactionOutcome;
 use crate::deletion::to_tombstone_specs;
 use crate::disk::Disk;
-use crate::error::{CommitError, CompactionError, ObjectError};
-use crate::file_format::{BatchFileWriter, footer_size_from_tail, time_column, write_file_batch};
+use crate::error::{CommitError, CompactionError, EngineError, FileWriteError};
 use crate::hooks::{HookPoint, Hooks};
 use crate::objects::Objects;
+use crate::partials::partials_from_spans_batch;
 use crate::read_state::{Published, publish_catalog};
+use crate::statam_io::io::{open_range_reader, run_blocking_io};
+use crate::statam_io::{BatchFileWriter, Bounds, extract_bounds, time_column, write_file_batch};
+use crate::unwind::guard_sync;
 use crate::verify::{VerifyQueue, may_be_corrupt};
 
 /// Shared by every job: built once in `Storage::open`.
@@ -380,6 +389,7 @@ impl Compactor {
         };
         // 1. The traces files derived from the inputs (spans only).
         let mut traces_ids: Vec<FileId> = Vec::new();
+        let mut traces_paths: Vec<String> = Vec::new();
         if job.table == FileTable::Spans {
             let input_ids: Vec<FileId> = job.inputs.iter().map(|file| file.id).collect();
             let pairs = self.committer.derived_traces(&input_ids).await?;
@@ -412,14 +422,40 @@ impl Compactor {
             for id in traces_ids.clone() {
                 guard.add(id);
             }
+            // Snapshot the active paths of derived `traces` files before commit so
+            // `evict_replaced_inputs` purges them from `ReadCache` immediately (D-ST-3).
+            let catalog = self.committer.catalog().await;
+            for file in catalog.files(FileTable::Traces, job.project, job.day..=job.day) {
+                if traces_ids.contains(&file.id) {
+                    traces_paths.push(file.path.clone());
+                }
+            }
         }
 
-        // 2. The slices and their row counts.
+        // 2. Fast-path streaming single-file GDPR rewrite for L1 `spans` owning a `.stpk` pack.
         let input_bytes = job
             .inputs
             .iter()
             .fold(0_u64, |sum, file| sum.saturating_add(file.total_bytes()));
-        let values = time_values(self.objects.store(), &job.inputs, time_column(job.table)).await?;
+        if job.kind == JobKind::Rewrite
+            && job.table == FileTable::Spans
+            && job.inputs.len() == 1
+            && job.inputs[0].pack.is_some()
+        {
+            return self
+                .run_gdpr_statam_rewrite(
+                    job,
+                    traces_ids,
+                    traces_paths,
+                    covered.as_ref(),
+                    known,
+                    input_bytes,
+                )
+                .await;
+        }
+
+        // 2b. The slices and their row counts.
+        let values = time_values(self.objects.io(), &job.inputs, time_column(job.table)).await?;
         let slice_list = slices(&values, slice_count(input_bytes, policy.target_file_size));
         let counts: Vec<usize> = slice_list
             .iter()
@@ -440,6 +476,7 @@ impl Compactor {
         // 3. Every slice, in order.
         let mut add: Vec<FileMeta> = Vec::new();
         let mut sources: Vec<(FileId, FileId)> = Vec::new();
+        let mut unstage: Vec<String> = Vec::new();
         let mut output_bytes = 0_u64;
         for (slice, expected_rows) in slice_list.iter().zip(&counts) {
             if self.stopping.load(Ordering::Acquire) {
@@ -448,7 +485,16 @@ impl Compactor {
             let (path, id) = Objects::table_file_path(job.table, job.project, job.day, level);
             let traces = (job.table == FileTable::Spans)
                 .then(|| Objects::table_file_path(FileTable::Traces, job.project, job.day, level));
+            let pack_plan = (job.table == FileTable::Spans && level == 1).then(|| {
+                let pack_uuid = Uuid::now_v7();
+                let pack_path = Objects::pack_file_path(job.project, job.day, level, pack_uuid);
+                (pack_uuid, pack_path)
+            });
+
             let mut staged = vec![path.clone()];
+            if let Some((_, pack_path)) = &pack_plan {
+                staged.push(pack_path.clone());
+            }
             if let Some((traces_path, _)) = &traces {
                 staged.push(traces_path.clone());
             }
@@ -459,78 +505,183 @@ impl Compactor {
             }
 
             let (target, file) = self.objects.create_output(&path).await?;
-            let writer = match BatchFileWriter::new(
-                job.table,
-                level,
-                file,
-                u64::try_from(*expected_rows).unwrap_or(u64::MAX),
-            ) {
-                Ok(writer) => writer,
-                Err(error) => {
+            let (summary, rows, size, pack_meta, partials) = if let Some((pack_uuid, pack_path)) =
+                pack_plan
+            {
+                let (pack_target, pack_file) = match self.objects.create_output(&pack_path).await {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        let _ = self.objects.discard_output(target).await;
+                        return Err(error.into());
+                    }
+                };
+                let pack_id = *pack_uuid.as_bytes();
+                let pack_builder = match ChunkPackBuilder::new_streaming(
+                    pack_id,
+                    PackWriteOptions::default(),
+                    pack_file,
+                ) {
+                    Ok(pb) => pb,
+                    Err(error) => {
+                        let _ = self.objects.discard_output(target).await;
+                        let _ = self.objects.discard_output(pack_target).await;
+                        return Err(FileWriteError::statam(error).into());
+                    }
+                };
+                let writer = match BatchFileWriter::new_with_pack(
+                    job.table,
+                    level,
+                    file,
+                    Some(pack_builder),
+                ) {
+                    Ok(writer) => writer,
+                    Err(error) => {
+                        let _ = self.objects.discard_output(target).await;
+                        let _ = self.objects.discard_output(pack_target).await;
+                        return Err(error.into());
+                    }
+                };
+                let merged = match merge_slice(
+                    &self.merge,
+                    job.table,
+                    &job.inputs,
+                    *slice,
+                    job.drop_deleted,
+                    covered.as_ref(),
+                    writer,
+                )
+                .await
+                {
+                    Ok(merged) => merged,
+                    Err(error) => {
+                        let _ = self.objects.discard_output(target).await;
+                        let _ = self.objects.discard_output(pack_target).await;
+                        return Err(error);
+                    }
+                };
+                if merged.rows == 0 {
                     let _ = self.objects.discard_output(target).await;
-                    return Err(error.into());
+                    let _ = self.objects.discard_output(pack_target).await;
+                    unstage.push(path);
+                    unstage.push(pack_path);
+                    if let Some((traces_path, _)) = traces {
+                        unstage.push(traces_path);
+                    }
+                    continue;
                 }
-            };
-            let merged = merge_slice(
-                &self.merge,
-                job.table,
-                &job.inputs,
-                *slice,
-                job.drop_deleted,
-                covered.as_ref(),
-                writer,
-            )
-            .await;
-            let merged = match merged {
-                Ok(merged) => merged,
-                Err(error) => {
+                let crate::compaction::merge::MergedSlice {
+                    writer,
+                    partials,
+                    rows,
+                } = merged;
+                let finished = tokio::task::spawn_blocking(move || {
+                    let (file, summary, pb_opt) = writer.finish()?;
+                    let pack_done = match pb_opt {
+                        Some(pb) if pb.chunk_count() > 0 => {
+                            let (pf, pstats) =
+                                pb.finish_into_inner().map_err(FileWriteError::statam)?;
+                            Some((pf, pstats))
+                        }
+                        _ => None,
+                    };
+                    Ok::<_, CompactionError>((file, summary, pack_done))
+                })
+                .await
+                .map_err(|_| CompactionError::Task)
+                .and_then(|finished| finished);
+                let (file, summary, pack_done) = match finished {
+                    Ok(finished) => finished,
+                    Err(error) => {
+                        let _ = self.objects.discard_output(target).await;
+                        let _ = self.objects.discard_output(pack_target).await;
+                        return Err(error);
+                    }
+                };
+                let pack_meta = if let Some((pack_file, pack_stats)) = pack_done {
+                    // Publish sibling `.stpk` BEFORE `.statam` so a published `.statam` never points at a missing pack.
+                    let pack_size = match self.objects.publish_output(pack_target, pack_file).await
+                    {
+                        Ok(size) => size,
+                        Err(error) => {
+                            let _ = self.objects.discard_output(target).await;
+                            return Err(error.into());
+                        }
+                    };
+                    output_bytes = output_bytes.saturating_add(pack_size);
+                    Some(PackMeta {
+                        id: pack_id,
+                        path: pack_path,
+                        size: pack_size,
+                        toc_size: u64::from(pack_stats.toc_stored_bytes),
+                    })
+                } else {
+                    let _ = self.objects.discard_output(pack_target).await;
+                    unstage.push(pack_path);
+                    None
+                };
+                let size = self.objects.publish_output(target, file).await?;
+                output_bytes = output_bytes.saturating_add(size);
+                (summary, rows, size, pack_meta, partials)
+            } else {
+                let writer = match BatchFileWriter::new(
+                    job.table,
+                    level,
+                    file,
+                    u64::try_from(*expected_rows).unwrap_or(u64::MAX),
+                ) {
+                    Ok(writer) => writer,
+                    Err(error) => {
+                        let _ = self.objects.discard_output(target).await;
+                        return Err(error.into());
+                    }
+                };
+                let merged = match merge_slice(
+                    &self.merge,
+                    job.table,
+                    &job.inputs,
+                    *slice,
+                    job.drop_deleted,
+                    covered.as_ref(),
+                    writer,
+                )
+                .await
+                {
+                    Ok(merged) => merged,
+                    Err(error) => {
+                        let _ = self.objects.discard_output(target).await;
+                        return Err(error);
+                    }
+                };
+                if merged.rows == 0 {
+                    // Every row of the slice was covered or, for a scores day
+                    // close, deleted. The staged rows stay for GC.
                     let _ = self.objects.discard_output(target).await;
-                    return Err(error);
+                    continue;
                 }
-            };
-            if merged.rows == 0 {
-                // Every row of the slice was covered or, for a scores day
-                // close, deleted. The staged rows stay for GC.
-                let _ = self.objects.discard_output(target).await;
-                continue;
-            }
-            let crate::compaction::merge::MergedSlice {
-                writer,
-                partials,
-                rows,
-            } = merged;
-            let temp = target.temp().to_path_buf();
-            let finished = tokio::task::spawn_blocking(move || {
-                let (file, summary) = writer.finish()?;
-                let file_len = file
-                    .metadata()
-                    .map_err(|source| ObjectError::io("reading compaction output", &temp, source))?
-                    .len();
-                let mut file = file;
-                file.seek(SeekFrom::End(-8)).map_err(|source| {
-                    ObjectError::io("reading compaction output", &temp, source)
-                })?;
-                let mut tail = [0_u8; 8];
-                file.read_exact(&mut tail).map_err(|source| {
-                    ObjectError::io("reading compaction output", &temp, source)
-                })?;
-                let footer_size = footer_size_from_tail(&tail, file_len)?;
-                Ok::<_, CompactionError>((file, summary, footer_size))
-            })
-            .await
-            .map_err(|_| CompactionError::Task)
-            .and_then(|finished| finished);
-            let (file, summary, footer_size) = match finished {
-                Ok(finished) => finished,
-                Err(error) => {
-                    // The output is not published: remove its temp file now (R5.5).
-                    let _ = self.objects.discard_output(target).await;
-                    return Err(error);
-                }
+                let crate::compaction::merge::MergedSlice {
+                    writer,
+                    partials,
+                    rows,
+                } = merged;
+                let finished = tokio::task::spawn_blocking(move || {
+                    let (file, summary, _pack) = writer.finish()?;
+                    Ok::<_, CompactionError>((file, summary))
+                })
+                .await
+                .map_err(|_| CompactionError::Task)
+                .and_then(|finished| finished);
+                let (file, summary) = match finished {
+                    Ok(finished) => finished,
+                    Err(error) => {
+                        let _ = self.objects.discard_output(target).await;
+                        return Err(error);
+                    }
+                };
+                let size = self.objects.publish_output(target, file).await?;
+                output_bytes = output_bytes.saturating_add(size);
+                (summary, rows, size, None, partials)
             };
 
-            let size = self.objects.publish_output(target, file).await?;
-            output_bytes = output_bytes.saturating_add(size);
             // Removing rows keeps a merged file merged, so a rewrite keeps its
             // input's flag.
             let fully_merged = if job.kind == JobKind::Rewrite {
@@ -547,7 +698,7 @@ impl Compactor {
                 level,
                 path,
                 size,
-                footer_size,
+                footer_size: summary.footer_size,
                 rows,
                 min_time: summary.min_time,
                 max_time: summary.max_time,
@@ -555,7 +706,7 @@ impl Compactor {
                 max_ingest_time: summary.max_ingest_time,
                 fully_merged,
                 deletions_applied_seq: known,
-                pack: None,
+                pack: pack_meta,
             });
 
             if job.table == FileTable::Spans {
@@ -620,6 +771,7 @@ impl Compactor {
             add,
             remove,
             sources,
+            unstage,
             ..CatalogEdit::default()
         };
         let published = Arc::clone(&self.published);
@@ -628,6 +780,9 @@ impl Compactor {
                 publish_catalog(&published, catalog);
             })
             .await?;
+
+        self.evict_replaced_inputs(&job.inputs, &traces_ids, &traces_paths)
+            .await;
 
         self.hooks.pause(HookPoint::CompactionAfterCommit);
         if let Some(error) = self.hooks.fail(HookPoint::CompactionAfterCommit) {
@@ -666,6 +821,475 @@ impl Compactor {
         );
         Ok(report)
     }
+
+    /// Immediately evicts replaced `.statam` (`spans`/`scores`/`traces`) and `.stpk` files
+    /// from `ReadCache` and `MetadataCache` after a compaction/rewrite commit succeeds (Decision 2A).
+    async fn evict_replaced_inputs(
+        &self,
+        inputs: &[Arc<FileMeta>],
+        traces_ids: &[FileId],
+        traces_paths: &[String],
+    ) {
+        let mut paths: Vec<&str> = Vec::with_capacity(inputs.len() * 2 + traces_paths.len());
+        for file in inputs {
+            paths.push(file.path.as_str());
+            self.merge
+                .qe_runtime
+                .metadata_cache
+                .invalidate_file(file.id);
+            if let Some(pack) = &file.pack {
+                paths.push(pack.path.as_str());
+                self.merge
+                    .qe_runtime
+                    .metadata_cache
+                    .invalidate_pack(pack.id);
+            }
+        }
+        for &tid in traces_ids {
+            self.merge.qe_runtime.metadata_cache.invalidate_file(tid);
+        }
+        for path in traces_paths {
+            paths.push(path.as_str());
+        }
+        self.objects.evict_read_cache(&paths).await;
+    }
+
+    /// Streaming single-file GDPR rewrite for an L1 `spans` file with a sibling `.stpk` pack.
+    ///
+    /// Copies 100%-live `.stpk` frames verbatim without decompression, purges erased chunks in
+    /// O(1 RG) + O(1 frame) RAM, buffers trailing `trace_id` groups across RG boundaries so
+    /// straddling traces never emit duplicate `traces` partials (M4), publishes `.stpk` before
+    /// `.statam`, commits atomically, and immediately evicts replaced cache entries (Decision 2A).
+    async fn run_gdpr_statam_rewrite(
+        self: &Arc<Self>,
+        job: Job,
+        traces_ids: Vec<FileId>,
+        traces_paths: Vec<String>,
+        covered: Option<&Expr>,
+        known: u64,
+        input_bytes: u64,
+    ) -> Result<CompactionReport, CompactionError> {
+        let old_file = Arc::clone(&job.inputs[0]);
+        let Some(old_pack) = old_file.pack.clone() else {
+            return Err(CompactionError::Input {
+                reason: "missing sibling pack for GDPR fast path",
+            });
+        };
+        let level = old_file.level;
+        let (new_path, new_id) =
+            Objects::table_file_path(FileTable::Spans, job.project, job.day, level);
+        let new_pack_uuid = Uuid::now_v7();
+        let new_pack_id = *new_pack_uuid.as_bytes();
+        let new_pack_path = Objects::pack_file_path(job.project, job.day, level, new_pack_uuid);
+        let (new_traces_path, new_traces_id) =
+            Objects::table_file_path(FileTable::Traces, job.project, job.day, level);
+
+        let staged = vec![
+            new_path.clone(),
+            new_pack_path.clone(),
+            new_traces_path.clone(),
+        ];
+        self.committer.stage(&staged).await?;
+        self.hooks.pause(HookPoint::CompactionAfterStage);
+        if self.hooks.fail(HookPoint::CompactionAfterStage).is_some() {
+            return Err(CompactionError::Fault);
+        }
+
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(CompactionError::Stopped);
+        }
+
+        let (statam_target, statam_file) = self.objects.create_output(&new_path).await?;
+        let (pack_target, pack_file) = match self.objects.create_output(&new_pack_path).await {
+            Ok(pair) => pair,
+            Err(error) => {
+                let _ = self.objects.discard_output(statam_target).await;
+                return Err(error.into());
+            }
+        };
+
+        let io = self.objects.io();
+        let handle = tokio::runtime::Handle::current();
+        let covered_owned = covered.cloned();
+        let old_file_ref = Arc::clone(&old_file);
+        let old_pack_ref = old_pack.clone();
+
+        let rewrite_res = run_blocking_io(handle.clone(), move || {
+            let cancel = CancelToken::new();
+            let eval_ctx = EvalContext::new(now_ns(), cancel.clone());
+            let mut bounds: Option<Bounds> = None;
+            let mut partials: Vec<Arc<Batch>> = Vec::new();
+            let mut trailing: Option<Batch> = None;
+
+            let outcome: Result<_, StatamError> = guard_sync(|| {
+                let statam_rr = open_range_reader(
+                    &io,
+                    &old_file_ref.path,
+                    old_file_ref.size,
+                    handle.clone(),
+                    cancel.clone(),
+                )?;
+                let old_pack_rr = open_range_reader(
+                    &io,
+                    &old_pack_ref.path,
+                    old_pack_ref.size,
+                    handle.clone(),
+                    cancel.clone(),
+                )?;
+
+                let mut should_erase = |batch: &Batch| -> Result<Bitmap, StatamError> {
+                    if let Some(ref pred) = covered_owned {
+                        eval_filter(pred, batch, &eval_ctx, None).map_err(|_| {
+                            StatamError::SchemaMismatch {
+                                reason: "evaluating deletion predicate during GDPR rewrite",
+                            }
+                        })
+                    } else {
+                        Ok(Bitmap::new_zeroed(batch.raw_len()))
+                    }
+                };
+                let mut on_surviving = |batch: &Batch| -> Result<(), StatamError> {
+                    if batch.num_rows() == 0 {
+                        return Ok(());
+                    }
+                    let b = extract_bounds(FileTable::Spans, batch).map_err(|_| {
+                        StatamError::Corrupt {
+                            reason: "invalid timestamps in surviving GDPR batch",
+                        }
+                    })?;
+                    match &mut bounds {
+                        Some(acc) => acc.merge(b),
+                        None => bounds = Some(b),
+                    }
+                    push_surviving_spans_batch(batch, &mut trailing, &mut partials)
+                };
+
+                let (statam_out, pack_out, stats) = gdpr_rewrite_single_file_streaming(
+                    statam_rr,
+                    Some((old_pack_ref.id, old_pack_rr)),
+                    new_pack_id,
+                    statam_file,
+                    Some(pack_file),
+                    Some(&cancel),
+                    &mut should_erase,
+                    &mut on_surviving,
+                )?;
+
+                if let Some(tail) = trailing.take()
+                    && tail.num_rows() > 0
+                {
+                    let p = partials_from_spans_batch(&tail).map_err(|_| StatamError::Corrupt {
+                        reason: "computing trailing trace partials during GDPR rewrite",
+                    })?;
+                    partials.push(Arc::new(p));
+                }
+
+                Ok((statam_out, pack_out, stats, bounds, partials))
+            });
+            outcome.map_err(|err| CompactionError::Read {
+                source: EngineError::from_statam(&err),
+            })
+        })
+        .await
+        .map_err(|()| CompactionError::Task)
+        .and_then(|res| res);
+
+        let (statam_out, pack_out, stats, bounds, partials) = match rewrite_res {
+            Ok(tuple) => tuple,
+            Err(error) => {
+                let _ = self.objects.discard_output(statam_target).await;
+                let _ = self.objects.discard_output(pack_target).await;
+                return Err(error);
+            }
+        };
+
+        let mut add: Vec<FileMeta> = Vec::new();
+        let mut sources: Vec<(FileId, FileId)> = Vec::new();
+        let mut unstage: Vec<String> = Vec::new();
+        let mut output_bytes = 0_u64;
+
+        if stats.surviving_rows == 0 {
+            let _ = self.objects.discard_output(statam_target).await;
+            let _ = self.objects.discard_output(pack_target).await;
+            unstage.push(new_path);
+            unstage.push(new_pack_path);
+            unstage.push(new_traces_path);
+        } else {
+            let Some(bounds) = bounds else {
+                let _ = self.objects.discard_output(statam_target).await;
+                let _ = self.objects.discard_output(pack_target).await;
+                return Err(CompactionError::Input {
+                    reason: "surviving GDPR rewrite produced no bounds",
+                });
+            };
+            let Some(statam_stats) = stats.statam_stats else {
+                let _ = self.objects.discard_output(statam_target).await;
+                let _ = self.objects.discard_output(pack_target).await;
+                return Err(CompactionError::Input {
+                    reason: "surviving GDPR rewrite produced no statam stats",
+                });
+            };
+
+            let pack_meta = match (stats.pack_stats, pack_out) {
+                (Some(pack_stats), Some(pf)) => {
+                    // Publish new sibling `.stpk` BEFORE `.statam`.
+                    let pack_size = match self.objects.publish_output(pack_target, pf).await {
+                        Ok(size) => size,
+                        Err(error) => {
+                            let _ = self.objects.discard_output(statam_target).await;
+                            return Err(error.into());
+                        }
+                    };
+                    output_bytes = output_bytes.saturating_add(pack_size);
+                    Some(PackMeta {
+                        id: new_pack_id,
+                        path: new_pack_path,
+                        size: pack_size,
+                        toc_size: u64::from(pack_stats.toc_stored_bytes),
+                    })
+                }
+                _ => {
+                    let _ = self.objects.discard_output(pack_target).await;
+                    unstage.push(new_pack_path);
+                    None
+                }
+            };
+
+            let statam_size = self
+                .objects
+                .publish_output(statam_target, statam_out)
+                .await?;
+            output_bytes = output_bytes.saturating_add(statam_size);
+
+            add.push(FileMeta {
+                id: new_id,
+                table: FileTable::Spans,
+                project: job.project,
+                day: job.day,
+                level,
+                path: new_path,
+                size: statam_size,
+                footer_size: u64::from(statam_stats.hot_tail_bytes),
+                rows: stats.surviving_rows,
+                min_time: bounds.min_time,
+                max_time: bounds.max_time,
+                min_ingest_time: bounds.min_ingest_time,
+                max_ingest_time: bounds.max_ingest_time,
+                fully_merged: old_file.fully_merged,
+                deletions_applied_seq: known,
+                pack: pack_meta,
+            });
+
+            let written_traces = tokio::task::spawn_blocking(move || {
+                write_file_batch(FileTable::Traces, level, &partials)
+            })
+            .await
+            .map_err(|_| CompactionError::Task)??;
+            self.objects
+                .put_durable(&new_traces_path, written_traces.bytes.clone())
+                .await?;
+            add.push(FileMeta {
+                id: new_traces_id,
+                table: FileTable::Traces,
+                project: job.project,
+                day: job.day,
+                level,
+                path: new_traces_path,
+                size: u64::try_from(written_traces.bytes.len()).unwrap_or(u64::MAX),
+                footer_size: written_traces.footer_size,
+                rows: written_traces.rows,
+                min_time: written_traces.min_time,
+                max_time: written_traces.max_time,
+                min_ingest_time: written_traces.min_ingest_time,
+                max_ingest_time: written_traces.max_ingest_time,
+                fully_merged: old_file.fully_merged,
+                deletions_applied_seq: known,
+                pack: None,
+            });
+            sources.push((new_traces_id, new_id));
+        }
+
+        self.hooks.pause(HookPoint::CompactionAfterWrite);
+        if self.hooks.fail(HookPoint::CompactionAfterWrite).is_some() {
+            return Err(CompactionError::Fault);
+        }
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(CompactionError::Stopped);
+        }
+
+        let mut remove: Vec<(FileId, FileState)> = vec![(old_file.id, FileState::Active)];
+        for id in &traces_ids {
+            remove.push((*id, FileState::Active));
+        }
+        let input_files = u64::try_from(remove.len()).unwrap_or(u64::MAX);
+        let output_files = u64::try_from(add.len()).unwrap_or(u64::MAX);
+        let edit = CatalogEdit {
+            add,
+            remove,
+            sources,
+            unstage,
+            ..CatalogEdit::default()
+        };
+        let published = Arc::clone(&self.published);
+        self.committer
+            .commit(&edit, move |catalog| {
+                publish_catalog(&published, catalog);
+            })
+            .await?;
+
+        self.evict_replaced_inputs(&job.inputs, &traces_ids, &traces_paths)
+            .await;
+
+        self.hooks.pause(HookPoint::CompactionAfterCommit);
+        if let Some(error) = self.hooks.fail(HookPoint::CompactionAfterCommit) {
+            tracing::warn!(
+                %error,
+                "compaction commit hook failed after the catalog commit"
+            );
+        }
+
+        let report = CompactionReport {
+            jobs: 1,
+            failed: 0,
+            input_files,
+            output_files,
+            input_bytes,
+            output_bytes,
+            spans_output_bytes: output_bytes,
+        };
+        tracing::info!(
+            table = "spans",
+            project = %job.project,
+            day = %job.day,
+            kind = "rewrite",
+            jobs = report.jobs,
+            input_files = report.input_files,
+            output_files = report.output_files,
+            input_bytes = report.input_bytes,
+            output_bytes = report.output_bytes,
+            frames_copied_verbatim = stats.frames_copied_verbatim,
+            frames_rewritten = stats.frames_rewritten,
+            frames_dropped = stats.frames_dropped,
+            chunks_purged = stats.chunks_purged,
+            "compacted a partition"
+        );
+        Ok(report)
+    }
+}
+
+/// Reads the 16-byte `trace_id` at dense row `row` of a spans batch.
+fn span_trace_id_at(batch: &Batch, row: usize) -> Result<[u8; 16], StatamError> {
+    let col = batch
+        .column_by_name(spans::TRACE_ID)
+        .ok_or(StatamError::SchemaMismatch {
+            reason: "missing trace_id column during GDPR rewrite",
+        })?;
+    match col {
+        Column::Flat(flat) if !flat.is_null(row) => match flat.data() {
+            FlatData::FixedBytes16(vals) => vals.get(row).copied().ok_or(StatamError::Corrupt {
+                reason: "trace_id row out of bounds",
+            }),
+            _ => Err(StatamError::SchemaMismatch {
+                reason: "unexpected trace_id column type",
+            }),
+        },
+        Column::Const {
+            value: ScalarValue::FixedBytes16(b),
+            len,
+        } if row < *len => Ok(*b),
+        Column::Dict(dict) if !dict.is_null(row) => {
+            let code = *dict.codes().get(row).ok_or(StatamError::Corrupt {
+                reason: "trace_id dict code out of bounds",
+            })? as usize;
+            if dict.values().is_null(code) {
+                return Err(StatamError::Corrupt {
+                    reason: "null trace_id dict value during GDPR rewrite",
+                });
+            }
+            match dict.values().data() {
+                FlatData::FixedBytes16(vals) => {
+                    vals.get(code).copied().ok_or(StatamError::Corrupt {
+                        reason: "trace_id dict value out of bounds",
+                    })
+                }
+                _ => Err(StatamError::SchemaMismatch {
+                    reason: "unexpected trace_id dict type",
+                }),
+            }
+        }
+        Column::Rle(rle) if row < rle.len() => {
+            let run = rle.run_ends().partition_point(|&end| (end as usize) <= row);
+            if rle.values().is_null(run) {
+                return Err(StatamError::Corrupt {
+                    reason: "null trace_id rle value during GDPR rewrite",
+                });
+            }
+            match rle.values().data() {
+                FlatData::FixedBytes16(vals) => {
+                    vals.get(run).copied().ok_or(StatamError::Corrupt {
+                        reason: "trace_id rle value out of bounds",
+                    })
+                }
+                _ => Err(StatamError::SchemaMismatch {
+                    reason: "unexpected trace_id rle type",
+                }),
+            }
+        }
+        _ => Err(StatamError::Corrupt {
+            reason: "null or invalid trace_id during GDPR rewrite",
+        }),
+    }
+}
+
+/// Buffers only the trailing `trace_id` group across Row Group boundaries (O(1 trace) RAM, M4)
+/// and emits complete trace groups to `partials_from_spans_batch`.
+fn push_surviving_spans_batch(
+    batch: &Batch,
+    trailing: &mut Option<Batch>,
+    partials: &mut Vec<Arc<Batch>>,
+) -> Result<(), StatamError> {
+    if batch.num_rows() == 0 {
+        return Ok(());
+    }
+    let dense = if batch.selection().is_all(batch.raw_len()) {
+        batch.clone()
+    } else {
+        batch.compact(None)?
+    };
+    let combined = match trailing.take() {
+        Some(prev) => {
+            let prev_last = span_trace_id_at(&prev, prev.num_rows() - 1)?;
+            let next_first = span_trace_id_at(&dense, 0)?;
+            if prev_last == next_first {
+                Batch::concat(Arc::clone(dense.schema()), &[&prev, &dense], None)?
+            } else {
+                let p = partials_from_spans_batch(&prev).map_err(|_| StatamError::Corrupt {
+                    reason: "computing trace partials during GDPR rewrite",
+                })?;
+                partials.push(Arc::new(p));
+                dense
+            }
+        }
+        None => dense,
+    };
+    let n = combined.num_rows();
+    let last_tid = span_trace_id_at(&combined, n - 1)?;
+    let mut split = n - 1;
+    while split > 0 && span_trace_id_at(&combined, split - 1)? == last_tid {
+        split -= 1;
+    }
+    if split > 0 {
+        let prefix = combined.slice(0, split, None)?;
+        let tail = combined.slice(split, n - split, None)?;
+        let p = partials_from_spans_batch(&prefix).map_err(|_| StatamError::Corrupt {
+            reason: "computing trace partials during GDPR rewrite",
+        })?;
+        partials.push(Arc::new(p));
+        *trailing = Some(tail);
+    } else {
+        *trailing = Some(combined);
+    }
+    Ok(())
 }
 
 fn kind_label(kind: JobKind) -> &'static str {
@@ -987,15 +1611,58 @@ pub(crate) mod tests {
         assert_eq!(files[0].level, 1);
 
         let bytes = std::fs::read(dir.path().join("objects").join(&files[0].path)).unwrap();
-        let metadata = parquet::file::metadata::ParquetMetaDataReader::new()
-            .parse_and_finish(&bytes::Bytes::from(bytes))
-            .unwrap();
+        let meta =
+            cetra_statam::StatamFileMeta::read_from(&cetra_statam::SliceReader::new(bytes), None)
+                .unwrap();
         assert_eq!(
-            crate::file_format::file_format_version(&metadata),
-            Some(crate::format::FORMAT_VERSION),
-            "the L1 output carries the format version"
+            meta.postscript.format_version,
+            cetra_statam::FORMAT_VERSION,
+            "the L1 output carries the Statam format version"
         );
         storage.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn gdpr_surviving_batch_buffers_straddling_trace_without_duplicate_partials() {
+        // Simulate 3 Row Groups where trace 2 straddles RG0 -> RG1 -> RG2, and trace 1 / trace 3
+        // sit on either side. `push_surviving_spans_batch` must emit exactly ONE merged partial
+        // row per trace (M4).
+        let rg0 = span_rows(&[
+            span_row(1, 0, at(10, 0, 0), at(10, 0, 1)),
+            span_row(2, 0, at(10, 0, 2), at(10, 0, 3)),
+        ]);
+        let rg1 = span_rows(&[
+            span_row(2, 1, at(10, 0, 4), at(10, 0, 5)),
+            span_row(2, 2, at(10, 0, 6), at(10, 0, 7)),
+        ]);
+        let rg2 = span_rows(&[
+            span_row(2, 3, at(10, 0, 8), at(10, 0, 9)),
+            span_row(3, 0, at(10, 0, 10), at(10, 0, 11)),
+        ]);
+
+        let mut trailing = None;
+        let mut partials = Vec::new();
+        for rg in [&rg0, &rg1, &rg2] {
+            super::push_surviving_spans_batch(rg, &mut trailing, &mut partials).unwrap();
+        }
+        if let Some(tail) = trailing.take() {
+            partials.push(Arc::new(
+                crate::partials::partials_from_spans_batch(&tail).unwrap(),
+            ));
+        }
+
+        let refs: Vec<&Batch> = partials.iter().map(Arc::as_ref).collect();
+        let combined = Batch::concat(FileTable::Traces.column_schema(), &refs, None).unwrap();
+        assert_eq!(
+            combined.num_rows(),
+            3,
+            "must emit exactly 3 trace partials (zero duplicates for straddling trace 2)"
+        );
+        let counts_col = require_col(&combined, cetra_core::schema::traces::SPAN_COUNT).unwrap();
+        let counts: Vec<i64> = (0..combined.num_rows())
+            .map(|r| i64_at(&combined, counts_col, r).unwrap())
+            .collect();
+        assert_eq!(counts, vec![1, 4, 1]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

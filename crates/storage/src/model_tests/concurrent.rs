@@ -37,7 +37,7 @@ use crate::config::StorageConfig;
 use crate::deletion::DeletionStatus;
 use crate::hooks::HookPoint;
 use crate::reads::AlertMeasure;
-use crate::test_support::parquet_rows;
+use crate::test_support::statam_rows;
 use crate::wal::Table;
 
 /// Tokio worker threads of a concurrent life: enough for the drivers' storage calls and the
@@ -1404,7 +1404,7 @@ fn object_bytes_reads_both_stores() {
             "no span file after the settle (remote {remote})"
         );
         for file in &files {
-            let rows = parquet_rows(harness.object_bytes(file)).num_rows();
+            let rows = statam_rows(harness.object_bytes(file), harness.pack_bytes(file)).num_rows();
             assert_eq!(
                 u64::try_from(rows).expect("a row count"),
                 file.rows,

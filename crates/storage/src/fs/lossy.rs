@@ -72,7 +72,8 @@ pub(crate) struct State {
 struct Inode {
     synced_len: u64,
     len: u64,
-    /// Writes past `synced_len`, in order, never overlapping.
+    /// Writes since the last sync (all at `start >= synced_len`); may overlap when
+    /// a writer seeks back to patch an unsynced header before fsync.
     writes: Vec<Pending>,
     /// Current root-relative name, or `None` once the shim sees no name.
     path: Option<PathBuf>,
@@ -644,34 +645,39 @@ impl Tracked {
         }
     }
 
-    /// Appends `buf` and records what was written. A write must start at the
-    /// file's length: writes are appends.
+    /// Writes `buf` and records the unsynced range. Writes must stay at or past
+    /// `synced_len` and at or before `len` (no holes and no unsynced overwrites
+    /// of already-synced bytes).
     pub(crate) fn write(&self, inner: &mut std::fs::File, buf: &[u8]) -> io::Result<usize> {
         let mut st = self.root.lock();
         if st.halted {
             return Err(halted_error());
         }
-        let len = st.inodes.get(&self.ino).map_or(0, |inode| inode.len);
+        let (synced_len, len) = st
+            .inodes
+            .get(&self.ino)
+            .map_or((0, 0), |inode| (inode.synced_len, inode.len));
         let start = if self.append {
             inner.metadata()?.len()
         } else {
             inner.stream_position()?
         };
         assert!(
-            start == len,
-            "lossy fs: non-append write at {}; extend fs::lossy",
+            start >= synced_len && start <= len,
+            "lossy fs: write at {start} outside unsynced range [{synced_len}, {len}] of {}; extend fs::lossy",
             self.path.display()
         );
         let written = inner.write(buf)?;
         if written > 0 {
             let written = written as u64;
+            let end = start + written;
             if let Some(inode) = st.inodes.get_mut(&self.ino) {
                 inode.writes.push(Pending {
                     start,
-                    end: start + written,
+                    end,
                     poisoned: false,
                 });
-                inode.len += written;
+                inode.len = inode.len.max(end);
             }
         }
         Ok(written)
@@ -851,8 +857,8 @@ fn apply(root: &Root, st: &mut State, mode: CrashMode, seed: u64) -> CrashReport
             continue;
         }
         let last_live = writes.iter().rposition(|pending| !pending.poisoned);
-        let mut kept: Vec<(u64, u64)> = Vec::new();
-        let mut dropped: Vec<(u64, u64)> = Vec::new();
+        let mut kept: Vec<(usize, u64, u64)> = Vec::new();
+        let mut dropped: Vec<(usize, u64, u64)> = Vec::new();
         for (index, pending) in writes.iter().enumerate() {
             let survives = !pending.poisoned
                 && match mode {
@@ -862,7 +868,7 @@ fn apply(root: &Root, st: &mut State, mode: CrashMode, seed: u64) -> CrashReport
                 };
             if !survives {
                 report.dropped_writes += 1;
-                dropped.push((pending.start, pending.end));
+                dropped.push((index, pending.start, pending.end));
                 continue;
             }
             let mut end = pending.end;
@@ -872,17 +878,44 @@ fn apply(root: &Root, st: &mut State, mode: CrashMode, seed: u64) -> CrashReport
                 end = pending.start + cut;
                 if cut < full {
                     report.torn_writes += 1;
+                    // Bytes after `cut` were not written by this torn write.
+                    dropped.push((index, end, pending.end));
                 }
             }
-            kept.push((pending.start, end));
+            kept.push((index, pending.start, end));
         }
-        // Kept writes are appends, so the last one ends furthest.
-        let new_len = kept.last().map_or(synced, |&(_, end)| end.max(synced));
-        let zeros: Vec<(u64, u64)> = dropped
-            .into_iter()
-            .filter(|&(start, _)| start < new_len)
-            .map(|(start, end)| (start, end.min(new_len)))
-            .collect();
+        let new_len = kept.iter().map(|&(_, _, end)| end).fold(synced, u64::max);
+        let mut zeros: Vec<(u64, u64)> = Vec::new();
+        for (d_idx, start, end) in dropped {
+            if start >= new_len {
+                continue;
+            }
+            // Subtract any subrange overwritten by a later surviving write.
+            let mut pieces = vec![(start, end.min(new_len))];
+            for &(k_idx, k_start, k_end) in &kept {
+                if k_idx <= d_idx || k_start >= k_end {
+                    continue;
+                }
+                let mut next = Vec::with_capacity(pieces.len());
+                for (a, b) in pieces {
+                    if k_end <= a || k_start >= b {
+                        next.push((a, b));
+                    } else {
+                        if a < k_start {
+                            next.push((a, k_start));
+                        }
+                        if k_end < b {
+                            next.push((k_end, b));
+                        }
+                    }
+                }
+                pieces = next;
+                if pieces.is_empty() {
+                    break;
+                }
+            }
+            zeros.extend(pieces);
+        }
         let file = std::fs::OpenOptions::new()
             .write(true)
             .open(&abs)
@@ -1400,8 +1433,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "non-append")]
-    fn non_append_writes_panic() {
+    #[should_panic(expected = "outside unsynced range")]
+    fn overwrite_below_synced_len_panics() {
         let (_t, data, _lossy) = setup();
         let mut file = OpenOptions::new()
             .write(true)
@@ -1409,8 +1442,29 @@ mod tests {
             .open(data.join("f"))
             .unwrap();
         file.write_all(b"abc").unwrap();
+        file.sync_all().unwrap();
         file.seek(SeekFrom::Start(0)).unwrap();
         file.write_all(b"d").unwrap();
+    }
+
+    #[test]
+    fn unsynced_overwrite_is_tracked_and_recoverable() {
+        let (_t, data, lossy) = setup();
+        let path = data.join("f");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"abcdef").unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(b"XY").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        crate::fs::sync_dir(&data).unwrap();
+
+        lossy.crash_with(CrashMode::DropAll, 0);
+        assert_eq!(std::fs::read(&path).unwrap(), b"XYcdef");
     }
 
     #[test]

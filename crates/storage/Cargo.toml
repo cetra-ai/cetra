@@ -1,6 +1,6 @@
 [package]
 name = "cetra-storage"
-description = "WAL, Parquet storage, catalog, compaction, and queries"
+description = "WAL, Statam storage, catalog, compaction, and queries"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,7 +14,7 @@ workspace = true
 cetra-column.workspace = true
 cetra-core.workspace = true
 cetra-query.workspace = true
-arrow = { workspace = true }
+cetra-statam.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 bytesize.workspace = true
@@ -26,7 +26,7 @@ humantime-serde.workspace = true
 lz4_flex = { workspace = true }
 # `fs` is already a default feature of the pin. `aws` is the S3 backend (D119).
 object_store = { workspace = true, features = ["fs", "aws"] }
-parquet = { workspace = true, features = ["arrow", "zstd", "snap", "lz4", "flate2-zlib-rs"] }
+parquet = { workspace = true, features = ["zstd"] }
 rustix = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true

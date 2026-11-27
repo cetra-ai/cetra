@@ -983,7 +983,7 @@ mod tests {
 
     use super::*;
     use crate::deletion::ProjectMemSnapshot;
-    use crate::file_format::FileMetadataCache;
+    use crate::engine::metadata_cache::MetadataCache;
     use crate::memtable::Memtable;
     use crate::verify::VerifyQueue;
     use crate::wal::Table;
@@ -992,7 +992,7 @@ mod tests {
         let rt = tokio::runtime::Handle::current();
         let store = Arc::new(InMemory::new());
         let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap();
-        let cache = Arc::new(FileMetadataCache::new(0));
+        let cache = Arc::new(MetadataCache::new(0));
         let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
         let spans_mt = Memtable::new(Table::Spans).snapshot();
 
@@ -1006,9 +1006,10 @@ mod tests {
             )
             .unwrap(),
         );
+        let io = crate::objects::StorageIo::from_store(store);
         let traces = Arc::new(
             TracesSource::new(
-                Arc::clone(&store) as _,
+                io.clone(),
                 project,
                 Vec::new(),
                 ProjectMemSnapshot::empty(),
@@ -1022,7 +1023,7 @@ mod tests {
         );
         let scores = Arc::new(
             ScoresSource::new(
-                store,
+                io,
                 project,
                 Vec::new(),
                 ProjectMemSnapshot::empty(),

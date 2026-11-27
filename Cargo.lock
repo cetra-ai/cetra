@@ -293,20 +293,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arrow-ipc"
-version = "59.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea79f6056557715de2b463ea7f979fe54fbfd6088ffcd144401a777ef28914f9"
-dependencies = [
- "arrow-array",
- "arrow-buffer",
- "arrow-data",
- "arrow-schema",
- "arrow-select",
- "flatbuffers",
-]
-
-[[package]]
 name = "arrow-ord"
 version = "59.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1193,13 +1179,13 @@ name = "cetra-storage"
 version = "0.1.0-rc.2"
 dependencies = [
  "arbitrary",
- "arrow",
  "async-trait",
  "bytes",
  "bytesize",
  "cetra-column",
  "cetra-core",
  "cetra-query",
+ "cetra-statam",
  "chrono",
  "crc32c",
  "flate2",
@@ -2220,16 +2206,6 @@ name = "flagset"
 version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
-
-[[package]]
-name = "flatbuffers"
-version = "25.12.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35f6839d7b3b98adde531effaf34f0c2badc6f4735d26fe74709d8e513a96ef3"
-dependencies = [
- "bitflags",
- "rustc_version",
-]
 
 [[package]]
 name = "flate2"
@@ -4183,24 +4159,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20033034bc38d6bbb14518717e115cceed4bce3f2425232034a6f6be91877425"
 dependencies = [
  "ahash",
- "arrow-array",
- "arrow-buffer",
- "arrow-data",
- "arrow-ipc",
- "arrow-schema",
- "arrow-select",
- "base64 0.23.1",
  "bytes",
  "chrono",
- "flate2",
  "half",
  "hashbrown 0.17.1",
- "lz4_flex",
  "num-bigint 0.5.1",
  "num-integer",
  "num-traits",
  "seq-macro",
- "snap",
  "twox-hash",
  "zstd 0.13.5",
 ]
@@ -5675,12 +5641,6 @@ checksum = "149309498a5f7334b12ddae0cad8aba81ce785fe91755068867e017cf98fee46"
 dependencies = [
  "serde",
 ]
-
-[[package]]
-name = "snap"
-version = "1.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "199905e6153d6405f9728fe44daace35f8f837bbf830bb6e85fbd5828709a886"
 
 [[package]]
 name = "socket2"

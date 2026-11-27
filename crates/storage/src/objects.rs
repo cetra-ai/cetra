@@ -1,4 +1,4 @@
-//! Where flushed Parquet files are stored, and how a local write becomes durable.
+//! Where flushed Statam files are stored, and how a local write becomes durable.
 //!
 //! `LocalFileSystem` in object_store 0.13 does not fsync. It is registered for
 //! reads only. Local `put_durable` writes a temp file, `sync_all`s it, renames
@@ -275,7 +275,7 @@ impl Objects {
         }
     }
 
-    /// The object store, for async Parquet reads at open.
+    /// The object store, for async Statam reads at open.
     pub(crate) fn store(&self) -> Arc<dyn ObjectStore> {
         Arc::clone(&self.store)
     }
@@ -300,7 +300,7 @@ impl Objects {
         }
     }
 
-    /// `tables/<table>/project=<project_id>/day=<YYYY-MM-DD>/<level>-<uuidv7>.parquet`.
+    /// `tables/<table>/project=<project_id>/day=<YYYY-MM-DD>/<level>-<uuidv7>.statam`.
     ///
     /// This is the only path formatter. `level` is `0` or `1`.
     pub(crate) fn table_file_path(
@@ -311,7 +311,7 @@ impl Objects {
     ) -> (String, FileId) {
         let id = FileId::new_v7();
         let path = format!(
-            "tables/{}/project={project}/day={}/{level}-{id}.parquet",
+            "tables/{}/project={project}/day={}/{level}-{id}.statam",
             table.as_str(),
             day.format("%Y-%m-%d"),
         );
@@ -1916,7 +1916,7 @@ mod tests {
         assert_eq!(
             first,
             format!(
-                "tables/spans/project={}/day=2026-11-11/0-{first_id}.parquet",
+                "tables/spans/project={}/day=2026-11-11/0-{first_id}.statam",
                 project()
             )
         );
@@ -1924,14 +1924,14 @@ mod tests {
         assert_eq!(
             scores,
             format!(
-                "tables/scores/project={}/day=2026-11-11/1-{score_id}.parquet",
+                "tables/scores/project={}/day=2026-11-11/1-{score_id}.statam",
                 project()
             )
         );
         // The literal layout: the id is the only part that varies.
         assert_eq!(
             first.replace(&first_id.to_string(), "<id>"),
-            "tables/spans/project=018f6b4e-7c1a-7c1a-8c1a-000000000001/day=2026-11-11/0-<id>.parquet",
+            "tables/spans/project=018f6b4e-7c1a-7c1a-8c1a-000000000001/day=2026-11-11/0-<id>.statam",
             "the object layout is part of the format (spec 03 § 12)"
         );
     }

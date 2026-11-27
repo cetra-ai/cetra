@@ -22,7 +22,6 @@ use crate::catalog::{Catalog, CatalogEdit, Committer, FileId, FileMeta, FileTabl
 use crate::dedup;
 use crate::deletion::{Tombstones, applicable, drop_covered_batch, to_tombstone_specs};
 use crate::error::FlushError;
-use crate::file_format::{WrittenFile, write_file_batch};
 use crate::hooks::{HookPoint, Hooks};
 #[cfg(test)]
 use crate::memtable::MemBatch;
@@ -31,6 +30,7 @@ use crate::objects::Objects;
 use crate::partials::partials_from_spans_batch;
 use crate::projects::ProjectStates;
 use crate::read_state::{Published, ReadState};
+use crate::statam_io::{WrittenFile, write_file_batch};
 use crate::wal::writer::{RotateError, WriterShared};
 use crate::wal::{Table, truncate_segments};
 
@@ -507,7 +507,7 @@ fn prepare(
                 let refs: Vec<&Batch> = batches.iter().map(|batch| batch.batch.as_ref()).collect();
                 let combined = Batch::concat(FileTable::Scores.column_schema(), &refs, None)
                     .map_err(|source| {
-                        FlushError::prepare(crate::error::ParquetWriteError::from_column(source))
+                        FlushError::prepare(crate::error::FileWriteError::from_column(source))
                     })?;
                 let min_ingest = min_ingest_time(&combined, table)?;
                 let combined =
@@ -718,9 +718,8 @@ fn prepared_file(
 fn dedup_spans(batches: &[MemBatch]) -> Result<Batch, FlushError> {
     let schema = Arc::clone(batches[0].batch.schema());
     let refs: Vec<&Batch> = batches.iter().map(|batch| batch.batch.as_ref()).collect();
-    let combined = Batch::concat(schema, &refs, None).map_err(|source| {
-        FlushError::prepare(crate::error::ParquetWriteError::from_column(source))
-    })?;
+    let combined = Batch::concat(schema, &refs, None)
+        .map_err(|source| FlushError::prepare(crate::error::FileWriteError::from_column(source)))?;
     dedup::latest_spans_batch(&combined).map_err(|error| FlushError::dedup(error.reason()))
 }
 

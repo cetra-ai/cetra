@@ -13,7 +13,7 @@ use cetra_column::{CancelToken, DataType, ScalarValue, Schema};
 use cetra_core::ids::ProjectId;
 use cetra_core::schema::{scores, spans};
 use cetra_query::exec::{
-    ExecContext, ExecMetrics, IdLookupHint, ScanSpec, SpillManager, TimeRangeHint,
+    ExecContext, ExecMetrics, IdLookupHint, ScanSource, ScanSpec, SpillManager, TimeRangeHint,
 };
 use cetra_query::tombstone::{TombstoneTable, covered_predicate};
 use cetra_query::{BinaryOp, EvalContext, Expr, QueryError};
@@ -26,10 +26,11 @@ use crate::compaction::job::{ClaimGuard, Compactor};
 use crate::compaction::merge::MergeContext;
 use crate::compaction::plan::{Job, JobKind, Policy};
 use crate::deletion::{PendingDeletion, Tombstones, applicable, to_tombstone_specs};
+use crate::engine::statam_source::StatamSource;
 use crate::error::{CommitError, CompactionError};
-use crate::file_format::{ingest_column, open_file_scan};
 use crate::memtable::MemSnapshot;
 use crate::read_state::{ReadState, publish_catalog, publish_tombstones};
+use crate::statam_io::ingest_column;
 use crate::verify::{Suspects, may_be_corrupt};
 
 /// What one deletion pass did.
@@ -564,16 +565,17 @@ async fn holds_covered(
 
     // Inline tombstones MUST be disabled (`Arc::from([])`) so covered rows
     // are not stripped before `spec.filters` sees them.
-    let mut streams = open_file_scan(
-        Arc::clone(&ctx.store),
-        Arc::clone(file),
+    let mut streams = StatamSource::new(
+        ctx.io.clone(),
+        file.table,
         Arc::clone(col_schema),
+        vec![Arc::clone(file)],
+        Arc::from([]),
         Arc::clone(&ctx.qe_runtime.metadata_cache),
         Suspects::new(Arc::clone(&ctx.verify)),
         ctx.runtime_handle.clone(),
-        &spec,
-        &exec_ctx,
     )
+    .open_partitions(&spec, &exec_ctx)
     .map_err(CompactionError::from)?;
     let Some(mut stream) = streams.pop() else {
         return Ok(false);
@@ -681,7 +683,7 @@ mod tests {
     use crate::hooks::HookPoint;
     use crate::reads::columns::{active_rows, i64_at, require_col};
     use crate::reads::{ListScope, MAX_PAGE, SortOrder, TraceListRequest, TraceSort, trace_list};
-    use crate::test_support::{parquet_rows, rows, score_row, score_rows, span_row, span_rows};
+    use crate::test_support::{object_rows, rows, score_row, score_rows, span_row, span_rows};
     use crate::views::QueryContext;
     use crate::wal::Table;
 
@@ -755,10 +757,9 @@ mod tests {
         *span_row(trace, 0, 0, 0).trace_id.as_bytes()
     }
 
-    /// The raw 16-byte trace ids stored in one Parquet object.
+    /// The raw 16-byte trace ids stored in one Statam object.
     fn object_trace_ids(dir: &Path, file: &FileMeta, column: &str) -> Vec<[u8; 16]> {
-        let bytes = std::fs::read(dir.join("objects").join(&file.path)).unwrap();
-        let all = parquet_rows(bytes::Bytes::from(bytes));
+        let all = object_rows(dir, file);
         let col = all.column_by_name(column).unwrap();
         match col {
             cetra_column::Column::Flat(flat) => match flat.data() {
@@ -1346,13 +1347,13 @@ mod tests {
             "the other user's span of the session stays"
         );
         let bytes = std::fs::read(dir.path().join("objects").join(&spans_files[0].path)).unwrap();
-        let metadata = parquet::file::metadata::ParquetMetaDataReader::new()
-            .parse_and_finish(&bytes::Bytes::from(bytes))
-            .unwrap();
+        let meta =
+            cetra_statam::StatamFileMeta::read_from(&cetra_statam::SliceReader::new(bytes), None)
+                .unwrap();
         assert_eq!(
-            crate::file_format::file_format_version(&metadata),
-            Some(crate::format::FORMAT_VERSION),
-            "the rewritten file carries the format version"
+            meta.postscript.format_version,
+            cetra_statam::FORMAT_VERSION,
+            "the rewritten file carries the Statam format version"
         );
         let stored = score_file_rows(dir.path(), &storage);
         assert_eq!(stored.len(), 1, "{stored:?}");

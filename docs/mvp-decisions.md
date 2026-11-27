@@ -12,7 +12,7 @@ Competitor research: `research/competitors.md`.
 - Cost + tokens from a price table (LiteLLM import + per-project custom prices, track T), incl. cache/reasoning tokens.
 
 **Storage**
-- Single binary, single machine. Custom pure-Rust columnar format (`cetra-column`) and query engine (`cetra-query`) + Parquet (own layout, manifest in SQLite), local disk or S3 (`D-QE-1`, `D-QE-2`).
+- Single binary, single machine. Custom pure-Rust columnar format (`cetra-column`), query engine (`cetra-query`), and native Statam storage format (`.statam` files + `.stpk` payload packs, manifest in SQLite), local disk or S3 (`D-QE-1`, `D-QE-2`, `D-ST-1`).
 - WAL (`CBM1` binary framing) + in-memory `cetra-column` buffer → spans queryable within seconds (live view).
 - Tombstone deletes, physical removal at compaction; retention by dropping time partitions.
 
@@ -55,7 +55,7 @@ D1–D168 below are numbered in one sequence. From now on a track's decisions ar
 |---|---|---|
 | D1 | Positioning | Lightweight, single-binary self-host for bottom-up adoption; revenue from enterprise self-host features, then cost governance (gateway). |
 | D2 | Backend language | Rust. |
-| D3 | Trace storage | Apache DataFusion + Parquet. Same engine in embedded mode and future scale mode (S3 + Postgres metadata). No ClickHouse. *(Query engine superseded by D-QE-1.)* |
+| D3 | Trace storage | Apache DataFusion + Parquet. Same engine in embedded mode and future scale mode (S3 + Postgres metadata). No ClickHouse. *(Query engine superseded by D-QE-1; on-disk format superseded by D-ST-1.)* |
 | D4 | Ingestion | OTLP (HTTP + gRPC) in v1, normalizing GenAI semconv / OpenInference / OpenLLMetry / Vercel AI SDK attributes. Proxy/gateway later. |
 | D5 | SDK | Yes, we ship an SDK. |
 | D6 | Tenancy | Organizations → projects from day one. |
@@ -68,7 +68,7 @@ D1–D168 below are numbered in one sequence. From now on a track's decisions ar
 | D13 | Deletion semantics | Deletes visible immediately (tombstones); bytes physically removed at the next file rewrite. Amended by D-M-3: hidden once the deletion worker registers the request, normally within seconds of the API call (minutes for a very large end user). |
 | D14 | Team / timeline | Solo, AI-assisted, ~2 months target. |
 | D15 | Topology | Single machine in v1 (vertical scaling); internal split so it can be distributed later. |
-| D16 | Table layout | Own Parquet layout + manifest in the metadata DB. No Iceberg/Delta in v1. |
+| D16 | Table layout | Own Parquet layout + manifest in the metadata DB. No Iceberg/Delta in v1. *(On-disk format superseded by Statam `.statam` + `.stpk` in D-ST-1, D-ST-2.)* |
 | D17 | SDK | Python + TypeScript, thin layer over OpenTelemetry; reuse OpenInference/OpenLLMetry instrumentors; REST client for datasets/experiments/scores. |
 | D18 | Experiments | Client-side via SDK. No server-side runs in MVP. |
 | D19 | Prompt registry | In the MVP (D191). |
@@ -91,7 +91,7 @@ D1–D168 below are numbered in one sequence. From now on a track's decisions ar
 | D36 | Metadata DB | SQLite only in v1. Postgres when going multi-node. |
 | D37 | Backups | Documented snapshot procedure. |
 | D38 | Self-monitoring | Deferred to just before release. /metrics and /readyz: N M3 (D-N-28–D-N-30). |
-| D39 | Stack | tokio/axum/tonic, datafusion/parquet/arrow/object_store + own WAL, sqlx (SQLite), argon2/openidconnect/oauth2, utoipa, lettre + minijinja, Vite/React/TS/TanStack/shadcn/Recharts, OTel-based SDKs, monorepo (`crates/`, `web/`, `sdks/python`, `sdks/typescript`). *(DataFusion and Arrow replaced across the query/data plane by `cetra-query` and `cetra-column` in D-QE-1, D-QE-2.)* |
+| D39 | Stack | tokio/axum/tonic, datafusion/parquet/arrow/object_store + own WAL, sqlx (SQLite), argon2/openidconnect/oauth2, utoipa, lettre + minijinja, Vite/React/TS/TanStack/shadcn/Recharts, OTel-based SDKs, monorepo (`crates/`, `web/`, `sdks/python`, `sdks/typescript`). *(DataFusion and Arrow replaced across the query/data plane by `cetra-query` and `cetra-column` in D-QE-1, D-QE-2; Parquet storage replaced by `cetra-statam` in D-ST-1, keeping `parquet` with `zstd` only for SQL `.parquet` exports.)* |
 | D40 | Payloads | 10 MiB HTTP / 32 MiB gRPC, 413 above; attributes >8 MiB truncated with marker + list of truncated attrs. |
 | D41 | Multimodal | Server-side extraction (data URIs, OpenAI, Anthropic, Gemini formats) → SHA-256 content-addressed blobs per project; span holds `media://` reference. |
 | D42 | Message dedup | Later (rely on zstd in v1; schema designed to allow it). |
@@ -114,7 +114,7 @@ D1–D168 below are numbered in one sequence. From now on a track's decisions ar
 | D59 | Config ownership | No config in `cetra-core`: each crate owns its config section (otel: ingest limits, storage: storage/WAL/compaction, server: auth/SMTP/…); the server assembles the top-level config and does figment loading. |
 | D60 | Span contract | `cetra-core` defines owned Rust `Span`/`Score` structs (serde) and the `Span`/`Score` → Arrow `RecordBatch` conversion; otel outputs `Vec<Span>`, storage consumes batches. *(Amended by D-QE-2: converts to `cetra_column::Batch`.)* |
 | D61 | ID types | Newtypes only for `TraceId`, `SpanId` (fixed bytes, hex, all-zero invalid), `ProjectId`, `OrgId` (UUID). Other entity IDs are plain `uuid::Uuid`. |
-| D62 | Arrow string columns | In memory every string column is `Utf8`; "(dict)" in spec 01 means Parquet dictionary encoding, not an Arrow `Dictionary` type. *(Amended by D-QE-2: `cetra-column` uses `Flat`/`Const`/`Dict`/`Rle` encodings; "(dict)" in spec 01 still means Parquet dictionary encoding.)* |
+| D62 | Arrow string columns | In memory every string column is `Utf8`; "(dict)" in spec 01 means Parquet dictionary encoding, not an Arrow `Dictionary` type. *(Amended by D-QE-2 and D-ST-1: `cetra-column` uses `Flat`/`Const`/`Dict`/`Rle` encodings; "(dict)" in spec 01 means file-level dictionary encoding in Statam.)* |
 | D63 | Contract tests | `insta` snapshot tests lock schemas, enums, names and serde formats of `cetra-core`. |
 | D64 | JSON timestamps | Instants are `i64` ns in Rust/Arrow and RFC 3339 UTC strings with 9 fractional digits and `Z` in JSON (fixtures, API). Durations (`ttft_ns`, `duration_ns`) stay JSON integers. |
 | D65 | Message extra fields | Canonical message parts and messages keep unmodelled fields in an `extra` map (typed part preserved, exact JSON round-trip, explicit `null`s on optional fields included); `Unknown` only for unknown/invalid part types. Tool-call `arguments` is optional. |
@@ -1139,7 +1139,7 @@ Decisions of track QE (`docs/plans/query-engine/design.md`), numbered `D-QE-<n>`
 |---|---|---|
 | D-QE-1 | Own query engine | **Replace DataFusion with our own pure-Rust query engine (`cetra-query`)**, keeping `sqlparser` (`GenericDialect`) for parsing (user). Priorities: owning the stack, latency + memory control, compile time. Rejected: keeping DataFusion (~30+ crates, planning floor, untracked operator memory, poor Strata fit); DuckDB/`chDB` (C++ FFI, weak multi-tenant sandboxing, incompatible with `TraceMerger`/S3 `read_cache`). |
 | D-QE-2 | `cetra-column` | **Replace Arrow with a lean, `tokio`-free `cetra-column` crate** (user) with `Flat`/`Const`/`Dict`/`Rle` encodings, `Selection` vectors, synchronous `MemoryPool`/`FairSpill`, and `CancelToken`, shared across `cetra-core`, `cetra-query`, `cetra-storage`, `cetra-server` and future Strata. Rejected: keeping Arrow `RecordBatch` (50+ dynamic types, downcasting, no native selection vectors). |
-| D-QE-3 | Format-agnostic scan | **Decouple the engine from on-disk formats via `ScanSource` / `ScanSpec`.** Ship on `ParquetSource` (with our own bounded Parquet metadata cache) now; swap in `StrataSource` once Strata passes its workload evaluation. |
+| D-QE-3 | Format-agnostic scan | **Decouple the engine from on-disk formats via `ScanSource` / `ScanSpec`.** Ship on `ParquetSource` (with our own bounded Parquet metadata cache) now; swap in `StrataSource` once Strata passes its workload evaluation. *(Completed by D-ST-1: `StatamSource` replaces `ParquetSource`.)* |
 | D-QE-4 | Shape B SQL | **Curated analytical SQL ("Shape B")** for the SQL console and MCP (user): `SELECT`/`WITH`/equi-joins/`UNION [ALL]`/`INTERSECT`/`EXCEPT`/`UNNEST`/`GROUP BY`/`HAVING`/`FILTER (WHERE ...)`/basic `OVER` windows/~50 curated scalar functions/`approx_percentile_cont`/`encode`/JSON extraction/`EXPLAIN`/`{name:Type}` params; explicitly reject correlated subqueries, `WITH RECURSIVE`, `LATERAL`, `ROLLUP`/`CUBE`/`GROUPING SETS`, exotic window frames and the 20 denied OOM functions. |
 | D-QE-5 | Push pipelines | **DuckDB-style synchronous push pipelines on a bounded CPU worker pool** (8 MiB worker stacks), keeping Tokio strictly for disk/S3/network I/O. Rejected: async pull streams (DataFusion), port-graph DAGs, stage-by-stage `rayon::par_iter`. |
 | D-QE-6 | Spilling | **Spill to disk on buffering operators only** (`Sort`, `HashAgg`, `HashJoin`, `TraceMerger`) using `cetra-column` binary framing, enforcing `storage.min_free_bytes` via `Disk` and bounding open spill FDs. |
@@ -1152,6 +1152,17 @@ Decisions of track QE (`docs/plans/query-engine/design.md`), numbered `D-QE-<n>`
 | D-QE-13 | Percentiles | **Bounded-memory sketches (DDSketch / t-digest) for dashboard widgets, facets and `approx_percentile_cont`, and exact `percentile_cont` in SQL gated by `MemoryPool`** (user). |
 | D-QE-14 | `INTERSECT` / `EXCEPT` | **Include `INTERSECT` and `EXCEPT` in Shape B SQL** (user), lowered to hash semi/anti-joins under the 32-table cap (D-A2-1). |
 | D-QE-15 | Unified `columns[].type` | **Emit unified cetra `columns[].type` display names** (`string`, `integer`, `float`, `decimal`, `boolean`, `timestamp`, `date`, `interval`, `binary`, `string_list`, `string_map`, `list`, `json`, `null`) in `POST /sql` responses, aligned with `GET /schema` and updating spec 05, OpenAPI, `web/src/lib/sql/types.ts` and fixtures together in M7 (user). |
+
+## Track ST — Statam native storage format
+
+Decisions of track ST (`crates/statam` and Stage 3 `cetra-storage` integration), numbered `D-ST-<n>`.
+
+| # | Topic | Decision |
+|---|---|---|
+| D-ST-1 | Native Statam storage format | **Statam (`.statam` + `.stpk`, `cetra-statam`) replaces Parquet and Arrow as `cetra-storage`'s on-disk and S3 file format (amends D3, D16, D39, D62, D-QE-3).** Flush writes self-contained `L0Fast` `.statam` files (no `.stpk`); compaction writes `L1Compact` `.statam` files with shredded `MapUtf8` columns, Hot/Lazy SBBF bloom filters, `TS02` trigram skip indexes, and sibling `.stpk` payload packs for `spans`. `arrow` is removed from all shipped crates (kept only in root `[workspace.dependencies]` as a dev-dependency for `crates/statam`'s Parquet comparison benchmark), and `parquet` remains with `zstd` only (`default-features = false`) for user-facing SQL `.parquet` exports (D-QE-8, D-QE-12). |
+| D-ST-2 | 1:1 `.stpk` pack ownership | **Strict 1:1 `.stpk` pack ownership per L1 `spans` `.statam` file (Decision 1A).** Each L1 `spans` file owns at most one sibling pack at `tables/spans/project=<project>/day=<YYYY-MM-DD>/<level>-<pack_id>.stpk` (omitted when 0 external chunks are emitted), tracked by four nullable all-or-none columns on `data_files` (`pack_id`, `pack_path`, `pack_size_bytes`, `pack_toc_size`) plus partial index `data_files_pack_path` (`WHERE pack_path IS NOT NULL`). Rejected: shared per-day `payload_packs`/`file_packs` join tables — 1:1 ownership enables single-file GDPR rewrites and 1:1 GC, online backup, disk accounting (`total_bytes()`), and quarantine without refcounting or multi-file coordination. |
+| D-ST-3 | Streaming GDPR pack rewrite & cache eviction | **GDPR erasure performs a streaming single-file `.statam` + `.stpk` rewrite with immediate cache eviction and normal `storage.gc.grace` deletion (Decision 2A).** Rewriting an L1 `spans` file with a pack streams one row group and one `.stpk` frame at a time: 100%-live non-dict frames are copied verbatim without decompression, any legacy `DictSection` is unconditionally discarded, mixed frames are recompressed with live chunks only, and 0%-live frames are dropped, guaranteeing 0 bytes of erased payloads remain in rewritten files. Immediately upon rewrite commit, replaced `.statam` and `.stpk` entries are evicted from `ReadCache` and `MetadataCache`; physical deletion of retired objects runs through standard `collect_obsolete` after `storage.gc.grace` (deleting `.stpk` first, then `.statam`). |
+| D-ST-4 | Direct cut-over & `FORMAT_VERSION = 1` | **Direct cut-over with no dual-format toggle or compatibility shim, keeping `FORMAT_VERSION = 1` pre-release (Decisions 3A & 4A, `AGENTS.md`).** `ParquetSource` and `arrow_write` are deleted rather than kept behind a feature flag or dual read/write path. Because cetra is unreleased (`fixtures/storage/golden/RELEASES` is empty), `FORMAT_VERSION` stays `1` and `golden_tests` generates and validates Statam (`.statam` + `.stpk`) golden data directories (spec 03 §12). |
 
 ## Open
 
