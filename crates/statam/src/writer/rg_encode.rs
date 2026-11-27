@@ -34,8 +34,8 @@ use super::l0_payload::{L0_LOCAL_PACK_IDX, LocalL0PayloadBuilder};
 use super::{
     HIGH_CARDINALITY_ID_COLS, HOT_ANALYTICS_POST_TRACE_COLS, HOT_ANALYTICS_TIER1_SMALL_COLS,
     HOT_ANALYTICS_TIER1_TIME_COLS, HOT_ANALYTICS_TIER2_COLS, ID_CORE_COLS,
-    KNOWN_LOW_CARD_DICT_COLS, PhysColWriteState, PrechunkedRefs, Rg0DictResult, StatamWriter,
-    default_l1_codec,
+    KNOWN_LOW_CARD_DICT_COLS, PackBuilderTarget, PhysColWriteState, PrechunkedRefs, Rg0DictResult,
+    StatamWriter, default_l1_codec,
 };
 
 /// Minimum compressed mini-block bytes required to emit a narrow-column trigram filter.
@@ -98,7 +98,7 @@ pub(super) fn core_column_plan(
     steps
 }
 
-impl<'a, W: Write + Seek> StatamWriter<'a, W> {
+impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
     pub(super) fn flush_rg_columns(
         &mut self,
         rg_cols: &[Arc<Column>],
@@ -1428,7 +1428,7 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                     continue;
                 }
                 if self.options.profile == WriteProfile::L1Compact
-                    && let Some(pb) = self.pack_builder.as_deref_mut()
+                    && let Some(pb) = self.pack_builder.as_mut().map(PackBuilderTarget::as_mut)
                 {
                     self.uses_external_pack = true;
                     let cids = pb.append_blob(bytes)?;
@@ -1476,7 +1476,7 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
             }
 
             if self.options.profile == WriteProfile::L1Compact
-                && let Some(pb) = self.pack_builder.as_deref_mut()
+                && let Some(pb) = self.pack_builder.as_mut().map(PackBuilderTarget::as_mut)
             {
                 self.uses_external_pack = true;
                 let bypassed = self

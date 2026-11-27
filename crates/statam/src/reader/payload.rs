@@ -3353,7 +3353,9 @@ impl StatamReader {
     }
 }
 
-fn clone_decoded_p1_for_wave(src: &HashMap<usize, DecodedPhase1>) -> HashMap<usize, DecodedPhase1> {
+pub(super) fn clone_decoded_p1_for_wave(
+    src: &HashMap<usize, DecodedPhase1>,
+) -> HashMap<usize, DecodedPhase1> {
     let mut out = HashMap::with_capacity(src.len());
     for (&k, v) in src {
         match v {

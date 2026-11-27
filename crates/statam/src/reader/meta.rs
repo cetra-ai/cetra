@@ -76,6 +76,79 @@ impl StatamFileMeta {
         Self::read_from_with_tail(reader, tail_hint).map(|(meta, _, _)| meta)
     }
 
+    /// Reads and validates the Hot Tail using an optional catalog-stored footer size hint.
+    ///
+    /// On remote readers (`reader.is_remote()`), expands the tail fetch ONLY upward from
+    /// `DEFAULT_TAIL_HINT` (preserving 1-GET prefetch of `inline_lazy` sections on small files
+    /// while also opening large Hot Tails in 1 GET), clamped to `MAX_HOT_TAIL_BYTES`.
+    /// On local readers, uses `stored_footer_bytes` directly (clamped to `MAX_HOT_TAIL_BYTES`).
+    pub fn read_from_with_hint(
+        reader: &dyn RangeReader,
+        stored_footer_bytes: Option<u64>,
+    ) -> Result<Self, StatamError> {
+        let tail_hint = stored_footer_bytes.map(|h| {
+            let bytes = if reader.is_remote() {
+                h.max(u64::from(DEFAULT_TAIL_HINT))
+            } else {
+                h
+            };
+            bytes.min(MAX_HOT_TAIL_BYTES as u64) as u32
+        });
+        Self::read_from(reader, tail_hint)
+    }
+
+    /// Returns a deterministic non-zero heap memory estimate in bytes for external metadata caches.
+    pub fn memory_bytes(&self) -> usize {
+        let mut total = size_of::<Self>();
+        total = total.saturating_add(
+            self.schema_meta
+                .sort_cols
+                .len()
+                .saturating_mul(size_of::<u16>()),
+        );
+        total = total.saturating_add(self.schema_meta.pack_ids.len().saturating_mul(16));
+        total = total.saturating_add(
+            self.schema_meta
+                .locality_groups
+                .len()
+                .saturating_mul(size_of::<crate::format::LocalityGroup>()),
+        );
+        for field in self.schema_meta.schema.fields() {
+            total = total
+                .saturating_add(size_of::<cetra_column::Field>())
+                .saturating_add(field.name.len());
+        }
+        for sm in &self.schema_meta.shredded_maps {
+            total = total.saturating_add(size_of::<crate::format::ShreddedMapDir>());
+            for k in &sm.keys {
+                total = total
+                    .saturating_add(size_of::<crate::format::ShreddedMapKeyEntry>())
+                    .saturating_add(k.key.len());
+            }
+        }
+        total = total.saturating_add(
+            self.col_dir
+                .len()
+                .saturating_mul(size_of::<ColumnDirEntry>()),
+        );
+        total = total.saturating_add(self.rg_dir.len().saturating_mul(size_of::<RowGroupEntry>()));
+        total = total.saturating_add(self.block_dir.len().saturating_mul(size_of::<BlockEntry>()));
+        total = total.saturating_add(self.hot_bloom_bytes.len());
+        total = total.saturating_add(self.hot_dict_bytes.len());
+        total = total.saturating_add(
+            self.lazy_dir
+                .len()
+                .saturating_mul(size_of::<LazyIndexEntry>()),
+        );
+        for b in self.inline_lazy.values() {
+            total = total
+                .saturating_add(size_of::<usize>())
+                .saturating_add(size_of::<Bytes>())
+                .saturating_add(b.len());
+        }
+        total
+    }
+
     /// Reads and validates the Hot Tail, also returning `(tail_start, tail)` from the initial
     /// tail prefetch so remote readers can retain covered data bytes in [`crate::io::TailCachedReader`].
     pub(crate) fn read_from_with_tail(

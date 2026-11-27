@@ -41,7 +41,7 @@ pub use format::{
 };
 pub use gdpr::{
     GdprFileInput, GdprRewriteReport, GdprRewriteResult, GdprRewriteStats, RewrittenPackFile,
-    RewrittenStatamFile, gdpr_rewrite_day,
+    RewrittenStatamFile, SingleFileGdprStats, gdpr_rewrite_day, gdpr_rewrite_single_file_streaming,
 };
 pub use io::{
     FileReader, IoCounters, RangeReader, S3_CACHE_BLOCK_BYTES, SimulatedS3Config, SimulatedS3Mode,
@@ -59,7 +59,7 @@ pub use payload::{
 };
 pub use reader::{
     CoalesceMode, IdLookup, InMemoryPackResolver, PackResolver, Predicate, ScanRequest,
-    StatamFileMeta, StatamReader, SubstringQuery, TimeRange,
+    StatamFileMeta, StatamReader, StatamScanIter, SubstringQuery, TimeRange,
 };
 pub use simd::{FilterOp, Sbbf, TrigramBloom, statam_bloom_hash};
 pub use writer::{L0_LOCAL_PACK_IDX, StatamWriter, WriteOptions, WriteStats};

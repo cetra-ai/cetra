@@ -471,7 +471,7 @@ impl StatamReader {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn eval_phase1_mb(
+    pub(super) fn eval_phase1_mb(
         &self,
         rg_idx: usize,
         mb_idx: usize,
@@ -2214,7 +2214,7 @@ pub(super) fn eval_utf8_substring(
     }
 }
 
-fn trim_bitmap_mask(mask: &mut Bitmap, keep: usize, trim_tail: bool) {
+pub(super) fn trim_bitmap_mask(mask: &mut Bitmap, keep: usize, trim_tail: bool) {
     let mut trimmed = Bitmap::new_zeroed(mask.len());
     if trim_tail {
         let skip = mask.count_ones().saturating_sub(keep);

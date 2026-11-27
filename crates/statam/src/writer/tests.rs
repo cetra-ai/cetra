@@ -2255,3 +2255,188 @@ fn pass21_non_payload_compressed_rg_sizing() {
         ScalarValue::Utf8(pattern_10k)
     );
 }
+
+#[test]
+fn streaming_pack_builder_is_bit_exact_with_in_memory_and_owned_writer() {
+    use crate::payload::pack::{ChunkPackReader, PackWriteOptions};
+
+    let pack_id = [0x7Au8; 16];
+    let opts = PackWriteOptions {
+        target_frame_raw_bytes: 16 * 1024,
+        enable_trigram_skip: true,
+        emit_hash_table: true,
+        ..PackWriteOptions::default()
+    };
+
+    // 1. Bit-exact parity between ChunkPackBuilder::new + finish and new_streaming + finish_into_inner.
+    let mut mem_pb = ChunkPackBuilder::new(pack_id, opts);
+    let mut stream_pb =
+        ChunkPackBuilder::new_streaming(pack_id, opts, std::io::Cursor::new(Vec::new())).unwrap();
+    mem_pb.enable_boundary_tracking();
+    stream_pb.enable_boundary_tracking();
+    assert_eq!(mem_pb.chunk_count(), 0);
+    assert_eq!(stream_pb.chunk_count(), 0);
+
+    for i in 0..40usize {
+        let payload = format!("streaming-parity-chunk-{i:04}-{}", "abcd1234".repeat(160));
+        let c1 = mem_pb.intern_chunk(payload.as_bytes()).unwrap();
+        let c2 = stream_pb.intern_chunk(payload.as_bytes()).unwrap();
+        assert_eq!(c1, c2);
+        // Repeat every 5th chunk to exercise dedup hits.
+        if i % 5 == 0 {
+            let d1 = mem_pb.intern_chunk(payload.as_bytes()).unwrap();
+            let d2 = stream_pb.intern_chunk(payload.as_bytes()).unwrap();
+            assert_eq!(d1, d2);
+            assert_eq!(d1, c1);
+        }
+        assert_eq!(mem_pb.chunk_count(), (i + 1) as u32);
+        assert_eq!(stream_pb.chunk_count(), (i + 1) as u32);
+    }
+    // Exercise boundary chunk marking + bypass + blob.
+    mem_pb.mark_boundary_chunks(&[0, 1]);
+    stream_pb.mark_boundary_chunks(&[0, 1]);
+    let b1 = mem_pb.append_raw_bypass(&[0x5Au8; 4096]).unwrap();
+    let b2 = stream_pb.append_raw_bypass(&[0x5Au8; 4096]).unwrap();
+    assert_eq!(b1, b2);
+    let bl1 = mem_pb.append_blob(&[0x3Cu8; 40_000]).unwrap();
+    let bl2 = stream_pb.append_blob(&[0x3Cu8; 40_000]).unwrap();
+    assert_eq!(bl1, bl2);
+    assert_eq!(mem_pb.chunk_count(), stream_pb.chunk_count());
+
+    let mut mem_bytes = Vec::new();
+    let mem_stats = mem_pb.finish(&mut mem_bytes).unwrap();
+    let (stream_cursor, stream_stats) = stream_pb.finish_into_inner().unwrap();
+    let stream_bytes = stream_cursor.into_inner();
+    assert_eq!(stream_stats, mem_stats);
+    assert_eq!(stream_bytes, mem_bytes);
+
+    // Non-zero start_offset streaming pack writes cleanly at offset 37.
+    let mut prefixed = std::io::Cursor::new(vec![0xEEu8; 37]);
+    prefixed.set_position(37);
+    let mut off_pb = ChunkPackBuilder::new_streaming(pack_id, opts, prefixed).unwrap();
+    off_pb
+        .intern_chunk(b"hello-prefixed-streaming-pack")
+        .unwrap();
+    let (off_cursor, off_stats) = off_pb.finish_into_inner().unwrap();
+    let off_buf = off_cursor.into_inner();
+    assert_eq!(&off_buf[..37], &[0xEEu8; 37]);
+    assert_eq!(off_buf.len() as u64, 37 + off_stats.total_bytes);
+    let pr = ChunkPackReader::open(Arc::new(SliceReader::new(off_buf[37..].to_vec()))).unwrap();
+    pr.verify_full(pack_id).unwrap();
+
+    // 2. StatamWriter::new_with_owned_pack auto-derives pack_id when options.pack_id is None.
+    let schema = Schema::try_new_arc(vec![
+        Field::new("start_time", DataType::TimestampNs { utc: true }, false),
+        Field::new("input", DataType::Utf8, true),
+    ])
+    .unwrap();
+    let payload_a = "OWNED_PACK_PAYLOAD_A_".repeat(250);
+    let payload_b = "OWNED_PACK_PAYLOAD_B_".repeat(250);
+    let big_batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::TimestampNs {
+                        values: vec![10, 20],
+                        utc: true,
+                    },
+                    None,
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices([payload_a.as_str(), payload_b.as_str()])
+                            .unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        2,
+    )
+    .unwrap();
+
+    let owned_pack_id = [0x99u8; 16];
+    let w_opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+    assert!(w_opts.pack_id.is_none());
+    let pb = ChunkPackBuilder::new_streaming(owned_pack_id, opts, std::io::Cursor::new(Vec::new()))
+        .unwrap();
+    let mut writer: StatamWriter<'static, std::io::Cursor<Vec<u8>>, std::io::Cursor<Vec<u8>>> =
+        StatamWriter::new_with_owned_pack(
+            std::io::Cursor::new(Vec::new()),
+            Arc::clone(&schema),
+            w_opts.clone(),
+            Some(pb),
+        )
+        .unwrap();
+    writer.write_batch(&big_batch).unwrap();
+    let (statam_c, w_stats, owned_pb) = writer.finish_into_inner().unwrap();
+    assert_eq!(w_stats.pack_ids, vec![owned_pack_id]);
+    let owned_pb = owned_pb.unwrap();
+    assert!(owned_pb.chunk_count() > 0);
+    let (pack_c, p_stats) = owned_pb.finish_into_inner().unwrap();
+    assert_eq!(p_stats.pack_id, owned_pack_id);
+    assert!(p_stats.toc_stored_bytes > 0);
+
+    let pr =
+        Arc::new(ChunkPackReader::open(Arc::new(SliceReader::new(pack_c.into_inner()))).unwrap());
+    let mut resolver = InMemoryPackResolver::new();
+    resolver.insert(owned_pack_id, Arc::clone(&pr));
+    let reader = StatamReader::open(
+        Arc::new(SliceReader::new(statam_c.into_inner())),
+        Some(Arc::new(resolver)),
+    )
+    .unwrap();
+    reader
+        .verify_full_with_pack(Some((owned_pack_id, &pr)), 2, TableKind::Spans)
+        .unwrap();
+
+    // 3. 0-chunk pack case (all payloads inline) -> owned_pb.chunk_count() == 0, pack_ids empty.
+    let inline_batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::TimestampNs {
+                        values: vec![10, 20],
+                        utc: true,
+                    },
+                    None,
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(["short1", "short2"]).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        2,
+    )
+    .unwrap();
+    let zero_pb =
+        ChunkPackBuilder::new_streaming([0xAAu8; 16], opts, std::io::Cursor::new(Vec::new()))
+            .unwrap();
+    let mut zero_writer = StatamWriter::new_with_owned_pack(
+        std::io::Cursor::new(Vec::new()),
+        Arc::clone(&schema),
+        w_opts,
+        Some(zero_pb),
+    )
+    .unwrap();
+    zero_writer.write_batch(&inline_batch).unwrap();
+    let (zero_statam_c, zero_stats, zero_owned_pb) = zero_writer.finish_into_inner().unwrap();
+    assert!(zero_stats.pack_ids.is_empty());
+    assert_eq!(zero_owned_pb.unwrap().chunk_count(), 0);
+    let zero_reader =
+        StatamReader::open(Arc::new(SliceReader::new(zero_statam_c.into_inner())), None).unwrap();
+    zero_reader
+        .verify_full_with_pack(None, 2, TableKind::Spans)
+        .unwrap();
+}

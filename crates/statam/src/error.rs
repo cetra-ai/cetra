@@ -72,6 +72,52 @@ pub enum StatamError {
     /// Error propagated from `cetra-column`.
     #[error("column error: {0}")]
     Column(#[from] cetra_column::ColumnError),
+
+    /// Transient object-store or transport error (privacy-safe static reason only).
+    #[error("store error: {reason}")]
+    Store {
+        /// Static diagnostic reason (never URLs, endpoints, bucket names, or keys).
+        reason: &'static str,
+    },
+
+    /// Operation was cancelled cooperatively via a `CancelToken`.
+    #[error("statam operation cancelled")]
+    Cancelled,
+
+    /// Operation exceeded its memory `Reservation` budget.
+    #[error("statam memory limit exceeded")]
+    MemoryExceeded,
+}
+
+impl StatamError {
+    /// Returns `true` for transient object-store/transport errors that must not trigger quarantine.
+    #[inline]
+    pub fn is_store_error(&self) -> bool {
+        matches!(self, Self::Store { .. })
+    }
+
+    /// Returns `true` for data corruption, format/schema mismatch, missing pack, or missing/truncated file I/O.
+    #[inline]
+    pub fn is_corrupt(&self) -> bool {
+        match self {
+            Self::Corrupt { .. }
+            | Self::UnsupportedVersion { .. }
+            | Self::UnsupportedFeature { .. }
+            | Self::BoundsExceeded { .. }
+            | Self::ChecksumMismatch { .. }
+            | Self::MissingPack { .. }
+            | Self::SchemaMismatch { .. } => true,
+            Self::Io(err) => matches!(
+                err.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::UnexpectedEof
+            ),
+            Self::Store { .. }
+            | Self::Cancelled
+            | Self::MemoryExceeded
+            | Self::EncryptionRequired
+            | Self::Column(_) => false,
+        }
+    }
 }
 
 struct Hex16([u8; 16]);
@@ -82,5 +128,74 @@ impl fmt::Display for Hex16 {
             write!(f, "{b:02x}")?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    #[test]
+    fn error_classification_is_store_and_is_corrupt() {
+        let store_err = StatamError::Store {
+            reason: "object store read failed",
+        };
+        assert!(store_err.is_store_error());
+        assert!(!store_err.is_corrupt());
+        assert!(store_err.to_string().contains("object store read failed"));
+
+        let cancelled = StatamError::Cancelled;
+        assert!(!cancelled.is_store_error());
+        assert!(!cancelled.is_corrupt());
+
+        let mem = StatamError::MemoryExceeded;
+        assert!(!mem.is_store_error());
+        assert!(!mem.is_corrupt());
+
+        let enc = StatamError::EncryptionRequired;
+        assert!(!enc.is_store_error());
+        assert!(!enc.is_corrupt());
+
+        let col_err = StatamError::Column(cetra_column::ColumnError::InvalidBatch {
+            reason: "bad batch",
+        });
+        assert!(!col_err.is_store_error());
+        assert!(!col_err.is_corrupt());
+
+        let corrupt_variants = [
+            StatamError::Corrupt {
+                reason: "bad magic",
+            },
+            StatamError::UnsupportedVersion {
+                found: 99,
+                expected: 1,
+            },
+            StatamError::UnsupportedFeature { mask: 0x1 },
+            StatamError::BoundsExceeded { reason: "too big" },
+            StatamError::ChecksumMismatch { context: "block" },
+            StatamError::MissingPack { pack_id: [7u8; 16] },
+            StatamError::SchemaMismatch { reason: "mismatch" },
+            StatamError::Io(io::Error::new(io::ErrorKind::NotFound, "gone")),
+            StatamError::Io(io::Error::new(io::ErrorKind::UnexpectedEof, "eof")),
+        ];
+        for err in &corrupt_variants {
+            assert!(
+                !err.is_store_error(),
+                "unexpected is_store_error for {err:?}"
+            );
+            assert!(err.is_corrupt(), "expected is_corrupt for {err:?}");
+        }
+
+        let non_corrupt_io = [
+            StatamError::Io(io::Error::new(io::ErrorKind::TimedOut, "timeout")),
+            StatamError::Io(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+            StatamError::Io(io::Error::new(io::ErrorKind::Interrupted, "interrupted")),
+        ];
+        for err in &non_corrupt_io {
+            assert!(!err.is_store_error());
+            assert!(!err.is_corrupt(), "unexpected is_corrupt for {err:?}");
+        }
     }
 }

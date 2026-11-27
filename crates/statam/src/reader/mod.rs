@@ -6,8 +6,10 @@ mod materialize;
 mod meta;
 mod payload;
 mod plan;
+mod stream;
 #[cfg(test)]
 mod tests;
+mod verify;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -53,6 +55,7 @@ use payload::{PHASE2_PAYLOAD_WAVE_TARGET_BYTES, ParsedL0Payload, ResolvedChunks}
 use plan::{
     ActiveMiniBlock, BlockCacheReader, DecodedPhase1, RgIoPlan, TouchedMbRows, find_time_column,
 };
+pub use stream::StatamScanIter;
 
 /// Maximum gap (64 KiB) between blocks coalesced unconditionally into a single `Scan` range read.
 const SCAN_COALESCE_MAX_GAP: u64 = 64 * 1024;
@@ -381,6 +384,15 @@ impl StatamReader {
         meta: StatamFileMeta,
         packs: Option<Arc<dyn PackResolver>>,
     ) -> Result<Self, StatamError> {
+        Self::open_with_shared_meta(reader, Arc::new(meta), packs)
+    }
+
+    /// Opens a `.statam` file reusing an externally cached [`Arc<StatamFileMeta>`] (0 extra GETs).
+    pub fn open_with_shared_meta(
+        reader: Arc<dyn RangeReader>,
+        meta: Arc<StatamFileMeta>,
+        packs: Option<Arc<dyn PackResolver>>,
+    ) -> Result<Self, StatamError> {
         let mut caches = ReaderCaches::default();
         for pidx in 0..meta.col_dir.len() {
             if let Some(bloom) = meta.hot_bloom(pidx)? {
@@ -392,7 +404,7 @@ impl StatamReader {
         }
         Ok(Self {
             reader,
-            meta: Arc::new(meta),
+            meta,
             packs,
             retained_tail_start: None,
             caches: Mutex::new(caches),

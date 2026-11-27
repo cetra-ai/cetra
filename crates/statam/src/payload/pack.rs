@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::hash::BuildHasherDefault;
-use std::io::Write;
+use std::io::{Cursor, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -283,11 +283,15 @@ fn fast_head_hash_128(bytes: &[u8]) -> u64 {
     h
 }
 
-pub struct ChunkPackBuilder {
+pub struct ChunkPackBuilder<W: Write + Seek = Cursor<Vec<u8>>> {
     pack_id: [u8; 16],
     options: PackWriteOptions,
-    /// Holds the 48-byte header placeholder followed by framed data and alignment padding.
-    buf: Vec<u8>,
+    /// Streaming sink receiving the 48-byte header placeholder, framed data, padding, and tail.
+    out: W,
+    /// Initial stream position in `out` where the 48-byte `PackHeader` placeholder was written.
+    start_offset: u64,
+    /// Bytes written to `out` relative to `start_offset` (starts at `PACK_HEADER_LEN`).
+    written_len: u64,
     dedup: HashMap<[u8; 16], u32, BuildHasherDefault<Hash16IdentityHasher>>,
     frames: Vec<FrameEntry>,
     chunk_locs: Vec<ChunkLoc>,
@@ -324,11 +328,11 @@ pub struct ChunkPackBuilder {
     boundary_chunks: Vec<bool>,
 }
 
-impl fmt::Debug for ChunkPackBuilder {
+impl<W: Write + Seek> fmt::Debug for ChunkPackBuilder<W> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ChunkPackBuilder")
             .field("options", &self.options)
-            .field("buf_len", &self.buf.len())
+            .field("written_len", &self.written_len)
             .field("frame_count", &self.frames.len())
             .field("chunk_count", &self.chunk_locs.len())
             .field("trigram_buf_len", &self.trigram_buf.len())
@@ -351,26 +355,61 @@ impl fmt::Debug for ChunkPackBuilder {
     }
 }
 
-impl ChunkPackBuilder {
-    /// Creates a new `.stpk` pack builder for `pack_id` (Zstd dictionary training disabled by default).
+impl ChunkPackBuilder<Cursor<Vec<u8>>> {
+    /// Creates a new in-memory `.stpk` pack builder for `pack_id` (Zstd dictionary training disabled by default).
     pub fn new(pack_id: [u8; 16], options: PackWriteOptions) -> Self {
-        Self::new_inner(pack_id, options, false)
+        let mut out = Cursor::new(vec![0u8; PACK_HEADER_LEN]);
+        out.set_position(PACK_HEADER_LEN as u64);
+        Self::new_inner(pack_id, options, false, out, 0)
     }
 
-    /// Creates a new `.stpk` pack builder for `pack_id` with opt-in Zstd dictionary training
+    /// Creates a new in-memory `.stpk` pack builder for `pack_id` with opt-in Zstd dictionary training
     /// enabled whenever `options.codec == Codec::Zstd` under non-Miri builds.
     pub fn new_with_dict(pack_id: [u8; 16], options: PackWriteOptions) -> Self {
         let enable_dict = default_dict_enabled(options.codec);
-        Self::new_inner(pack_id, options, enable_dict)
+        let mut out = Cursor::new(vec![0u8; PACK_HEADER_LEN]);
+        out.set_position(PACK_HEADER_LEN as u64);
+        Self::new_inner(pack_id, options, enable_dict, out, 0)
     }
 
-    fn new_inner(pack_id: [u8; 16], mut options: PackWriteOptions, enable_dict: bool) -> Self {
+    /// Finalizes and writes the complete `.stpk` file into `out`.
+    pub fn finish<Out: Write>(self, mut out: Out) -> Result<PackWriteStats, StatamError> {
+        let (cursor, stats) = self.finish_into_inner()?;
+        out.write_all(cursor.get_ref())?;
+        Ok(stats)
+    }
+}
+
+impl<W: Write + Seek> ChunkPackBuilder<W> {
+    /// Creates a new streaming `.stpk` pack builder writing each finished frame directly to `out`.
+    ///
+    /// Writes a 48-byte `PackHeader` placeholder at `out.stream_position()?` that
+    /// [`Self::finish_into_inner`] patches in place once all frames and trailer sections are written.
+    pub fn new_streaming(
+        pack_id: [u8; 16],
+        options: PackWriteOptions,
+        mut out: W,
+    ) -> Result<Self, StatamError> {
+        let start_offset = out.stream_position()?;
+        out.write_all(&[0u8; PACK_HEADER_LEN])?;
+        Ok(Self::new_inner(pack_id, options, false, out, start_offset))
+    }
+
+    fn new_inner(
+        pack_id: [u8; 16],
+        mut options: PackWriteOptions,
+        enable_dict: bool,
+        out: W,
+        start_offset: u64,
+    ) -> Self {
         options.target_frame_raw_bytes =
             options.target_frame_raw_bytes.clamp(1, MAX_FRAME_RAW_BYTES);
         Self {
             pack_id,
             options,
-            buf: vec![0u8; PACK_HEADER_LEN],
+            out,
+            start_offset,
+            written_len: PACK_HEADER_LEN as u64,
             dedup: HashMap::default(),
             frames: Vec::new(),
             chunk_locs: Vec::new(),
@@ -406,6 +445,16 @@ impl ChunkPackBuilder {
             has_any_boundary: false,
             boundary_chunks: Vec::new(),
         }
+    }
+
+    /// Returns the total number of unique chunks currently recorded in this pack
+    /// (including chunks buffered in the active or pending frames).
+    pub fn chunk_count(&self) -> u32 {
+        let total = self.chunk_locs.len()
+            + self.pre_dict_chunk_count
+            + self.pending_frame_chunks
+            + self.cur_chunks.len();
+        u32::try_from(total).unwrap_or(u32::MAX)
     }
 
     /// Enables boundary-chunk tracking so single-chunk-only packs omit `EdgeTable`
@@ -906,9 +955,12 @@ impl ChunkPackBuilder {
             }
         }
 
-        self.apply_1mib_boundary_guard(raw_frame_bytes.len());
-        let frame_offset = self.buf.len() as u64;
-        self.buf.extend_from_slice(raw_frame_bytes);
+        self.apply_1mib_boundary_guard(raw_frame_bytes.len())?;
+        let frame_offset = self.written_len;
+        self.out.write_all(raw_frame_bytes)?;
+        self.written_len = self
+            .written_len
+            .saturating_add(raw_frame_bytes.len() as u64);
         self.stored_frame_bytes = self
             .stored_frame_bytes
             .saturating_add(raw_frame_bytes.len() as u64);
@@ -987,8 +1039,9 @@ impl ChunkPackBuilder {
         Ok(remapped)
     }
 
-    /// Finalizes and writes the complete `.stpk` file into `out`.
-    pub fn finish<W: Write>(mut self, mut out: W) -> Result<PackWriteStats, StatamError> {
+    /// Finalizes the `.stpk` stream, patches the 48-byte `PackHeader` at `start_offset`,
+    /// seeks to EOF, flushes `out`, and returns `(out, PackWriteStats)`.
+    pub fn finish_into_inner(mut self) -> Result<(W, PackWriteStats), StatamError> {
         if !self.cur_chunks.is_empty() {
             self.flush_current_frame()?;
         }
@@ -1013,7 +1066,7 @@ impl ChunkPackBuilder {
                 reason: "chunk_count overflows u32",
             })?;
 
-        let mut cur_off = self.buf.len() as u64;
+        let mut cur_off = self.written_len;
 
         // 1. ChunkHashTable (compaction-only: [[u8; 16]; chunk_count] || crc32c: u32)
         let (hash_table_off, hash_table_bytes) =
@@ -1263,7 +1316,6 @@ impl ChunkPackBuilder {
             enc_envelope_len: 0,
             reserved: 0,
         };
-        self.buf[0..PACK_HEADER_LEN].copy_from_slice(&header.encode());
 
         let postscript = PackPostscript {
             toc_stored_len,
@@ -1288,47 +1340,69 @@ impl ChunkPackBuilder {
         };
         let ps_bytes = postscript.encode();
 
-        out.write_all(&self.buf)?;
-        out.write_all(&hash_table_bytes)?;
+        if !hash_table_bytes.is_empty() {
+            self.out.write_all(&hash_table_bytes)?;
+        }
         if !trigram_section.is_empty() {
-            out.write_all(&trigram_section)?;
+            self.out.write_all(&trigram_section)?;
         }
         if !edge_framed.is_empty() {
-            out.write_all(&edge_framed)?;
+            self.out.write_all(&edge_framed)?;
         }
         if !dict_framed.is_empty() {
-            out.write_all(&dict_framed)?;
+            self.out.write_all(&dict_framed)?;
         }
-        out.write_all(&toc_stored)?;
-        out.write_all(&ps_bytes)?;
+        self.out.write_all(&toc_stored)?;
+        self.out.write_all(&ps_bytes)?;
 
         let total_bytes = cur_off.saturating_add(u64::from(toc_stored_len));
+        let eof_pos =
+            self.start_offset
+                .checked_add(total_bytes)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "pack output stream EOF offset overflow",
+                })?;
+        self.out.seek(SeekFrom::Start(self.start_offset))?;
+        self.out.write_all(&header.encode())?;
+        self.out.seek(SeekFrom::Start(eof_pos))?;
+        self.out.flush()?;
 
-        Ok(PackWriteStats {
-            pack_id: self.pack_id,
-            total_bytes,
-            frame_count,
-            chunk_count,
-            dedup_hits: self.dedup_hits,
-            raw_chunk_bytes: self.raw_chunk_bytes,
-            stored_frame_bytes: self.stored_frame_bytes,
-            trigram_section_bytes: trigram_len,
-            edge_table_bytes: edge_table_len,
-            toc_stored_bytes: toc_stored_len,
-        })
+        Ok((
+            self.out,
+            PackWriteStats {
+                pack_id: self.pack_id,
+                total_bytes,
+                frame_count,
+                chunk_count,
+                dedup_hits: self.dedup_hits,
+                raw_chunk_bytes: self.raw_chunk_bytes,
+                stored_frame_bytes: self.stored_frame_bytes,
+                trigram_section_bytes: trigram_len,
+                edge_table_bytes: edge_table_len,
+                toc_stored_bytes: toc_stored_len,
+            },
+        ))
     }
 
-    fn apply_1mib_boundary_guard(&mut self, total_frame_len: usize) {
-        let mib = S3_CACHE_BLOCK_BYTES as usize;
-        let cur_off = self.buf.len();
+    fn apply_1mib_boundary_guard(&mut self, total_frame_len: usize) -> Result<(), StatamError> {
+        let mib = S3_CACHE_BLOCK_BYTES;
+        let cur_off = self.written_len;
         let pos_in_block = cur_off % mib;
-        let remaining_in_block = mib - pos_in_block;
+        let remaining_in_block = (mib - pos_in_block) as usize;
         if remaining_in_block < BOUNDARY_GUARD_THRESHOLD
             && total_frame_len < BOUNDARY_GUARD_MAX_FRAME
-            && pos_in_block + total_frame_len > mib
+            && (pos_in_block as usize) + total_frame_len > mib as usize
         {
-            self.buf.resize(cur_off + remaining_in_block, 0);
+            const ZEROS: [u8; 4096] = [0u8; 4096];
+            let mut left = remaining_in_block;
+            while left > 0 {
+                let n = left.min(ZEROS.len());
+                self.out.write_all(&ZEROS[..n])?;
+                left -= n;
+            }
+            self.written_len = self.written_len.saturating_add(remaining_in_block as u64);
         }
+        Ok(())
     }
 
     fn flush_current_frame(&mut self) -> Result<(), StatamError> {
@@ -1702,10 +1776,11 @@ impl ChunkPackBuilder {
                     self.observed_high_density_frames.saturating_add(1);
             }
         }
-        self.apply_1mib_boundary_guard(framed.len());
+        self.apply_1mib_boundary_guard(framed.len())?;
 
-        let frame_offset = self.buf.len() as u64;
-        self.buf.extend_from_slice(framed);
+        let frame_offset = self.written_len;
+        self.out.write_all(framed)?;
+        self.written_len = self.written_len.saturating_add(framed.len() as u64);
         self.stored_frame_bytes = self.stored_frame_bytes.saturating_add(framed.len() as u64);
 
         let (filter_off, filter_len) = if let Some(fb) = filter_bytes {
@@ -1885,6 +1960,242 @@ pub struct PackToc {
     pub(crate) frames_contiguous: bool,
 }
 
+impl PackToc {
+    /// Reads and validates a `.stpk` [`PackToc`] using an optional catalog-stored TOC size hint.
+    ///
+    /// On remote readers, expands the tail fetch ONLY upward from the default pack tail hint
+    /// (`PACK_REMOTE_SMALL_TAIL_HINT` for packs `<= 4 MiB`, else `PACK_DEFAULT_TAIL_HINT`),
+    /// clamped to `MAX_HOT_TAIL_BYTES`, and returns the retained `(tail_start, tail_bytes)` slice
+    /// when eligible. On local readers, uses `stored_toc_bytes` directly (clamped to
+    /// `MAX_HOT_TAIL_BYTES`).
+    #[allow(clippy::type_complexity)]
+    pub fn read_from_with_hint(
+        reader: &dyn RangeReader,
+        stored_toc_bytes: Option<u64>,
+    ) -> Result<(Arc<Self>, Option<(u64, Bytes)>), StatamError> {
+        let file_len = reader.file_len();
+        let default_hint =
+            if reader.is_remote() && file_len <= PACK_REMOTE_ADAPTIVE_TAIL_MAX_FILE_LEN {
+                PACK_REMOTE_SMALL_TAIL_HINT
+            } else {
+                PACK_DEFAULT_TAIL_HINT
+            };
+        let tail_hint = stored_toc_bytes.map(|h| {
+            let bytes = if reader.is_remote() {
+                h.max(u64::from(default_hint))
+            } else {
+                h
+            };
+            bytes.min(MAX_HOT_TAIL_BYTES as u64) as u32
+        });
+        let (toc, tail_start, tail, data_end) = read_toc_and_tail(reader, tail_hint)?;
+        let retain_tail = reader.is_remote()
+            && tail_start < data_end
+            && tail.len() <= crate::io::MAX_RETAINED_TAIL_BYTES;
+        Ok((toc, retain_tail.then_some((tail_start, tail))))
+    }
+
+    /// Returns a deterministic non-zero heap memory estimate in bytes for external metadata caches.
+    pub fn memory_bytes(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(self.frames.len().saturating_mul(size_of::<FrameEntry>()))
+            .saturating_add(self.chunks.len().saturating_mul(size_of::<ChunkLoc>()))
+    }
+}
+
+fn read_toc_and_tail(
+    reader: &dyn RangeReader,
+    tail_hint: Option<u32>,
+) -> Result<(Arc<PackToc>, u64, Bytes, u64), StatamError> {
+    let file_len = reader.file_len();
+    let min_len = (PACK_HEADER_LEN + PACK_POSTSCRIPT_LEN) as u64;
+    if file_len < min_len {
+        return Err(StatamError::Corrupt {
+            reason: "pack file smaller than header + postscript",
+        });
+    }
+
+    let default_hint = if reader.is_remote() && file_len <= PACK_REMOTE_ADAPTIVE_TAIL_MAX_FILE_LEN {
+        PACK_REMOTE_SMALL_TAIL_HINT
+    } else {
+        PACK_DEFAULT_TAIL_HINT
+    };
+    let hint = u64::from(tail_hint.unwrap_or(default_hint)).max(PACK_POSTSCRIPT_LEN as u64);
+    let tail_start = file_len.saturating_sub(hint);
+    let tail = reader.read_range(tail_start..file_len)?;
+    if tail.len() as u64 != file_len - tail_start {
+        return Err(StatamError::Corrupt {
+            reason: "short read on pack tail",
+        });
+    }
+    if tail.len() < PACK_POSTSCRIPT_LEN {
+        return Err(StatamError::Corrupt {
+            reason: "short read on pack postscript",
+        });
+    }
+
+    let ps = PackPostscript::decode(&tail[tail.len() - PACK_POSTSCRIPT_LEN..])?;
+    if ps.flags & PACK_FLAG_HAS_DICT != 0 && ps.dict_len == 0 {
+        return Err(StatamError::Corrupt {
+            reason: "pack dict flag set with empty dict_len",
+        });
+    }
+    let toc_stored_u64 = u64::from(ps.toc_stored_len);
+    if toc_stored_u64 > file_len - PACK_HEADER_LEN as u64 {
+        return Err(StatamError::Corrupt {
+            reason: "pack toc_stored_len exceeds file data bounds",
+        });
+    }
+    let data_end = file_len - toc_stored_u64;
+
+    if tail_start == 0 && tail.len() >= PACK_HEADER_LEN {
+        let header = PackHeader::decode(&tail[0..PACK_HEADER_LEN])?;
+        if header.pack_id != ps.pack_id || header.flags != ps.flags {
+            return Err(StatamError::Corrupt {
+                reason: "pack header and postscript metadata mismatch",
+            });
+        }
+    }
+
+    let trailer_sections = validate_trailer_sections(&ps, data_end)?;
+
+    let toc_body_stored_len = (ps.toc_stored_len as usize) - PACK_POSTSCRIPT_LEN;
+    let owned_toc_body: Bytes;
+    let toc_body: &[u8] = if tail.len() >= ps.toc_stored_len as usize {
+        let start = tail.len() - (ps.toc_stored_len as usize);
+        &tail[start..start + toc_body_stored_len]
+    } else {
+        let toc_off = file_len - toc_stored_u64;
+        owned_toc_body = reader.read_range(toc_off..toc_off + toc_body_stored_len as u64)?;
+        if owned_toc_body.len() != toc_body_stored_len {
+            return Err(StatamError::Corrupt {
+                reason: "short read on pack TOC body",
+            });
+        }
+        &owned_toc_body
+    };
+
+    if crc32c::crc32c(toc_body) != ps.toc_crc32c {
+        return Err(StatamError::ChecksumMismatch {
+            context: "pack TOC",
+        });
+    }
+
+    let is_zstd_toc = (ps.flags & PACK_FLAG_TOC_ZSTD) != 0;
+    let toc_codec = if is_zstd_toc {
+        Codec::Zstd
+    } else if ps.flags & PACK_FLAG_TOC_LZ4 != 0 {
+        Codec::Lz4
+    } else {
+        Codec::None
+    };
+    let toc_raw = decompress_checked(
+        toc_body,
+        toc_codec,
+        ps.toc_raw_len as usize,
+        MAX_HOT_TAIL_BYTES,
+    )?;
+
+    let frame_count = ps.frame_count as usize;
+    let chunk_count = ps.chunk_count as usize;
+    let frames_bytes =
+        frame_count
+            .checked_mul(FRAME_ENTRY_LEN)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "pack frame directory byte size overflow",
+            })?;
+    let chunks_bytes =
+        chunk_count
+            .checked_mul(CHUNK_LOC_LEN)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "pack chunk directory byte size overflow",
+            })?;
+    let expected_len =
+        frames_bytes
+            .checked_add(chunks_bytes)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "pack TOC byte size overflow",
+            })?;
+    if toc_raw.len() != expected_len {
+        return Err(StatamError::Corrupt {
+            reason: "decompressed pack TOC length mismatch",
+        });
+    }
+
+    let mut frames = Vec::with_capacity(frame_count);
+    let mut expected_cid = 0u32;
+    let mut frames_contiguous = frame_count > 0;
+    for idx in 0..frame_count {
+        let off = idx * FRAME_ENTRY_LEN;
+        let entry = FrameEntry::decode(&toc_raw[off..off + FRAME_ENTRY_LEN])?;
+        validate_frame_entry(&entry, &ps, data_end, &trailer_sections)?;
+        if frames_contiguous {
+            if entry.first_chunk_id != expected_cid {
+                frames_contiguous = false;
+            } else if let Some(next) = expected_cid.checked_add(entry.chunk_count) {
+                expected_cid = next;
+            } else {
+                frames_contiguous = false;
+            }
+        }
+        frames.push(entry);
+    }
+    if expected_cid as usize != chunk_count {
+        frames_contiguous = false;
+    }
+
+    let mut chunks = Vec::with_capacity(chunk_count);
+    let mut prev_frame = u32::MAX;
+    let mut prev_end = 0u32;
+    let mut expected_fid = 0usize;
+    for idx in 0..chunk_count {
+        let off = frames_bytes + idx * CHUNK_LOC_LEN;
+        let mut loc = ChunkLoc::decode(&toc_raw[off..off + CHUNK_LOC_LEN])?;
+        if is_zstd_toc && loc.frame_id == prev_frame {
+            loc.offset_in_frame = prev_end.wrapping_add(loc.offset_in_frame);
+        }
+        let frame = frames
+            .get(loc.frame_id as usize)
+            .ok_or(StatamError::Corrupt {
+                reason: "chunk frame_id out of bounds",
+            })?;
+        let end =
+            loc.offset_in_frame
+                .checked_add(loc.raw_len)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "chunk offset_in_frame + raw_len overflow",
+                })?;
+        if end > frame.raw_len {
+            return Err(StatamError::Corrupt {
+                reason: "chunk span exceeds owning frame raw_len",
+            });
+        }
+        if frames_contiguous {
+            while expected_fid < frames.len()
+                && (idx as u64)
+                    >= u64::from(frames[expected_fid].first_chunk_id)
+                        + u64::from(frames[expected_fid].chunk_count)
+            {
+                expected_fid += 1;
+            }
+            if expected_fid >= frames.len() || loc.frame_id as usize != expected_fid {
+                frames_contiguous = false;
+            }
+        }
+        prev_frame = loc.frame_id;
+        prev_end = end;
+        chunks.push(loc);
+    }
+
+    let toc = Arc::new(PackToc {
+        postscript: ps,
+        frames,
+        chunks,
+        frames_contiguous,
+    });
+    Ok((toc, tail_start, tail, data_end))
+}
+
 #[derive(Clone)]
 pub(crate) struct TrigramSectionData {
     pub(crate) edge_blooms: Option<(TrigramBloom, TrigramBloom)>,
@@ -1943,58 +2254,8 @@ impl ChunkPackReader {
         reader: Arc<dyn RangeReader>,
         tail_hint: Option<u32>,
     ) -> Result<Self, StatamError> {
-        let file_len = reader.file_len();
-        let min_len = (PACK_HEADER_LEN + PACK_POSTSCRIPT_LEN) as u64;
-        if file_len < min_len {
-            return Err(StatamError::Corrupt {
-                reason: "pack file smaller than header + postscript",
-            });
-        }
-
-        let default_hint =
-            if reader.is_remote() && file_len <= PACK_REMOTE_ADAPTIVE_TAIL_MAX_FILE_LEN {
-                PACK_REMOTE_SMALL_TAIL_HINT
-            } else {
-                PACK_DEFAULT_TAIL_HINT
-            };
-        let hint = u64::from(tail_hint.unwrap_or(default_hint)).max(PACK_POSTSCRIPT_LEN as u64);
-        let tail_start = file_len.saturating_sub(hint);
-        let tail = reader.read_range(tail_start..file_len)?;
-        if tail.len() as u64 != file_len - tail_start {
-            return Err(StatamError::Corrupt {
-                reason: "short read on pack tail",
-            });
-        }
-        if tail.len() < PACK_POSTSCRIPT_LEN {
-            return Err(StatamError::Corrupt {
-                reason: "short read on pack postscript",
-            });
-        }
-
-        let ps = PackPostscript::decode(&tail[tail.len() - PACK_POSTSCRIPT_LEN..])?;
-        if ps.flags & PACK_FLAG_HAS_DICT != 0 && ps.dict_len == 0 {
-            return Err(StatamError::Corrupt {
-                reason: "pack dict flag set with empty dict_len",
-            });
-        }
-        let toc_stored_u64 = u64::from(ps.toc_stored_len);
-        if toc_stored_u64 > file_len - PACK_HEADER_LEN as u64 {
-            return Err(StatamError::Corrupt {
-                reason: "pack toc_stored_len exceeds file data bounds",
-            });
-        }
-        let data_end = file_len - toc_stored_u64;
-
-        if tail_start == 0 && tail.len() >= PACK_HEADER_LEN {
-            let header = PackHeader::decode(&tail[0..PACK_HEADER_LEN])?;
-            if header.pack_id != ps.pack_id || header.flags != ps.flags {
-                return Err(StatamError::Corrupt {
-                    reason: "pack header and postscript metadata mismatch",
-                });
-            }
-        }
-
-        let trailer_sections = validate_trailer_sections(&ps, data_end)?;
+        let (toc, tail_start, tail, data_end) = read_toc_and_tail(reader.as_ref(), tail_hint)?;
+        let ps = &toc.postscript;
 
         let retain_tail = reader.is_remote()
             && tail_start < data_end
@@ -2030,133 +2291,6 @@ impl ChunkPackReader {
         let inline_trigram = slice_inline(ps.trigram_off, ps.trigram_len);
         let inline_edge_table = slice_inline(ps.edge_table_off, ps.edge_table_len);
 
-        let toc_body_stored_len = (ps.toc_stored_len as usize) - PACK_POSTSCRIPT_LEN;
-        let owned_toc_body: Bytes;
-        let toc_body: &[u8] = if tail.len() >= ps.toc_stored_len as usize {
-            let start = tail.len() - (ps.toc_stored_len as usize);
-            &tail[start..start + toc_body_stored_len]
-        } else {
-            let toc_off = file_len - toc_stored_u64;
-            owned_toc_body = reader.read_range(toc_off..toc_off + toc_body_stored_len as u64)?;
-            if owned_toc_body.len() != toc_body_stored_len {
-                return Err(StatamError::Corrupt {
-                    reason: "short read on pack TOC body",
-                });
-            }
-            &owned_toc_body
-        };
-
-        if crc32c::crc32c(toc_body) != ps.toc_crc32c {
-            return Err(StatamError::ChecksumMismatch {
-                context: "pack TOC",
-            });
-        }
-
-        let is_zstd_toc = (ps.flags & PACK_FLAG_TOC_ZSTD) != 0;
-        let toc_codec = if is_zstd_toc {
-            Codec::Zstd
-        } else if ps.flags & PACK_FLAG_TOC_LZ4 != 0 {
-            Codec::Lz4
-        } else {
-            Codec::None
-        };
-        let toc_raw = decompress_checked(
-            toc_body,
-            toc_codec,
-            ps.toc_raw_len as usize,
-            MAX_HOT_TAIL_BYTES,
-        )?;
-
-        let frame_count = ps.frame_count as usize;
-        let chunk_count = ps.chunk_count as usize;
-        let frames_bytes =
-            frame_count
-                .checked_mul(FRAME_ENTRY_LEN)
-                .ok_or(StatamError::BoundsExceeded {
-                    reason: "pack frame directory byte size overflow",
-                })?;
-        let chunks_bytes =
-            chunk_count
-                .checked_mul(CHUNK_LOC_LEN)
-                .ok_or(StatamError::BoundsExceeded {
-                    reason: "pack chunk directory byte size overflow",
-                })?;
-        let expected_len =
-            frames_bytes
-                .checked_add(chunks_bytes)
-                .ok_or(StatamError::BoundsExceeded {
-                    reason: "pack TOC byte size overflow",
-                })?;
-        if toc_raw.len() != expected_len {
-            return Err(StatamError::Corrupt {
-                reason: "decompressed pack TOC length mismatch",
-            });
-        }
-
-        let mut frames = Vec::with_capacity(frame_count);
-        let mut expected_cid = 0u32;
-        let mut frames_contiguous = frame_count > 0;
-        for idx in 0..frame_count {
-            let off = idx * FRAME_ENTRY_LEN;
-            let entry = FrameEntry::decode(&toc_raw[off..off + FRAME_ENTRY_LEN])?;
-            validate_frame_entry(&entry, &ps, data_end, &trailer_sections)?;
-            if frames_contiguous {
-                if entry.first_chunk_id != expected_cid {
-                    frames_contiguous = false;
-                } else if let Some(next) = expected_cid.checked_add(entry.chunk_count) {
-                    expected_cid = next;
-                } else {
-                    frames_contiguous = false;
-                }
-            }
-            frames.push(entry);
-        }
-        if expected_cid as usize != chunk_count {
-            frames_contiguous = false;
-        }
-
-        let mut chunks = Vec::with_capacity(chunk_count);
-        let mut prev_frame = u32::MAX;
-        let mut prev_end = 0u32;
-        let mut expected_fid = 0usize;
-        for idx in 0..chunk_count {
-            let off = frames_bytes + idx * CHUNK_LOC_LEN;
-            let mut loc = ChunkLoc::decode(&toc_raw[off..off + CHUNK_LOC_LEN])?;
-            if is_zstd_toc && loc.frame_id == prev_frame {
-                loc.offset_in_frame = prev_end.wrapping_add(loc.offset_in_frame);
-            }
-            let frame = frames
-                .get(loc.frame_id as usize)
-                .ok_or(StatamError::Corrupt {
-                    reason: "chunk frame_id out of bounds",
-                })?;
-            let end = loc.offset_in_frame.checked_add(loc.raw_len).ok_or(
-                StatamError::BoundsExceeded {
-                    reason: "chunk offset_in_frame + raw_len overflow",
-                },
-            )?;
-            if end > frame.raw_len {
-                return Err(StatamError::Corrupt {
-                    reason: "chunk span exceeds owning frame raw_len",
-                });
-            }
-            if frames_contiguous {
-                while expected_fid < frames.len()
-                    && (idx as u64)
-                        >= u64::from(frames[expected_fid].first_chunk_id)
-                            + u64::from(frames[expected_fid].chunk_count)
-                {
-                    expected_fid += 1;
-                }
-                if expected_fid >= frames.len() || loc.frame_id as usize != expected_fid {
-                    frames_contiguous = false;
-                }
-            }
-            prev_frame = loc.frame_id;
-            prev_end = end;
-            chunks.push(loc);
-        }
-
         let retained_tail_start = retain_tail.then_some(tail_start);
         let reader: Arc<dyn RangeReader> = if retain_tail {
             Arc::new(crate::io::TailCachedReader::new(reader, tail_start, tail)?)
@@ -2166,17 +2300,51 @@ impl ChunkPackReader {
 
         Ok(Self {
             reader,
-            toc: Arc::new(PackToc {
-                postscript: ps,
-                frames,
-                chunks,
-                frames_contiguous,
-            }),
+            toc,
             data_end,
             retained_tail_start,
             inline_dict_framed,
             inline_trigram,
             inline_edge_table,
+            dict_cache: OnceLock::new(),
+            dict_init: Mutex::new(()),
+            trigram_cache: OnceLock::new(),
+            trigram_init: Mutex::new(()),
+            edge_table_cache: OnceLock::new(),
+            edge_table_init: Mutex::new(()),
+        })
+    }
+
+    /// Zero-I/O constructor from an externally cached [`Arc<PackToc>`].
+    pub fn open_with_toc(
+        reader: Arc<dyn RangeReader>,
+        toc: Arc<PackToc>,
+    ) -> Result<Self, StatamError> {
+        let file_len = reader.file_len();
+        let min_len = (PACK_HEADER_LEN + PACK_POSTSCRIPT_LEN) as u64;
+        if file_len < min_len {
+            return Err(StatamError::Corrupt {
+                reason: "pack file smaller than header + postscript",
+            });
+        }
+        let ps = &toc.postscript;
+        let toc_stored_u64 = u64::from(ps.toc_stored_len);
+        if toc_stored_u64 > file_len - PACK_HEADER_LEN as u64 {
+            return Err(StatamError::Corrupt {
+                reason: "pack toc_stored_len exceeds file data bounds",
+            });
+        }
+        let data_end = file_len - toc_stored_u64;
+        let _ = validate_trailer_sections(ps, data_end)?;
+
+        Ok(Self {
+            reader,
+            toc,
+            data_end,
+            retained_tail_start: None,
+            inline_dict_framed: None,
+            inline_trigram: None,
+            inline_edge_table: None,
             dict_cache: OnceLock::new(),
             dict_init: Mutex::new(()),
             trigram_cache: OnceLock::new(),
@@ -3062,14 +3230,17 @@ impl ChunkPackReader {
         if let Some(cached) = self.trigram_cache.get() {
             return Ok(cached);
         }
-        let data = self.read_trigram_section_uncached()?;
+        let data = self.read_trigram_section_uncached(false)?;
         let _ = self.trigram_cache.set(data);
         self.trigram_cache.get().ok_or(StatamError::Corrupt {
             reason: "trigram cache uninitialized",
         })
     }
 
-    fn read_trigram_section_uncached(&self) -> Result<TrigramSectionData, StatamError> {
+    fn read_trigram_section_uncached(
+        &self,
+        bypass_inline: bool,
+    ) -> Result<TrigramSectionData, StatamError> {
         let ps = &self.toc.postscript;
         if ps.trigram_len == 0 {
             return Ok(TrigramSectionData {
@@ -3096,7 +3267,7 @@ impl ChunkPackReader {
                 reason: "trigram section out of pack bounds",
             });
         }
-        let section = if let Some(ref inline) = self.inline_trigram {
+        let section = if !bypass_inline && let Some(ref inline) = self.inline_trigram {
             inline.clone()
         } else {
             self.reader.read_range(start..end)?
@@ -3186,12 +3357,15 @@ impl ChunkPackReader {
         if let Some(cached) = self.edge_table_cache.get() {
             return Ok(Arc::clone(cached));
         }
-        let table = Arc::new(self.read_edge_table_flat_uncached()?);
+        let table = Arc::new(self.read_edge_table_flat_uncached(false)?);
         let _ = self.edge_table_cache.set(Arc::clone(&table));
         Ok(self.edge_table_cache.get().map_or(table, Arc::clone))
     }
 
-    fn read_edge_table_flat_uncached(&self) -> Result<FlatEdgeTable, StatamError> {
+    fn read_edge_table_flat_uncached(
+        &self,
+        bypass_inline: bool,
+    ) -> Result<FlatEdgeTable, StatamError> {
         let ps = &self.toc.postscript;
         if ps.edge_table_len == 0 {
             return Ok(FlatEdgeTable {
@@ -3220,7 +3394,7 @@ impl ChunkPackReader {
                 reason: "edge table out of pack bounds",
             });
         }
-        let framed = if let Some(ref inline) = self.inline_edge_table {
+        let framed = if !bypass_inline && let Some(ref inline) = self.inline_edge_table {
             inline.clone()
         } else {
             self.reader.read_range(start..end)?
@@ -3376,6 +3550,120 @@ impl ChunkPackReader {
 
         let (chunks, _) = bytes[..table_bytes].as_chunks::<16>();
         Ok(chunks.to_vec())
+    }
+
+    /// Performs full `.stpk` integrity verification: validates `PackHeader` at offset 0,
+    /// verifies CRCs and structure of every present optional trailer section (`ChunkHashTable`,
+    /// `TrigramSkipSection`, `EdgeTable`, `DictSection`), and decompresses and verifies CRC +
+    /// chunk bounds of every frame.
+    pub fn verify_full(&self, expected_pack_id: [u8; 16]) -> Result<(), StatamError> {
+        let ps = &self.toc.postscript;
+        if ps.pack_id != expected_pack_id {
+            return Err(StatamError::Corrupt {
+                reason: "pack postscript pack_id mismatch during verify_full",
+            });
+        }
+
+        // 1. Explicitly read and verify PackHeader at 0..PACK_HEADER_LEN.
+        let hdr_bytes = self.reader.read_range(0..PACK_HEADER_LEN as u64)?;
+        if hdr_bytes.len() != PACK_HEADER_LEN {
+            return Err(StatamError::Corrupt {
+                reason: "short read on pack header during verify_full",
+            });
+        }
+        let hdr = PackHeader::decode(&hdr_bytes)?;
+        if hdr.pack_id != expected_pack_id
+            || hdr.flags != ps.flags
+            || hdr.format_version != ps.format_version
+            || hdr.required_features != ps.required_features
+        {
+            return Err(StatamError::Corrupt {
+                reason: "pack header metadata mismatch during verify_full",
+            });
+        }
+
+        // 2. Verify every present optional trailer section directly from `self.reader`.
+        if ps.chunk_count > 0 && ps.hash_table_off != 0 {
+            let hashes = self.read_hash_table()?;
+            if hashes.len() != ps.chunk_count as usize {
+                return Err(StatamError::Corrupt {
+                    reason: "pack hash table length mismatch during verify_full",
+                });
+            }
+        }
+        if ps.trigram_len > 0 {
+            let _ = self.read_trigram_section_uncached(true)?;
+        }
+        if ps.edge_table_len > 0 {
+            let _ = self.read_edge_table_flat_uncached(true)?;
+        }
+        let dict = if (ps.flags & PACK_FLAG_HAS_DICT) != 0 || ps.dict_len > 0 {
+            let range = self.validated_dict_range()?.ok_or(StatamError::Corrupt {
+                reason: "invalid pack dict range during verify_full",
+            })?;
+            let framed = self.reader.read_range(range)?;
+            if framed.len() != ps.dict_len as usize {
+                return Err(StatamError::Corrupt {
+                    reason: "short read on pack dict section during verify_full",
+                });
+            }
+            let (_, flags, dict_bytes) = read_framed_pack_frame(&framed, MAX_PACK_DICT_BYTES)?;
+            if flags != 0 {
+                return Err(StatamError::Corrupt {
+                    reason: "pack dict section frame has unexpected flags",
+                });
+            }
+            Some(PackDecoderDict::new(&dict_bytes)?)
+        } else {
+            None
+        };
+
+        // 3. Decompress and verify CRC + decoded length of every frame.
+        let mut dict_decomp = PackFrameDecompressor::new();
+        for (fid, entry) in self.toc.frames.iter().enumerate() {
+            let raw = self.read_frame_raw(fid as u32)?;
+            let frame_dict = if (entry.flags & PACK_FRAME_FLAG_USES_DICT) != 0 {
+                Some(dict.as_ref().ok_or(StatamError::Corrupt {
+                    reason: "frame requires dict on pack without dict section",
+                })?)
+            } else {
+                None
+            };
+            let (_, _, decoded) = read_framed_pack_frame_with_decompressor(
+                &raw,
+                MAX_FRAME_RAW_BYTES,
+                frame_dict,
+                &mut dict_decomp,
+            )?;
+            if decoded.len() != entry.raw_len as usize {
+                return Err(StatamError::Corrupt {
+                    reason: "decompressed frame length mismatch during verify_full",
+                });
+            }
+        }
+
+        // 4. Verify every chunk location lies within its owning frame's raw_len.
+        for loc in &self.toc.chunks {
+            let frame = self
+                .toc
+                .frames
+                .get(loc.frame_id as usize)
+                .ok_or(StatamError::Corrupt {
+                    reason: "chunk frame_id out of bounds during verify_full",
+                })?;
+            let end = loc.offset_in_frame.checked_add(loc.raw_len).ok_or(
+                StatamError::BoundsExceeded {
+                    reason: "chunk span overflow during verify_full",
+                },
+            )?;
+            if end > frame.raw_len {
+                return Err(StatamError::Corrupt {
+                    reason: "chunk span exceeds owning frame raw_len during verify_full",
+                });
+            }
+        }
+
+        Ok(())
     }
 }
 

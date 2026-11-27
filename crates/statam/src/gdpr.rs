@@ -2,9 +2,10 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
+use std::io::{Seek, Write};
 use std::sync::Arc;
 
-use cetra_column::{Batch, Bitmap, Column, DataType};
+use cetra_column::{Batch, Bitmap, CancelToken, Column, DataType};
 
 use crate::StatamError;
 use crate::codec::WriteProfile;
@@ -15,7 +16,7 @@ use crate::format::{
 };
 use crate::io::RangeReader;
 use crate::payload::pack::{ChunkPackBuilder, ChunkPackReader, PackWriteOptions, PackWriteStats};
-use crate::payload::{PayloadRefRow, decode_payload_refs};
+use crate::payload::{PayloadRefRow, decode_payload_refs, decode_payload_refs_selected};
 use crate::reader::StatamReader;
 use crate::writer::{L0_LOCAL_PACK_IDX, StatamWriter, WriteOptions, WriteStats};
 
@@ -116,6 +117,529 @@ pub struct GdprRewriteResult {
 
 /// Alias matching `spec-v0.md` §2.
 pub type GdprRewriteReport = GdprRewriteResult;
+
+/// Summary counters and writer stats emitted by [`gdpr_rewrite_single_file_streaming`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SingleFileGdprStats {
+    /// Total rows in the input `.statam` file.
+    pub input_rows: u64,
+    /// Rows retained in the rewritten `.statam` file.
+    pub surviving_rows: u64,
+    /// Rows erased from the input `.statam` file.
+    pub erased_rows: u64,
+    /// Writer statistics for the rewritten `.statam` file (`None` when `surviving_rows == 0`).
+    pub statam_stats: Option<WriteStats>,
+    /// Pack write statistics for the rewritten `.stpk` file (`None` when no live external chunks remain).
+    pub pack_stats: Option<PackWriteStats>,
+    /// Pack ID written into the sibling `.stpk` file (`None` when no live external chunks remain).
+    pub new_pack_id: Option<[u8; 16]>,
+    /// Number of 100%-live pack frames copied verbatim without decompression.
+    pub frames_copied_verbatim: usize,
+    /// Number of mixed or legacy-dict pack frames decompressed, purged, and recompressed.
+    pub frames_rewritten: usize,
+    /// Number of 0%-live pack frames dropped completely.
+    pub frames_dropped: usize,
+    /// Number of dead chunks purged from the old pack.
+    pub chunks_purged: usize,
+}
+
+#[inline]
+fn check_cancel(cancel: Option<&CancelToken>) -> Result<(), StatamError> {
+    if cancel.is_some_and(CancelToken::is_cancelled) {
+        return Err(StatamError::Cancelled);
+    }
+    Ok(())
+}
+
+/// Executes a bounded-memory streaming single-file GDPR rewrite for 1:1 `.statam` + sibling `.stpk`
+/// ownership:
+///
+/// 1. **Pass A (RG-by-RG narrow + `PayloadRefs`):** Decodes non-payload columns per RG (filling
+///    `ExternalPayload` columns with `Const` empty placeholders), evaluates `should_erase(&batch)`
+///    returning an erase [`Bitmap`], stores the per-RG surviving mask, and scans ONLY `PayloadRefs`
+///    on surviving rows to mark `live_chunks` and `boundary_utf8_chunks` (O(1 RG) RAM).
+/// 2. **Early exit:** When `surviving_rows == 0`, returns immediately without writing outputs.
+/// 3. **Streaming pack rewrite:** When `old_pack` is `Some` and live chunks remain, streams frames
+///    one-by-one into `pack_out` via [`ChunkPackBuilder::new_streaming`] (copying 100%-live frames
+///    verbatim, dropping 0%-live frames, recompressing mixed/dict frames, and unconditionally
+///    discarding any old `DictSection`).
+/// 4. **Pass B (RG-by-RG `.statam` write):** Streams surviving rows into `statam_out` via
+///    [`StatamWriter`], calling `on_surviving_batch(&surviving_non_payload_batch)` per RG and
+///    remapping `PayloadRefs` to `new_pack_id`.
+#[allow(clippy::too_many_arguments)]
+pub fn gdpr_rewrite_single_file_streaming<WS, WP, FErase, FSurv>(
+    statam_reader: Arc<dyn RangeReader>,
+    old_pack: Option<([u8; 16], Arc<dyn RangeReader>)>,
+    new_pack_id: [u8; 16],
+    statam_out: WS,
+    mut pack_out: Option<WP>,
+    cancel: Option<&CancelToken>,
+    should_erase: &mut FErase,
+    on_surviving_batch: &mut FSurv,
+) -> Result<(WS, Option<WP>, SingleFileGdprStats), StatamError>
+where
+    WS: Write + Seek,
+    WP: Write + Seek,
+    FErase: FnMut(&Batch) -> Result<Bitmap, StatamError>,
+    FSurv: FnMut(&Batch) -> Result<(), StatamError>,
+{
+    check_cancel(cancel)?;
+    let statam = StatamReader::open(statam_reader, None)?;
+    let meta = statam.meta();
+    let input_rows = meta.row_count();
+
+    let opened_pack: Option<ChunkPackReader> = match old_pack {
+        Some((old_pack_id, old_pack_rr)) => {
+            if !meta.schema_meta.pack_ids.is_empty()
+                && meta.schema_meta.pack_ids.as_slice() != [old_pack_id]
+            {
+                return Err(StatamError::Corrupt {
+                    reason: "single-file GDPR statam pack_ids mismatch",
+                });
+            }
+            let opened = ChunkPackReader::open(old_pack_rr)?;
+            if opened.pack_id() != old_pack_id {
+                return Err(StatamError::Corrupt {
+                    reason: "single-file GDPR pack_id header mismatch",
+                });
+            }
+            Some(opened)
+        }
+        None => {
+            if let Some(&pack_id) = meta.schema_meta.pack_ids.first() {
+                return Err(StatamError::MissingPack { pack_id });
+            }
+            None
+        }
+    };
+
+    let num_rgs = meta.num_row_groups();
+    let payload_cols: Vec<usize> = (0..meta.schema().len())
+        .filter(|&i| meta.col_dir[i].locality_group == LocalityGroup::ExternalPayload)
+        .collect();
+
+    let mut rg_surviving_masks: Vec<Bitmap> = Vec::with_capacity(num_rgs);
+    let mut rg_surviving_counts: Vec<usize> = Vec::with_capacity(num_rgs);
+    let mut surviving_rows = 0u64;
+    let mut erased_rows = 0u64;
+    let mut live_chunks = opened_pack
+        .as_ref()
+        .map(|p| Bitmap::new_zeroed(p.toc().chunks.len()));
+    let mut boundary_utf8_chunks = opened_pack
+        .as_ref()
+        .map(|p| Bitmap::new_zeroed(p.toc().chunks.len()));
+
+    // Pass A: RG-by-RG narrow + PayloadRefs scan.
+    for rg_idx in 0..num_rgs {
+        check_cancel(cancel)?;
+        let batch = statam.read_non_payload_rg_batch(rg_idx)?;
+        let rg_rows = batch.raw_len();
+        let erase_mask = should_erase(&batch)?;
+        if erase_mask.len() != rg_rows {
+            return Err(StatamError::SchemaMismatch {
+                reason: "should_erase bitmap length does not match row group length",
+            });
+        }
+        let surviving_mask = erase_mask.not();
+        let surv_cnt = surviving_mask.count_ones();
+        surviving_rows = surviving_rows.saturating_add(surv_cnt as u64);
+        erased_rows = erased_rows.saturating_add((rg_rows - surv_cnt) as u64);
+
+        if surv_cnt > 0
+            && let (Some(live_bm), Some(boundary_bm)) =
+                (live_chunks.as_mut(), boundary_utf8_chunks.as_mut())
+        {
+            for &cidx in &payload_cols {
+                let is_utf8_col = meta.schema().fields()[cidx].data_type == DataType::Utf8;
+                let blks = meta.rg_blocks(cidx, rg_idx);
+                let mut mb_row_start = 0usize;
+                for blk in blks {
+                    let mb_rows = blk.row_count as usize;
+                    if blk.encoding != Encoding::ConstNull {
+                        let mb_surv_mask = surviving_mask.slice(mb_row_start, mb_rows)?;
+                        if !mb_surv_mask.all_zeros() {
+                            let raw = statam.read_block_body(blk)?;
+                            let selected = decode_payload_refs_selected(
+                                &raw,
+                                mb_rows,
+                                &mb_surv_mask,
+                                MAX_BATCH_DECODED_BYTES,
+                            )?;
+                            for (_, row_ref) in selected {
+                                if let PayloadRefRow::Chunks(refs) = row_ref {
+                                    let is_multi_chunk_utf8 = is_utf8_col && refs.len() > 1;
+                                    for (pidx, cid) in refs {
+                                        if pidx == L0_LOCAL_PACK_IDX {
+                                            continue;
+                                        }
+                                        if pidx != 0 {
+                                            return Err(StatamError::Corrupt {
+                                                reason: "single-file GDPR external pack_idx != 0",
+                                            });
+                                        }
+                                        if (cid as usize) >= live_bm.len() {
+                                            return Err(StatamError::Corrupt {
+                                                reason: "payload ref chunk_id out of pack bounds during GDPR",
+                                            });
+                                        }
+                                        let _ = live_bm.set(cid as usize, true);
+                                        if is_multi_chunk_utf8 {
+                                            let _ = boundary_bm.set(cid as usize, true);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    mb_row_start += mb_rows;
+                }
+            }
+        }
+
+        rg_surviving_masks.push(surviving_mask);
+        rg_surviving_counts.push(surv_cnt);
+    }
+
+    // Early exit when all rows are erased.
+    if surviving_rows == 0 {
+        let (frames_dropped, chunks_purged) = match &opened_pack {
+            Some(pack) => (pack.toc().frames.len(), pack.toc().chunks.len()),
+            None => (0, 0),
+        };
+        return Ok((
+            statam_out,
+            pack_out,
+            SingleFileGdprStats {
+                input_rows,
+                surviving_rows: 0,
+                erased_rows,
+                statam_stats: None,
+                pack_stats: None,
+                new_pack_id: None,
+                frames_copied_verbatim: 0,
+                frames_rewritten: 0,
+                frames_dropped,
+                chunks_purged,
+            },
+        ));
+    }
+
+    // Streaming Pack Rewrite (when old_pack is Some).
+    let mut frames_copied_verbatim = 0usize;
+    let mut frames_rewritten = 0usize;
+    let mut frames_dropped = 0usize;
+    let mut chunks_purged = 0usize;
+    let mut pack_stats: Option<PackWriteStats> = None;
+    let mut written_pack_id: Option<[u8; 16]> = None;
+    let mut chunk_remap: Vec<Option<u32>> = Vec::new();
+
+    if let (Some(pack), Some(live), Some(boundary_utf8)) =
+        (&opened_pack, &live_chunks, &boundary_utf8_chunks)
+    {
+        let toc = pack.toc();
+        let total_chunks = live.len();
+        let live_count = live.count_ones();
+
+        if live_count == 0 {
+            frames_dropped = toc.frames.len();
+            chunks_purged = total_chunks;
+        } else {
+            let wp = pack_out.take().ok_or(StatamError::SchemaMismatch {
+                reason: "pack_out is required when live external pack chunks survive",
+            })?;
+            let pack_opts = PackWriteOptions {
+                codec: default_gdpr_pack_codec(),
+                zstd_level: 3,
+                target_frame_raw_bytes: 64 * 1024,
+                enable_trigram_skip: (toc.postscript.flags & PACK_FLAG_HAS_TRIGRAM) != 0
+                    || toc.frames.iter().any(|f| f.filter_len > 0),
+                compress_toc_lz4: (toc.postscript.flags & (PACK_FLAG_TOC_LZ4 | PACK_FLAG_TOC_ZSTD))
+                    != 0,
+                emit_hash_table: toc.postscript.hash_table_off != 0,
+                write_threads: 1,
+            };
+            let mut builder = ChunkPackBuilder::new_streaming(new_pack_id, pack_opts, wp)?;
+            builder.enable_boundary_tracking();
+
+            let hashes = pack.read_hash_table()?;
+            let has_hashes = hashes.len() == total_chunks;
+            let trigrams = pack.read_trigram_section()?;
+            let edges = pack.read_edge_table()?;
+            chunk_remap = vec![None; total_chunks];
+
+            if toc.frames_contiguous {
+                for (fid, f_entry) in toc.frames.iter().enumerate() {
+                    check_cancel(cancel)?;
+                    let first_cid = f_entry.first_chunk_id as usize;
+                    let cnt = f_entry.chunk_count as usize;
+                    let live_in_frame = (first_cid..first_cid + cnt)
+                        .filter(|&c| live.get(c))
+                        .count();
+
+                    if live_in_frame == 0 {
+                        frames_dropped += 1;
+                        chunks_purged += cnt;
+                        continue;
+                    }
+
+                    let has_utf8_boundary_in_frame =
+                        (first_cid..first_cid + cnt).any(|cid| boundary_utf8.get(cid));
+                    let edges_ok = if edges.is_empty() {
+                        !has_utf8_boundary_in_frame
+                    } else {
+                        edges.len() == total_chunks
+                            && (first_cid..first_cid + cnt).all(|cid| {
+                                let loc = toc.chunks[cid];
+                                !(boundary_utf8.get(cid)
+                                    && loc.raw_len > 0
+                                    && (edges[cid].0.is_empty() || edges[cid].1.is_empty()))
+                            })
+                    };
+
+                    if live_in_frame == cnt
+                        && frame_has_no_slack(
+                            &toc.chunks[first_cid..first_cid + cnt],
+                            f_entry.raw_len,
+                        )
+                        && (f_entry.flags & PACK_FRAME_FLAG_USES_DICT) == 0
+                        && has_hashes
+                        && edges_ok
+                    {
+                        let raw_frame = pack.read_frame_raw(fid as u32)?;
+                        let chunk_meta: Vec<([u8; 16], u32, u32)> = (first_cid..first_cid + cnt)
+                            .map(|cid| {
+                                let loc = toc.chunks[cid];
+                                (hashes[cid], loc.offset_in_frame, loc.raw_len)
+                            })
+                            .collect();
+                        let filter_slice =
+                            trigrams[fid].as_ref().map(|b| b.as_bytes()).unwrap_or(&[]);
+                        let empty_edges: Vec<(Vec<u8>, Vec<u8>)>;
+                        let edge_slice = if edges.is_empty() {
+                            empty_edges = vec![(Vec::new(), Vec::new()); cnt];
+                            &empty_edges[..]
+                        } else {
+                            &edges[first_cid..first_cid + cnt]
+                        };
+
+                        let new_cids = builder.append_raw_frame(
+                            &raw_frame,
+                            *f_entry,
+                            &chunk_meta,
+                            filter_slice,
+                            edge_slice,
+                        )?;
+                        for (offset, new_cid) in new_cids.into_iter().enumerate() {
+                            let old_cid = first_cid + offset;
+                            chunk_remap[old_cid] = Some(new_cid);
+                            if boundary_utf8.get(old_cid) {
+                                builder.mark_boundary_chunk(new_cid);
+                            }
+                        }
+                        frames_copied_verbatim += 1;
+                    } else {
+                        let decoded = pack.read_frame_decompressed(fid as u32)?;
+                        for (old_cid, slot) in
+                            chunk_remap.iter_mut().enumerate().skip(first_cid).take(cnt)
+                        {
+                            let loc = toc.chunks[old_cid];
+                            if live.get(old_cid) {
+                                let start = loc.offset_in_frame as usize;
+                                let end = start.checked_add(loc.raw_len as usize).ok_or(
+                                    StatamError::Corrupt {
+                                        reason: "chunk slice offset overflow during GDPR",
+                                    },
+                                )?;
+                                let slice = decoded.get(start..end).ok_or(StatamError::Corrupt {
+                                    reason: "chunk slice out of decompressed frame bounds during GDPR",
+                                })?;
+                                let new_cid = builder.intern_chunk(slice)?;
+                                *slot = Some(new_cid);
+                                if boundary_utf8.get(old_cid) {
+                                    builder.mark_boundary_chunk(new_cid);
+                                }
+                            } else {
+                                chunks_purged += 1;
+                            }
+                        }
+                        frames_rewritten += 1;
+                    }
+                }
+            } else {
+                let mut chunks_by_frame: Vec<Vec<usize>> = vec![Vec::new(); toc.frames.len()];
+                for (old_cid, loc) in toc.chunks.iter().enumerate() {
+                    chunks_by_frame[loc.frame_id as usize].push(old_cid);
+                }
+                for (fid, frame_cids) in chunks_by_frame.into_iter().enumerate() {
+                    check_cancel(cancel)?;
+                    let mut live_cids = Vec::new();
+                    for old_cid in frame_cids {
+                        if live.get(old_cid) {
+                            live_cids.push(old_cid);
+                        } else {
+                            chunks_purged += 1;
+                        }
+                    }
+                    if live_cids.is_empty() {
+                        frames_dropped += 1;
+                        continue;
+                    }
+                    let decoded = pack.read_frame_decompressed(fid as u32)?;
+                    for old_cid in live_cids {
+                        let loc = toc.chunks[old_cid];
+                        let start = loc.offset_in_frame as usize;
+                        let end = start.checked_add(loc.raw_len as usize).ok_or(
+                            StatamError::Corrupt {
+                                reason: "chunk slice offset overflow during GDPR",
+                            },
+                        )?;
+                        let slice = decoded.get(start..end).ok_or(StatamError::Corrupt {
+                            reason: "chunk slice out of decompressed frame bounds during GDPR",
+                        })?;
+                        let new_cid = builder.intern_chunk(slice)?;
+                        chunk_remap[old_cid] = Some(new_cid);
+                        if boundary_utf8.get(old_cid) {
+                            builder.mark_boundary_chunk(new_cid);
+                        }
+                    }
+                    frames_rewritten += 1;
+                }
+            }
+
+            let (wp_done, p_stats) = builder.finish_into_inner()?;
+            pack_out = Some(wp_done);
+            pack_stats = Some(p_stats);
+            written_pack_id = Some(new_pack_id);
+        }
+    }
+
+    // Pass B: RG-by-RG stream surviving rows into StatamWriter<WS>.
+    let write_opts = derive_write_options_from_meta(meta);
+    let mut writer = StatamWriter::new_with_owned_pack(
+        statam_out,
+        Arc::clone(meta.schema()),
+        write_opts,
+        None::<ChunkPackBuilder>,
+    )?;
+    writer.set_pack_ids(written_pack_id.into_iter().collect());
+
+    for (rg_idx, (surviving_mask, surv_cnt)) in rg_surviving_masks
+        .into_iter()
+        .zip(rg_surviving_counts)
+        .enumerate()
+    {
+        if surv_cnt == 0 {
+            continue;
+        }
+        check_cancel(cancel)?;
+
+        let batch = statam.read_non_payload_rg_batch(rg_idx)?;
+        let surviving_indices: Vec<u32> = surviving_mask.iter_ones().map(|i| i as u32).collect();
+        let surviving_batch = gather_surviving_non_payload_batch(&batch, &surviving_indices)?;
+        on_surviving_batch(&surviving_batch)?;
+
+        if payload_cols.is_empty() {
+            writer.write_batch(&surviving_batch)?;
+        } else {
+            let mut has_l0_chunks = false;
+            let mut remapped_refs: HashMap<usize, Vec<PayloadRefRow>> =
+                HashMap::with_capacity(payload_cols.len());
+
+            for &cidx in &payload_cols {
+                let mut out_rows = Vec::with_capacity(surv_cnt);
+                let blks = meta.rg_blocks(cidx, rg_idx);
+                let mut mb_row_start = 0usize;
+                for blk in blks {
+                    let mb_rows = blk.row_count as usize;
+                    let mb_surv_mask = surviving_mask.slice(mb_row_start, mb_rows)?;
+                    let mb_surv_cnt = mb_surv_mask.count_ones();
+                    if mb_surv_cnt > 0 {
+                        if blk.encoding == Encoding::ConstNull {
+                            out_rows.resize(out_rows.len() + mb_surv_cnt, PayloadRefRow::Null);
+                        } else {
+                            let raw = statam.read_block_body(blk)?;
+                            let selected = decode_payload_refs_selected(
+                                &raw,
+                                mb_rows,
+                                &mb_surv_mask,
+                                MAX_BATCH_DECODED_BYTES,
+                            )?;
+                            for (_, row) in selected {
+                                match row {
+                                    PayloadRefRow::Null => out_rows.push(PayloadRefRow::Null),
+                                    PayloadRefRow::Inline(b) => {
+                                        out_rows.push(PayloadRefRow::Inline(b));
+                                    }
+                                    PayloadRefRow::Chunks(refs) => {
+                                        let mut new_refs = Vec::with_capacity(refs.len());
+                                        for (old_pidx, old_cid) in refs {
+                                            if old_pidx == L0_LOCAL_PACK_IDX {
+                                                has_l0_chunks = true;
+                                                new_refs.push((L0_LOCAL_PACK_IDX, old_cid));
+                                            } else {
+                                                if old_pidx != 0 {
+                                                    return Err(StatamError::Corrupt {
+                                                        reason: "single-file GDPR external pack_idx != 0",
+                                                    });
+                                                }
+                                                let new_cid = chunk_remap
+                                                    .get(old_cid as usize)
+                                                    .and_then(|opt| *opt)
+                                                    .ok_or(StatamError::Corrupt {
+                                                        reason: "surviving chunk missing from single-file GDPR remap",
+                                                    })?;
+                                                new_refs.push((0u16, new_cid));
+                                            }
+                                        }
+                                        out_rows.push(PayloadRefRow::Chunks(new_refs));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    mb_row_start += mb_rows;
+                }
+                remapped_refs.insert(cidx, out_rows);
+            }
+
+            let mut l0_source = if has_l0_chunks {
+                let src = statam
+                    .open_l0_payload_for_rg(rg_idx)?
+                    .ok_or(StatamError::Corrupt {
+                        reason: "missing L0 payload region for L0 chunk reference",
+                    })?;
+                Some(src)
+            } else {
+                None
+            };
+
+            writer.write_batch_with_prechunked_refs(
+                &surviving_batch,
+                &remapped_refs,
+                l0_source.as_mut(),
+            )?;
+        }
+    }
+
+    let (statam_out_done, statam_stats, _) = writer.finish_into_inner()?;
+
+    Ok((
+        statam_out_done,
+        pack_out,
+        SingleFileGdprStats {
+            input_rows,
+            surviving_rows,
+            erased_rows,
+            statam_stats: Some(statam_stats),
+            pack_stats,
+            new_pack_id: written_pack_id,
+            frames_copied_verbatim,
+            frames_rewritten,
+            frames_dropped,
+            chunks_purged,
+        },
+    ))
+}
 
 type PackRemapTable = HashMap<[u8; 16], ([u8; 16], Vec<Option<u32>>)>;
 
@@ -2109,5 +2633,551 @@ mod tests {
             }
         }
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn gdpr_single_file_streaming_verbatim_rewrite_drop_zero_byte_erasure() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("start_time", DataType::TimestampNs { utc: true }, false),
+            Field::new("user_id", DataType::Utf8, false),
+            Field::new("input", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        // Build 3 distinct frames:
+        // - Rows 0..10: all surviving (100%-live frame -> copied verbatim)
+        // - Rows 10..20: mixed surviving + erased (mixed frame -> rewritten)
+        // - Rows 20..30: all erased (0%-live frame -> dropped)
+        let n = 30usize;
+        let mut ts = Vec::with_capacity(n);
+        let mut users = Vec::with_capacity(n);
+        let mut inputs = Vec::with_capacity(n);
+        for i in 0..n {
+            ts.push(1000 + i as i64 * 10);
+            if i < 10 {
+                users.push(format!("keep_only_{i}"));
+                inputs.push(format!(
+                    "KEEP_FRAME0_ROW_{i:02}_{}",
+                    "alpha_beta_gamma_".repeat(120)
+                ));
+            } else if i < 20 {
+                if i % 2 == 0 {
+                    users.push(format!("erase_mix_{i}"));
+                    inputs.push(format!(
+                        "SECRET_MIXED_ERASED_{i:02}_{}",
+                        "secret_pii_payload_".repeat(120)
+                    ));
+                } else {
+                    users.push(format!("keep_mix_{i}"));
+                    inputs.push(format!(
+                        "KEEP_MIXED_ROW_{i:02}_{}",
+                        "survivor_text_".repeat(120)
+                    ));
+                }
+            } else {
+                users.push(format!("erase_dead_{i}"));
+                inputs.push(format!(
+                    "SECRET_DEAD_FRAME_{i:02}_{}",
+                    "dead_frame_secret_".repeat(120)
+                ));
+            }
+        }
+
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: ts,
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(users.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(inputs.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n,
+        )
+        .unwrap();
+
+        let old_pack_id = [0x11u8; 16];
+        let new_pack_id = [0x22u8; 16];
+        let pack_opts = PackWriteOptions {
+            target_frame_raw_bytes: 16 * 1024,
+            ..test_pack_opts()
+        };
+        let pb = ChunkPackBuilder::new_streaming(
+            old_pack_id,
+            pack_opts,
+            std::io::Cursor::new(Vec::new()),
+        )
+        .unwrap();
+        let mut w_opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        w_opts.sort_cols = vec![0];
+        w_opts.row_group_size = 12;
+        w_opts.mini_block_size = 6;
+        let mut writer = StatamWriter::new_with_owned_pack(
+            std::io::Cursor::new(Vec::new()),
+            Arc::clone(&schema),
+            w_opts,
+            Some(pb),
+        )
+        .unwrap();
+        writer.write_batch(&batch).unwrap();
+        let (old_statam_cursor, _, owned_pack) = writer.finish_into_inner().unwrap();
+        let (old_pack_cursor, _) = owned_pack.unwrap().finish_into_inner().unwrap();
+        let old_statam_bytes = old_statam_cursor.into_inner();
+        let old_pack_bytes = old_pack_cursor.into_inner();
+
+        let mut seen_surviving_rows = 0usize;
+        let (new_statam_cursor, new_pack_cursor_opt, stats) = gdpr_rewrite_single_file_streaming(
+            Arc::new(SliceReader::new(old_statam_bytes.clone())),
+            Some((
+                old_pack_id,
+                Arc::new(SliceReader::new(old_pack_bytes.clone())),
+            )),
+            new_pack_id,
+            std::io::Cursor::new(Vec::new()),
+            Some(std::io::Cursor::new(Vec::new())),
+            None,
+            &mut |rg_batch| {
+                let col = rg_batch.column_by_name("user_id").unwrap();
+                let mut bm = Bitmap::new_zeroed(rg_batch.raw_len());
+                for r in 0..rg_batch.raw_len() {
+                    if let cetra_column::ScalarValue::Utf8(u) = col.get_scalar(r).unwrap()
+                        && u.starts_with("erase_")
+                    {
+                        bm.set(r, true).unwrap();
+                    }
+                }
+                Ok(bm)
+            },
+            &mut |surv_batch| {
+                seen_surviving_rows += surv_batch.num_rows();
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(stats.input_rows, 30);
+        assert_eq!(stats.surviving_rows, 15);
+        assert_eq!(stats.erased_rows, 15);
+        assert_eq!(seen_surviving_rows, 15);
+        assert_eq!(stats.new_pack_id, Some(new_pack_id));
+        assert!(stats.statam_stats.is_some());
+        assert!(stats.pack_stats.is_some());
+        assert!(stats.frames_copied_verbatim >= 1);
+        assert!(stats.frames_rewritten >= 1);
+        assert!(stats.frames_dropped >= 1);
+        assert!(stats.chunks_purged >= 15);
+
+        let new_statam_bytes = new_statam_cursor.into_inner();
+        let new_pack_bytes = new_pack_cursor_opt.unwrap().into_inner();
+
+        // 0-byte erasure proof across BOTH rewritten files.
+        assert!(memmem::find(&new_statam_bytes, b"SECRET_MIXED_ERASED_").is_none());
+        assert!(memmem::find(&new_statam_bytes, b"SECRET_DEAD_FRAME_").is_none());
+        assert!(memmem::find(&new_statam_bytes, b"erase_mix_").is_none());
+        assert!(memmem::find(&new_statam_bytes, b"erase_dead_").is_none());
+        assert!(memmem::find(&new_pack_bytes, b"SECRET_MIXED_ERASED_").is_none());
+        assert!(memmem::find(&new_pack_bytes, b"SECRET_DEAD_FRAME_").is_none());
+
+        // Whole-file + sibling pack integrity verification passes!
+        let new_pr =
+            Arc::new(ChunkPackReader::open(Arc::new(SliceReader::new(new_pack_bytes))).unwrap());
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert(new_pack_id, Arc::clone(&new_pr));
+        let new_reader = StatamReader::open(
+            Arc::new(SliceReader::new(new_statam_bytes)),
+            Some(Arc::new(resolver)),
+        )
+        .unwrap();
+        new_reader
+            .verify_full_with_pack(Some((new_pack_id, &new_pr)), 15, TableKind::Spans)
+            .unwrap();
+
+        let scanned = new_reader.scan(&ScanRequest::default()).unwrap();
+        let mut actual_inputs = Vec::new();
+        for b in &scanned {
+            let col = b.column_by_name("input").unwrap();
+            for r in 0..b.num_rows() {
+                if let cetra_column::ScalarValue::Utf8(s) = col.get_scalar(r).unwrap() {
+                    actual_inputs.push(s);
+                }
+            }
+        }
+        let expected_inputs: Vec<String> = users
+            .iter()
+            .zip(inputs.iter())
+            .filter(|(u, _)| !u.starts_with("erase_"))
+            .map(|(_, inp)| inp.clone())
+            .collect();
+        assert_eq!(actual_inputs, expected_inputs);
+
+        // Early exit when surviving_rows == 0.
+        let mut cb_called = false;
+        let (_, _, zero_stats) = gdpr_rewrite_single_file_streaming(
+            Arc::new(SliceReader::new(old_statam_bytes.clone())),
+            Some((
+                old_pack_id,
+                Arc::new(SliceReader::new(old_pack_bytes.clone())),
+            )),
+            [0x33u8; 16],
+            std::io::Cursor::new(Vec::new()),
+            Some(std::io::Cursor::new(Vec::new())),
+            None,
+            &mut |rg_batch| Ok(Bitmap::new_ones(rg_batch.raw_len())),
+            &mut |_| {
+                cb_called = true;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(zero_stats.surviving_rows, 0);
+        assert_eq!(zero_stats.erased_rows, 30);
+        assert!(zero_stats.statam_stats.is_none());
+        assert!(zero_stats.pack_stats.is_none());
+        assert!(zero_stats.new_pack_id.is_none());
+        assert!(!cb_called);
+
+        // CancelToken mid-rewrite returns Cancelled.
+        let cancel = CancelToken::new();
+        let mut seen_rgs = 0usize;
+        let err = gdpr_rewrite_single_file_streaming(
+            Arc::new(SliceReader::new(old_statam_bytes)),
+            Some((old_pack_id, Arc::new(SliceReader::new(old_pack_bytes)))),
+            [0x44u8; 16],
+            std::io::Cursor::new(Vec::new()),
+            Some(std::io::Cursor::new(Vec::new())),
+            Some(&cancel),
+            &mut |rg_batch| {
+                seen_rgs += 1;
+                if seen_rgs == 1 {
+                    cancel.cancel();
+                }
+                Ok(Bitmap::new_zeroed(rg_batch.raw_len()))
+            },
+            &mut |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(matches!(err, StatamError::Cancelled));
+    }
+
+    #[test]
+    fn gdpr_single_file_streaming_zero_live_chunks_drops_pack() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("start_time", DataType::TimestampNs { utc: true }, false),
+            Field::new("user_id", DataType::Utf8, false),
+            Field::new("input", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        // Row 0 survives with an inline payload; Row 1 is erased with an external chunk payload.
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: vec![10, 20],
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(["keep", "erase"]).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(["tiny_inline", &"ERASE_EXT_".repeat(500)])
+                                .unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            2,
+        )
+        .unwrap();
+
+        let old_pack_id = [0x91u8; 16];
+        let pb = ChunkPackBuilder::new_streaming(
+            old_pack_id,
+            test_pack_opts(),
+            std::io::Cursor::new(Vec::new()),
+        )
+        .unwrap();
+        let mut writer = StatamWriter::new_with_owned_pack(
+            std::io::Cursor::new(Vec::new()),
+            Arc::clone(&schema),
+            WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact),
+            Some(pb),
+        )
+        .unwrap();
+        writer.write_batch(&batch).unwrap();
+        let (old_statam_c, _, owned_pack) = writer.finish_into_inner().unwrap();
+        let (old_pack_c, _) = owned_pack.unwrap().finish_into_inner().unwrap();
+
+        let (new_statam_c, _pack_out, stats) = gdpr_rewrite_single_file_streaming(
+            Arc::new(SliceReader::new(old_statam_c.into_inner())),
+            Some((
+                old_pack_id,
+                Arc::new(SliceReader::new(old_pack_c.into_inner())),
+            )),
+            [0x92u8; 16],
+            std::io::Cursor::new(Vec::new()),
+            Some(std::io::Cursor::new(Vec::new())),
+            None,
+            &mut |_| Ok(Bitmap::from_bools(&[false, true])),
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(stats.surviving_rows, 1);
+        assert_eq!(stats.erased_rows, 1);
+        assert!(stats.pack_stats.is_none());
+        assert!(stats.new_pack_id.is_none());
+        assert!(stats.frames_dropped >= 1);
+        assert!(stats.chunks_purged >= 1);
+
+        let new_bytes = new_statam_c.into_inner();
+        assert!(memmem::find(&new_bytes, b"ERASE_EXT_").is_none());
+        let reader = StatamReader::open(Arc::new(SliceReader::new(new_bytes)), None).unwrap();
+        assert!(reader.meta().schema_meta.pack_ids.is_empty());
+        reader
+            .verify_full_with_pack(None, 1, TableKind::Spans)
+            .unwrap();
+    }
+
+    #[test]
+    fn gdpr_streaming_discards_dict_and_rewrites_l0_without_pack() {
+        // 1. L0Fast self-contained file (old_pack = None).
+        let schema = Schema::try_new_arc(vec![
+            Field::new("trace_id", DataType::FixedBytes16, false),
+            Field::new("start_time", DataType::TimestampNs { utc: true }, false),
+            Field::new("user_id", DataType::Utf8, true),
+            Field::new("input", DataType::Utf8, true),
+        ])
+        .unwrap();
+        let l0_batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::FixedBytes16(vec![[1u8; 16], [2u8; 16]]), None)
+                        .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: vec![100, 200],
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(["keep_u", "erase_u"]).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices([
+                                format!("KEEP_L0_{}", "k".repeat(4096)).as_str(),
+                                format!("ERASE_L0_{}", "e".repeat(4096)).as_str(),
+                            ])
+                            .unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            2,
+        )
+        .unwrap();
+        let mut l0_writer = StatamWriter::new_with_owned_pack(
+            std::io::Cursor::new(Vec::new()),
+            Arc::clone(&schema),
+            WriteOptions::for_table(TableKind::Spans, WriteProfile::L0Fast),
+            None::<ChunkPackBuilder<std::io::Cursor<Vec<u8>>>>,
+        )
+        .unwrap();
+        l0_writer.write_batch(&l0_batch).unwrap();
+        let (l0_old_c, _, _) = l0_writer.finish_into_inner().unwrap();
+
+        let (l0_new_c, l0_pack_out, l0_stats) =
+            gdpr_rewrite_single_file_streaming::<_, std::io::Cursor<Vec<u8>>, _, _>(
+                Arc::new(SliceReader::new(l0_old_c.into_inner())),
+                None,
+                [0xA1u8; 16],
+                std::io::Cursor::new(Vec::new()),
+                None,
+                None,
+                &mut |_| Ok(Bitmap::from_bools(&[false, true])),
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+        assert!(l0_pack_out.is_none());
+        assert_eq!(l0_stats.surviving_rows, 1);
+        assert_eq!(l0_stats.erased_rows, 1);
+        let l0_new_bytes = l0_new_c.into_inner();
+        assert!(memmem::find(&l0_new_bytes, b"ERASE_L0_").is_none());
+        let l0_reader = StatamReader::open(Arc::new(SliceReader::new(l0_new_bytes)), None).unwrap();
+        l0_reader
+            .verify_full_with_pack(None, 1, TableKind::Spans)
+            .unwrap();
+
+        // 2. Dict-trained L1 pack: dict section unconditionally discarded, 0 verbatim dict frames.
+        let rows = 300usize;
+        let tids: Vec<[u8; 16]> = (0..rows)
+            .map(|i| {
+                let mut b = [0u8; 16];
+                b[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                b
+            })
+            .collect();
+        let ts: Vec<i64> = (0..rows).map(|i| 1_000_000 + i as i64).collect();
+        let users: Vec<String> = (0..rows)
+            .map(|i| if i == 0 { "erase_dict" } else { "keep_dict" }.to_owned())
+            .collect();
+        let inputs: Vec<String> = (0..rows)
+            .map(|i| {
+                let marker = if i == 0 {
+                    "DICT_ERASE_SECRET_TOKEN"
+                } else {
+                    "DICT_KEEP_COMMON_PREFIX"
+                };
+                format!(
+                    "{{\"role\":\"user\",\"idx\":{i},\"tag\":\"{marker}\",\"body\":\"{}\"}}",
+                    "abcdefghij".repeat(800)
+                )
+            })
+            .collect();
+        let dict_batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::FixedBytes16(tids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: ts,
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(users.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(inputs.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            rows,
+        )
+        .unwrap();
+
+        let old_pack_id = [0xD1u8; 16];
+        let mut dict_pb = ChunkPackBuilder::new_with_dict(old_pack_id, test_pack_opts());
+        let mut dict_opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        dict_opts.pack_id = Some(old_pack_id);
+        let mut old_s = Vec::new();
+        {
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut old_s),
+                Arc::clone(&schema),
+                dict_opts,
+                Some(&mut dict_pb),
+            )
+            .unwrap();
+            w.write_batch(&dict_batch).unwrap();
+            w.finish().unwrap();
+        }
+        let mut old_p = Vec::new();
+        dict_pb.finish(&mut old_p).unwrap();
+        let old_pr = ChunkPackReader::open(Arc::new(SliceReader::new(old_p.clone()))).unwrap();
+        #[cfg(not(miri))]
+        assert!(old_pr.postscript().dict_len > 0);
+
+        let (new_s_c, new_p_opt, stats) = gdpr_rewrite_single_file_streaming(
+            Arc::new(SliceReader::new(old_s)),
+            Some((old_pack_id, Arc::new(SliceReader::new(old_p)))),
+            [0xD2u8; 16],
+            std::io::Cursor::new(Vec::new()),
+            Some(std::io::Cursor::new(Vec::new())),
+            None,
+            &mut |b| {
+                let mut bm = Bitmap::new_zeroed(b.raw_len());
+                if b.raw_len() > 0 {
+                    let _ = bm.set(0, true);
+                }
+                Ok(bm)
+            },
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(stats.surviving_rows, (rows - 1) as u64);
+        assert_eq!(stats.erased_rows, 1);
+        #[cfg(not(miri))]
+        assert_eq!(stats.frames_copied_verbatim, 0);
+        let new_p_bytes = new_p_opt.unwrap().into_inner();
+        let new_pr =
+            ChunkPackReader::open(Arc::new(SliceReader::new(new_p_bytes.clone()))).unwrap();
+        assert_eq!(new_pr.postscript().dict_len, 0);
+        assert!(memmem::find(&new_p_bytes, b"DICT_ERASE_SECRET_TOKEN").is_none());
+        let new_sr =
+            StatamReader::open(Arc::new(SliceReader::new(new_s_c.into_inner())), None).unwrap();
+        new_sr
+            .verify_full_with_pack(
+                Some(([0xD2u8; 16], &new_pr)),
+                (rows - 1) as u64,
+                TableKind::Spans,
+            )
+            .unwrap();
     }
 }

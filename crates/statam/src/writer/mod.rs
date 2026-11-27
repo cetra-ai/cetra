@@ -293,13 +293,28 @@ pub struct WriteStats {
     pub pack_ids: Vec<[u8; 16]>,
 }
 
+enum PackBuilderTarget<'a, PW: Write + Seek> {
+    Borrowed(&'a mut ChunkPackBuilder<PW>),
+    Owned(Box<ChunkPackBuilder<PW>>),
+}
+
+impl<PW: Write + Seek> PackBuilderTarget<'_, PW> {
+    #[inline]
+    pub(super) fn as_mut(&mut self) -> &mut ChunkPackBuilder<PW> {
+        match self {
+            Self::Borrowed(pb) => pb,
+            Self::Owned(pb) => pb,
+        }
+    }
+}
+
 /// Streaming bounded-memory PAX writer producing `.statam` files.
-pub struct StatamWriter<'a, W: Write + Seek> {
+pub struct StatamWriter<'a, W: Write + Seek, PW: Write + Seek = std::io::Cursor<Vec<u8>>> {
     out: W,
     start_offset: u64,
     schema: Arc<Schema>,
     options: WriteOptions,
-    pack_builder: Option<&'a mut ChunkPackBuilder>,
+    pack_builder: Option<PackBuilderTarget<'a, PW>>,
     logical_locality: Vec<LocalityGroup>,
     bloom_col_set: HashSet<usize>,
     hot_bloom_col_idx: Option<usize>,
@@ -360,7 +375,7 @@ struct PhysColWriteState {
     null_count_total: u32,
 }
 
-impl<W: Write + Seek> fmt::Debug for StatamWriter<'_, W> {
+impl<W: Write + Seek, PW: Write + Seek> fmt::Debug for StatamWriter<'_, W, PW> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StatamWriter")
             .field("profile", &self.options.profile)
@@ -374,16 +389,63 @@ impl<W: Write + Seek> fmt::Debug for StatamWriter<'_, W> {
     }
 }
 
-impl<'a, W: Write + Seek> StatamWriter<'a, W> {
+impl<'a, W: Write + Seek> StatamWriter<'a, W, std::io::Cursor<Vec<u8>>> {
     /// Creates a new streaming [`StatamWriter`] writing into `out` for `schema` and `options`.
     ///
     /// Records the initial stream offset and writes a 32-byte header placeholder that
     /// [`Self::finish`] patches in place once all Row Groups and tail sections are written.
     pub fn new(
-        mut out: W,
+        out: W,
         schema: Arc<Schema>,
         options: WriteOptions,
         pack_builder: Option<&'a mut ChunkPackBuilder>,
+    ) -> Result<Self, StatamError> {
+        Self::new_inner(
+            out,
+            schema,
+            options,
+            pack_builder.map(PackBuilderTarget::Borrowed),
+        )
+    }
+}
+
+impl<W: Write + Seek, PW: Write + Seek> StatamWriter<'static, W, PW> {
+    /// Creates a `'static` [`StatamWriter`] that owns its optional streaming [`ChunkPackBuilder`].
+    ///
+    /// When `options.pack_id` is `None` and `pack` is `Some(ref p)`, automatically sets
+    /// `options.pack_id = Some(p.pack_id())` so callers never fall back to `[0u8; 16]`.
+    pub fn new_with_owned_pack(
+        out: W,
+        schema: Arc<Schema>,
+        mut options: WriteOptions,
+        pack: Option<ChunkPackBuilder<PW>>,
+    ) -> Result<Self, StatamError> {
+        if let Some(ref p) = pack {
+            match options.pack_id {
+                None => options.pack_id = Some(p.pack_id()),
+                Some(id) if id != p.pack_id() => {
+                    return Err(StatamError::SchemaMismatch {
+                        reason: "WriteOptions::pack_id does not match owned ChunkPackBuilder::pack_id",
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+        Self::new_inner(
+            out,
+            schema,
+            options,
+            pack.map(|p| PackBuilderTarget::Owned(Box::new(p))),
+        )
+    }
+}
+
+impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
+    fn new_inner(
+        mut out: W,
+        schema: Arc<Schema>,
+        options: WriteOptions,
+        mut pack_builder: Option<PackBuilderTarget<'a, PW>>,
     ) -> Result<Self, StatamError> {
         let fields = schema.fields();
         if fields.is_empty() {
@@ -509,9 +571,8 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
             }
         }
 
-        let mut pack_builder = pack_builder;
-        if let Some(pb) = pack_builder.as_deref_mut() {
-            pb.enable_boundary_tracking();
+        if let Some(pb) = pack_builder.as_mut() {
+            pb.as_mut().enable_boundary_tracking();
         }
         let pack_ids = match (&pack_builder, options.pack_id) {
             (Some(_), Some(id)) => vec![id],
@@ -1502,7 +1563,18 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
     /// Finishes the `.statam` file (flushing any partial Row Group, writing Lazy Indexes,
     /// Hot Tail, and 112-byte Postscript, then patching the 32-byte header at `start_offset`
     /// and seeking to EOF).
-    pub fn finish(mut self) -> Result<WriteStats, StatamError> {
+    pub fn finish(self) -> Result<WriteStats, StatamError> {
+        self.finish_into_inner().map(|(_, stats, _)| stats)
+    }
+
+    /// Finishes the `.statam` file and returns `(out, stats, owned_pack_builder)`.
+    ///
+    /// Returns `Some(pack_builder)` when constructed via [`Self::new_with_owned_pack`] with
+    /// an owned [`ChunkPackBuilder`], or `None` otherwise.
+    #[allow(clippy::type_complexity)]
+    pub fn finish_into_inner(
+        mut self,
+    ) -> Result<(W, WriteStats, Option<ChunkPackBuilder<PW>>), StatamError> {
         if self.rg_buf_rows > 0 {
             self.flush_row_group()?;
         }
@@ -1845,20 +1917,29 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
 
         let shredded_subcols = (self.phys_col_meta.len() - self.schema.len()) as u16;
 
-        Ok(WriteStats {
-            total_bytes,
-            row_count: self.total_rows,
-            num_row_groups,
-            total_blocks,
-            hot_tail_bytes: hot_tail_len,
-            hot_tail_raw_bytes: hot_tail_raw_len,
-            core_bytes: self.core_bytes,
-            wide_bytes: self.wide_bytes,
-            l0_payload_bytes: self.l0_payload_bytes,
-            lazy_index_bytes: lazy_data_buf.len() as u64,
-            shredded_subcols,
-            pack_ids,
-        })
+        let owned_pack = match self.pack_builder.take() {
+            Some(PackBuilderTarget::Owned(pb)) => Some(*pb),
+            Some(PackBuilderTarget::Borrowed(_)) | None => None,
+        };
+
+        Ok((
+            self.out,
+            WriteStats {
+                total_bytes,
+                row_count: self.total_rows,
+                num_row_groups,
+                total_blocks,
+                hot_tail_bytes: hot_tail_len,
+                hot_tail_raw_bytes: hot_tail_raw_len,
+                core_bytes: self.core_bytes,
+                wide_bytes: self.wide_bytes,
+                l0_payload_bytes: self.l0_payload_bytes,
+                lazy_index_bytes: lazy_data_buf.len() as u64,
+                shredded_subcols,
+                pack_ids,
+            },
+            owned_pack,
+        ))
     }
 
     fn flush_row_group(&mut self) -> Result<(), StatamError> {
