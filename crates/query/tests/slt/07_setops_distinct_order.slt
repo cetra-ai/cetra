@@ -1,0 +1,509 @@
+# 07_setops_distinct_order.slt
+# UNION / UNION ALL / INTERSECT / EXCEPT, SELECT DISTINCT, ORDER BY NULLS FIRST/LAST,
+# SELECT DISTINCT ... ORDER BY with quoted case-sensitive aliases, LIMIT/OFFSET + TopK, VALUES.
+
+statement ok
+CREATE TABLE set_a (id BIGINT NOT NULL, k BIGINT, grp VARCHAR)
+
+statement ok
+INSERT INTO set_a VALUES
+  (1, 10, 'a'),
+  (2, 10, 'a'),
+  (3, 20, 'b'),
+  (4, 30, 'c'),
+  (5, NULL, 'n'),
+  (6, NULL, 'n')
+
+statement ok
+CREATE TABLE set_b (id BIGINT NOT NULL, k BIGINT, grp VARCHAR)
+
+statement ok
+INSERT INTO set_b VALUES
+  (10, 20, 'b'),
+  (11, 20, 'b'),
+  (12, 40, 'd'),
+  (13, NULL, 'n')
+
+statement ok
+CREATE TABLE set_empty (id BIGINT NOT NULL, k BIGINT, grp VARCHAR)
+
+# UNION deduplicates values including NULLs
+query I nosort
+SELECT k FROM set_a
+UNION
+SELECT k FROM set_b
+ORDER BY k ASC NULLS LAST
+----
+10
+20
+30
+40
+NULL
+
+# UNION ALL preserves all duplicates and NULLs
+query I nosort
+SELECT k FROM set_a
+UNION ALL
+SELECT k FROM set_b
+ORDER BY k ASC NULLS LAST
+----
+10
+10
+20
+20
+20
+30
+40
+NULL
+NULL
+NULL
+
+# INTERSECT returns deduplicated common rows including NULL
+query I nosort
+SELECT k FROM set_a
+INTERSECT
+SELECT k FROM set_b
+ORDER BY k ASC NULLS LAST
+----
+20
+NULL
+
+# EXCEPT returns deduplicated left rows absent from right (NULL is in both, so excluded!)
+query I nosort
+SELECT k FROM set_a
+EXCEPT
+SELECT k FROM set_b
+ORDER BY k ASC NULLS LAST
+----
+10
+30
+
+# EXCEPT when right has no NULLs keeps left NULL (deduplicated to 1 row)
+query I nosort
+SELECT k FROM set_a
+EXCEPT
+SELECT k FROM set_b WHERE k IS NOT NULL
+ORDER BY k ASC NULLS LAST
+----
+10
+30
+NULL
+
+# Set operations with empty table
+query I nosort
+SELECT k FROM set_a
+UNION
+SELECT k FROM set_empty
+ORDER BY k ASC NULLS LAST
+----
+10
+20
+30
+NULL
+
+query I nosort
+SELECT k FROM set_a
+INTERSECT
+SELECT k FROM set_empty
+ORDER BY k ASC NULLS LAST
+----
+
+query I nosort
+SELECT k FROM set_empty
+EXCEPT
+SELECT k FROM set_a
+ORDER BY k ASC NULLS LAST
+----
+
+# Chained multi-branch UNION ALL + UNION
+query I nosort
+SELECT k FROM set_a WHERE k = 10
+UNION ALL
+SELECT k FROM set_b WHERE k = 40
+UNION
+SELECT k FROM set_a WHERE k = 10
+ORDER BY k ASC NULLS LAST
+----
+10
+40
+
+# Multi-column set operations
+query IT nosort
+SELECT k, grp FROM set_a
+INTERSECT
+SELECT k, grp FROM set_b
+ORDER BY k ASC NULLS LAST, grp ASC NULLS LAST
+----
+20	b
+NULL	n
+
+# Set-op type widening (I64 UNION DOUBLE -> DOUBLE)
+query R nosort
+SELECT 1 AS v
+UNION
+SELECT 2.5 AS v
+ORDER BY v ASC NULLS LAST
+----
+1
+2.5
+
+# Set-op type widening (I64 UNION DECIMAL(10, 2))
+query R nosort
+SELECT 10 AS v
+UNION ALL
+SELECT CAST('12.50' AS DECIMAL(10, 2)) AS v
+ORDER BY v ASC NULLS LAST
+----
+10.00
+12.50
+
+# Set-op with outer ORDER BY, LIMIT, and OFFSET
+query I nosort
+SELECT k FROM set_a
+UNION
+SELECT k FROM set_b
+ORDER BY k ASC NULLS LAST
+LIMIT 2 OFFSET 1
+----
+20
+30
+
+# SELECT DISTINCT on single column (deduplicates NULLs)
+query I nosort
+SELECT DISTINCT k FROM set_a ORDER BY k ASC NULLS LAST
+----
+10
+20
+30
+NULL
+
+# SELECT DISTINCT on multiple columns
+query IT nosort
+SELECT DISTINCT k, grp FROM set_a ORDER BY k ASC NULLS LAST, grp ASC NULLS LAST
+----
+10	a
+20	b
+30	c
+NULL	n
+
+# SELECT DISTINCT on empty table
+query I nosort
+SELECT DISTINCT k FROM set_empty
+----
+
+# SELECT DISTINCT on floats collapses -0.0 == 0.0 and NaN == NaN
+statement ok
+CREATE TABLE flt_d (id BIGINT NOT NULL, x DOUBLE)
+
+statement ok
+INSERT INTO flt_d VALUES
+  (1, 0.0),
+  (2, -0.0),
+  (3, 1.5),
+  (4, CAST('NaN' AS DOUBLE)),
+  (5, CAST('NaN' AS DOUBLE)),
+  (6, NULL),
+  (7, NULL)
+
+query R nosort
+SELECT DISTINCT x FROM flt_d ORDER BY x ASC NULLS LAST
+----
+0
+1.5
+NaN
+NULL
+
+# Explicit ORDER BY ASC/DESC with NULLS FIRST and NULLS LAST
+query II nosort
+SELECT id, k FROM set_a ORDER BY k ASC NULLS FIRST, id ASC NULLS LAST
+----
+5	NULL
+6	NULL
+1	10
+2	10
+3	20
+4	30
+
+query II nosort
+SELECT id, k FROM set_a ORDER BY k ASC NULLS LAST, id ASC NULLS LAST
+----
+1	10
+2	10
+3	20
+4	30
+5	NULL
+6	NULL
+
+query II nosort
+SELECT id, k FROM set_a ORDER BY k DESC NULLS FIRST, id ASC NULLS LAST
+----
+5	NULL
+6	NULL
+4	30
+3	20
+1	10
+2	10
+
+query II nosort
+SELECT id, k FROM set_a ORDER BY k DESC NULLS LAST, id ASC NULLS LAST
+----
+4	30
+3	20
+1	10
+2	10
+5	NULL
+6	NULL
+
+# Cetra PostgreSQL-compatible default NULL ordering (ASC -> NULLS LAST, DESC -> NULLS FIRST)
+# duckdb: skip duckdb defaults to NULLS LAST for both ASC and DESC
+query II nosort
+SELECT id, k FROM set_a ORDER BY k ASC, id ASC
+----
+1	10
+2	10
+3	20
+4	30
+5	NULL
+6	NULL
+
+# duckdb: skip duckdb defaults to NULLS LAST for both ASC and DESC
+query II nosort
+SELECT id, k FROM set_a ORDER BY k DESC, id ASC
+----
+5	NULL
+6	NULL
+4	30
+3	20
+1	10
+2	10
+
+# ORDER BY ordinal (1-based) and expression not in SELECT list
+query IT nosort
+SELECT id, grp FROM set_a ORDER BY 2 DESC NULLS LAST, 1 ASC NULLS LAST
+----
+5	n
+6	n
+4	c
+3	b
+1	a
+2	a
+
+query I nosort
+SELECT id FROM set_a ORDER BY COALESCE(k, 999) ASC NULLS LAST, id ASC NULLS LAST
+----
+1
+2
+3
+4
+5
+6
+
+# ORDER BY SELECT alias
+query II nosort
+SELECT id, COALESCE(k, -1) AS eff_k
+FROM set_a
+ORDER BY eff_k DESC NULLS LAST, id ASC NULLS LAST
+----
+4	30
+3	20
+1	10
+2	10
+5	-1
+6	-1
+
+# SELECT DISTINCT ... ORDER BY with quoted case-sensitive alias
+query T nosort
+SELECT DISTINCT grp AS "GrpName"
+FROM set_a
+ORDER BY "GrpName" DESC NULLS LAST
+----
+n
+c
+b
+a
+
+# SELECT DISTINCT ... ORDER BY with two quoted aliases differing only in case
+query IT nosort
+SELECT DISTINCT k AS "Val", grp AS "val"
+FROM set_a
+WHERE k IS NOT NULL
+ORDER BY "val" DESC NULLS LAST, "Val" ASC NULLS LAST
+----
+30	c
+20	b
+10	a
+
+# SELECT DISTINCT ... ORDER BY expression matching SELECT output
+query I nosort
+SELECT DISTINCT (k + 1) AS k1
+FROM set_a
+ORDER BY (k + 1) ASC NULLS LAST
+----
+11
+21
+31
+NULL
+
+# LIMIT 0 returns 0 rows
+query II nosort
+SELECT id, k FROM set_a ORDER BY id ASC NULLS LAST LIMIT 0
+----
+
+# TopK (ORDER BY + small LIMIT) with deterministic tie-breaker and NULLS FIRST/LAST
+query II nosort
+SELECT id, k FROM set_a ORDER BY k ASC NULLS LAST, id ASC NULLS LAST LIMIT 3
+----
+1	10
+2	10
+3	20
+
+query II nosort
+SELECT id, k FROM set_a ORDER BY k DESC NULLS FIRST, id ASC NULLS LAST LIMIT 3
+----
+5	NULL
+6	NULL
+4	30
+
+# TopK with LIMIT + OFFSET
+query II nosort
+SELECT id, k FROM set_a ORDER BY k ASC NULLS LAST, id ASC NULLS LAST LIMIT 2 OFFSET 2
+----
+3	20
+4	30
+
+# OFFSET alone (without LIMIT)
+query II nosort
+SELECT id, k FROM set_a ORDER BY id ASC NULLS LAST OFFSET 4
+----
+5	NULL
+6	NULL
+
+# OFFSET beyond row count returns 0 rows
+query II nosort
+SELECT id, k FROM set_a ORDER BY id ASC NULLS LAST LIMIT 5 OFFSET 100
+----
+
+# Standalone VALUES query with ORDER BY and LIMIT
+# duckdb: skip duckdb VALUES column naming differs from column1/column2
+query IT nosort
+VALUES (3, 'c'), (1, 'a'), (2, 'b')
+ORDER BY column1 ASC NULLS LAST
+LIMIT 2
+----
+1	a
+2	b
+
+# VALUES used as derived table with explicit column aliases
+query IT nosort
+SELECT v.n, v.s
+FROM (VALUES (2, 'two'), (1, 'one'), (3, 'three')) AS v(n, s)
+ORDER BY v.n ASC NULLS LAST
+----
+1	one
+2	two
+3	three
+
+# Three-way UNION deduplicating across all 3 branches
+query I nosort
+SELECT k FROM set_a WHERE k = 10
+UNION
+SELECT k FROM set_b WHERE k = 20
+UNION
+SELECT k FROM set_a WHERE k IS NULL
+ORDER BY k ASC NULLS LAST
+----
+10
+20
+NULL
+
+# Self EXCEPT returns 0 rows
+query I nosort
+SELECT k FROM set_a
+EXCEPT
+SELECT k FROM set_a
+----
+
+# SELECT DISTINCT with LIMIT and OFFSET
+query I nosort
+SELECT DISTINCT k
+FROM set_a
+ORDER BY k ASC NULLS LAST
+LIMIT 2 OFFSET 1
+----
+20
+30
+
+# ORDER BY DOUBLE with -Infinity, finite, +Infinity, NaN, and NULL
+statement ok
+CREATE TABLE flt_ord (id BIGINT NOT NULL, x DOUBLE)
+
+statement ok
+INSERT INTO flt_ord VALUES
+  (1, CAST('NaN' AS DOUBLE)),
+  (2, CAST('-Infinity' AS DOUBLE)),
+  (3, 0.0),
+  (4, CAST('Infinity' AS DOUBLE)),
+  (5, -1.5),
+  (6, NULL)
+
+query IR nosort
+SELECT id, x FROM flt_ord ORDER BY x ASC NULLS LAST, id ASC NULLS LAST
+----
+2	-Infinity
+5	-1.5
+3	0
+4	Infinity
+1	NaN
+6	NULL
+
+query IR nosort
+SELECT id, x FROM flt_ord ORDER BY x DESC NULLS FIRST, id ASC NULLS LAST
+----
+6	NULL
+1	NaN
+4	Infinity
+3	0
+5	-1.5
+2	-Infinity
+
+statement ok
+DROP TABLE flt_ord
+
+# ORDER BY DATE and TIMESTAMP with NULLS FIRST / LAST
+statement ok
+CREATE TABLE dt_ord (id BIGINT NOT NULL, d DATE, ts TIMESTAMP)
+
+statement ok
+INSERT INTO dt_ord VALUES
+  (1, DATE '2026-03-01', TIMESTAMP '2026-03-01 10:00:00'),
+  (2, DATE '2026-01-15', TIMESTAMP '2026-01-15 09:00:00'),
+  (3, NULL, NULL)
+
+query IIT nosort
+SELECT id, d, ts FROM dt_ord ORDER BY d ASC NULLS FIRST, id ASC NULLS LAST
+----
+3	NULL	NULL
+2	2026-01-15	2026-01-15T09:00:00.000000000
+1	2026-03-01	2026-03-01T10:00:00.000000000
+
+statement ok
+DROP TABLE dt_ord
+
+# Optimizer REGRESSION: filter above Sort with fallible sort key (10 / id) must NOT push below Sort
+# duckdb: skip duckdb float division does not error on zero
+statement error division by zero
+SELECT sub.id
+FROM (SELECT id FROM set_a UNION ALL SELECT 0 AS id ORDER BY (10 / id) ASC NULLS LAST) sub
+WHERE sub.id > 0
+
+statement ok
+DROP TABLE flt_d
+
+statement ok
+DROP TABLE set_empty
+
+statement ok
+DROP TABLE set_b
+
+statement ok
+DROP TABLE set_a

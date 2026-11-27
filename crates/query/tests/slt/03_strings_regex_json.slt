@@ -1,0 +1,484 @@
+# 03_strings_regex_json.slt
+# LIKE/ILIKE/ESCAPE, string scalar functions, regexp_like/regexp_extract,
+# encode (including uppercase-hex pushdown regression), and JSON functions + ->/->>.
+
+statement ok
+CREATE TABLE strs (id BIGINT NOT NULL, s VARCHAR)
+
+statement ok
+INSERT INTO strs VALUES
+  (1, 'Hello World'),
+  (2, 'a%b_c'),
+  (3, 'aXbYc'),
+  (4, 'foo\'),
+  (5, 'Café Noir'),
+  (6, '東京タワー'),
+  (7, ''),
+  (8, NULL)
+
+# LIKE and NOT LIKE with % and _
+query IBB nosort
+SELECT id, (s LIKE 'Hello%') AS m1, (s NOT LIKE '%o%') AS m2
+FROM strs
+WHERE id IN (1, 2, 7, 8)
+ORDER BY id ASC NULLS LAST
+----
+1	true	false
+2	false	true
+7	false	true
+8	NULL	NULL
+
+# LIKE with explicit ESCAPE '\' matching literal % and _
+query IB nosort
+SELECT id, (s LIKE 'a\%b\_c' ESCAPE '\') AS esc_match
+FROM strs
+WHERE id IN (2, 3, 8)
+ORDER BY id ASC NULLS LAST
+----
+2	true
+3	false
+8	NULL
+
+# LIKE with custom ESCAPE '!' and empty ESCAPE '' (disables escaping)
+# duckdb: skip duckdb empty ESCAPE '' behavior differs
+query BBB nosort
+SELECT
+  ('a%b' LIKE 'a!%b' ESCAPE '!') AS custom_esc,
+  ('a\b' LIKE 'a\b' ESCAPE '') AS empty_esc_lit,
+  ('foo\' LIKE 'foo\' ESCAPE '\') AS trailing_esc
+----
+true	true	true
+
+# ILIKE case-insensitive ASCII and Unicode matching
+query IBB nosort
+SELECT id, (s ILIKE 'hello%') AS ci_ascii, (s ILIKE 'café%') AS ci_uni
+FROM strs
+WHERE id IN (1, 5, 8)
+ORDER BY id ASC NULLS LAST
+----
+1	true	false
+5	false	true
+8	NULL	NULL
+
+# LIKE on empty string with %, _, and exact empty pattern
+query BBBB nosort
+SELECT
+  ('' LIKE '') AS eq_empty,
+  ('' LIKE '%') AS pct_empty,
+  ('' LIKE '_') AS under_empty,
+  ('a' LIKE '_') AS under_one
+----
+true	true	false	true
+
+# Dynamic (non-constant) LIKE pattern column
+statement ok
+CREATE TABLE like_dyn (id BIGINT NOT NULL, s VARCHAR, pat VARCHAR)
+
+statement ok
+INSERT INTO like_dyn VALUES
+  (1, 'hello', 'he%'),
+  (2, 'hello', 'wo%'),
+  (3, 'abc', '_b_'),
+  (4, 'abc', NULL),
+  (5, NULL, 'a%')
+
+query IB nosort
+SELECT id, (s LIKE pat ESCAPE '\') AS matched
+FROM like_dyn
+ORDER BY id ASC NULLS LAST
+----
+1	true
+2	false
+3	true
+4	NULL
+5	NULL
+
+statement ok
+DROP TABLE like_dyn
+
+# lower, upper, length / char_length / character_length (UTF-8 character count, not bytes!)
+query ITTIII nosort
+SELECT
+  id,
+  lower(s) AS lo,
+  upper(s) AS hi,
+  length(s) AS len1,
+  char_length(s) AS len2,
+  character_length(s) AS len3
+FROM strs
+WHERE id IN (1, 5, 6, 7, 8)
+ORDER BY id ASC NULLS LAST
+----
+1	hello world	HELLO WORLD	11	11	11
+5	café noir	CAFÉ NOIR	9	9	9
+6	東京タワー	東京タワー	5	5	5
+7	(empty)	(empty)	0	0	0
+8	NULL	NULL	NULL	NULL	NULL
+
+# substr / substring / SUBSTRING(s FROM a FOR b) with positive start
+query TTTT nosort
+SELECT
+  substr('abcdef', 2, 3) AS s1,
+  substring('abcdef', 4) AS s2,
+  SUBSTRING('東京タワー' FROM 2 FOR 3) AS s3,
+  substr('abc', 10, 2) AS s4
+----
+bcd	def	京タワ	(empty)
+
+# substr with 0 and negative start (PostgreSQL/DataFusion clamping: start <= 0 consumes from count)
+# duckdb: skip duckdb treats negative substr start as counting from right
+query TTT nosort
+SELECT
+  substr('abcdef', 0, 3) AS z_start,
+  substr('abcdef', -1, 4) AS neg_start,
+  substr('abcdef', -5, 3) AS neg_empty
+----
+ab	ab	(empty)
+
+# substr with negative length errors
+# duckdb: skip error message wording
+statement error negative substring length
+SELECT substr('abcdef', 2, -1) AS bad_len
+
+# trim, ltrim, rtrim and SQL TRIM(LEADING/TRAILING/BOTH ... FROM ...)
+query TTTTTT nosort
+SELECT
+  trim('  hi  ') AS t1,
+  ltrim('  hi  ') AS t2,
+  rtrim('  hi  ') AS t3,
+  trim('xxhixx', 'x') AS t4,
+  TRIM(LEADING '0' FROM '004200') AS t5,
+  TRIM(TRAILING '0' FROM '004200') AS t6
+----
+hi	hi  	  hi	hi	4200	0042
+
+# left / right with positive, zero, and negative counts
+query TTTTTT nosort
+SELECT
+  left('abcdef', 2) AS l_pos,
+  left('abcdef', 0) AS l_zero,
+  left('abcdef', -2) AS l_neg,
+  right('abcdef', 2) AS r_pos,
+  right('abcdef', 0) AS r_zero,
+  right('abcdef', -2) AS r_neg
+----
+ab	(empty)	abcd	ef	(empty)	cdef
+
+# split_part: positive, negative (from right), out of range, empty delimiter
+# duckdb: skip duckdb split_part with empty delimiter splits characters instead of returning whole string
+query TTTT nosort
+SELECT
+  split_part('a/b/c', '/', 2) AS p2,
+  split_part('a/b/c', '/', -1) AS pn1,
+  split_part('a/b/c', '/', 5) AS pout,
+  split_part('hello', '', 1) AS pempty
+----
+b	c	(empty)	hello
+
+# split_part with position 0 errors
+# duckdb: skip error message wording
+statement error field position must not be zero
+SELECT split_part('a/b', '/', 0) AS bad_part
+
+# String concatenation: || propagates NULL, concat skips NULL, concat_ws skips NULL args but NULL sep -> NULL
+query TTTTT nosort
+SELECT
+  ('foo' || 'bar') AS pipe_ok,
+  ('foo' || CAST(NULL AS VARCHAR)) AS pipe_null,
+  concat('a', NULL, 'b', 42) AS c_skip,
+  concat_ws('-', 'a', NULL, 'b', 'c') AS cws_ok,
+  concat_ws(CAST(NULL AS VARCHAR), 'a', 'b') AS cws_null_sep
+----
+foobar	NULL	ab42	a-b-c	NULL
+
+# starts_with, ends_with, contains, strpos / POSITION(... IN ...)
+query BBBIIII nosort
+SELECT
+  starts_with('cetra-query', 'cetra') AS sw,
+  ends_with('cetra-query', 'query') AS ew,
+  contains('cetra-query', 'ra-q') AS ct,
+  strpos('cetra-query', 'query') AS sp1,
+  strpos('cetra-query', 'missing') AS sp2,
+  strpos('東京タワー', 'タワ') AS sp_uni,
+  POSITION('a' IN 'banana') AS pos_sql
+----
+true	true	true	7	0	3	2
+
+# Edge cases: substr count=0, ltrim/rtrim custom chars, TRIM(BOTH), left/right > len, split_part multi-char delim
+query TTTTTT nosort
+SELECT
+  substr('abcdef', 2, 0) AS sub0,
+  ltrim('xxabcxx', 'x') AS lt_x,
+  rtrim('xxabcxx', 'x') AS rt_x,
+  TRIM(BOTH 'xy' FROM 'xyabcyx') AS tb_xy,
+  left('hi', 10) AS l_big,
+  split_part('one--two--three', '--', 2) AS sp_mc
+----
+(empty)	abcxx	xxabc	abc	hi	two
+
+# Edge cases: concat all-NULL -> empty, concat_ws all-NULL -> empty, strpos empty needle -> 1
+query TTIII nosort
+SELECT
+  concat(CAST(NULL AS VARCHAR), CAST(NULL AS VARCHAR)) AS c_all_null,
+  concat_ws(',', CAST(NULL AS VARCHAR), CAST(NULL AS VARCHAR)) AS cws_all_null,
+  strpos('abc', '') AS sp_empty_needle,
+  strpos('', '') AS sp_both_empty,
+  strpos('', 'a') AS sp_empty_hay
+----
+(empty)	(empty)	1	1	0
+
+# Unicode left/right/starts_with/ends_with/contains
+query TTBBB nosort
+SELECT
+  left('東京タワー', 2) AS l_uni,
+  right('東京タワー', 3) AS r_uni,
+  starts_with('東京タワー', '東京') AS sw_uni,
+  ends_with('東京タワー', 'ワー') AS ew_uni,
+  contains('Café Noir', 'fé') AS ct_uni
+----
+東京	タワー	true	true	true
+
+# Column-level string operations across NULL and empty rows
+query ITTT nosort
+SELECT id, trim(s) AS ts, left(s, 3) AS ls, concat_ws(':', 'p', s) AS cs
+FROM strs
+WHERE id IN (1, 6, 7, 8)
+ORDER BY id ASC NULLS LAST
+----
+1	Hello World	Hel	p:Hello World
+6	東京タワー	東京タ	p:東京タワー
+7	(empty)	(empty)	p:
+8	NULL	NULL	p
+
+# regexp_like (2-arg and 3-arg flags)
+# duckdb: skip duckdb uses regexp_matches rather than regexp_like
+query BBBBB nosort
+SELECT
+  regexp_like('abc123', '[0-9]+') AS r1,
+  regexp_like('abc', '[0-9]+') AS r2,
+  regexp_like('Hello', 'hello', 'i') AS r_ci,
+  regexp_like('a', 'A') AS r_cs,
+  regexp_like(CAST(NULL AS VARCHAR), 'a') AS r_null
+----
+true	false	true	false	NULL
+
+# regexp_extract: whole match vs capture group 1, no match -> NULL, flags 'i'
+# duckdb: skip cetra regexp_extract 3-arg flags and capture group 1 default
+query TTTT nosort
+SELECT
+  regexp_extract('order-42-end', '[0-9]+') AS whole,
+  regexp_extract('user=alice;role=admin', 'user=([a-z]+)') AS grp1,
+  regexp_extract('no_digits_here', '[0-9]+') AS nomatch,
+  regexp_extract('Model: GPT-4o', 'model: ([a-z0-9-]+)', 'i') AS ci_grp
+----
+42	alice	NULL	GPT-4o
+
+# regexp_like and regexp_extract over table column (including empty and NULL)
+# duckdb: skip cetra regexp_like / regexp_extract
+query IBT nosort
+SELECT
+  id,
+  regexp_like(s, '^[A-Z]') AS starts_upper,
+  regexp_extract(s, '([A-Za-z]+)') AS first_word
+FROM strs
+WHERE id IN (1, 4, 7, 8)
+ORDER BY id ASC NULLS LAST
+----
+1	true	Hello
+4	false	foo
+7	false	NULL
+8	NULL	NULL
+
+# Invalid regex flag errors
+# duckdb: skip cetra regex flag error
+statement error unsupported regex flag
+SELECT regexp_like('abc', 'a', 'z') AS bad_flag
+
+# Binary & FixedBytes8 / FixedBytes16 encoding and hex pushdown regression
+# duckdb: skip FIXEDBYTES8/16 and cetra encode() semantics
+statement ok
+CREATE TABLE hex_tbl (
+  id BIGINT NOT NULL,
+  raw_b BYTEA,
+  sid FIXEDBYTES8,
+  tid FIXEDBYTES16
+)
+
+# duckdb: skip FIXEDBYTES8/16 and cetra encode() semantics
+statement ok
+INSERT INTO hex_tbl VALUES
+  (1, X'deadbeef', X'0001020304050607', X'000102030405060708090a0b0c0d0e0f'),
+  (2, X'00ff', X'aabbccddeeff0011', X'fedcba98765432100123456789abcdef'),
+  (3, NULL, NULL, NULL)
+
+# encode(binary/fixedbytes/utf8, 'hex') produces lowercase hex; format arg is case-insensitive
+# duckdb: skip cetra encode() semantics
+query ITTTT nosort
+SELECT
+  id,
+  encode(raw_b, 'hex') AS b_hex,
+  encode(sid, 'HEX') AS s_hex,
+  encode(tid, 'hex') AS t_hex,
+  encode('Hi', 'hex') AS u_hex
+FROM hex_tbl
+ORDER BY id ASC NULLS LAST
+----
+1	deadbeef	0001020304050607	000102030405060708090a0b0c0d0e0f	4869
+2	00ff	aabbccddeeff0011	fedcba98765432100123456789abcdef	4869
+3	NULL	NULL	NULL	4869
+
+# Hex pushdown: lowercase hex literal matches row 1
+# duckdb: skip FIXEDBYTES16 and cetra encode()
+query I nosort
+SELECT id
+FROM hex_tbl
+WHERE encode(tid, 'hex') = '000102030405060708090a0b0c0d0e0f'
+ORDER BY id ASC NULLS LAST
+----
+1
+
+# Hex pushdown REGRESSION: uppercase hex literal MUST NOT match lowercase encode(tid, 'hex')!
+# Tests pass3_hex_id_rewrite parity with unoptimized eval_encode.
+# duckdb: skip FIXEDBYTES16 and cetra encode()
+query I nosort
+SELECT id
+FROM hex_tbl
+WHERE encode(tid, 'hex') = '000102030405060708090A0B0C0D0E0F'
+ORDER BY id ASC NULLS LAST
+----
+
+# Hex pushdown REGRESSION: IN list with uppercase hex literal must not match
+# duckdb: skip FIXEDBYTES16 and cetra encode()
+query I nosort
+SELECT id
+FROM hex_tbl
+WHERE encode(tid, 'hex') IN ('000102030405060708090A0B0C0D0E0F', 'FEDCBA98765432100123456789ABCDEF')
+ORDER BY id ASC NULLS LAST
+----
+
+# Hex pushdown: != with uppercase hex literal must keep both non-null rows
+# duckdb: skip FIXEDBYTES16 and cetra encode()
+query I nosort
+SELECT id
+FROM hex_tbl
+WHERE encode(tid, 'hex') != '000102030405060708090A0B0C0D0E0F'
+ORDER BY id ASC NULLS LAST
+----
+1
+2
+
+# Hex pushdown REGRESSION: NOT IN with mixed lowercase + uppercase hex excludes only the lowercase match
+# duckdb: skip FIXEDBYTES16 and cetra encode()
+query I nosort
+SELECT id
+FROM hex_tbl
+WHERE encode(tid, 'hex') NOT IN ('000102030405060708090a0b0c0d0e0f', 'FEDCBA98765432100123456789ABCDEF')
+ORDER BY id ASC NULLS LAST
+----
+2
+
+# Unsupported encoding ('base64') returns clean QueryError::Failed
+# duckdb: skip cetra encode() only supports hex
+statement error unsupported encoding
+SELECT encode(X'616263', 'base64') AS b64
+
+# JSON functions: json_get (->), json_get_text (->>), json_extract, json_extract_text
+statement ok
+CREATE TABLE json_tbl (id BIGINT NOT NULL, doc VARCHAR)
+
+statement ok
+INSERT INTO json_tbl VALUES
+  (1, '{"user":{"name":"Alice","age":30},"tags":["llm","eval"],"empty":null}'),
+  (2, '[10, 20, {"k":"v"}]'),
+  (3, 'not-valid-json'),
+  (4, NULL)
+
+# json_get vs json_get_text and -> vs ->> operators
+# duckdb: skip cetra json_get/json_get_text and string-typed ->/->>
+query ITTTT nosort
+SELECT
+  id,
+  json_get(doc, 'user') AS u_json,
+  (doc -> 'user' -> 'name') AS name_quoted,
+  (doc -> 'user' ->> 'name') AS name_text,
+  json_get_text(doc -> 'user', 'age') AS age_text
+FROM json_tbl
+WHERE id IN (1, 3, 4)
+ORDER BY id ASC NULLS LAST
+----
+1	{"name":"Alice","age":30}	"Alice"	Alice	30
+3	NULL	NULL	NULL	NULL
+4	NULL	NULL	NULL	NULL
+
+# JSON null literal: -> returns 'null', ->> returns SQL NULL
+# duckdb: skip cetra json_get/json_get_text
+query TT nosort
+SELECT (doc -> 'empty') AS j_null, (doc ->> 'empty') AS t_null
+FROM json_tbl
+WHERE id = 1
+----
+null	NULL
+
+# JSON 0-based array indexing via -> / ->> (negative/OOB -> NULL)
+# duckdb: skip cetra json_get integer key
+query TTTT nosort
+SELECT
+  (doc -> 0) AS e0,
+  (doc -> 2 ->> 'k') AS e2k,
+  (doc -> 99) AS oob,
+  (doc -> -1) AS neg
+FROM json_tbl
+WHERE id = 2
+----
+10	v	NULL	NULL
+
+# json_extract vs json_extract_text with JSONPath (single match and multi-match)
+# duckdb: skip cetra json_extract/json_extract_text
+query TTTT nosort
+SELECT
+  json_extract(doc, '$.user.name') AS j_name,
+  json_extract_text(doc, '$.user.name') AS t_name,
+  json_extract_text(doc, '$.tags[1]') AS tag1,
+  json_extract(doc, '$.tags[*]') AS all_tags
+FROM json_tbl
+WHERE id = 1
+----
+"Alice"	Alice	eval	["llm","eval"]
+
+# json_extract on missing path and invalid JSON returns NULL
+# duckdb: skip cetra json_extract
+query ITT nosort
+SELECT id, json_extract(doc, '$.missing') AS miss, json_extract_text(doc, '$.user.name') AS nm
+FROM json_tbl
+WHERE id IN (1, 3, 4)
+ORDER BY id ASC NULLS LAST
+----
+1	NULL	Alice
+3	NULL	NULL
+4	NULL	NULL
+
+# json_get_text and json_extract_text on boolean, number, and nested array values
+# duckdb: skip cetra json_get_text / json_extract_text
+query TTTT nosort
+SELECT
+  json_get_text('{"ok":true,"n":42,"arr":[1,2]}', 'ok') AS b_txt,
+  json_get_text('{"ok":true,"n":42,"arr":[1,2]}', 'n') AS n_txt,
+  json_get_text('{"ok":true,"n":42,"arr":[1,2]}', 'arr') AS a_txt,
+  json_extract_text('{"ok":false,"x":null}', '$.x') AS null_txt
+----
+true	42	[1,2]	NULL
+
+# Invalid JSONPath errors
+# duckdb: skip cetra json_extract error
+statement error invalid JSONPath
+SELECT json_extract('{"a":1}', '$[invalid') AS bad_path
+
+statement ok
+DROP TABLE json_tbl
+
+# duckdb: skip hex_tbl was skipped above
+statement ok
+DROP TABLE hex_tbl
+
+statement ok
+DROP TABLE strs

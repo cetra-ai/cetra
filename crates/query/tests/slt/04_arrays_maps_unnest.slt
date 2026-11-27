@@ -1,0 +1,466 @@
+# 04_arrays_maps_unnest.slt
+# ARRAY[...], list concat ||, 1-based subscripts, array_has/array_has_all/array_length/
+# array_element/array_to_string/array_distinct, MAP(VARCHAR, VARCHAR), map['k'],
+# map_keys/map_values, UNNEST in FROM and SELECT.
+
+statement ok
+CREATE TABLE arr_tbl (
+  id BIGINT NOT NULL,
+  tags VARCHAR[],
+  nums BIGINT[]
+)
+
+statement ok
+INSERT INTO arr_tbl VALUES
+  (1, ARRAY['llm', 'eval', 'llm'], ARRAY[10, 20, 30]),
+  (2, ARRAY['prod', NULL, 'eval'], ARRAY[5, NULL, 5]),
+  (3, ARRAY[], ARRAY[]),
+  (4, NULL, NULL),
+  (5, ARRAY['solo'], ARRAY[100])
+
+# ARRAY[...] literals (ints, strings, with NULLs, nested)
+query TTT nosort
+SELECT
+  ARRAY[1, 2, 3] AS a_int,
+  ARRAY['x', NULL, 'y'] AS a_str,
+  ARRAY[ARRAY[1, 2], ARRAY[3, 4]] AS a_2d
+----
+[1, 2, 3]	[x, NULL, y]	[[1, 2], [3, 4]]
+
+# List concatenation || (cetra/DataFusion null semantics: NULL || [1] -> [1], [1] || NULL -> [1])
+# duckdb: skip duckdb list || NULL returns NULL
+query ITT nosort
+SELECT
+  id,
+  (nums || ARRAY[1]) AS c_right,
+  (ARRAY[1] || nums) AS c_left
+FROM arr_tbl
+WHERE id IN (1, 3, 4)
+ORDER BY id ASC NULLS LAST
+----
+1	[10, 20, 30, 1]	[1, 10, 20, 30]
+3	[1]	[1]
+4	[1]	[1]
+
+# Basic non-null list concatenation (DuckDB compatible)
+query T nosort
+SELECT (ARRAY['a', 'b'] || ARRAY['c']) AS joined
+----
+[a, b, c]
+
+# Nested 2D array subscripting and array comparisons
+query IBBBB nosort
+SELECT
+  (ARRAY[ARRAY[10, 20], ARRAY[30, 40]])[2][1] AS elem_2_1,
+  (ARRAY[1, 2] = ARRAY[1, 2]) AS arr_eq,
+  (ARRAY[1, 2] != ARRAY[1, 3]) AS arr_ne,
+  (ARRAY[1, 2] < ARRAY[1, 3]) AS arr_lt,
+  (ARRAY[1, 2] < ARRAY[1, 2, 0]) AS arr_prefix_lt
+----
+30	true	true	true	true
+
+# array_has and array_has_all on integer arrays
+# duckdb: skip cetra array_has / array_has_all
+query IBB nosort
+SELECT id, array_has(nums, 20) AS has20, array_has_all(nums, ARRAY[10, 30, 10]) AS has_dup_sub
+FROM arr_tbl
+WHERE id IN (1, 2, 3, 4)
+ORDER BY id ASC NULLS LAST
+----
+1	true	true
+2	false	false
+3	false	false
+4	NULL	NULL
+
+# array_to_string with boolean list, NULL delimiter -> NULL, NULL null_str skips NULLs
+# duckdb: skip duckdb array_to_string takes 2 arguments
+query TTT nosort
+SELECT
+  array_to_string(ARRAY[true, false, NULL], ',') AS b_str,
+  array_to_string(ARRAY['a', 'b'], CAST(NULL AS VARCHAR)) AS null_delim,
+  array_to_string(ARRAY['a', NULL, 'b'], ',', CAST(NULL AS VARCHAR)) AS null_rep
+----
+true,false	NULL	a,b
+
+# array_distinct on integer array without NULLs
+# unordered_arrays
+query T nosort
+SELECT array_distinct(ARRAY[3, 1, 2, 1, 3]) AS d_ints
+----
+[3, 1, 2]
+
+# 1-based array subscripting: valid, negative (from end), 0/OOB -> NULL, NULL array -> NULL
+query ITTT nosort
+SELECT
+  id,
+  tags[1] AS first_t,
+  tags[2] AS second_t,
+  tags[99] AS oob_t
+FROM arr_tbl
+ORDER BY id ASC NULLS LAST
+----
+1	llm	eval	NULL
+2	prod	NULL	NULL
+3	NULL	NULL	NULL
+4	NULL	NULL	NULL
+5	solo	NULL	NULL
+
+# Negative and zero array subscripts (cetra: -1 = last, 0 = NULL)
+# duckdb: skip duckdb 0-index behavior differs
+query IIII nosort
+SELECT
+  nums[-1] AS last_n,
+  nums[-3] AS first_n,
+  nums[0] AS zero_n,
+  nums[-10] AS neg_oob
+FROM arr_tbl
+WHERE id = 1
+----
+30	10	NULL	NULL
+
+# array_element (1-based, negative, 0, OOB, NULL)
+# duckdb: skip cetra array_element function name
+query IIIII nosort
+SELECT
+  id,
+  array_element(nums, 1) AS e1,
+  array_element(nums, -1) AS elast,
+  array_element(nums, 0) AS e0,
+  array_element(nums, 5) AS eoob
+FROM arr_tbl
+ORDER BY id ASC NULLS LAST
+----
+1	10	30	NULL	NULL
+2	5	5	NULL	NULL
+3	NULL	NULL	NULL	NULL
+4	NULL	NULL	NULL	NULL
+5	100	100	NULL	NULL
+
+# array_has and alias array_contains
+# duckdb: skip cetra array_has NULL-target semantics
+query IBBBB nosort
+SELECT
+  id,
+  array_has(tags, 'eval') AS has_eval,
+  array_contains(tags, 'prod') AS has_prod,
+  array_has(tags, 'missing') AS has_miss,
+  array_has(tags, CAST(NULL AS VARCHAR)) AS has_null
+FROM arr_tbl
+ORDER BY id ASC NULLS LAST
+----
+1	true	false	false	NULL
+2	true	true	false	NULL
+3	false	false	false	NULL
+4	NULL	NULL	NULL	NULL
+5	false	false	false	NULL
+
+# array_has_all and @> operator
+# duckdb: skip cetra array_has_all and @>
+query IBBBB nosort
+SELECT
+  id,
+  array_has_all(tags, ARRAY['llm', 'eval']) AS has_both,
+  array_has_all(tags, ARRAY[]) AS has_empty,
+  (tags @> ARRAY['prod', 'eval']) AS op_contains,
+  array_has_all(tags, ARRAY['eval', NULL]) AS has_with_null
+FROM arr_tbl
+ORDER BY id ASC NULLS LAST
+----
+1	true	true	false	false
+2	false	true	true	true
+3	false	true	false	false
+4	NULL	NULL	NULL	NULL
+5	false	true	false	false
+
+# array_length 1D on table rows (empty -> 0, NULL -> NULL)
+query III nosort
+SELECT id, array_length(tags) AS tlen, array_length(nums) AS nlen
+FROM arr_tbl
+ORDER BY id ASC NULLS LAST
+----
+1	3	3
+2	3	3
+3	0	0
+4	NULL	NULL
+5	1	1
+
+# array_length 2D with explicit dimension (dim 1, dim 2, dim out of range -> NULL)
+# duckdb: skip duckdb 2-arg array_length only applies to fixed-size ARRAY
+query IIII nosort
+SELECT
+  array_length(ARRAY[ARRAY[1, 2, 3], ARRAY[4, 5, 6]], 1) AS dim1,
+  array_length(ARRAY[ARRAY[1, 2, 3], ARRAY[4, 5, 6]], 2) AS dim2,
+  array_length(ARRAY[ARRAY[1, 2], ARRAY[3, 4]], 3) AS dim3_oob,
+  array_length(ARRAY[ARRAY[1, 2]], 0) AS dim0_oob
+----
+2	3	NULL	NULL
+
+# array_to_string (2-arg skips NULLs; 3-arg replaces NULLs with null_str; empty -> empty string)
+# duckdb: skip duckdb array_to_string takes 2 arguments
+query ITT nosort
+SELECT
+  id,
+  array_to_string(tags, ',') AS joined_skip,
+  array_to_string(tags, '|', 'MISSING') AS joined_fill
+FROM arr_tbl
+ORDER BY id ASC NULLS LAST
+----
+1	llm,eval,llm	llm|eval|llm
+2	prod,eval	prod|MISSING|eval
+3	(empty)	(empty)
+4	NULL	NULL
+5	solo	solo
+
+# array_to_string on integer list
+query IT nosort
+SELECT id, array_to_string(nums, '-') AS num_str
+FROM arr_tbl
+WHERE id IN (1, 3, 5)
+ORDER BY id ASC NULLS LAST
+----
+1	10-20-30
+3	(empty)
+5	100
+
+# array_distinct on non-null arrays (DuckDB compatible)
+# unordered_arrays
+query IT nosort
+SELECT id, array_distinct(tags) AS d_tags
+FROM arr_tbl
+WHERE id IN (1, 3, 5)
+ORDER BY id ASC NULLS LAST
+----
+1	[llm, eval]
+3	[]
+5	[solo]
+
+# array_distinct preserves single NULL element in cetra (DuckDB list_distinct drops NULLs)
+# duckdb: skip duckdb list_distinct drops NULL elements
+query ITT nosort
+SELECT id, array_distinct(tags) AS d_tags, array_distinct(nums) AS d_nums
+FROM arr_tbl
+WHERE id IN (2, 4)
+ORDER BY id ASC NULLS LAST
+----
+2	[prod, NULL, eval]	[5, NULL]
+4	NULL	NULL
+
+# MAP(VARCHAR, VARCHAR) table, subscripting, map_keys, map_values
+# duckdb: skip cetra MAP(...) constructor syntax
+statement ok
+CREATE TABLE map_tbl (
+  id BIGINT NOT NULL,
+  meta MAP(VARCHAR, VARCHAR)
+)
+
+# duckdb: skip cetra MAP(...) constructor syntax
+statement ok
+INSERT INTO map_tbl VALUES
+  (1, MAP('z', 'last', 'a', 'first', 'm', NULL)),
+  (2, MAP('env', 'prod')),
+  (3, MAP()),
+  (4, NULL)
+
+# Map lookup m['k']: present, missing -> NULL, NULL value -> NULL, empty/NULL map -> NULL
+# duckdb: skip cetra MAP table
+query ITTTT nosort
+SELECT
+  id,
+  meta['a'] AS ka,
+  meta['m'] AS km,
+  meta['env'] AS kenv,
+  meta['missing'] AS kmiss
+FROM map_tbl
+ORDER BY id ASC NULLS LAST
+----
+1	first	NULL	NULL	NULL
+2	NULL	NULL	prod	NULL
+3	NULL	NULL	NULL	NULL
+4	NULL	NULL	NULL	NULL
+
+# Map display formatting and map_keys / map_values (map_keys/map_values preserve stored entry order)
+# duckdb: skip cetra MAP table
+query ITTT nosort
+SELECT
+  id,
+  meta,
+  map_keys(meta) AS ks,
+  map_values(meta) AS vs
+FROM map_tbl
+ORDER BY id ASC NULLS LAST
+----
+1	{a=first, m=NULL, z=last}	[z, a, m]	[last, first, NULL]
+2	{env=prod}	[env]	[prod]
+3	{}	[]	[]
+4	NULL	NULL	NULL
+
+# Qualified map subscript lookup in WHERE and SELECT
+# duckdb: skip cetra MAP table
+query IT nosort
+SELECT m.id, m.meta['env'] AS env_val
+FROM map_tbl AS m
+WHERE m.meta['env'] = 'prod'
+ORDER BY m.id ASC NULLS LAST
+----
+2	prod
+
+# Map lookup with NULL key returns NULL
+# duckdb: skip cetra MAP table
+query IT nosort
+SELECT id, meta[CAST(NULL AS VARCHAR)] AS nk
+FROM map_tbl
+WHERE id IN (1, 2)
+ORDER BY id ASC NULLS LAST
+----
+1	NULL
+2	NULL
+
+# Map lookup inside COALESCE and CASE
+# duckdb: skip cetra MAP table
+query ITT nosort
+SELECT
+  id,
+  COALESCE(meta['env'], 'unknown') AS eff_env,
+  CASE WHEN meta['a'] = 'first' THEN 'hit' ELSE 'miss' END AS chk
+FROM map_tbl
+ORDER BY id ASC NULLS LAST
+----
+1	unknown	hit
+2	prod	miss
+3	unknown	miss
+4	unknown	miss
+
+# UNNEST + GROUP BY tag frequency count (classic analytics query)
+# duckdb: skip duckdb FROM UNNEST lateral syntax differs
+query TI nosort
+SELECT u.tag, COUNT(*) AS cnt
+FROM arr_tbl AS a, UNNEST(a.tags) AS u(tag)
+GROUP BY u.tag
+ORDER BY u.tag ASC NULLS LAST
+----
+eval	2
+llm	2
+prod	1
+solo	1
+NULL	1
+
+# CROSS JOIN UNNEST syntax in FROM
+# duckdb: skip duckdb CROSS JOIN UNNEST syntax differs
+query II nosort
+SELECT a.id, u.n
+FROM arr_tbl AS a
+CROSS JOIN UNNEST(a.nums) AS u(n)
+WHERE a.id IN (1, 5)
+ORDER BY a.id ASC NULLS LAST, u.n ASC NULLS LAST
+----
+1	10
+1	20
+1	30
+5	100
+
+# UNNEST in SELECT (drops empty/NULL array rows, preserves NULL elements inside array)
+query IT nosort
+SELECT id, UNNEST(tags) AS tag
+FROM arr_tbl
+ORDER BY id ASC NULLS LAST, tag ASC NULLS LAST
+----
+1	eval
+1	llm
+1	llm
+2	eval
+2	prod
+2	NULL
+5	solo
+
+# UNNEST in SELECT with WHERE filter on base table
+query II nosort
+SELECT id, UNNEST(nums) AS num
+FROM arr_tbl
+WHERE id <= 2
+ORDER BY id ASC NULLS LAST, num ASC NULLS LAST
+----
+1	10
+1	20
+1	30
+2	5
+2	5
+2	NULL
+
+# UNNEST in SELECT combined with expression over unnested value
+query II nosort
+SELECT id, (UNNEST(nums) * 2) AS doubled
+FROM arr_tbl
+WHERE id IN (1, 5)
+ORDER BY id ASC NULLS LAST, doubled ASC NULLS LAST
+----
+1	20
+1	40
+1	60
+5	200
+
+# UNNEST in FROM clause (comma join)
+# duckdb: skip duckdb FROM UNNEST lateral syntax differs
+query IT nosort
+SELECT a.id, u.tag
+FROM arr_tbl AS a, UNNEST(a.tags) AS u(tag)
+ORDER BY a.id ASC NULLS LAST, u.tag ASC NULLS LAST
+----
+1	eval
+1	llm
+1	llm
+2	eval
+2	prod
+2	NULL
+5	solo
+
+# UNNEST in FROM clause with WHERE filtering the unnested column
+# duckdb: skip duckdb FROM UNNEST lateral syntax differs
+query IT nosort
+SELECT a.id, u.tag
+FROM arr_tbl AS a, UNNEST(a.tags) AS u(tag)
+WHERE u.tag = 'eval'
+ORDER BY a.id ASC NULLS LAST
+----
+1	eval
+2	eval
+
+# UNNEST in FROM with multiple parallel arrays (zipped, padded with NULL to max length)
+# duckdb: skip duckdb multi-arg FROM UNNEST syntax differs
+query IIT nosort
+SELECT a.id, u.n, u.t
+FROM arr_tbl AS a, UNNEST(a.nums, a.tags) AS u(n, t)
+WHERE a.id IN (1, 5)
+ORDER BY a.id ASC NULLS LAST, u.n ASC NULLS LAST
+----
+1	10	llm
+1	20	eval
+1	30	llm
+5	100	solo
+
+# Standalone UNNEST of an array literal in FROM
+# duckdb: skip duckdb FROM UNNEST alias syntax differs
+query I nosort
+SELECT u.v
+FROM UNNEST(ARRAY[3, 1, 2]) AS u(v)
+ORDER BY u.v ASC NULLS LAST
+----
+1
+2
+3
+
+# Subscripting a non-list/non-map type errors cleanly
+# duckdb: skip error message wording
+statement error cannot be subscripted
+SELECT id[1] AS bad_sub FROM arr_tbl
+
+# UNNEST of a non-list column errors cleanly
+# duckdb: skip error message wording
+statement error list
+SELECT UNNEST(id) AS bad_u FROM arr_tbl
+
+# duckdb: skip map_tbl was skipped above
+statement ok
+DROP TABLE map_tbl
+
+statement ok
+DROP TABLE arr_tbl
