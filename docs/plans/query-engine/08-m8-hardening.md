@@ -1,15 +1,15 @@
 # Track QE — Milestone 8 Implementation Plan (Post-Review Hardening & Verification Gates)
 
-**Status:** Done (2026-11-26) — All waves H1–H4b implemented, cold-reviewed by Neon High, and verified across H5–H6.
+**Status:** Done (2026-11-27) — All waves H1–H4b implemented, independently cold-reviewed, verified across H5–H6, and followed by a 52-finding deep-review remediation pass (Waves 1–5).
 **Track / Milestone:** QE — M8 (Hardening follow-up to M1–M7 on branch `qe-query-engine`)
-**Source:** Clean-room blind design review (`qe_plan_blind_review.md`) + read-only code triage (`qe_code_triage.md`) against PR #267 (`e63bd7c`)
-**Scope:** Close **all 9 confirmed Blockers**, **Seam #3**, **all 26 confirmed Majors**, **12 remaining Minors** (`QE-m13` slim `arrow` umbrella swap explicitly deferred until Statam replaces Parquet), **1 newly discovered `ChunkFlusher` reservation leak** in `reads/facets.rs`, and **CodeQL alerts `#152` & `#153`** across `H1`–`H4b` + full verification (`H5`) + Neon High cold code review (`H6`).
+**Source:** Clean-room blind design review and read-only code triage against PR #267 (`e63bd7c`), followed by an 8-slice deep review against PR #267 (`f066d65`)
+**Scope:** Close **all 9 confirmed Blockers**, **Seam #3**, **all 26 confirmed Majors**, **12 remaining Minors** (`QE-m13` slim `arrow` umbrella swap explicitly deferred until a native file format replaces Parquet), **1 newly discovered `ChunkFlusher` reservation leak** in `reads/facets.rs`, and **CodeQL alerts `#152` & `#153`** across `H1`–`H4b` + full verification (`H5`) + cold code review (`H6`), plus the 52 verified deep-review findings (2 P0, 19 P1, 31 P2) in Waves 1–5.
 
 ---
 
 ## Cross-Cutting Invariants
 
-1. **Workspace & ownership:** All edits happen exclusively inside `/home/sebastien/travaux/llm-observer/.claude/worktrees/qe-query-engine` (`qe-query-engine`). Never edit `/home/sebastien/travaux/cetra` (`main`).
+1. **Workspace & ownership:** All edits happen exclusively on the `qe-query-engine` branch; never edit `main` directly.
 2. **Code rules (`AGENTS.md`):** `#![forbid(unsafe_code)]`, zero `unwrap()`/`expect()` outside tests (unless an adjacent comment proves the invariant), zero compatibility shims/wrappers (update all callers in the same commit), privacy-safe `Debug`/`Display`/errors (zero row payloads or PII), `thiserror` per crate.
 3. **Crate dependency graph preserved:**
    - `cetra-column` depends on no workspace crate and no `tokio`/`arrow`/`parquet`.
@@ -224,13 +224,13 @@ Closed: `QE-B1` (column side), `QE-B2`, `QE-M3`, `QE-M4` (types side), `QE-M35`,
    - Add `RunError::Busy` (`kind() == "busy"`, mapped to 503 `ApiError::Unavailable` in `server/src/http/error.rs`) and make `EngineContext.pool: Arc<ScopedPool>` non-optional.
 4. **Chunked `dataset_items`/`experiment_items` (`VIEW_BATCH_ROWS = 8_192`, `8 MiB` text cap) (`QE-M34`)**.
 5. **Full cell-value decoding in HTTP & CLI Parquet export tests (`QE-M33`)**.
-6. **Hygiene (`QE-m12`):** `views/catalog.rs:887` fixture `in_sql` assertion + 5 stale Arrow/DataFusion comments. (`QE-m13` slim `arrow-array`/`arrow-schema` swap is explicitly deferred until Statam removes Arrow completely.)
+6. **Hygiene (`QE-m12`):** `views/catalog.rs:887` fixture `in_sql` assertion + 5 stale Arrow/DataFusion comments. (`QE-m13` slim `arrow-array`/`arrow-schema` swap is explicitly deferred until a native file format removes Arrow completely.)
 
 **Commit:** `storage,server,cli: facets per-field isolation & ChunkFlusher fix, RunError::Busy, chunked SQLite views, Parquet test decoding, hygiene`
 
 ---
 
-## Phases H5 & H6 — Verification Gates (`QE-B20`) & Cold Neon High Review *(Done)*
+## Phases H5 & H6 — Verification Gates (`QE-B20`) & Cold Review *(Done)*
 
 ### H5 Verification Results (2026-11-26, Linux 7.3.4, Ryzen 9 3950X 16c/32t, 62 GiB RAM)
 
@@ -251,5 +251,16 @@ Closed: `QE-B1` (column side), `QE-B2`, `QE-M3`, `QE-M4` (types side), `QE-M35`,
 
 ### H6 Cold Reviews & Final Sync
 
-- Every wave (`H1`, `H2`, `H3a`, `H3b`, `H4a`, `H4b`) received an independent cold Neon High code review and every finding was fixed and verified in follow-up commits (`e2af788`, `fb9268b`, `43386a3`, `9eec660`, `e131209`).
+- Every wave (`H1`, `H2`, `H3a`, `H3b`, `H4a`, `H4b`) received an independent cold code review and every finding was fixed and verified in follow-up commits (`e2af788`, `fb9268b`, `43386a3`, `9eec660`, `e131209`).
 - `design.md` synced with hardened contracts (`Arc<Column>`, `EvalCache`, `MapProjection`, CNF `substrings`, `SpillAppender`, `ScopedPool::child`, `bg_workers`, `ScoresSource` pre-LWW pushdown).
+
+### Post-M8 Deep Review & 5-Wave Remediation (2026-11-27)
+
+An 8-slice cold deep review of the full PR #267 diff (`f066d65`) identified **52 verified findings** (2 P0, 19 P1, 31 P2), planned and plan-reviewed before implementation, fixed across 5 commits, and cold-diff-reviewed across all 5 waves:
+
+- **Wave 1 (`97d8e66`, `column`, `wal/record`):** Memoized `MaterializedEstimator` eliminating exponential CPU blowup on nested `Dict`/`Rle`/`List`/`Const` frames (`P0-1`), lock-free `ScopedPool::child` `on_release` (`P1-9`), symmetric encode/decode frame bounds, `RLE` `run_count <= len` validation, zero-copy `Const` Utf8/Binary decode, and peak reservation for structured `Const` scalars (`P2-1`–`P2-3`).
+- **Wave 2 (`c768bfa`, `query` eval/bind/fn/encode/fuzz):** Typed `NULL` for `date_trunc(NULL, ts)` (`P1-4`), `Decimal128` arithmetic widening/clamping/scale validation (`P1-5`), balanced `OR` tombstones + iterative boolean/binary spine evaluation (`P1-10`), `256 KiB` NFA / `128 KiB` DFA regex caps with `384 KiB` `EvalCache` charge (`P1-14`), streaming hex encoding & `array_to_string` budgeting (`P1-15`, `P2-4`), scientific `Decimal` parsing, recursive `unify_pair`, multi-dim `array_length`, iterative `plan_fuzz_cost`, and lazy `FuzzScratchDir` (`P2-5`, `P2-6`, `P2-29`, `P2-30`).
+- **Wave 3 (`60e9d04`, `query/exec`):** Canonical `Interval` inside `List` keys (`P1-6`), exhaustive `UnionSource` filter column remapping (`P1-7`), top-5-bit spill partition dispatch & disjoint table/partition hash domains (`P1-11`), `ExternalSort`/`HashJoin`/`HashAgg` spill & reservation hardening (`P1-12`, `P1-13`, `P2-7`–`P2-18`), plus multi-worker headroom enforcement in global `HashAgg::consume` (verified `400/400` under 16-way 2-CPU contention).
+- **Wave 4 (`74f6f90`, `query/sql`, `spec 05`):** Iterative `LogicalPlan` traversals and `EXPLAIN` formatters with enforced `MAX_PLAN_NODES = 4_096`, `MAX_PLAN_DEPTH = 128`, `MAX_WINDOW_GROUPS = 32`, and `MAX_SUBQUERY_JOINS = 32` (`P0-2`), qualified subscripts in `precoerce_expr`/`rewrite_agg_expr` (`P1-1`, `P1-2`), empty & NUL identifier rejection (`P1-3`), internal synthetic column partitioning, `DISTINCT ORDER BY` quote sensitivity, iterative AST cloning (including subqueries), and safe `OR` hex-ID pushdown (`P2-19`–`P2-22`).
+- **Wave 5 (`ca301e1`, `storage`, `server`):** SQL export producer panic propagation (`P1-8`), zero-2×-spike reservation handoffs + `ReservedVec` Parquet export + compaction `emit_chunk` reconciliation (`P1-16`), streaming `user_detail` join & pool-accounted deletion sinks (`P1-17`, `P1-18`), `ParquetPartitionStream` rollback & `take` accounting, deprecated unsigned `Int32` & inverted `min > max` pruning guards, `MemtableSource::from_projected`, streaming experiment sinks, and source-enforced `VisibleFromSource`/`with_visible_from` (`P2-23`–`P2-28`, `P2-31`).
+- **Verification:** Full `just check-rust` (`6,280` nextest tests + `13` crash tests + doctests + `clippy -D warnings` + `fmt` + `check-ee` + `cargo deny`) and `31/31` PR #267 CI + CodeQL checks green (`0` open CodeQL alerts).
