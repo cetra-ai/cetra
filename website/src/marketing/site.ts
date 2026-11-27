@@ -18,6 +18,9 @@ export const MIN_STARS_SHOWN = 50;
 export const CLOUD = {
   signup: "https://app.cetra.sh/signup",
   login: "https://app.cetra.sh/login",
+  /** The legal pages; `cetra.sh/privacy` and `cetra.sh/terms` redirect there (`public/_redirects`). */
+  privacy: "https://app.cetra.sh/privacy",
+  terms: "https://app.cetra.sh/terms",
   /** The regions the cloud offers today (design §9.4; us1 from D-Q-121 in llmobs-control). */
   regions: ["EU (eu1)", "US (us1)"],
 } as const;
@@ -90,6 +93,8 @@ export const FOOTER: FooterColumn[] = [
     links: [
       { label: "Status", href: STATUS_URL },
       { label: "Licence", href: LICENSE_URL },
+      { label: "Privacy", href: CLOUD.privacy },
+      { label: "Terms", href: CLOUD.terms },
     ],
   },
 ];
