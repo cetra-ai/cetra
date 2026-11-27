@@ -31,7 +31,7 @@ use crate::format::{
     MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, RowGroupEntry, read_framed_block_checked_cow,
 };
 use crate::io::RangeReader;
-use crate::parallel::{in_parallel_scope, parallel_map_in_order};
+use crate::parallel::{MAX_PARALLEL_THREADS, in_parallel_scope, parallel_map_in_order_static};
 use crate::payload::pack::ChunkPackReader;
 use crate::payload::search::RetainedPackChunks;
 use crate::payload::{
@@ -50,7 +50,9 @@ pub use meta::StatamFileMeta;
 use payload::PayloadWavePlan;
 pub(crate) use payload::StreamingL0Payload;
 use payload::{PHASE2_PAYLOAD_WAVE_TARGET_BYTES, ParsedL0Payload, ResolvedChunks};
-use plan::{ActiveMiniBlock, DecodedPhase1, RgIoPlan, TouchedMbRows, find_time_column};
+use plan::{
+    ActiveMiniBlock, BlockCacheReader, DecodedPhase1, RgIoPlan, TouchedMbRows, find_time_column,
+};
 
 /// Maximum gap (64 KiB) between blocks coalesced unconditionally into a single `Scan` range read.
 const SCAN_COALESCE_MAX_GAP: u64 = 64 * 1024;
@@ -74,7 +76,7 @@ const MIN_PARALLEL_WORK_BYTES: usize = 48 * 1024;
 /// Computes the bounded worker count for reader parallel scopes based on `work_bytes`.
 #[inline]
 pub(super) fn effective_read_threads(work_bytes: usize, max_threads: usize) -> usize {
-    let cap = max_threads.clamp(1, crate::parallel::MAX_PARALLEL_THREADS);
+    let cap = max_threads.clamp(1, MAX_PARALLEL_THREADS);
     if cap <= 1 || work_bytes < MIN_PARALLEL_WORK_BYTES {
         return 1;
     }
@@ -335,7 +337,7 @@ struct P2CandidateFetch {
 /// Range-based reader for `.statam` files.
 pub struct StatamReader {
     reader: Arc<dyn RangeReader>,
-    meta: StatamFileMeta,
+    meta: Arc<StatamFileMeta>,
     packs: Option<Arc<dyn PackResolver>>,
     retained_tail_start: Option<u64>,
     caches: Mutex<ReaderCaches>,
@@ -390,7 +392,7 @@ impl StatamReader {
         }
         Ok(Self {
             reader,
-            meta,
+            meta: Arc::new(meta),
             packs,
             retained_tail_start: None,
             caches: Mutex::new(caches),
@@ -588,7 +590,7 @@ impl StatamReader {
                         reason: "short read on L0 payload during verify_full",
                     });
                 }
-                let l0 = ParsedL0Payload::parse(&bytes)?;
+                let l0 = ParsedL0Payload::parse(bytes)?;
                 l0.verify_all_frames()?;
             }
         }
@@ -726,6 +728,7 @@ impl StatamReader {
             keys.sort_unstable();
             keys.dedup();
         }
+        let map_keys_by_col = Arc::new(map_keys_by_col);
 
         if early_empty {
             return Ok(Vec::new());
@@ -1116,7 +1119,7 @@ impl StatamReader {
         struct TouchedRgPlan {
             rg_idx: usize,
             mb_rows: Vec<(usize, Vec<usize>)>,
-            plan: RgIoPlan,
+            plan: Arc<RgIoPlan>,
             ranges: Vec<(u64, u64)>,
             rg_bytes: u64,
             need_l0_payload: bool,
@@ -1124,11 +1127,11 @@ impl StatamReader {
             dict_cols: Vec<usize>,
         }
 
-        let empty_map_keys: HashMap<usize, Vec<String>> = HashMap::new();
+        let empty_map_keys: Arc<HashMap<usize, Vec<String>>> = Arc::new(HashMap::new());
         let mut touched_with_plans: Vec<TouchedRgPlan> = Vec::with_capacity(touched_rgs.len());
         for (rg_idx, mb_rows) in touched_rgs {
             let surviving_mbs: Vec<usize> = mb_rows.iter().map(|(mb, _)| *mb).collect();
-            let plan = self.build_rg_io_plan(
+            let plan = Arc::new(self.build_rg_io_plan(
                 rg_idx,
                 &surviving_mbs,
                 &proj_indices,
@@ -1138,7 +1141,7 @@ impl StatamReader {
                 &[],
                 &[],
                 &[],
-            );
+            ));
             let mut dict_cols = Vec::new();
             for &pidx in plan.all_phys_cols() {
                 if (self.meta.col_dir[pidx].col_flags & COL_FLAG_HAS_FILE_DICT) != 0 {
@@ -1255,29 +1258,19 @@ impl StatamReader {
                             .any(|(mb_idx, _)| blks[*mb_idx].encoding != Encoding::ConstNull)
                     })
                 });
-            let block_cache = self.fetch_blocks_and_lazy_maybe_prefetch_packs(
+            let block_cache = Arc::new(self.fetch_blocks_and_lazy_maybe_prefetch_packs(
                 &wave_ranges,
                 &[],
                 &[],
                 &wave_dict_cols,
                 eligible_for_pack_prefetch,
-            )?;
+            )?);
 
-            let read_block = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
-                if blk.stored_len == 0 {
-                    return Ok(Cow::Borrowed(&[]));
-                }
-                let end = blk
-                    .offset
-                    .checked_add(BLOCK_FRAME_HEADER_LEN as u64 + u64::from(blk.stored_len))
-                    .ok_or(StatamError::BoundsExceeded {
-                        reason: "take_rows block key overflow",
-                    })?;
-                let key = (blk.offset, end);
-                let frame = block_cache.get(&key).ok_or(StatamError::Corrupt {
-                    reason: "missing take_rows fetched block",
-                })?;
-                read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
+            let block_reader = BlockCacheReader::Map {
+                primary: Arc::clone(&block_cache),
+                fallback: None,
+                missing_reason: "missing take_rows fetched block",
+                overflow_reason: "take_rows block key overflow",
             };
 
             if !has_payload_proj {
@@ -1298,7 +1291,7 @@ impl StatamReader {
                         &proj_schema,
                         &empty_map_keys,
                         &empty_chunks,
-                        &read_block,
+                        &block_reader,
                         read_threads,
                     )?;
                     out_batches.append(&mut rg_batches);
@@ -1311,7 +1304,7 @@ impl StatamReader {
             struct StagedTakeRg {
                 rg_idx: usize,
                 mb_rows: Vec<(usize, Vec<usize>)>,
-                plan: RgIoPlan,
+                plan: Arc<RgIoPlan>,
                 need_l0_payload: bool,
                 l0_end: u64,
                 active_mbs: Vec<ActiveMiniBlock>,
@@ -1379,16 +1372,35 @@ impl StatamReader {
                 let ref_workers = effective_read_threads(ref_work_bytes, read_threads);
                 if ref_tasks.len() >= 2 && ref_workers > 1 && !in_parallel_scope() {
                     ref_tasks.sort_unstable_by_key(|a| std::cmp::Reverse(a.6));
-                    let decoded_refs = parallel_map_in_order(
-                        ref_tasks,
+                    let mut sparse_masks: Vec<Vec<Option<Arc<Bitmap>>>> = stage
+                        .iter()
+                        .map(|s| vec![None; s.active_mbs.len()])
+                        .collect();
+                    let static_ref_tasks: Vec<_> = ref_tasks
+                        .into_iter()
+                        .map(|(rg_pos, mb_pos, rg_idx, mb_idx, cidx, is_sparse, _)| {
+                            let mask_opt = if is_sparse {
+                                let slot = &mut sparse_masks[rg_pos][mb_pos];
+                                let arc = slot.get_or_insert_with(|| {
+                                    Arc::new(stage[rg_pos].active_mbs[mb_pos].1.clone())
+                                });
+                                Some(Arc::clone(arc))
+                            } else {
+                                None
+                            };
+                            (rg_pos, mb_pos, rg_idx, mb_idx, cidx, mask_opt)
+                        })
+                        .collect();
+                    let meta = Arc::clone(&self.meta);
+                    let br = block_reader.clone();
+                    let decoded_refs = parallel_map_in_order_static(
+                        static_ref_tasks,
                         ref_workers,
-                        |(rg_pos, mb_pos, rg_idx, mb_idx, cidx, is_sparse, _)| {
-                            let mask = &stage[rg_pos].active_mbs[mb_pos].1;
-                            let mb_row_count =
-                                self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
-                            let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
-                            let raw = read_block(blk)?;
-                            let item = if is_sparse {
+                        move |(rg_pos, mb_pos, rg_idx, mb_idx, cidx, mask_opt)| {
+                            let mb_row_count = meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
+                            let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                            let raw = br.read_block(blk)?;
+                            let item = if let Some(mask) = mask_opt.as_deref() {
                                 let selected = decode_payload_refs_selected(
                                     &raw,
                                     mb_row_count,
@@ -1415,7 +1427,7 @@ impl StatamReader {
                         let mb_row_count =
                             self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
                         let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
-                        let raw = read_block(blk)?;
+                        let raw = block_reader.read_block(blk)?;
                         let item = if is_sparse {
                             let mask = &stage[rg_pos].active_mbs[mb_pos].1;
                             let selected = decode_payload_refs_selected(
@@ -1438,11 +1450,11 @@ impl StatamReader {
                 }
             }
 
-            struct PreparedTakeRg<'a> {
+            struct PreparedTakeRg {
                 rg_idx: usize,
                 mb_rows: Vec<(usize, Vec<usize>)>,
-                plan: RgIoPlan,
-                l0_parsed: Option<ParsedL0Payload<'a>>,
+                plan: Arc<RgIoPlan>,
+                l0_parsed: Option<ParsedL0Payload>,
                 active_mbs: Vec<ActiveMiniBlock>,
                 ext_by_pack: BTreeMap<u16, BTreeSet<u32>>,
                 l0_cids: BTreeSet<u32>,
@@ -1451,7 +1463,7 @@ impl StatamReader {
                 max_mb_col_decoded_bytes: usize,
             }
 
-            let mut prepared: Vec<PreparedTakeRg<'_>> = Vec::with_capacity(stage.len());
+            let mut prepared: Vec<PreparedTakeRg> = Vec::with_capacity(stage.len());
             let mut merged_ext_by_pack: BTreeMap<u16, BTreeSet<u32>> = BTreeMap::new();
             let mut total_l0_chunk_bytes = 0usize;
             let mut total_l0_frame_bytes = 0usize;
@@ -1461,7 +1473,7 @@ impl StatamReader {
                 let l0_parsed = if item.need_l0_payload {
                     block_cache
                         .get(&(rg.l0_payload_offset, item.l0_end))
-                        .map(|b| ParsedL0Payload::parse(b))
+                        .map(|b| ParsedL0Payload::parse(b.clone()))
                         .transpose()?
                 } else {
                     None
@@ -1502,7 +1514,7 @@ impl StatamReader {
                 });
             }
 
-            let materialize_prepared_rg = |prep: PreparedTakeRg<'_>,
+            let materialize_prepared_rg = |prep: PreparedTakeRg,
                                            ext_chunks: &mut ResolvedChunks,
                                            ext_chunk_bytes: usize,
                                            ext_frame_bytes: usize|
@@ -1539,7 +1551,7 @@ impl StatamReader {
                     &proj_schema,
                     &empty_map_keys,
                     ext_chunks,
-                    &read_block,
+                    &block_reader,
                     read_threads,
                 );
                 ext_chunks.clear_l0();
@@ -1556,28 +1568,54 @@ impl StatamReader {
                 && total_frame_bytes <= PHASE2_PAYLOAD_WAVE_TARGET_BYTES
                 && max_wave_col_decoded_bytes <= PHASE2_PAYLOAD_WAVE_TARGET_BYTES
             {
-                let mut wave_ext_chunks =
-                    self.resolve_external_pack_chunks(merged_ext_by_pack, read_threads)?;
-                for prep in prepared {
-                    let mut rg_batches = materialize_prepared_rg(
-                        prep,
-                        &mut wave_ext_chunks,
-                        total_ext_chunk_bytes,
-                        total_ext_frame_bytes,
+                let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
+                if threads > 1
+                    && !in_parallel_scope()
+                    && prepared.len() == 1
+                    && prepared[0].l0_cids.is_empty()
+                    && !merged_ext_by_pack.is_empty()
+                    && !proj_indices.is_empty()
+                {
+                    let prep = prepared.pop().ok_or(StatamError::Corrupt {
+                        reason: "missing single prepared take RG",
+                    })?;
+                    let mut rg_batches = self.resolve_and_materialize_take_rg_fused(
+                        prep.rg_idx,
+                        prep.mb_rows,
+                        prep.active_mbs,
+                        &prep.plan,
+                        &proj_indices,
+                        &proj_schema,
+                        &empty_map_keys,
+                        merged_ext_by_pack,
+                        &block_reader,
+                        threads,
                     )?;
                     out_batches.append(&mut rg_batches);
+                } else {
+                    let mut wave_ext_chunks =
+                        self.resolve_external_pack_chunks(merged_ext_by_pack, read_threads)?;
+                    for prep in prepared {
+                        let mut rg_batches = materialize_prepared_rg(
+                            prep,
+                            &mut wave_ext_chunks,
+                            total_ext_chunk_bytes,
+                            total_ext_frame_bytes,
+                        )?;
+                        out_batches.append(&mut rg_batches);
+                    }
                 }
             } else {
                 // Wave-bounded fallback (> 128 MiB of external and/or L0 blobs): partition RGs
                 // into <= 128 MiB payload sub-waves, splitting any > 128 MiB single RG via
                 // `split_payload_waves_multi`.
                 let empty_pre = HashMap::new();
-                let mut sub_rgs: Vec<PreparedTakeRg<'_>> = Vec::new();
+                let mut sub_rgs: Vec<PreparedTakeRg> = Vec::new();
                 let mut sub_ext: BTreeMap<u16, BTreeSet<u32>> = BTreeMap::new();
                 let mut sub_l0_c = 0usize;
                 let mut sub_l0_f = 0usize;
 
-                let flush_sub_rgs = |rgs: &mut Vec<PreparedTakeRg<'_>>,
+                let flush_sub_rgs = |rgs: &mut Vec<PreparedTakeRg>,
                                      ext: &mut BTreeMap<u16, BTreeSet<u32>>,
                                      l0_c: &mut usize,
                                      l0_f: &mut usize,
@@ -1667,7 +1705,7 @@ impl StatamReader {
                                 &proj_indices,
                                 prep.l0_parsed.as_ref(),
                                 &empty_pre,
-                                &read_block,
+                                &block_reader,
                                 read_threads,
                             )?;
                             let take_mbs = wave_mbs
@@ -1685,7 +1723,7 @@ impl StatamReader {
                                 &proj_schema,
                                 &empty_map_keys,
                                 &chunks,
-                                &read_block,
+                                &block_reader,
                                 read_threads,
                             )?;
                             out_batches.append(&mut rg_batches);
@@ -1816,13 +1854,13 @@ impl StatamReader {
         surviving_rgs: Vec<(usize, Vec<usize>)>,
         proj_indices: &[usize],
         proj_schema: &Arc<Schema>,
-        map_keys_by_col: &HashMap<usize, Vec<String>>,
+        map_keys_by_col: &Arc<HashMap<usize, Vec<String>>>,
         read_threads: usize,
     ) -> Result<Vec<Batch>, StatamError> {
         struct UnfilteredRgPlan {
             rg_idx: usize,
             surviving_mbs: Vec<usize>,
-            plan: RgIoPlan,
+            plan: Arc<RgIoPlan>,
             ranges: Vec<(u64, u64)>,
             rg_bytes: u64,
             l0_needed: bool,
@@ -1837,7 +1875,7 @@ impl StatamReader {
         let mut planned = Vec::with_capacity(surviving_rgs.len());
         for (rg_idx, surviving_mbs) in surviving_rgs {
             let rg = &self.meta.rg_dir[rg_idx];
-            let plan = self.build_rg_io_plan(
+            let plan = Arc::new(self.build_rg_io_plan(
                 rg_idx,
                 &surviving_mbs,
                 proj_indices,
@@ -1847,7 +1885,7 @@ impl StatamReader {
                 &[],
                 &[],
                 &[],
-            );
+            ));
             let mut ranges = Vec::new();
             let mut rg_bytes = 0u64;
             for &mb_idx in &surviving_mbs {
@@ -1950,27 +1988,18 @@ impl StatamReader {
                             })
                     })
                 });
-            let cache = self.fetch_blocks_and_lazy_maybe_prefetch_packs(
+            let cache = Arc::new(self.fetch_blocks_and_lazy_maybe_prefetch_packs(
                 &wave_ranges,
                 &[],
                 &[],
                 &wave_dicts,
                 eligible_for_pack_prefetch,
-            )?;
-            let read_block = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
-                if blk.stored_len == 0 {
-                    return Ok(Cow::Borrowed(&[]));
-                }
-                let end = blk
-                    .offset
-                    .checked_add(BLOCK_FRAME_HEADER_LEN as u64 + u64::from(blk.stored_len))
-                    .ok_or(StatamError::BoundsExceeded {
-                        reason: "Scan block key overflow",
-                    })?;
-                let frame = cache.get(&(blk.offset, end)).ok_or(StatamError::Corrupt {
-                    reason: "missing unfiltered Scan fetched block",
-                })?;
-                read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
+            )?);
+            let block_reader = BlockCacheReader::Map {
+                primary: Arc::clone(&cache),
+                fallback: None,
+                missing_reason: "missing unfiltered Scan fetched block",
+                overflow_reason: "Scan block key overflow",
             };
 
             for item in wave {
@@ -1978,7 +2007,7 @@ impl StatamReader {
                 let l0_parsed = if item.l0_needed {
                     cache
                         .get(&(rg.l0_payload_offset, item.l0_end))
-                        .map(|b| ParsedL0Payload::parse(b))
+                        .map(|b| ParsedL0Payload::parse(b.clone()).map(Arc::new))
                         .transpose()?
                 } else {
                     None
@@ -2004,7 +2033,7 @@ impl StatamReader {
                     map_keys_by_col,
                     l0_parsed.as_ref(),
                     &empty_pre,
-                    &read_block,
+                    &block_reader,
                     read_threads,
                 )?;
                 for batch in rg_batches {
@@ -2023,7 +2052,7 @@ impl StatamReader {
         surviving_rgs: Vec<(usize, Vec<usize>)>,
         proj_indices: &[usize],
         proj_schema: &Arc<Schema>,
-        map_keys_by_col: &HashMap<usize, Vec<String>>,
+        map_keys_by_col: &Arc<HashMap<usize, Vec<String>>>,
         time_col_idx: Option<usize>,
         time_range: TimeRange,
         lookups: &[(usize, &IdLookup)],
@@ -2035,7 +2064,7 @@ impl StatamReader {
         struct FilteredRgP1 {
             rg_idx: usize,
             surviving_mbs: Vec<usize>,
-            plan: RgIoPlan,
+            plan: Arc<RgIoPlan>,
             p1_ranges: Vec<(u64, u64)>,
             p1_bytes: u64,
             p1_raw_bytes: u64,
@@ -2054,7 +2083,7 @@ impl StatamReader {
         let mut planned = Vec::with_capacity(surviving_rgs.len());
         for (rg_idx, surviving_mbs) in surviving_rgs {
             let rg = &self.meta.rg_dir[rg_idx];
-            let plan = self.build_rg_io_plan(
+            let plan = Arc::new(self.build_rg_io_plan(
                 rg_idx,
                 &surviving_mbs,
                 proj_indices,
@@ -2064,7 +2093,7 @@ impl StatamReader {
                 lookups,
                 preds,
                 subs,
-            );
+            ));
             let mut p1_ranges = Vec::new();
             let mut p1_bytes = 0u64;
             let mut p1_raw_bytes = 0u64;
@@ -2208,36 +2237,25 @@ impl StatamReader {
 
             // Wave 1: Fetch ALL missing Phase-1 dicts + ALL Phase-1 blocks (plus folded Phase 2 on
             // small remote scans) in ONE wave!
-            let p1_cache = self.fetch_blocks_and_lazy_maybe_prefetch_packs(
+            let p1_cache = Arc::new(self.fetch_blocks_and_lazy_maybe_prefetch_packs(
                 &wave_p1_ranges,
                 &[],
                 &[],
                 &wave_p1_dicts,
                 eligible_for_pack_prefetch,
-            )?;
+            )?);
             self.refresh_dict_sub_bitmaps(subs, dict_sub_bitmaps);
 
-            let p1_lookup = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
-                if blk.stored_len == 0 {
-                    return Ok(Cow::Borrowed(&[]));
-                }
-                let end = blk
-                    .offset
-                    .checked_add(BLOCK_FRAME_HEADER_LEN as u64 + u64::from(blk.stored_len))
-                    .ok_or(StatamError::BoundsExceeded {
-                        reason: "Phase 1 block key overflow",
-                    })?;
-                let frame = p1_cache
-                    .get(&(blk.offset, end))
-                    .ok_or(StatamError::Corrupt {
-                        reason: "missing Phase 1 fetched block",
-                    })?;
-                read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
+            let p1_reader = BlockCacheReader::Map {
+                primary: Arc::clone(&p1_cache),
+                fallback: None,
+                missing_reason: "missing Phase 1 fetched block",
+                overflow_reason: "Phase 1 block key overflow",
             };
 
             struct ActiveRgP2 {
                 rg_idx: usize,
-                plan: RgIoPlan,
+                plan: Arc<RgIoPlan>,
                 active_mbs: Vec<(usize, Bitmap, HashMap<usize, DecodedPhase1>)>,
                 p1_l0_needed: bool,
                 p2_l0_needed: bool,
@@ -2255,7 +2273,7 @@ impl StatamReader {
                 let l0_from_p1 = if item.p1_l0_needed {
                     p1_cache
                         .get(&(rg.l0_payload_offset, item.l0_end))
-                        .map(|b| ParsedL0Payload::parse(b))
+                        .map(|b| ParsedL0Payload::parse(b.clone()))
                         .transpose()?
                 } else {
                     None
@@ -2272,7 +2290,7 @@ impl StatamReader {
                     subs,
                     dict_sub_bitmaps,
                     l0_from_p1.as_ref(),
-                    &p1_lookup,
+                    &p1_reader,
                     None,
                     false,
                     read_threads,
@@ -2340,7 +2358,7 @@ impl StatamReader {
 
             for p2_wave in p2_waves {
                 // Wave 2: Skipped completely when Phase 2 was folded into Wave 1!
-                let p2_cache = if p2_folded_into_p1 {
+                let p2_cache = Arc::new(if p2_folded_into_p1 {
                     HashMap::new()
                 } else {
                     let total_p2_ranges: usize = p2_wave.iter().map(|w| w.p2_ranges.len()).sum();
@@ -2351,25 +2369,13 @@ impl StatamReader {
                         wave_p2_dicts.extend_from_slice(&item.p2_dict_cols);
                     }
                     self.fetch_blocks_and_lazy(&wave_p2_ranges, &[], &[], &wave_p2_dicts)?
-                };
+                });
 
-                let p2_lookup = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
-                    if blk.stored_len == 0 {
-                        return Ok(Cow::Borrowed(&[]));
-                    }
-                    let end = blk
-                        .offset
-                        .checked_add(BLOCK_FRAME_HEADER_LEN as u64 + u64::from(blk.stored_len))
-                        .ok_or(StatamError::BoundsExceeded {
-                            reason: "Phase 2 block key overflow",
-                        })?;
-                    let key = (blk.offset, end);
-                    let frame = p2_cache.get(&key).or_else(|| p1_cache.get(&key)).ok_or(
-                        StatamError::Corrupt {
-                            reason: "missing Phase 2 fetched block",
-                        },
-                    )?;
-                    read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
+                let p2_reader = BlockCacheReader::Map {
+                    primary: Arc::clone(&p2_cache),
+                    fallback: Some(Arc::clone(&p1_cache)),
+                    missing_reason: "missing Phase 2 fetched block",
+                    overflow_reason: "Phase 2 block key overflow",
                 };
 
                 for item in p2_wave {
@@ -2377,14 +2383,14 @@ impl StatamReader {
                     let l0_parsed = if item.p1_l0_needed {
                         p1_cache
                             .get(&(rg.l0_payload_offset, item.l0_end))
-                            .map(|b| ParsedL0Payload::parse(b))
+                            .map(|b| ParsedL0Payload::parse(b.clone()).map(Arc::new))
                             .transpose()?
                     } else if item.p2_l0_needed {
                         let l0_key = (rg.l0_payload_offset, item.l0_end);
                         p2_cache
                             .get(&l0_key)
                             .or_else(|| p1_cache.get(&l0_key))
-                            .map(|b| ParsedL0Payload::parse(b))
+                            .map(|b| ParsedL0Payload::parse(b.clone()).map(Arc::new))
                             .transpose()?
                     } else {
                         None
@@ -2398,7 +2404,7 @@ impl StatamReader {
                         map_keys_by_col,
                         l0_parsed.as_ref(),
                         &wave_retained_map,
-                        &p2_lookup,
+                        &p2_reader,
                         read_threads,
                     )?;
                     for batch in rg_batches {
@@ -2421,7 +2427,7 @@ impl StatamReader {
         surviving_mbs: &[usize],
         proj_indices: &[usize],
         proj_schema: &Arc<Schema>,
-        map_keys_by_col: &HashMap<usize, Vec<String>>,
+        map_keys_by_col: &Arc<HashMap<usize, Vec<String>>>,
         time_col_idx: Option<usize>,
         time_range: TimeRange,
         lookups: &[(usize, &IdLookup)],
@@ -2432,7 +2438,7 @@ impl StatamReader {
         trim_tail: bool,
         read_threads: usize,
     ) -> Result<Vec<Batch>, StatamError> {
-        let plan = self.build_rg_io_plan(
+        let plan = Arc::new(self.build_rg_io_plan(
             rg_idx,
             surviving_mbs,
             proj_indices,
@@ -2442,7 +2448,7 @@ impl StatamReader {
             lookups,
             preds,
             subs,
-        );
+        ));
 
         // Single tightest contiguous RG byte range fetch covering only needed blocks!
         let mut need_l0_payload = false;
@@ -2573,39 +2579,21 @@ impl StatamReader {
                     reason: "L0 payload end overflows usize",
                 },
             )?;
-            let l0_slice = rg_slice
-                .get(rel_start..rel_end)
-                .ok_or(StatamError::Corrupt {
+            if rel_start > rel_end || rel_end > rg_slice.len() {
+                return Err(StatamError::Corrupt {
                     reason: "L0 payload slice out of Point RG range",
-                })?;
-            Some(ParsedL0Payload::parse(l0_slice)?)
+                });
+            }
+            Some(Arc::new(ParsedL0Payload::parse(
+                rg_slice.slice(rel_start..rel_end),
+            )?))
         } else {
             None
         };
 
-        let block_lookup = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
-            if blk.stored_len == 0 {
-                return Ok(Cow::Borrowed(&[]));
-            }
-            let rel = blk
-                .offset
-                .checked_sub(range_start)
-                .and_then(|v| usize::try_from(v).ok())
-                .ok_or(StatamError::Corrupt {
-                    reason: "block offset before Point RG range",
-                })?;
-            let total = BLOCK_FRAME_HEADER_LEN
-                .checked_add(blk.stored_len as usize)
-                .ok_or(StatamError::BoundsExceeded {
-                    reason: "block total length overflow",
-                })?;
-            let end = rel.checked_add(total).ok_or(StatamError::BoundsExceeded {
-                reason: "block end offset overflow",
-            })?;
-            let frame = rg_slice.get(rel..end).ok_or(StatamError::Corrupt {
-                reason: "block slice out of Point RG range",
-            })?;
-            read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
+        let block_reader = BlockCacheReader::Slice {
+            base_offset: range_start,
+            bytes: rg_slice,
         };
 
         let retained = RetainedPackChunks::default();
@@ -2620,8 +2608,8 @@ impl StatamReader {
             preds,
             subs,
             dict_sub_bitmaps,
-            l0_parsed.as_ref(),
-            &block_lookup,
+            l0_parsed.as_deref(),
+            &block_reader,
             limit_remaining,
             trim_tail,
             read_threads,
@@ -2641,7 +2629,7 @@ impl StatamReader {
             map_keys_by_col,
             l0_parsed.as_ref(),
             &retained_chunks,
-            &block_lookup,
+            &block_reader,
             read_threads,
         )
     }
@@ -2654,7 +2642,7 @@ impl StatamReader {
         surviving_mbs: &[usize],
         proj_indices: &[usize],
         proj_schema: &Arc<Schema>,
-        map_keys_by_col: &HashMap<usize, Vec<String>>,
+        map_keys_by_col: &Arc<HashMap<usize, Vec<String>>>,
         time_col_idx: Option<usize>,
         time_range: TimeRange,
         lookups: &[(usize, &IdLookup)],
@@ -2665,7 +2653,7 @@ impl StatamReader {
         trim_tail: bool,
         read_threads: usize,
     ) -> Result<Vec<Batch>, StatamError> {
-        let plan = self.build_rg_io_plan(
+        let plan = Arc::new(self.build_rg_io_plan(
             rg_idx,
             surviving_mbs,
             proj_indices,
@@ -2675,7 +2663,7 @@ impl StatamReader {
             lookups,
             preds,
             subs,
-        );
+        ));
 
         // Phase 1: Coalesce and fetch ONLY filter/substring columns (+ any missing Phase-1 lazy dicts).
         let mut p1_ranges = Vec::new();
@@ -2767,39 +2755,29 @@ impl StatamReader {
                     })
             });
 
-        let p1_cache = self.fetch_blocks_and_lazy_maybe_prefetch_packs(
+        let p1_cache = Arc::new(self.fetch_blocks_and_lazy_maybe_prefetch_packs(
             &p1_ranges,
             &[],
             &[],
             &p1_dict_cols,
             eligible_for_pack_prefetch,
-        )?;
+        )?);
         self.refresh_dict_sub_bitmaps(subs, dict_sub_bitmaps);
 
         let l0_from_p1 = if p1_l0_needed {
             p1_cache
                 .get(&(rg.l0_payload_offset, p1_l0_end))
-                .map(|b| ParsedL0Payload::parse(b))
+                .map(|b| ParsedL0Payload::parse(b.clone()).map(Arc::new))
                 .transpose()?
         } else {
             None
         };
 
-        let p1_lookup = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
-            if blk.stored_len == 0 {
-                return Ok(Cow::Borrowed(&[]));
-            }
-            let end = blk
-                .offset
-                .checked_add(BLOCK_FRAME_HEADER_LEN as u64 + u64::from(blk.stored_len))
-                .ok_or(StatamError::BoundsExceeded {
-                    reason: "Phase 1 block key overflow",
-                })?;
-            let key = (blk.offset, end);
-            let frame = p1_cache.get(&key).ok_or(StatamError::Corrupt {
-                reason: "missing Phase 1 fetched block",
-            })?;
-            read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
+        let p1_reader = BlockCacheReader::Map {
+            primary: Arc::clone(&p1_cache),
+            fallback: None,
+            missing_reason: "missing Phase 1 fetched block",
+            overflow_reason: "Phase 1 block key overflow",
         };
 
         // Evaluate Phase 1 on each surviving mini-block (in parallel across MBs when read_threads > 1).
@@ -2815,8 +2793,8 @@ impl StatamReader {
             preds,
             subs,
             dict_sub_bitmaps,
-            l0_from_p1.as_ref(),
-            &p1_lookup,
+            l0_from_p1.as_deref(),
+            &p1_reader,
             limit_remaining,
             trim_tail,
             read_threads,
@@ -2829,7 +2807,7 @@ impl StatamReader {
         let retained_chunks = retained.into_map();
 
         let p2_l0_needed = rg.l0_payload_len > 0 && !p1_l0_needed && has_payload_proj;
-        let p2_cache = if p2_folded_into_p1 {
+        let p2_cache = Arc::new(if p2_folded_into_p1 {
             HashMap::new()
         } else {
             let active_mb_ids: Vec<usize> = active_mbs.iter().map(|(mb, _, _)| *mb).collect();
@@ -2842,38 +2820,25 @@ impl StatamReader {
                 has_payload_proj,
             )?;
             self.fetch_blocks_and_lazy(&p2_fetch.ranges, &[], &[], &p2_fetch.dict_cols)?
-        };
+        });
         let l0_from_p2 = if p2_l0_needed {
             let l0_key = (rg.l0_payload_offset, p1_l0_end);
             p2_cache
                 .get(&l0_key)
                 .or_else(|| p1_cache.get(&l0_key))
-                .map(|b| ParsedL0Payload::parse(b))
+                .map(|b| ParsedL0Payload::parse(b.clone()).map(Arc::new))
                 .transpose()?
         } else {
             None
         };
         let l0_ref = l0_from_p1.as_ref().or(l0_from_p2.as_ref());
 
-        let p2_lookup =
-            |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
-                if blk.stored_len == 0 {
-                    return Ok(Cow::Borrowed(&[]));
-                }
-                let end = blk
-                    .offset
-                    .checked_add(BLOCK_FRAME_HEADER_LEN as u64 + u64::from(blk.stored_len))
-                    .ok_or(StatamError::BoundsExceeded {
-                        reason: "Phase 2 block key overflow",
-                    })?;
-                let key = (blk.offset, end);
-                let frame = p2_cache.get(&key).or_else(|| p1_cache.get(&key)).ok_or(
-                    StatamError::Corrupt {
-                        reason: "missing Phase 2 fetched block",
-                    },
-                )?;
-                read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
-            };
+        let p2_reader = BlockCacheReader::Map {
+            primary: Arc::clone(&p2_cache),
+            fallback: Some(Arc::clone(&p1_cache)),
+            missing_reason: "missing Phase 2 fetched block",
+            overflow_reason: "Phase 2 block key overflow",
+        };
 
         // Coalesce all .stpk / L0 chunk reads across active mini-blocks and projected
         // ExternalPayload columns in wave-bounded batches (<= 128 MiB per wave).
@@ -2886,7 +2851,7 @@ impl StatamReader {
             map_keys_by_col,
             l0_ref,
             &retained_chunks,
-            &p2_lookup,
+            &p2_reader,
             read_threads,
         )
     }

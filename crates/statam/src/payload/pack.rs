@@ -24,7 +24,9 @@ use crate::format::{
     write_framed_pack_frame_with_compressor_min_savings, write_framed_pack_frame_with_limit,
 };
 use crate::io::{RangeReader, S3_CACHE_BLOCK_BYTES};
-use crate::parallel::{MAX_PARALLEL_THREADS, parallel_map_in_order_with_init};
+use crate::parallel::{
+    MAX_PARALLEL_THREADS, parallel_map_in_order_static_with_ctx, parallel_map_in_order_with_init,
+};
 use crate::simd::trigram::{MAX_TRIGRAM_BLOOM_BYTES, MIN_TRIGRAM_BLOOM_BYTES, TrigramBloom};
 
 /// Maximum head/tail edge bytes stored per chunk in `EdgeTable`.
@@ -1905,7 +1907,7 @@ pub(crate) type FetchedFrameGroups = (
 /// Range-based reader for an immutable `.stpk` chunk pack.
 pub struct ChunkPackReader {
     reader: Arc<dyn RangeReader>,
-    toc: PackToc,
+    toc: Arc<PackToc>,
     data_end: u64,
     retained_tail_start: Option<u64>,
     inline_dict_framed: Option<Bytes>,
@@ -2164,12 +2166,12 @@ impl ChunkPackReader {
 
         Ok(Self {
             reader,
-            toc: PackToc {
+            toc: Arc::new(PackToc {
                 postscript: ps,
                 frames,
                 chunks,
                 frames_contiguous,
-            },
+            }),
             data_end,
             retained_tail_start,
             inline_dict_framed,
@@ -2676,58 +2678,7 @@ impl ChunkPackReader {
         dict: Option<&'a PackDecoderDict>,
         dict_decomp: &mut PackFrameDecompressor<'a>,
     ) -> Result<Vec<(u32, Bytes)>, StatamError> {
-        let entry = &self.toc.frames[fid as usize];
-        verify_raw_frame_matches_entry(raw, entry)?;
-        let (_, _, decoded) =
-            read_framed_pack_frame_with_decompressor(raw, MAX_FRAME_RAW_BYTES, dict, dict_decomp)?;
-        if decoded.len() != entry.raw_len as usize {
-            return Err(StatamError::Corrupt {
-                reason: "decompressed frame length mismatch",
-            });
-        }
-        let mut used_bytes = 0usize;
-        for &cid in cids {
-            let loc = self
-                .toc
-                .chunks
-                .get(cid as usize)
-                .ok_or(StatamError::Corrupt {
-                    reason: "chunk_id out of bounds",
-                })?;
-            let start = loc.offset_in_frame as usize;
-            let end = start
-                .checked_add(loc.raw_len as usize)
-                .ok_or(StatamError::Corrupt {
-                    reason: "chunk slice offset overflow",
-                })?;
-            if end > decoded.len() {
-                return Err(StatamError::Corrupt {
-                    reason: "chunk slice out of decoded frame bounds",
-                });
-            }
-            used_bytes = used_bytes.saturating_add(loc.raw_len as usize);
-        }
-
-        let mut out = Vec::with_capacity(cids.len());
-        if used_bytes.saturating_mul(2) >= decoded.len()
-            || decoded.len().saturating_sub(used_bytes) <= 16 * 1024
-        {
-            let frame_bytes = Bytes::from(decoded);
-            for &cid in cids {
-                let loc = &self.toc.chunks[cid as usize];
-                let start = loc.offset_in_frame as usize;
-                let end = start + loc.raw_len as usize;
-                out.push((cid, frame_bytes.slice(start..end)));
-            }
-        } else {
-            for &cid in cids {
-                let loc = &self.toc.chunks[cid as usize];
-                let start = loc.offset_in_frame as usize;
-                let end = start + loc.raw_len as usize;
-                out.push((cid, Bytes::copy_from_slice(&decoded[start..end])));
-            }
-        }
-        Ok(out)
+        decompress_frame_chunks_as_bytes_with_toc(&self.toc, fid, raw, cids, dict, dict_decomp)
     }
 
     /// Fetches and decompresses all requested unique `chunk_ids` as guarded zero-copy [`Bytes`],
@@ -2777,23 +2728,40 @@ impl ChunkPackReader {
             .clamp(1, threads)
             .min(frame_groups.len());
 
-        let frame_tasks: Vec<(u32, Bytes, Vec<u32>)> = frame_groups
+        let mut frame_tasks: Vec<(u32, Bytes, Vec<u32>)> = frame_groups
             .into_iter()
             .zip(frame_bytes_list)
             .map(|((fid, cids), raw)| (fid, raw, cids))
             .collect();
+        // LPT scheduling: start the largest compressed frames first so skewed packs finish sooner
+        // (`Codec::None` frames need no decompression and carry `work_len = 0`).
+        frame_tasks.sort_unstable_by_key(|(fid, _, _)| {
+            let entry = &self.toc.frames[*fid as usize];
+            let work_len = if entry.codec == Codec::None {
+                0
+            } else {
+                entry.raw_len
+            };
+            std::cmp::Reverse(work_len)
+        });
 
-        let per_frame = parallel_map_in_order_with_init(
+        let per_frame = parallel_map_in_order_static_with_ctx(
+            (Arc::clone(&self.toc), dict),
             frame_tasks,
             workers,
-            || Ok(PackFrameDecompressor::new()),
-            |dict_decomp, (fid, raw, cids)| {
-                self.decompress_frame_chunks_as_bytes(
-                    fid,
-                    &raw,
-                    &cids,
-                    dict.as_deref(),
-                    dict_decomp,
+            |(toc, dict), worker| {
+                worker.run_with_init(
+                    || Ok(PackFrameDecompressor::new()),
+                    |dict_decomp, (fid, raw, cids)| {
+                        decompress_frame_chunks_as_bytes_with_toc(
+                            toc,
+                            fid,
+                            &raw,
+                            &cids,
+                            dict.as_deref(),
+                            dict_decomp,
+                        )
+                    },
                 )
             },
         )?;
@@ -3591,6 +3559,64 @@ fn frame_byte_range(entry: &FrameEntry) -> Result<Range<u64>, StatamError> {
             reason: "frame byte range end overflow",
         })?;
     Ok(entry.offset..end)
+}
+
+fn decompress_frame_chunks_as_bytes_with_toc<'a>(
+    toc: &PackToc,
+    fid: u32,
+    raw: &[u8],
+    cids: &[u32],
+    dict: Option<&'a PackDecoderDict>,
+    dict_decomp: &mut PackFrameDecompressor<'a>,
+) -> Result<Vec<(u32, Bytes)>, StatamError> {
+    let entry = &toc.frames[fid as usize];
+    verify_raw_frame_matches_entry(raw, entry)?;
+    let (_, _, decoded) =
+        read_framed_pack_frame_with_decompressor(raw, MAX_FRAME_RAW_BYTES, dict, dict_decomp)?;
+    if decoded.len() != entry.raw_len as usize {
+        return Err(StatamError::Corrupt {
+            reason: "decompressed frame length mismatch",
+        });
+    }
+    let mut used_bytes = 0usize;
+    for &cid in cids {
+        let loc = toc.chunks.get(cid as usize).ok_or(StatamError::Corrupt {
+            reason: "chunk_id out of bounds",
+        })?;
+        let start = loc.offset_in_frame as usize;
+        let end = start
+            .checked_add(loc.raw_len as usize)
+            .ok_or(StatamError::Corrupt {
+                reason: "chunk slice offset overflow",
+            })?;
+        if end > decoded.len() {
+            return Err(StatamError::Corrupt {
+                reason: "chunk slice out of decoded frame bounds",
+            });
+        }
+        used_bytes = used_bytes.saturating_add(loc.raw_len as usize);
+    }
+
+    let mut out = Vec::with_capacity(cids.len());
+    if used_bytes.saturating_mul(2) >= decoded.len()
+        || decoded.len().saturating_sub(used_bytes) <= 16 * 1024
+    {
+        let frame_bytes = Bytes::from(decoded);
+        for &cid in cids {
+            let loc = &toc.chunks[cid as usize];
+            let start = loc.offset_in_frame as usize;
+            let end = start + loc.raw_len as usize;
+            out.push((cid, frame_bytes.slice(start..end)));
+        }
+    } else {
+        for &cid in cids {
+            let loc = &toc.chunks[cid as usize];
+            let start = loc.offset_in_frame as usize;
+            let end = start + loc.raw_len as usize;
+            out.push((cid, Bytes::copy_from_slice(&decoded[start..end])));
+        }
+    }
+    Ok(out)
 }
 
 fn verify_raw_frame_matches_entry(raw: &[u8], entry: &FrameEntry) -> Result<(), StatamError> {

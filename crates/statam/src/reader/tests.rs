@@ -3899,7 +3899,7 @@ fn b7_l0_aliased_chunks_budget_and_streaming_l0_substring_scan() {
     }
     l0_buf.extend_from_slice(&framed);
 
-    let parsed = ParsedL0Payload::parse(&l0_buf).unwrap();
+    let parsed = ParsedL0Payload::parse(Bytes::from(l0_buf)).unwrap();
     let all_cids: Vec<u32> = (0..chunk_count).collect();
     assert!(matches!(
         parsed.read_chunks_vec(&all_cids),
@@ -6443,7 +6443,7 @@ fn pass13_fix_b2_partial_cache_hit_and_multi_rg_shared_retention() {
     let mut total_hits = 0usize;
     for rg_idx in 0..big_reader.meta().rg_dir.len() {
         let mbs: Vec<usize> = (0..big_reader.meta().rg_blocks(0, rg_idx).len()).collect();
-        let plan = big_reader.build_rg_io_plan(
+        let plan = Arc::new(big_reader.build_rg_io_plan(
             rg_idx,
             &mbs,
             &[0, 1],
@@ -6453,9 +6453,13 @@ fn pass13_fix_b2_partial_cache_hit_and_multi_rg_shared_retention() {
             &[],
             &[],
             &subs,
-        );
-        let read_blk = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
-            Ok(Cow::Owned(big_reader.read_block_body(blk)?))
+        ));
+        let read_blk = BlockCacheReader::Slice {
+            base_offset: 0,
+            bytes: big_reader
+                .reader
+                .read_range(0..big_reader.reader.file_len())
+                .unwrap(),
         };
         let active = big_reader
             .eval_phase1_mbs(
@@ -10175,8 +10179,12 @@ fn pass23_hash_free_wave_plan_parity_and_multiwave_fallback() {
         "expected shredded `env` key with residual_count > 0, got {env_sub:?}"
     );
 
-    let read_blk = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
-        Ok(Cow::Owned(reader.read_block_body(blk)?))
+    let read_blk = BlockCacheReader::Slice {
+        base_offset: 0,
+        bytes: reader
+            .reader
+            .read_range(0..reader.reader.file_len())
+            .unwrap(),
     };
     for &sparse in &[false, true] {
         let mut mask = if sparse {
@@ -10437,9 +10445,13 @@ fn pass23_hash_free_wave_plan_parity_and_multiwave_fallback() {
         .reader
         .read_range(rg0.l0_payload_offset..rg0.l0_payload_offset + u64::from(rg0.l0_payload_len))
         .unwrap();
-    let l0_parsed = ParsedL0Payload::parse(&l0_buf).unwrap();
-    let l0_read_blk = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
-        Ok(Cow::Owned(l0_reader.read_block_body(blk)?))
+    let l0_parsed = ParsedL0Payload::parse(l0_buf).unwrap();
+    let l0_read_blk = BlockCacheReader::Slice {
+        base_offset: 0,
+        bytes: l0_reader
+            .reader
+            .read_range(0..l0_reader.reader.file_len())
+            .unwrap(),
     };
     let mut l0_mbs = vec![(0usize, Bitmap::new_ones(16), HashMap::new())];
     l0_reader
@@ -10630,6 +10642,427 @@ fn pass23_single_pred_projected_always_matches_parity() {
                 expected_col,
                 "remote 8T mismatch (proj={proj:?}, limit={limit:?}, col={ci})"
             );
+        }
+    }
+}
+
+#[test]
+fn pass24_fused_take_rg_and_lpt_pack_frames_parity() {
+    // Part 1: Multi-MB single-RG `take_rows` exercising `resolve_and_materialize_take_rg_fused`:
+    //   - col 0: `id` (I64, non-payload)
+    //   - col 1: `service` (Utf8, Dict-encoded non-payload)
+    //   - col 2: `all_null` (Utf8, ConstNull)
+    //   - col 3: `attrs_res` (shredded MapUtf8 with residual keys + nullable rows)
+    //   - col 4: `attrs_fast` (shredded MapUtf8 with zero residual & non-null -> skip_residual)
+    //   - col 5: `payload_text` (ExternalPayload Utf8 -> `.stpk` frames + inline + null)
+    //   - col 6: `payload_blob` (ExternalPayload Binary -> `.stpk` frames)
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("service", DataType::Utf8, false),
+        Field::new("all_null", DataType::Utf8, true),
+        Field::new("attrs_res", DataType::MapUtf8, true),
+        Field::new("attrs_fast", DataType::MapUtf8, false),
+        Field::new("payload_text", DataType::Utf8, true),
+        Field::new("payload_blob", DataType::Binary, true),
+    ])
+    .unwrap();
+
+    let n = 512usize; // 1 RG * 8 MBs (64 rows/MB)
+    let services = ["api", "auth", "billing", "worker"];
+    type MapRow = Option<Vec<(String, Option<String>)>>;
+    let mut ids = Vec::with_capacity(n);
+    let mut svc_vals = Vec::with_capacity(n);
+    let mut attrs_res_rows: Vec<MapRow> = Vec::with_capacity(n);
+    let mut attrs_fast_rows: Vec<MapRow> = Vec::with_capacity(n);
+    let mut p_text_vals = Vec::with_capacity(n);
+    let mut p_text_nulls = Bitmap::new_zeroed(n);
+    let mut p_blob_vals = Vec::with_capacity(n);
+    let mut p_blob_nulls = Bitmap::new_zeroed(n);
+
+    for i in 0..n {
+        ids.push(i as i64);
+        svc_vals.push(services[i % services.len()]);
+
+        // `attrs_res`: shredded keys ("env", "region") + rare residual key every 3rd row + nulls.
+        if i % 17 == 0 {
+            attrs_res_rows.push(None);
+        } else {
+            let mut pairs = vec![
+                (
+                    "env".to_owned(),
+                    Some(if i % 2 == 0 { "prod" } else { "staging" }.to_owned()),
+                ),
+                ("region".to_owned(), Some(format!("us-east-{}", i % 3))),
+            ];
+            if i % 3 == 0 {
+                pairs.push((format!("extra_{}", i % 7), Some(format!("val_{i}"))));
+            }
+            attrs_res_rows.push(Some(pairs));
+        }
+
+        // `attrs_fast`: only 2 always-present shredded keys, zero residual, non-null.
+        attrs_fast_rows.push(Some(vec![
+            ("tier".to_owned(), Some(format!("t{}", i % 4))),
+            ("zone".to_owned(), Some(format!("z{}", i % 2))),
+        ]));
+
+        // `payload_text`: mix of null, short inline, and multi-KB external `.stpk` chunks.
+        if i % 19 == 0 {
+            p_text_vals.push(String::new());
+        } else if i % 11 == 0 {
+            let _ = p_text_nulls.set(i, true);
+            p_text_vals.push(format!("inline_row_{i}"));
+        } else {
+            let _ = p_text_nulls.set(i, true);
+            p_text_vals.push(format!(
+                "row_{i:04}_payload_{}",
+                "abcdefghij0123456789".repeat(120)
+            ));
+        }
+
+        // `payload_blob`: large external binary payloads (> 64 KiB total across taken MBs so Step 4 parallelizes).
+        if i % 23 == 0 {
+            p_blob_vals.push(Vec::new());
+        } else {
+            let _ = p_blob_nulls.set(i, true);
+            let mut b = Vec::with_capacity(1600);
+            for k in 0..1600usize {
+                b.push(((i.wrapping_mul(31) ^ k.wrapping_mul(17)) & 0xff) as u8);
+            }
+            p_blob_vals.push(b);
+        }
+    }
+
+    let build_map_col = |rows: &[MapRow]| -> Column {
+        let mut offsets = Vec::with_capacity(rows.len() + 1);
+        offsets.push(0u32);
+        let mut keys = Vec::new();
+        let mut vals = Vec::new();
+        let mut val_valid = Vec::new();
+        let mut row_nulls = Bitmap::new_zeroed(rows.len());
+        let mut any_null = false;
+        for (r, opt) in rows.iter().enumerate() {
+            if let Some(pairs) = opt {
+                let _ = row_nulls.set(r, true);
+                for (k, v) in pairs {
+                    keys.push(k.as_str());
+                    match v {
+                        Some(s) => {
+                            vals.push(s.as_str());
+                            val_valid.push(true);
+                        }
+                        None => {
+                            vals.push("");
+                            val_valid.push(false);
+                        }
+                    }
+                }
+            } else {
+                any_null = true;
+            }
+            offsets.push(keys.len() as u32);
+        }
+        let val_nulls = if val_valid.iter().all(|&b| b) {
+            None
+        } else {
+            Some(Bitmap::from_bools(&val_valid))
+        };
+        let md = MapData::try_new(
+            offsets,
+            Utf8Data::try_from_slices(keys).unwrap(),
+            Utf8Data::try_from_slices(vals).unwrap(),
+            val_nulls,
+        )
+        .unwrap();
+        Column::Flat(
+            FlatColumn::try_new(
+                FlatData::MapUtf8(Box::new(md)),
+                if any_null { Some(row_nulls) } else { None },
+            )
+            .unwrap(),
+        )
+    };
+
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(svc_vals).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            ),
+            Column::try_new_const(ScalarValue::Null(DataType::Utf8), n).unwrap(),
+            build_map_col(&attrs_res_rows),
+            build_map_col(&attrs_fast_rows),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(p_text_vals.iter().map(String::as_str)).unwrap(),
+                    ),
+                    Some(p_text_nulls),
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Binary(
+                        BinaryData::try_from_slices(p_blob_vals.iter().map(Vec::as_slice)).unwrap(),
+                    ),
+                    Some(p_blob_nulls),
+                )
+                .unwrap(),
+            ),
+        ],
+        n,
+    )
+    .unwrap();
+
+    let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+    opts.row_group_size = n; // single RG!
+    opts.mini_block_size = 64; // 8 MBs!
+    opts.payload_cols = vec!["payload_text".to_owned(), "payload_blob".to_owned()];
+    let pack_id = [0x24u8; 16];
+    let mut pack_opts = test_pack_opts();
+    pack_opts.target_frame_raw_bytes = 64 * 1024; // multiple frames so LPT & parallel Stage 1 run
+    let mut pb = ChunkPackBuilder::new(pack_id, pack_opts);
+    opts.pack_id = Some(pack_id);
+    let mut file_bytes = Vec::new();
+    {
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut file_bytes),
+            Arc::clone(&schema),
+            opts,
+            Some(&mut pb),
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+    }
+    let mut pack_bytes = Vec::new();
+    pb.finish(&mut pack_bytes).unwrap();
+
+    let mut local_resolver = InMemoryPackResolver::new();
+    local_resolver
+        .insert_bytes(pack_id, pack_bytes.clone())
+        .unwrap();
+    let local_reader = StatamReader::open(
+        Arc::new(SliceReader::new(file_bytes.clone())),
+        Some(Arc::new(local_resolver)),
+    )
+    .unwrap();
+    assert_eq!(local_reader.meta().rg_dir.len(), 1);
+    assert_eq!(local_reader.meta().rg_blocks(0, 0).len(), 8);
+    assert_eq!(
+        local_reader.meta().rg_blocks(1, 0)[0].encoding,
+        Encoding::Dict
+    );
+    assert_eq!(
+        local_reader.meta().rg_blocks(2, 0)[0].encoding,
+        Encoding::ConstNull
+    );
+    assert!(local_reader.find_shredded_subcol(3, "env").is_some());
+    assert!(local_reader.find_shredded_subcol(4, "tier").is_some());
+
+    // Build remote S3 readers (uncached) for BOTH `.statam` and `.stpk` to prove exact S3 GET/byte invariance.
+    let no_cache_cfg = SimulatedS3Config {
+        cache_capacity_blocks: 0,
+        ..SimulatedS3Config::default()
+    };
+    let s3_file =
+        Arc::new(SimulatedS3Reader::from_bytes(file_bytes, no_cache_cfg).with_remote_hint(true));
+    let s3_pack =
+        Arc::new(SimulatedS3Reader::from_bytes(pack_bytes, no_cache_cfg).with_remote_hint(true));
+    let remote_pack = Arc::new(ChunkPackReader::open(s3_pack.clone()).unwrap());
+    let mut remote_resolver = InMemoryPackResolver::new();
+    remote_resolver.insert(pack_id, remote_pack);
+    let remote_reader =
+        StatamReader::open(s3_file.clone(), Some(Arc::new(remote_resolver))).unwrap();
+
+    // Multi-MB take across all 8 MBs (6 rows/MB = 48 rows, > 150 KiB payloads -> parallel Step 4)
+    // + single-MB take (Step 4 sequential with `recon_threads = threads`)
+    // + duplicate `proj_indices`.
+    let multi_mb_rows: Vec<u64> = (0..8u64)
+        .flat_map(|mb| {
+            [0, 3, 11, 17, 23, 45]
+                .into_iter()
+                .map(move |off| mb * 64 + off)
+        })
+        .collect();
+    let single_mb_rows: Vec<u64> = (0..20u64).map(|r| 64 + r * 2).collect();
+    let dup_proj = vec![0usize, 1, 1, 2, 3, 3, 4, 5, 5, 6];
+
+    for (label, rows, proj_opt) in [
+        ("multi_mb_all_cols", multi_mb_rows.as_slice(), None),
+        (
+            "multi_mb_dup_proj",
+            multi_mb_rows.as_slice(),
+            Some(dup_proj.as_slice()),
+        ),
+        ("single_mb_all_cols", single_mb_rows.as_slice(), None),
+    ] {
+        let proj_schema = match proj_opt {
+            Some(p) => Arc::new(schema.project(p).unwrap()),
+            None => Arc::clone(&schema),
+        };
+        let loc1 = concat_scanned_batches(
+            &proj_schema,
+            &local_reader.take_rows(rows, proj_opt, 1).unwrap(),
+        );
+        let loc8 = concat_scanned_batches(
+            &proj_schema,
+            &local_reader.take_rows(rows, proj_opt, 8).unwrap(),
+        );
+
+        s3_file.reset_counters();
+        s3_pack.reset_counters();
+        let rem1 = concat_scanned_batches(
+            &proj_schema,
+            &remote_reader.take_rows(rows, proj_opt, 1).unwrap(),
+        );
+        let f1 = s3_file.counters();
+        let p1 = s3_pack.counters();
+
+        s3_file.reset_counters();
+        s3_pack.reset_counters();
+        let rem8 = concat_scanned_batches(
+            &proj_schema,
+            &remote_reader.take_rows(rows, proj_opt, 8).unwrap(),
+        );
+        let f8 = s3_file.counters();
+        let p8 = s3_pack.counters();
+
+        assert_eq!(loc1.num_rows(), rows.len(), "{label} row count");
+        assert_eq!(loc8.num_rows(), rows.len(), "{label} 8T row count");
+        assert_eq!(f1.gets, f8.gets, "{label} statam S3 GET invariance");
+        assert_eq!(
+            f1.bytes_from_s3, f8.bytes_from_s3,
+            "{label} statam S3 bytes_from_s3 invariance"
+        );
+        assert_eq!(
+            f1.bytes_requested, f8.bytes_requested,
+            "{label} statam S3 bytes_requested invariance"
+        );
+        assert_eq!(p1.gets, p8.gets, "{label} pack S3 GET invariance");
+        assert_eq!(
+            p1.bytes_from_s3, p8.bytes_from_s3,
+            "{label} pack S3 bytes_from_s3 invariance"
+        );
+        assert_eq!(
+            p1.bytes_requested, p8.bytes_requested,
+            "{label} pack S3 bytes_requested invariance"
+        );
+        for ci in 0..proj_schema.len() {
+            let exp = loc1.column(ci).unwrap().materialize(None).unwrap();
+            assert_eq!(
+                loc8.column(ci).unwrap().materialize(None).unwrap(),
+                exp,
+                "{label} local 8T mismatch col {ci}"
+            );
+            assert_eq!(
+                rem1.column(ci).unwrap().materialize(None).unwrap(),
+                exp,
+                "{label} remote 1T mismatch col {ci}"
+            );
+            assert_eq!(
+                rem8.column(ci).unwrap().materialize(None).unwrap(),
+                exp,
+                "{label} remote 8T mismatch col {ci}"
+            );
+        }
+    }
+
+    // Part 2: `scan_chunks_as_bytes_parallel` LPT frame sorting parity across skewed frame sizes
+    // (tiny + large `Codec::None` + Zstd + dict-compressed frames).
+    for use_dict in [false, true] {
+        let pid = if use_dict { [0x25u8; 16] } else { [0x26u8; 16] };
+        let popts = PackWriteOptions {
+            codec: Codec::Zstd,
+            zstd_level: 1,
+            target_frame_raw_bytes: 64 * 1024,
+            enable_trigram_skip: false,
+            compress_toc_lz4: false,
+            write_threads: 1,
+            emit_hash_table: false,
+        };
+        let mut builder = if use_dict {
+            ChunkPackBuilder::new_with_dict(pid, popts)
+        } else {
+            ChunkPackBuilder::new(pid, popts)
+        };
+        let mut expected_chunks: HashMap<u32, Vec<u8>> = HashMap::new();
+
+        // Feed many repeatable JSON chunks (> 2 MiB when `use_dict` so dict training triggers),
+        // alternating tiny frames, large compressible Zstd frames, and incompressible `Codec::None` blobs.
+        let rounds = if use_dict { 48usize } else { 12usize };
+        for r in 0..rounds {
+            // Compressible chunk (triggers Zstd / dict frame).
+            let text = format!(
+                "{{\"trace_id\":\"tr_{r:04}\",\"service\":\"checkout\",\"msg\":\"{}\"}}",
+                "structured_log_payload_repeat_".repeat(120 + (r % 5) * 60)
+            )
+            .into_bytes();
+            let cid = builder.intern_chunk(&text).unwrap();
+            expected_chunks.insert(cid, text);
+
+            if r % 4 == 0 {
+                // Incompressible large blob (`>= 32 KiB`, dedicated 1-chunk `Codec::None` frame).
+                let mut state = (r as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x55aa_55aa;
+                let mut blob = vec![0u8; 96 * 1024 + (r % 3) * 32 * 1024];
+                for byte in &mut blob {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    *byte = (state & 0xff) as u8;
+                }
+                let cids = builder.append_blob(&blob).unwrap();
+                assert_eq!(cids.len(), 1);
+                expected_chunks.insert(cids[0], blob);
+            }
+        }
+
+        let mut pbytes = Vec::new();
+        builder.finish(&mut pbytes).unwrap();
+        let pack_reader = ChunkPackReader::open(Arc::new(SliceReader::new(pbytes))).unwrap();
+        assert!(
+            pack_reader.toc().frames.len() >= 6,
+            "expected >= 6 frames for LPT skew test (use_dict={use_dict})"
+        );
+        // Verify genuinely skewed frame sizes exist.
+        let min_f = pack_reader
+            .toc()
+            .frames
+            .iter()
+            .map(|f| f.raw_len)
+            .min()
+            .unwrap();
+        let max_f = pack_reader
+            .toc()
+            .frames
+            .iter()
+            .map(|f| f.raw_len)
+            .max()
+            .unwrap();
+        assert!(
+            max_f > min_f,
+            "expected skewed frame sizes (min={min_f}, max={max_f}, use_dict={use_dict})"
+        );
+
+        let all_cids: Vec<u32> = expected_chunks.keys().copied().collect();
+        let ref_map = pack_reader.read_chunks(&all_cids).unwrap();
+        for threads in [1usize, 4, 8] {
+            let got: HashMap<u32, Bytes> = pack_reader
+                .scan_chunks_as_bytes_parallel(&all_cids, threads)
+                .unwrap()
+                .into_iter()
+                .collect();
+            assert_eq!(got.len(), expected_chunks.len());
+            for (&cid, exp) in &expected_chunks {
+                assert_eq!(got[&cid].as_ref(), exp.as_slice());
+                assert_eq!(got[&cid].as_ref(), ref_map[&cid].as_slice());
+            }
         }
     }
 }

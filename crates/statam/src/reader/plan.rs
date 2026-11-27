@@ -11,7 +11,10 @@ use cetra_column::{Bitmap, Column, DataType, Schema};
 use crate::StatamError;
 use crate::codec::nested::ShreddedSubCol;
 use crate::codec::{ZonePred, ZoneValue, zone_map_always_matches, zone_map_may_match};
-use crate::format::{BLOCK_FLAG_MIN_MAX_VALID, BlockEntry, Encoding};
+use crate::format::{
+    BLOCK_FLAG_MIN_MAX_VALID, BLOCK_FRAME_HEADER_LEN, BlockEntry, Encoding, MAX_BLOCK_RAW_BYTES,
+    read_framed_block_checked_cow,
+};
 use crate::io::RangeReader;
 use crate::payload::search::extract_ilike_trigram_hashes;
 use crate::payload::{FlatPayloadRefs, PayloadRefRow};
@@ -46,8 +49,71 @@ pub(super) type TakeMiniBlock = (
     Option<Bitmap>,
     HashMap<usize, DecodedPhase1>,
 );
-pub(super) type BlockReader<'a> =
-    dyn Fn(&BlockEntry) -> Result<Cow<'a, [u8]>, StatamError> + Sync + 'a;
+#[derive(Clone)]
+pub(super) enum BlockCacheReader {
+    Map {
+        primary: Arc<HashMap<(u64, u64), Bytes>>,
+        fallback: Option<Arc<HashMap<(u64, u64), Bytes>>>,
+        missing_reason: &'static str,
+        overflow_reason: &'static str,
+    },
+    Slice {
+        base_offset: u64,
+        bytes: Bytes,
+    },
+}
+
+impl BlockCacheReader {
+    pub(super) fn read_block(&self, blk: &BlockEntry) -> Result<Cow<'_, [u8]>, StatamError> {
+        if blk.stored_len == 0 {
+            return Ok(Cow::Borrowed(&[]));
+        }
+        match self {
+            Self::Map {
+                primary,
+                fallback,
+                missing_reason,
+                overflow_reason,
+            } => {
+                let end = blk
+                    .offset
+                    .checked_add(BLOCK_FRAME_HEADER_LEN as u64 + u64::from(blk.stored_len))
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: overflow_reason,
+                    })?;
+                let key = (blk.offset, end);
+                let frame = primary
+                    .get(&key)
+                    .or_else(|| fallback.as_ref().and_then(|fb| fb.get(&key)))
+                    .ok_or(StatamError::Corrupt {
+                        reason: missing_reason,
+                    })?;
+                read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
+            }
+            Self::Slice { base_offset, bytes } => {
+                let rel = blk
+                    .offset
+                    .checked_sub(*base_offset)
+                    .and_then(|v| usize::try_from(v).ok())
+                    .ok_or(StatamError::Corrupt {
+                        reason: "block offset before Point RG range",
+                    })?;
+                let total = BLOCK_FRAME_HEADER_LEN
+                    .checked_add(blk.stored_len as usize)
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "block total length overflow",
+                    })?;
+                let end = rel.checked_add(total).ok_or(StatamError::BoundsExceeded {
+                    reason: "block end offset overflow",
+                })?;
+                let frame = bytes.get(rel..end).ok_or(StatamError::Corrupt {
+                    reason: "block slice out of Point RG range",
+                })?;
+                read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
+            }
+        }
+    }
+}
 
 pub(super) enum DecodedPhase1 {
     Col(Column),
@@ -545,15 +611,22 @@ impl StatamReader {
         logical_col: usize,
         key: &str,
     ) -> Option<(usize, u32)> {
-        let sm = self
-            .meta
-            .schema_meta
-            .shredded_maps
-            .iter()
-            .find(|s| s.logical_col_idx as usize == logical_col)?;
-        let ke = sm.keys.iter().find(|k| k.key == key)?;
-        Some((ke.sub_col_idx as usize, ke.residual_count))
+        find_shredded_subcol_in_meta(&self.meta, logical_col, key)
     }
+}
+
+pub(super) fn find_shredded_subcol_in_meta(
+    meta: &super::StatamFileMeta,
+    logical_col: usize,
+    key: &str,
+) -> Option<(usize, u32)> {
+    let sm = meta
+        .schema_meta
+        .shredded_maps
+        .iter()
+        .find(|s| s.logical_col_idx as usize == logical_col)?;
+    let ke = sm.keys.iter().find(|k| k.key == key)?;
+    Some((ke.sub_col_idx as usize, ke.residual_count))
 }
 
 pub(super) fn fetch_coalesced_blocks(
