@@ -1,4 +1,5 @@
 ---
+import { Code } from "astro:components";
 import Button from "../marketing/components/Button.astro";
 import Section from "../marketing/components/Section.astro";
 import SectionHeading from "../marketing/components/SectionHeading.astro";
@@ -14,6 +15,40 @@ import MarketingLayout from "../marketing/layouts/MarketingLayout.astro";
 import { LANGUAGE_FILTERS } from "../marketing/lib/integrations-filter.mjs";
 
 const items = loadIntegrations();
+
+/** The hero's setup snippets, one entry per tab, each split into its install command and its code. */
+const SETUP = [
+  [
+    { lang: "shellscript", code: 'pip install "cetra-sdk[openai]" openai' },
+    { lang: "python", code: 'import cetra\ncetra.init(instrument=["openai"])' },
+  ],
+  [
+    {
+      lang: "shellscript",
+      code: "npm install @cetra-ai/sdk @arizeai/openinference-instrumentation-openai openai",
+    },
+    {
+      lang: "typescript",
+      code: [
+        'import { init } from "@cetra-ai/sdk";',
+        'import { openai } from "@cetra-ai/sdk/openai";',
+        'import OpenAI from "openai";',
+        "",
+        "init({ apiKey: process.env.CETRA_API_KEY, instrument: [openai(OpenAI)] });",
+      ].join("\n"),
+    },
+  ],
+  [
+    {
+      lang: "shellscript",
+      code: [
+        "export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080",
+        'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-cetra-…"',
+        "# then start any OpenTelemetry SDK or collector",
+      ].join("\n"),
+    },
+  ],
+] as const;
 const groupChips = groups(items).map((group) => ({
   group,
   count: items.filter((item) => item.group === group).length,
@@ -70,26 +105,15 @@ const filterData = JSON.stringify(
       />
       <div class="setup">
         <Tabs id="setup" label="Set up cetra" labels={["Python", "TypeScript", "Any OTLP exporter"]}>
-          <div data-tab-panel>
-            <pre class="code"><code>{`pip install "cetra-sdk[openai]" openai
-
-import cetra
-cetra.init(instrument=["openai"])`}</code></pre>
-          </div>
-          <div data-tab-panel>
-            <pre class="code"><code>{`npm install @cetra-ai/sdk @arizeai/openinference-instrumentation-openai openai
-
-import { init } from "@cetra-ai/sdk";
-import { openai } from "@cetra-ai/sdk/openai";
-import OpenAI from "openai";
-
-init({ apiKey: process.env.CETRA_API_KEY, instrument: [openai(OpenAI)] });`}</code></pre>
-          </div>
-          <div data-tab-panel>
-            <pre class="code"><code>{`export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080
-export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-cetra-…"
-# then start any OpenTelemetry SDK or collector`}</code></pre>
-          </div>
+          {SETUP.map((panel) => (
+            <div data-tab-panel>
+              <div class="code">
+                {panel.map((block) => (
+                  <Code code={block.code} lang={block.lang} theme="css-variables" />
+                ))}
+              </div>
+            </div>
+          ))}
         </Tabs>
         <p class="setup-note">OpenAI shown, abridged. Each integration's page has its own lines.</p>
       </div>
@@ -211,11 +235,31 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-cetra-…"
     background: var(--c-ink-2);
     border: 1px solid var(--line);
     border-radius: var(--radius);
-    font-family: var(--font-mono);
     font-size: var(--text-sm);
     line-height: 1.7;
-    overflow-x: auto;
+    /* Shiki's css-variables theme reads these: the site palette, not a stock theme */
+    --astro-code-foreground: var(--c-paper);
+    --astro-code-background: transparent;
+    --astro-code-token-keyword: var(--c-teal-light);
+    --astro-code-token-string: var(--c-code-string);
+    --astro-code-token-string-expression: var(--c-code-string);
+    --astro-code-token-constant: var(--c-code-constant);
+    --astro-code-token-function: var(--c-code-function);
+    --astro-code-token-parameter: var(--c-stone-300);
+    --astro-code-token-punctuation: var(--c-stone-400);
+    --astro-code-token-comment: var(--c-stone-400);
+    --astro-code-token-link: var(--c-teal-light);
+  }
+  .code :global(pre) {
+    margin: 0;
+    font-family: var(--font-mono);
     white-space: pre;
+  }
+  .code :global(pre + pre) {
+    margin-top: var(--space-4);
+  }
+  .code :global([style*="--astro-code-token-comment"]) {
+    font-style: italic;
   }
   .setup-note {
     font-size: var(--text-xs);
