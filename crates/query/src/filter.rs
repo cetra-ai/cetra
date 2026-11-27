@@ -986,4 +986,27 @@ mod tests {
         assert!(!dbg.contains("secret_env_literal"));
         assert!(!dbg.contains("secret_score_name"));
     }
+
+    /// The `filter_dsl` nightly's timeout input (87 bytes, issue #189): byte 0 picks the
+    /// view, the rest is a dotted chain that never completes. sqlparser 0.62 re-parsed
+    /// such a chain after every `.`, so each `.` doubled the time (about 2 min for this
+    /// input); 0.64 parses it once (upstream PR 2344). Both inputs are rejected, quickly.
+    #[test]
+    fn a_dotted_chain_that_never_completes_is_rejected_quickly() {
+        const REGRESSION: &[u8] = include_bytes!(
+            "../../../fuzz/regressions/filter_dsl/timeout-4a90aaeb86596f02528e6a7db1eaaca1aa253f31"
+        );
+        let schema = base_schema();
+        let text = std::str::from_utf8(&REGRESSION[1..]).unwrap();
+        let long_chain = "a.".repeat(1000);
+        for text in [text, long_chain.as_str()] {
+            let started = std::time::Instant::now();
+            parse_filter_ast(FilterView::Spans, &schema, text).expect_err(text);
+            // About 1 ms in a debug build; the old parser took minutes.
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "{text}"
+            );
+        }
+    }
 }

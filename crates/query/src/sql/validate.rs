@@ -1913,4 +1913,15 @@ mod tests {
             err.message
         );
     }
+
+    /// A long dotted name that never completes (issue #189): sqlparser 0.62 took time
+    /// doubling with each `.`; 0.64 rejects it at once.
+    #[test]
+    fn a_dotted_chain_that_never_completes_is_rejected_quickly() {
+        let sql = format!("SELECT {}", "a.".repeat(4000));
+        let started = std::time::Instant::now();
+        parse_and_validate_sql(&sql, &registered()).unwrap_err();
+        // A few ms in a debug build; the old parser never finished.
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
 }

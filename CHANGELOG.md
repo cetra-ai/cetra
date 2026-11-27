@@ -64,6 +64,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Fixed
 
+- A filter or SQL console query with a long, unfinished dotted name (such as `a.b.c.`) is now rejected at once. Before, each `.` doubled the time the server took to reject it, so a filter under 100 characters could hold a request for minutes.
 - A dashboard table names its group column after a map field's key (`repository`, not `metadata['repository']`) and gives long group names the room the value columns leave, instead of cutting them at two fifths of the width.
 - Dashboard charts draw a count or a sum at 0 in a bucket with no rows instead of leaving a gap, so a stacked chart of sparse data no longer breaks apart.
 - A dashboard's horizontal bar chart sizes its label column to the longest label, so repository names such as `github.com/acme/data-pipelines` are no longer cut, and the last value on its axis is no longer clipped; time charts keep their last time label whole too.
