@@ -159,6 +159,7 @@ const CANNOT_FACET: &str = "field cannot be faceted";
 const INTERNAL_KEY_PREFIX: &str = "cetra.";
 const VALUE_COL: &str = "facet_value";
 const COUNT_COL: &str = "facet_count";
+const WEIGHT_COL: &str = "facet_weight";
 
 struct FacetColumns {
     values: &'static [&'static str],
@@ -1629,7 +1630,13 @@ impl ChunkFlusher<'_> {
         let flat = FlatColumn::try_new(FlatData::Utf8(utf8), None)?;
         let mini = Batch::try_new(
             Arc::clone(self.utf8_schema),
-            vec![Column::Flat(flat)],
+            vec![
+                Column::Flat(flat),
+                Column::Const {
+                    value: ScalarValue::I64(1),
+                    len,
+                },
+            ],
             len,
             Selection::All,
         )?;
@@ -1643,6 +1650,37 @@ impl ChunkFlusher<'_> {
         res?;
         Ok(())
     }
+}
+
+fn push_weighted_utf8_batch(
+    utf8_schema: &Arc<Schema>,
+    scratch: &mut Reservation,
+    agg: &mut Option<HashAgg>,
+    values: &[&str],
+    weights: Vec<i64>,
+) -> Result<(), QueryError> {
+    let len = values.len();
+    if len == 0 {
+        return Ok(());
+    }
+    let utf8 = Utf8Data::try_from_slices(values.iter().copied())?;
+    let flat_val = FlatColumn::try_new(FlatData::Utf8(utf8), None)?;
+    let flat_wt = FlatColumn::try_new(FlatData::I64(weights), None)?;
+    let mini = Batch::try_new(
+        Arc::clone(utf8_schema),
+        vec![Column::Flat(flat_val), Column::Flat(flat_wt)],
+        len,
+        Selection::All,
+    )?;
+    let bytes = mini.memory_bytes();
+    scratch.try_grow(bytes)?;
+    let res = match agg.as_mut() {
+        Some(a) => a.consume(mini, scratch),
+        None => Err(QueryError::internal("missing facet HashAgg")),
+    };
+    scratch.shrink(bytes);
+    res?;
+    Ok(())
 }
 
 fn push_value_field_batch(
@@ -1674,6 +1712,94 @@ fn push_value_field_batch(
             let col = batch
                 .column(*col_idx)
                 .ok_or_else(|| QueryError::internal("missing values column"))?;
+            if let Column::Dict(d) = col
+                && let FlatData::Utf8(utf8_dict) = d.values().data()
+            {
+                let dict_len = d.values().len();
+                if dict_len == 0 {
+                    *missing = missing.saturating_add(batch.num_rows() as u64);
+                    return Ok(());
+                }
+                let counts_bytes = dict_len.saturating_mul(size_of::<u64>());
+                scratch.try_grow(counts_bytes)?;
+                let mut counts = vec![0u64; dict_len];
+                let codes = d.codes();
+                for phys_row in active_rows(batch) {
+                    if phys_row >= d.len() || d.is_null(phys_row) {
+                        *missing = missing.saturating_add(1);
+                        continue;
+                    }
+                    let code = codes[phys_row] as usize;
+                    if code >= dict_len || d.values().is_null(code) {
+                        *missing = missing.saturating_add(1);
+                        continue;
+                    }
+                    counts[code] = counts[code].saturating_add(1);
+                }
+                let flush_res = (|| -> Result<(), QueryError> {
+                    let cap = batch_limit.min(dict_len).max(1);
+                    let mut vals: Vec<&str> = Vec::with_capacity(cap);
+                    let mut wts: Vec<i64> = Vec::with_capacity(cap);
+                    for (code, &cnt) in counts.iter().enumerate() {
+                        if cnt == 0 {
+                            continue;
+                        }
+                        let s = utf8_dict
+                            .get(code)
+                            .ok_or_else(|| QueryError::internal("dict utf8 code out of bounds"))?;
+                        if matches_query(s, query_ref) {
+                            let wt = i64::try_from(cnt).unwrap_or(i64::MAX);
+                            vals.push(s);
+                            wts.push(wt);
+                            if vals.len() >= batch_limit {
+                                let send_wts = std::mem::take(&mut wts);
+                                push_weighted_utf8_batch(
+                                    utf8_schema,
+                                    scratch,
+                                    agg,
+                                    &vals,
+                                    send_wts,
+                                )?;
+                                vals.clear();
+                            }
+                        }
+                    }
+                    if !vals.is_empty() {
+                        push_weighted_utf8_batch(utf8_schema, scratch, agg, &vals, wts)?;
+                    }
+                    Ok(())
+                })();
+                drop(counts);
+                scratch.shrink(counts_bytes);
+                flush_res?;
+                return Ok(());
+            }
+            if let Column::Const { value, .. } = col {
+                let n = batch.num_rows();
+                if n == 0 {
+                    return Ok(());
+                }
+                match value {
+                    ScalarValue::Null(_) => {
+                        *missing = missing.saturating_add(n as u64);
+                        return Ok(());
+                    }
+                    ScalarValue::Utf8(s) => {
+                        if matches_query(s, query_ref) {
+                            let wt = i64::try_from(n).unwrap_or(i64::MAX);
+                            push_weighted_utf8_batch(
+                                utf8_schema,
+                                scratch,
+                                agg,
+                                &[s.as_str()],
+                                vec![wt],
+                            )?;
+                        }
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
             let mut flusher = ChunkFlusher {
                 utf8_schema,
                 scratch,
@@ -2095,16 +2221,20 @@ impl PushSink for BucketFanoutSink {
 }
 
 fn single_utf8_schema() -> Result<Arc<Schema>, RunError> {
-    Schema::try_new_arc(vec![Field::new(VALUE_COL, DataType::Utf8, false)])
-        .map_err(|e| query_err_to_run(e.into()))
+    Schema::try_new_arc(vec![
+        Field::new(VALUE_COL, DataType::Utf8, false),
+        Field::new(WEIGHT_COL, DataType::I64, false),
+    ])
+    .map_err(|e| query_err_to_run(e.into()))
 }
 
 fn single_utf8_agg_spec(utf8_schema: &Schema) -> Result<HashAggSpec, RunError> {
     let col = col_expr(utf8_schema, VALUE_COL)?;
+    let weight = col_expr(utf8_schema, WEIGHT_COL)?;
     Ok(HashAggSpec {
         group_by: vec![(VALUE_COL.to_owned(), col)],
         aggs: vec![AggExpr {
-            func: AggFunc::CountStar,
+            func: AggFunc::Sum(weight),
             filter: None,
             output_name: COUNT_COL.to_owned(),
         }],
@@ -3304,6 +3434,240 @@ mod tests {
         }
         drop(held);
         assert_eq!(full_pool.reserved(), 0);
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[test]
+    fn dict_column_direct_code_tallying_handles_nulls_query_and_multibatch() {
+        use cetra_column::{Bitmap, DictColumn};
+
+        let schema = Schema::try_new_arc(vec![Field::new("model", DataType::Utf8, true)]).unwrap();
+        let dict_vals = FlatColumn::try_new(
+            FlatData::Utf8(
+                Utf8Data::try_from_slices(["gpt-4o", "claude-3", "gpt-4o-mini"]).unwrap(),
+            ),
+            None,
+        )
+        .unwrap();
+        // Batch 1: 6 rows, row 2 is NULL, row 4 masked out by Selection::Mask.
+        let mut nulls1 = Bitmap::new_ones(6);
+        nulls1.set(2, false).unwrap();
+        let dict1 = DictColumn::try_new(dict_vals, vec![0, 1, 0, 2, 1, 0], Some(nulls1)).unwrap();
+        let mut sel_mask = Bitmap::new_ones(6);
+        sel_mask.set(4, false).unwrap();
+        let batch1 = Batch::try_new(
+            Arc::clone(&schema),
+            vec![Column::Dict(dict1)],
+            6,
+            Selection::Mask(sel_mask),
+        )
+        .unwrap();
+        // Batch 2: Column::Const with 3 rows of "gpt-4o".
+        let batch2 = Batch::try_new(
+            Arc::clone(&schema),
+            vec![Column::Const {
+                value: ScalarValue::Utf8("gpt-4o".to_owned()),
+                len: 3,
+            }],
+            3,
+            Selection::All,
+        )
+        .unwrap();
+        // Batch 3: Column::Const Null with 2 rows.
+        let batch3 = Batch::try_new(
+            Arc::clone(&schema),
+            vec![Column::Const {
+                value: ScalarValue::Null(DataType::Utf8),
+                len: 2,
+            }],
+            2,
+            Selection::All,
+        )
+        .unwrap();
+
+        let utf8_schema = single_utf8_schema().unwrap();
+        let agg_spec = single_utf8_agg_spec(&utf8_schema).unwrap();
+        let pool = GlobalPool::standalone(16 * 1024 * 1024);
+        let exec_ctx = ExecContext {
+            pool: Arc::clone(&pool),
+            eval: cetra_query::EvalContext::new(0, cetra_column::CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(std::path::PathBuf::new(), 0)),
+            workers: Arc::new(cetra_query::exec::WorkerPool::new(1).unwrap()),
+            batch_size: 8192,
+            target_partitions: 1,
+            metrics: cetra_query::exec::ExecMetrics::new(),
+        };
+        let budget = Arc::new(FieldBudget {
+            exec_ctx: exec_ctx.clone(),
+            tripped: AtomicBool::new(false),
+        });
+        let fields = vec![
+            (
+                0usize,
+                CheckedField {
+                    field: ParsedField::Values("model"),
+                    query: None,
+                    limit: 10,
+                },
+            ),
+            (
+                1usize,
+                CheckedField {
+                    field: ParsedField::Values("model"),
+                    query: Some("gpt".to_owned()),
+                    limit: 10,
+                },
+            ),
+        ];
+        let budgets = vec![Some(Arc::clone(&budget)), Some(Arc::clone(&budget))];
+        let mut sink = FacetFanoutSink::new(
+            FacetView::Spans,
+            &fields,
+            &schema,
+            &utf8_schema,
+            &agg_spec,
+            exec_ctx,
+            &budgets,
+        )
+        .unwrap();
+        let mut batch_res = pool.register("dict_facet_test", false);
+        for b in [batch1, batch2, batch3] {
+            sink.consume(b, &mut batch_res).unwrap();
+        }
+        sink.finish().unwrap();
+
+        let (done, _) =
+            combine_pass1_sinks(vec![sink], &fields, &agg_spec, &utf8_schema, &budgets).unwrap();
+        // Unfiltered: active rows = 5 + 3 + 2 = 10; missing = 1 (batch1 row 2) + 2 (batch3) = 3;
+        // gpt-4o = 2 + 3 = 5, claude-3 = 1 (row 4 masked out), gpt-4o-mini = 1.
+        let d0 = done[0].1.as_ref().unwrap();
+        assert_eq!(d0.total, 10);
+        assert_eq!(d0.missing, 3);
+        assert_eq!(
+            d0.values,
+            vec![
+                FacetValue {
+                    value: "gpt-4o".to_owned(),
+                    count: 5
+                },
+                FacetValue {
+                    value: "claude-3".to_owned(),
+                    count: 1
+                },
+                FacetValue {
+                    value: "gpt-4o-mini".to_owned(),
+                    count: 1
+                },
+            ]
+        );
+        // Query "gpt": excludes "claude-3".
+        let d1 = done[1].1.as_ref().unwrap();
+        assert_eq!(d1.total, 10);
+        assert_eq!(d1.missing, 3);
+        assert_eq!(
+            d1.values,
+            vec![
+                FacetValue {
+                    value: "gpt-4o".to_owned(),
+                    count: 5
+                },
+                FacetValue {
+                    value: "gpt-4o-mini".to_owned(),
+                    count: 1
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn keys_only_facet_on_flushed_statam_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000009".parse().expect("pid");
+
+        let (mut spans, _) = build_sample_data();
+        for s in &mut spans {
+            s.project_id = project;
+        }
+        storage
+            .append_spans(project, span_rows(&spans))
+            .await
+            .expect("append");
+        storage
+            .flush_now(Duration::from_secs(10))
+            .await
+            .expect("flush");
+        assert!(
+            !storage.catalog_files(crate::wal::Table::Spans).is_empty(),
+            "spans must be flushed to Statam files"
+        );
+
+        let ctx = QueryContext::from_engine(
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("ctx"),
+        );
+        let fields = [
+            FacetField {
+                field: "metadata",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "name",
+                query: None,
+                limit: 10,
+            },
+        ];
+        let out = facets(
+            &ctx,
+            FacetsRequest {
+                view: FacetView::Spans,
+                filter: None,
+                search: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: true,
+                    include_experiments: true,
+                },
+                fields: &fields,
+                timeout: Duration::from_secs(10),
+            },
+        )
+        .await
+        .expect("facets");
+        let expected_total = spans.len() as u64;
+        let mut expected_keys: BTreeMap<String, u64> = BTreeMap::new();
+        let mut expected_names: BTreeMap<String, u64> = BTreeMap::new();
+        for s in &spans {
+            *expected_names.entry(s.name.clone()).or_insert(0) += 1;
+            for k in s.metadata.keys() {
+                if !k.starts_with(INTERNAL_KEY_PREFIX) {
+                    *expected_keys.entry(k.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut expected_key_vals: Vec<FacetValue> = expected_keys
+            .into_iter()
+            .map(|(value, count)| FacetValue { value, count })
+            .collect();
+        expected_key_vals.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+        let mut expected_name_vals: Vec<FacetValue> = expected_names
+            .into_iter()
+            .map(|(value, count)| FacetValue { value, count })
+            .collect();
+        expected_name_vals
+            .sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+
+        let meta_facet = out[0].as_ref().expect("metadata keys facet");
+        assert_eq!(meta_facet.kind, FacetKind::Keys);
+        assert_eq!(meta_facet.total, expected_total);
+        assert_eq!(meta_facet.values, expected_key_vals);
+        let name_facet = out[1].as_ref().expect("name dict facet");
+        assert_eq!(name_facet.total, expected_total);
+        assert_eq!(name_facet.values, expected_name_vals);
 
         let _ = storage.shutdown().await;
     }

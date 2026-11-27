@@ -2,7 +2,7 @@
 //! publish and commit one catalog edit, then publish the catalog to readers.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use cetra_column::{Batch, Bitmap, CancelToken, Column, FlatData, ScalarValue};
@@ -10,7 +10,8 @@ use cetra_core::schema::spans;
 use cetra_query::tombstone::{TombstoneTable, covered_predicate};
 use cetra_query::{EvalContext, Expr, eval_filter};
 use cetra_statam::{
-    ChunkPackBuilder, PackWriteOptions, StatamError, gdpr_rewrite_single_file_streaming,
+    ChunkPackBuilder, PackWriteOptions, StatamError, TaskExecutor,
+    gdpr_rewrite_single_file_streaming,
 };
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -25,15 +26,22 @@ use crate::compaction::slice::{slice_count, slices, time_values};
 use crate::counters::CompactionOutcome;
 use crate::deletion::to_tombstone_specs;
 use crate::disk::Disk;
+use crate::engine::WorkerPoolExecutor;
 use crate::error::{CommitError, CompactionError, EngineError, FileWriteError};
 use crate::hooks::{HookPoint, Hooks};
 use crate::objects::Objects;
 use crate::partials::partials_from_spans_batch;
 use crate::read_state::{Published, publish_catalog};
 use crate::statam_io::io::{open_range_reader, run_blocking_io};
-use crate::statam_io::{BatchFileWriter, Bounds, extract_bounds, time_column, write_file_batch};
+use crate::statam_io::{
+    BatchFileWriter, Bounds, WriteParallelism, extract_bounds, time_column, write_file_batch,
+};
 use crate::unwind::guard_sync;
 use crate::verify::{VerifyQueue, may_be_corrupt};
+
+/// Minimum `compaction.max_memory` headroom per active compaction job required before
+/// enabling multi-threaded Statam RG encoding (`write_threads > 1`).
+const MIN_PARALLEL_WRITE_MEM_PER_JOB: usize = 256 * 1024 * 1024;
 
 /// Shared by every job: built once in `Storage::open`.
 pub(crate) struct Compactor {
@@ -48,6 +56,8 @@ pub(crate) struct Compactor {
     /// Read at the start of each pass. Tests replace it ([`Storage::set_policy`]).
     pub(super) policy: Mutex<Policy>,
     pub(super) threads: usize,
+    /// Number of currently executing compaction jobs (for adaptive `write_threads`).
+    pub(super) active_jobs: AtomicUsize,
     /// `storage.deletion.max_delay`, ns.
     pub(super) max_delay: i64,
     pub(super) claims: Mutex<HashSet<FileId>>,
@@ -58,6 +68,38 @@ pub(crate) struct Compactor {
     /// Deletions already warned about as past `max_delay` (spec 03 §7): each
     /// is logged once, however many passes see it.
     pub(super) overdue_logged: Mutex<HashSet<Uuid>>,
+}
+
+struct ActiveJobGuard<'a> {
+    counter: &'a AtomicUsize,
+}
+
+impl<'a> ActiveJobGuard<'a> {
+    fn enter(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self { counter }
+    }
+}
+
+impl Drop for ActiveJobGuard<'_> {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Computes the adaptive Statam `write_threads` budget for a compaction job based on
+/// background pool size, `compaction.threads`, active job count, and `compaction.max_memory`.
+pub(super) fn compute_compaction_write_threads(
+    bg_workers: usize,
+    compaction_threads: usize,
+    active_jobs: usize,
+    pool_limit: usize,
+) -> usize {
+    let active = active_jobs.max(1);
+    if pool_limit / active < MIN_PARALLEL_WRITE_MEM_PER_JOB {
+        return 1;
+    }
+    bg_workers.min(compaction_threads / active).clamp(1, 4)
 }
 
 /// How much the compactor may do at once, and how late a deletion may be.
@@ -173,6 +215,7 @@ impl Compactor {
             merge,
             policy: Mutex::new(policy),
             threads: limits.threads,
+            active_jobs: AtomicUsize::new(0),
             max_delay: limits.max_delay,
             claims: Mutex::new(HashSet::new()),
             stopping: AtomicBool::new(false),
@@ -339,11 +382,38 @@ impl Compactor {
         outcome
     }
 
+    fn write_parallelism(&self) -> WriteParallelism {
+        let active = self.active_jobs.load(Ordering::Acquire).max(1);
+        let pool_limit = self.merge.pool.limit();
+        let Ok(bg_workers) = self.merge.qe_runtime.bg_workers() else {
+            return WriteParallelism::default();
+        };
+        let write_threads = compute_compaction_write_threads(
+            bg_workers.num_workers(),
+            self.threads,
+            active,
+            pool_limit,
+        );
+        if write_threads <= 1 {
+            return WriteParallelism::default();
+        }
+        let executor: Arc<dyn TaskExecutor> = Arc::new(WorkerPoolExecutor::new(
+            bg_workers,
+            CancelToken::new(),
+            write_threads,
+        ));
+        WriteParallelism {
+            write_threads,
+            executor: Some(executor),
+        }
+    }
+
     async fn run_job(
         self: &Arc<Self>,
         job: Job,
         policy: Policy,
     ) -> Result<CompactionReport, CompactionError> {
+        let _active_guard = ActiveJobGuard::enter(&self.active_jobs);
         // Reserved before anything is read; released when `run` returns, with
         // the job's claims (spec 03 §5, D-A1-9).
         let reserved = job
@@ -454,23 +524,9 @@ impl Compactor {
                 .await;
         }
 
-        // 2b. The slices and their row counts.
+        // 2b. The slices.
         let values = time_values(self.objects.io(), &job.inputs, time_column(job.table)).await?;
         let slice_list = slices(&values, slice_count(input_bytes, policy.target_file_size));
-        let counts: Vec<usize> = slice_list
-            .iter()
-            .map(|slice| {
-                let start = match slice.lower {
-                    Some(lower) => values.partition_point(|value| *value < lower),
-                    None => 0,
-                };
-                let end = match slice.upper {
-                    Some(upper) => values.partition_point(|value| *value < upper),
-                    None => values.len(),
-                };
-                end - start
-            })
-            .collect();
         drop(values);
 
         // 3. Every slice, in order.
@@ -478,10 +534,11 @@ impl Compactor {
         let mut sources: Vec<(FileId, FileId)> = Vec::new();
         let mut unstage: Vec<String> = Vec::new();
         let mut output_bytes = 0_u64;
-        for (slice, expected_rows) in slice_list.iter().zip(&counts) {
+        for slice in &slice_list {
             if self.stopping.load(Ordering::Acquire) {
                 return Err(CompactionError::Stopped);
             }
+            let write_parallel = self.write_parallelism();
             let (path, id) = Objects::table_file_path(job.table, job.project, job.day, level);
             let traces = (job.table == FileTable::Spans)
                 .then(|| Objects::table_file_path(FileTable::Traces, job.project, job.day, level));
@@ -528,11 +585,12 @@ impl Compactor {
                         return Err(FileWriteError::statam(error).into());
                     }
                 };
-                let writer = match BatchFileWriter::new_with_pack(
+                let writer = match BatchFileWriter::new_with_pack_parallel(
                     job.table,
                     level,
                     file,
                     Some(pack_builder),
+                    write_parallel,
                 ) {
                     Ok(writer) => writer,
                     Err(error) => {
@@ -623,18 +681,14 @@ impl Compactor {
                 output_bytes = output_bytes.saturating_add(size);
                 (summary, rows, size, pack_meta, partials)
             } else {
-                let writer = match BatchFileWriter::new(
-                    job.table,
-                    level,
-                    file,
-                    u64::try_from(*expected_rows).unwrap_or(u64::MAX),
-                ) {
-                    Ok(writer) => writer,
-                    Err(error) => {
-                        let _ = self.objects.discard_output(target).await;
-                        return Err(error.into());
-                    }
-                };
+                let writer =
+                    match BatchFileWriter::new_parallel(job.table, level, file, write_parallel) {
+                        Ok(writer) => writer,
+                        Err(error) => {
+                            let _ = self.objects.discard_output(target).await;
+                            return Err(error.into());
+                        }
+                    };
                 let merged = match merge_slice(
                     &self.merge,
                     job.table,
@@ -2331,5 +2385,22 @@ pub(crate) mod tests {
             assert!(seen.insert(row.clone()), "a span appears twice: {row:?}");
         }
         storage.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn compaction_write_threads_adapts_to_active_jobs_and_memory_budget() {
+        use super::compute_compaction_write_threads;
+        const MIB: usize = 1024 * 1024;
+        // Lone job with ample memory (>= 256 MiB) gets min(bg_workers, compaction_threads, 4).
+        assert_eq!(compute_compaction_write_threads(4, 4, 1, 512 * MIB), 4);
+        assert_eq!(compute_compaction_write_threads(8, 8, 1, 512 * MIB), 4);
+        assert_eq!(compute_compaction_write_threads(2, 4, 1, 512 * MIB), 2);
+        // Two active jobs split compaction_threads proportionally (4 / 2 = 2) when memory >= 512 MiB.
+        assert_eq!(compute_compaction_write_threads(4, 4, 2, 512 * MIB), 2);
+        // Four active jobs -> 1T each.
+        assert_eq!(compute_compaction_write_threads(4, 4, 4, 1024 * MIB), 1);
+        // Tight memory (< 256 MiB per active job) forces 1T even with idle threads.
+        assert_eq!(compute_compaction_write_threads(4, 4, 1, 128 * MIB), 1);
+        assert_eq!(compute_compaction_write_threads(4, 4, 2, 400 * MIB), 1);
     }
 }

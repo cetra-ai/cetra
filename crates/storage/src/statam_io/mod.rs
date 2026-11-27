@@ -15,7 +15,8 @@ use cetra_query::Expr;
 use cetra_query::exec::{SortKey, compare_rows};
 use cetra_statam::{
     ChunkPackBuilder, ChunkPackReader, Predicate, ScanRequest, StatamError, StatamFileMeta,
-    StatamReader, StatamWriter, TableKind, WriteOptions, WriteProfile, ZonePred, ZoneValue,
+    StatamReader, StatamWriter, TableKind, TaskExecutor, WriteOptions, WriteProfile, ZonePred,
+    ZoneValue,
 };
 use object_store::ObjectStoreExt;
 use object_store::path::Path as ObjectPath;
@@ -127,6 +128,15 @@ impl Bounds {
     }
 }
 
+/// Optional parallelism settings for Statam file encoding.
+#[derive(Clone, Default)]
+pub(crate) struct WriteParallelism {
+    /// Worker thread budget (`0` or `1` = sequential `1T`).
+    pub(crate) write_threads: usize,
+    /// Optional pluggable [`TaskExecutor`] (e.g. backed by `bg_workers`).
+    pub(crate) executor: Option<Arc<dyn TaskExecutor>>,
+}
+
 /// Sorts, encodes, and returns one self-contained Statam file from `cetra_column::Batch` inputs.
 ///
 /// CPU-bound: call from `spawn_blocking`. `level` is `0` or `1`.
@@ -134,6 +144,18 @@ pub(crate) fn write_file_batch(
     table: FileTable,
     level: u8,
     batches: &[Arc<Batch>],
+) -> Result<WrittenFile, FileWriteError> {
+    write_file_batch_with_parallel(table, level, batches, WriteParallelism::default())
+}
+
+/// Sorts, encodes, and returns one self-contained Statam file with explicit write parallelism.
+///
+/// CPU-bound: call from `spawn_blocking`. `level` is `0` or `1`.
+pub(crate) fn write_file_batch_with_parallel(
+    table: FileTable,
+    level: u8,
+    batches: &[Arc<Batch>],
+    parallel: WriteParallelism,
 ) -> Result<WrittenFile, FileWriteError> {
     if level > 1 {
         return Err(FileWriteError::invalid("level must be 0 or 1"));
@@ -167,6 +189,7 @@ pub(crate) fn write_file_batch(
         Cursor::new(Vec::new()),
         None::<ChunkPackBuilder<Cursor<Vec<u8>>>>,
         mini_block_size,
+        parallel,
     )?;
     writer.write(&sorted)?;
     let (cursor, summary, _pack) = writer.finish()?;
@@ -212,6 +235,7 @@ impl<W: Write + Seek + Send, PW: Write + Seek + Send + 'static> std::fmt::Debug
 
 impl<W: Write + Seek + Send> BatchFileWriter<W, Cursor<Vec<u8>>> {
     /// Creates a self-contained [`BatchFileWriter`] without an external `.stpk` pack.
+    #[cfg(test)]
     pub(crate) fn new(
         table: FileTable,
         level: u8,
@@ -220,17 +244,40 @@ impl<W: Write + Seek + Send> BatchFileWriter<W, Cursor<Vec<u8>>> {
     ) -> Result<Self, FileWriteError> {
         Self::new_with_pack(table, level, sink, None)
     }
+
+    /// Creates a self-contained [`BatchFileWriter`] with explicit write parallelism.
+    pub(crate) fn new_parallel(
+        table: FileTable,
+        level: u8,
+        sink: W,
+        parallel: WriteParallelism,
+    ) -> Result<Self, FileWriteError> {
+        Self::new_with_pack_parallel(table, level, sink, None, parallel)
+    }
 }
 
 impl<W: Write + Seek + Send, PW: Write + Seek + Send + 'static> BatchFileWriter<W, PW> {
     /// Creates a [`BatchFileWriter`] with an optional streaming [`ChunkPackBuilder`].
+    #[cfg(test)]
     pub(crate) fn new_with_pack(
         table: FileTable,
         level: u8,
         sink: W,
         pack: Option<ChunkPackBuilder<PW>>,
     ) -> Result<Self, FileWriteError> {
-        Self::new_with_pack_and_mb(table, level, sink, pack, None)
+        Self::new_with_pack_and_mb(table, level, sink, pack, None, WriteParallelism::default())
+    }
+
+    /// Creates a [`BatchFileWriter`] with an optional streaming [`ChunkPackBuilder`]
+    /// and explicit write parallelism.
+    pub(crate) fn new_with_pack_parallel(
+        table: FileTable,
+        level: u8,
+        sink: W,
+        pack: Option<ChunkPackBuilder<PW>>,
+        parallel: WriteParallelism,
+    ) -> Result<Self, FileWriteError> {
+        Self::new_with_pack_and_mb(table, level, sink, pack, None, parallel)
     }
 
     fn new_with_pack_and_mb(
@@ -239,6 +286,7 @@ impl<W: Write + Seek + Send, PW: Write + Seek + Send + 'static> BatchFileWriter<
         sink: W,
         pack: Option<ChunkPackBuilder<PW>>,
         mini_block_size: Option<usize>,
+        parallel: WriteParallelism,
     ) -> Result<Self, FileWriteError> {
         if level > 1 {
             return Err(FileWriteError::invalid("level must be 0 or 1"));
@@ -254,6 +302,8 @@ impl<W: Write + Seek + Send, PW: Write + Seek + Send + 'static> BatchFileWriter<
         if let Some(mb) = mini_block_size {
             opts.mini_block_size = mb;
         }
+        opts.write_threads = parallel.write_threads.clamp(1, 4);
+        opts.executor = parallel.executor;
         let writer = StatamWriter::new_with_owned_pack(sink, Arc::clone(&col_schema), opts, pack)
             .map_err(FileWriteError::statam)?;
         Ok(Self {

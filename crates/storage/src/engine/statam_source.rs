@@ -1,24 +1,31 @@
 //! Native Statam `ScanSource` with metadata caching, SBBF/zone-map/trigram/shredded-map
-//! pushdown, mini-block streaming, inline tombstones, cooperative cancellation,
-//! exact memory reservation accounting, and corrupt-file `Suspects` reporting.
+//! pushdown, CNF OR substring pushdown, 3VL `FilterExpr` per-file exact-pushed vs residual
+//! splitting, RG partitioning with `WorkerPoolExecutor`, zero-I/O `COUNT(*)`, direct `take_rows`,
+//! mini-block streaming, inline tombstones, cooperative cancellation, exact memory reservation
+//! accounting, and corrupt-file `Suspects` reporting.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 
 use cetra_column::{
-    Batch, CancelToken, Column, ColumnError, DataType, Reservation, ScalarValue, Schema, Selection,
+    Batch, CancelToken, Column, ColumnError, DataType, Field, FlatColumn, FlatData, Reservation,
+    ScalarValue, Schema, Selection,
 };
 use cetra_core::schema::traces;
 use cetra_query::exec::source::collect_expr_map_projections;
 use cetra_query::exec::{
     ExecContext, IdLookupHint, MapProjection, PartitionStream, ScanSource, ScanSpec,
 };
-use cetra_query::{BinaryOp, EvalContext, Expr, QueryError, UnaryOp, covered_predicate};
+use cetra_query::{BinaryOp, EvalContext, Expr, QueryError, ScalarFn, UnaryOp, covered_predicate};
+use cetra_statam::codec::dict::FileDict;
+use cetra_statam::format::BLOCK_FLAG_HAS_NAN;
+use cetra_statam::simd::bloom::BloomIndex;
 use cetra_statam::{
-    ChunkPackReader, CoalesceMode, IdLookup, LocalityGroup, PackResolver, PackToc, Predicate,
-    ScanRequest, StatamError, StatamFileMeta, StatamReader, StatamScanIter, SubstringQuery,
-    TimeRange, ZonePred, ZoneValue,
+    BlockEntry, ChunkPackReader, CoalesceMode, FilterExpr, IdLookup, LocalityGroup, MapReadMode,
+    PackResolver, PackToc, Predicate, ScanRequest, StatamError, StatamFileMeta, StatamReader,
+    StatamScanIter, SubstringQuery, TaskExecutor, TimeRange, ZonePred, ZoneValue,
+    statam_bloom_hash, zone_map_may_match,
 };
 use chrono::NaiveDate;
 
@@ -32,9 +39,25 @@ use crate::verify::Suspects;
 
 use super::metadata_cache::MetadataCache;
 use super::{
-    DAY_NS, apply_tombstones_and_filters, day_of_ns, reconcile_res, rollback_res,
-    to_tombstone_specs, tombstone_table,
+    DAY_NS, WorkerPoolExecutor, apply_tombstones_and_filters, day_of_ns, reconcile_res,
+    rollback_res, to_tombstone_specs, tombstone_table,
 };
+
+/// Return type of [`StatamSource::open_with_row_coords`].
+pub(crate) type PartitionStreamsWithSchema = (Vec<Box<dyn PartitionStream>>, Arc<Schema>);
+
+/// Virtual column name appended by [`StatamSource::open_with_row_coords`] carrying the
+/// 0-based `u32` file ordinal (as `I64`) into `StatamSource::files`.
+pub(crate) const ROW_COORD_FILE_COL: &str = "__cetra_file_ord";
+/// Virtual column name appended by [`StatamSource::open_with_row_coords`] carrying the
+/// 0-based file-global `u64` row index (as `I64`).
+pub(crate) const ROW_COORD_ROW_COL: &str = "__cetra_row_idx";
+
+/// Minimum uncached file byte size before `open_partitions` eagerly reads Hot Tail metadata
+/// to split Row Groups across worker partitions (`16 MiB`).
+const RG_SPLIT_OPEN_THRESHOLD_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum rows emitted per 0-column batch on the zero-I/O `COUNT(*)` fast path.
+const ZERO_IO_COUNT_MAX_CHUNK: usize = 65_536;
 
 /// Native Statam [`ScanSource`].
 #[derive(Clone)]
@@ -62,6 +85,13 @@ impl fmt::Debug for StatamSource {
             .field("schema_len", &self.schema.len())
             .finish_non_exhaustive()
     }
+}
+
+#[derive(Clone)]
+struct FileWork {
+    file_ordinal: u32,
+    file: Arc<FileMeta>,
+    rg_indices: Option<Vec<usize>>,
 }
 
 impl StatamSource {
@@ -97,16 +127,19 @@ impl StatamSource {
         self
     }
 
-    fn prune_files(&self, spec: &ScanSpec) -> Vec<Arc<FileMeta>> {
+    fn prune_files_indexed(
+        &self,
+        spec: &ScanSpec,
+    ) -> Result<Vec<(u32, Arc<FileMeta>)>, QueryError> {
         let min_ns = spec.time_range.min_ns;
         let max_ns = spec.time_range.max_ns;
         if let (Some(lo), Some(hi)) = (min_ns, max_ns)
             && lo > hi
         {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if spec.id_lookups.iter().any(id_lookup_is_empty) {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let (day_start, day_end) = file_day_bounds(self.table, min_ns, max_ns);
@@ -131,27 +164,449 @@ impl StatamSource {
             None
         };
 
-        self.files
-            .iter()
-            .filter(|file| {
-                if file.rows == 0 {
-                    return false;
-                }
-                if file.day < day_start || file.day > day_end {
-                    return false;
-                }
-                if !file_overlaps(file, min_ns, max_ns) {
-                    return false;
-                }
-                if let Some((lo, hi)) = around_window
-                    && !file_overlaps(file, Some(lo), Some(hi))
-                {
-                    return false;
-                }
-                true
-            })
-            .cloned()
+        let mut kept = Vec::new();
+        for (idx, file) in self.files.iter().enumerate() {
+            if file.rows == 0 {
+                continue;
+            }
+            if file.day < day_start || file.day > day_end {
+                continue;
+            }
+            if !file_overlaps(file, min_ns, max_ns) {
+                continue;
+            }
+            if let Some((lo, hi)) = around_window
+                && !file_overlaps(file, Some(lo), Some(hi))
+            {
+                continue;
+            }
+            let ord = u32::try_from(idx).map_err(|_| QueryError::TooLarge)?;
+            kept.push((ord, Arc::clone(file)));
+        }
+        Ok(kept)
+    }
+
+    #[cfg(test)]
+    fn prune_files(&self, spec: &ScanSpec) -> Vec<Arc<FileMeta>> {
+        self.prune_files_indexed(spec)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(_, f)| f)
             .collect()
+    }
+
+    /// Opens partition streams emitting the projected columns from `spec` PLUS two trailing
+    /// `I64` coordinate columns ([`ROW_COORD_FILE_COL`], [`ROW_COORD_ROW_COL`]) suitable for
+    /// a subsequent [`Self::take_rows`] Phase-2 fetch.
+    pub(crate) fn open_with_row_coords(
+        &self,
+        spec: &ScanSpec,
+        ctx: &ExecContext,
+    ) -> Result<PartitionStreamsWithSchema, QueryError> {
+        let base_schema = self.projected_schema(spec)?;
+        let mut fields = base_schema.fields().to_vec();
+        fields.push(Field::new(ROW_COORD_FILE_COL, DataType::I64, false));
+        fields.push(Field::new(ROW_COORD_ROW_COL, DataType::I64, false));
+        let coord_schema = Schema::try_new_arc(fields)?;
+        let streams = self.open_partitions_inner(spec, ctx, Arc::clone(&coord_schema), true)?;
+        Ok((streams, coord_schema))
+    }
+
+    /// Directly materializes the requested `(file_ordinal, row_idx)` coordinates with
+    /// `projection` using [`StatamReader::take_rows_with_limits`], respecting cancellation,
+    /// `Reservation` accounting, schema evolution, metadata caching, and corrupt-file reporting.
+    pub(crate) fn take_rows(
+        &self,
+        coords: &[(u32, u64)],
+        projection: &[usize],
+        ctx: &ExecContext,
+        res: &mut Reservation,
+    ) -> Result<Vec<Batch>, QueryError> {
+        for &idx in projection {
+            if idx >= self.schema.len() {
+                return Err(ColumnError::InvalidBatch {
+                    reason: "projection index out of bounds",
+                }
+                .into());
+            }
+        }
+        let out_schema = Arc::new(self.schema.project(projection)?);
+        if coords.is_empty() {
+            return Ok(Vec::new());
+        }
+        if ctx.eval.cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+
+        let mut by_file: BTreeMap<u32, Vec<u64>> = BTreeMap::new();
+        for &(file_ord, row_idx) in coords {
+            if (file_ord as usize) >= self.files.len() {
+                return Err(QueryError::internal("take_rows file ordinal out of bounds"));
+            }
+            by_file.entry(file_ord).or_default().push(row_idx);
+        }
+
+        let touched_files: Vec<Arc<FileMeta>> = by_file
+            .keys()
+            .map(|&ord| Arc::clone(&self.files[ord as usize]))
+            .collect();
+        self.suspects.record(&touched_files);
+
+        let res_before = res.size();
+        let (read_threads, executor) = make_query_executor(ctx);
+        let mut out_batches: Vec<Batch> = Vec::new();
+
+        for (file_ord, row_ids) in by_file {
+            if ctx.eval.cancel.is_cancelled() {
+                rollback_res(Some(res), res_before);
+                return Err(QueryError::Cancelled);
+            }
+            let file = &self.files[file_ord as usize];
+            let rr = open_range_reader(
+                &self.io,
+                &file.path,
+                file.size,
+                self.runtime.clone(),
+                ctx.eval.cancel.clone(),
+            )
+            .map_err(|e| {
+                rollback_res(Some(res), res_before);
+                map_statam_err(&self.suspects, file.id, e)
+            })?;
+
+            let meta = if let Some(cached) = self.metadata_cache.get_statam(file.id) {
+                cached
+            } else {
+                let loaded = guard_sync(|| {
+                    StatamFileMeta::read_from_with_hint(rr.as_ref(), Some(file.footer_size))
+                })
+                .map_err(|e| {
+                    rollback_res(Some(res), res_before);
+                    map_statam_err(&self.suspects, file.id, e)
+                })?;
+                let meta = Arc::new(loaded);
+                self.metadata_cache
+                    .insert_statam(file.id, Arc::clone(&meta));
+                meta
+            };
+
+            let file_schema = &meta.schema_meta.schema;
+            let mut file_proj = Vec::with_capacity(projection.len());
+            let mut slots = Vec::with_capacity(projection.len());
+            let mut has_missing_col = false;
+            for &full_idx in projection {
+                let field = &self.schema.fields()[full_idx];
+                match file_schema.index_of(&field.name) {
+                    Some(file_idx) => {
+                        if file_schema.fields()[file_idx].data_type != field.data_type {
+                            self.suspects.report_corrupt(file.id);
+                            rollback_res(Some(res), res_before);
+                            return Err(QueryError::CorruptData(
+                                "column type mismatch in statam file".to_owned(),
+                            ));
+                        }
+                        let file_pos = file_proj.len();
+                        file_proj.push(file_idx);
+                        slots.push(ScanColSlot::FromFile(file_pos));
+                    }
+                    None => {
+                        if !field.nullable {
+                            self.suspects.report_corrupt(file.id);
+                            rollback_res(Some(res), res_before);
+                            return Err(QueryError::CorruptData(
+                                "missing non-nullable column in statam file".to_owned(),
+                            ));
+                        }
+                        has_missing_col = true;
+                        slots.push(ScanColSlot::FillNull(field.data_type.clone()));
+                    }
+                }
+            }
+
+            let packs: Option<Arc<dyn PackResolver>> = file.pack.as_ref().map(|pack| {
+                Arc::new(SingleFilePackResolver {
+                    pack: pack.clone(),
+                    io: self.io.clone(),
+                    metadata_cache: Arc::clone(&self.metadata_cache),
+                    runtime: self.runtime.clone(),
+                    cancel: ctx.eval.cancel.clone(),
+                }) as Arc<dyn PackResolver>
+            });
+
+            let mut reader =
+                guard_sync(|| StatamReader::open_with_shared_meta(rr, Arc::clone(&meta), packs))
+                    .map_err(|e| {
+                        rollback_res(Some(res), res_before);
+                        map_statam_err(&self.suspects, file.id, e)
+                    })?;
+            if let Some(exec) = &executor {
+                reader = reader.with_executor(Arc::clone(exec));
+            }
+
+            let batches = guard_sync(|| {
+                reader.take_rows_with_limits(
+                    &row_ids,
+                    Some(&file_proj),
+                    read_threads,
+                    Some(&ctx.eval.cancel),
+                    Some(res),
+                )
+            })
+            .map_err(|e| {
+                rollback_res(Some(res), res_before);
+                map_statam_err(&self.suspects, file.id, e)
+            })?;
+
+            if has_missing_col {
+                let fill_layout = ScanBatchFill {
+                    schema: Arc::clone(&out_schema),
+                    slots,
+                };
+                for batch in batches {
+                    if batch.is_empty() {
+                        continue;
+                    }
+                    let filled = fill_missing_columns(&batch, &fill_layout)
+                        .inspect_err(|_| rollback_res(Some(res), res_before))?;
+                    out_batches.push(filled);
+                }
+            } else {
+                for batch in batches {
+                    if !batch.is_empty() {
+                        out_batches.push(batch);
+                    }
+                }
+            }
+        }
+
+        let total_bytes: usize = out_batches
+            .iter()
+            .map(Batch::memory_bytes)
+            .fold(0usize, usize::saturating_add);
+        reconcile_res(Some(res), res_before, total_bytes)?;
+        Ok(out_batches)
+    }
+
+    fn open_partitions_inner(
+        &self,
+        spec: &ScanSpec,
+        ctx: &ExecContext,
+        projected_schema: Arc<Schema>,
+        emit_row_coords: bool,
+    ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+        if spec.limit == Some(0) {
+            return Ok(Vec::new());
+        }
+        let kept_files = self.prune_files_indexed(spec)?;
+        if kept_files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let kept_metas: Vec<Arc<FileMeta>> =
+            kept_files.iter().map(|(_, f)| Arc::clone(f)).collect();
+        self.suspects.record(&kept_metas);
+
+        let plan = Arc::new(CompiledScanSpec::compile(
+            self.table,
+            &self.schema,
+            projected_schema,
+            spec,
+            emit_row_coords,
+        )?);
+
+        let target = ctx.target_partitions.max(1);
+        let allow_rg_split = kept_files.len() < target
+            && !(spec.limit.is_some() && plan.eligible_sort_desc)
+            && !self.chunk_to_batch_size;
+
+        let groups: Vec<Vec<FileWork>> = if allow_rg_split {
+            self.build_rg_partitioned_groups(kept_files, &plan, ctx, target)?
+        } else {
+            distribute_file_work(
+                kept_files
+                    .into_iter()
+                    .map(|(file_ordinal, file)| FileWork {
+                        file_ordinal,
+                        file,
+                        rg_indices: None,
+                    })
+                    .collect(),
+                target,
+            )
+        };
+
+        if groups.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // M3.5.3: When only 1 partition is produced (1-RG heavy decode / 1-RG `.stpk` search),
+        // dispatch Statam's internal parallel decode/search onto `ctx.workers` via `run_helping`.
+        let (read_threads, executor) = if groups.len() == 1 && !self.chunk_to_batch_size {
+            make_query_executor(ctx)
+        } else {
+            (1, None)
+        };
+
+        let streams = groups
+            .into_iter()
+            .map(|files| {
+                Box::new(StatamPartitionStream {
+                    io: self.io.clone(),
+                    table: self.table,
+                    schema: Arc::clone(&self.schema),
+                    files: files.into(),
+                    deletions: Arc::clone(&self.deletions),
+                    metadata_cache: Arc::clone(&self.metadata_cache),
+                    suspects: self.suspects.clone(),
+                    runtime: self.runtime.clone(),
+                    plan: Arc::clone(&plan),
+                    remaining: plan.stream_limit,
+                    eval: ctx.eval.clone(),
+                    batch_size: ctx.batch_size.max(1),
+                    chunk_to_batch_size: self.chunk_to_batch_size,
+                    read_threads,
+                    executor: executor.clone(),
+                    active_file: None,
+                }) as Box<dyn PartitionStream>
+            })
+            .collect();
+        Ok(streams)
+    }
+
+    /// Splits multi-RG files across `target` partitions using strictly in-memory metadata
+    /// (cached `StatamFileMeta`, or eagerly opening Hot Tails only when `total_bytes >= 16 MiB`
+    /// and the file does not qualify for Zero-I/O `COUNT(*)`).
+    fn build_rg_partitioned_groups(
+        &self,
+        kept_files: Vec<(u32, Arc<FileMeta>)>,
+        plan: &CompiledScanSpec,
+        ctx: &ExecContext,
+        target: usize,
+    ) -> Result<Vec<Vec<FileWork>>, QueryError> {
+        let mut buckets: Vec<Vec<FileWork>> = (0..target).map(|_| Vec::new()).collect();
+        let mut rr_cursor: usize = 0;
+
+        for (file_ordinal, file) in kept_files {
+            if ctx.eval.cancel.is_cancelled() {
+                return Err(QueryError::Cancelled);
+            }
+            // Never open uncached metadata for a file that qualifies for Zero-I/O COUNT(*).
+            if can_zero_io_count(&file, None, &self.deletions, self.table, &self.schema, plan) {
+                buckets[rr_cursor % target].push(FileWork {
+                    file_ordinal,
+                    file,
+                    rg_indices: None,
+                });
+                rr_cursor += 1;
+                continue;
+            }
+
+            let meta_opt = if let Some(cached) = self.metadata_cache.get_statam(file.id) {
+                Some(cached)
+            } else if file.total_bytes() >= RG_SPLIT_OPEN_THRESHOLD_BYTES {
+                let rr = open_range_reader(
+                    &self.io,
+                    &file.path,
+                    file.size,
+                    self.runtime.clone(),
+                    ctx.eval.cancel.clone(),
+                )
+                .map_err(|e| map_statam_err(&self.suspects, file.id, e))?;
+                let loaded = guard_sync(|| {
+                    StatamFileMeta::read_from_with_hint(rr.as_ref(), Some(file.footer_size))
+                })
+                .map_err(|e| map_statam_err(&self.suspects, file.id, e))?;
+                let meta = Arc::new(loaded);
+                self.metadata_cache
+                    .insert_statam(file.id, Arc::clone(&meta));
+                Some(meta)
+            } else {
+                None
+            };
+
+            let Some(meta) = meta_opt else {
+                buckets[rr_cursor % target].push(FileWork {
+                    file_ordinal,
+                    file,
+                    rg_indices: None,
+                });
+                rr_cursor += 1;
+                continue;
+            };
+
+            if meta.rg_dir.len() <= 1 {
+                buckets[rr_cursor % target].push(FileWork {
+                    file_ordinal,
+                    file,
+                    rg_indices: None,
+                });
+                rr_cursor += 1;
+                continue;
+            }
+
+            // Strictly in-memory RG pre-pruning (NEVER fetches Lazy blooms or Lazy dicts).
+            let surviving_rgs = pre_prune_rgs_in_memory(&meta, self.table, &self.schema, plan)
+                .map_err(|e| map_statam_err(&self.suspects, file.id, e))?;
+
+            if surviving_rgs.is_empty() {
+                continue;
+            }
+
+            if surviving_rgs.len() == 1 {
+                buckets[rr_cursor % target].push(FileWork {
+                    file_ordinal,
+                    file,
+                    rg_indices: Some(surviving_rgs),
+                });
+                rr_cursor += 1;
+            } else {
+                let mut per_bucket: Vec<Vec<usize>> = (0..target).map(|_| Vec::new()).collect();
+                for rg_idx in surviving_rgs {
+                    per_bucket[rr_cursor % target].push(rg_idx);
+                    rr_cursor += 1;
+                }
+                for (b_idx, rgs) in per_bucket.into_iter().enumerate() {
+                    if !rgs.is_empty() {
+                        buckets[b_idx].push(FileWork {
+                            file_ordinal,
+                            file: Arc::clone(&file),
+                            rg_indices: Some(rgs),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(buckets.into_iter().filter(|b| !b.is_empty()).collect())
+    }
+}
+
+fn make_query_executor(ctx: &ExecContext) -> (usize, Option<Arc<dyn TaskExecutor>>) {
+    let threads = ctx.target_partitions.clamp(1, 4);
+    if threads > 1 && ctx.workers.num_workers() > 1 {
+        let exec: Arc<dyn TaskExecutor> = Arc::new(WorkerPoolExecutor::new(
+            Arc::clone(&ctx.workers),
+            ctx.eval.cancel.clone(),
+            threads,
+        ));
+        (threads, Some(exec))
+    } else {
+        (1, None)
+    }
+}
+
+fn map_statam_err(suspects: &Suspects, file_id: FileId, err: StatamError) -> QueryError {
+    if err.is_corrupt() {
+        suspects.report_corrupt(file_id);
+        return QueryError::CorruptData("corrupt statam file".to_owned());
+    }
+    if err.is_store_error() {
+        return QueryError::StorageIo("storage read error".to_owned());
+    }
+    match err {
+        StatamError::Cancelled => QueryError::Cancelled,
+        StatamError::MemoryExceeded => QueryError::TooLarge,
+        StatamError::Column(c) => QueryError::Column(c),
+        _ => QueryError::internal("statam read failed"),
     }
 }
 
@@ -173,44 +628,7 @@ impl ScanSource for StatamSource {
         ctx: &ExecContext,
     ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
         let projected_schema = self.projected_schema(spec)?;
-        if spec.limit == Some(0) {
-            return Ok(Vec::new());
-        }
-        let kept_files = self.prune_files(spec);
-        if kept_files.is_empty() {
-            return Ok(Vec::new());
-        }
-        self.suspects.record(&kept_files);
-
-        let plan = Arc::new(CompiledScanSpec::compile(
-            self.table,
-            &self.schema,
-            projected_schema,
-            spec,
-        )?);
-        let groups = distribute_files(kept_files, ctx.target_partitions.max(1));
-        let streams = groups
-            .into_iter()
-            .map(|files| {
-                Box::new(StatamPartitionStream {
-                    io: self.io.clone(),
-                    table: self.table,
-                    schema: Arc::clone(&self.schema),
-                    files: files.into(),
-                    deletions: Arc::clone(&self.deletions),
-                    metadata_cache: Arc::clone(&self.metadata_cache),
-                    suspects: self.suspects.clone(),
-                    runtime: self.runtime.clone(),
-                    plan: Arc::clone(&plan),
-                    remaining: plan.stream_limit,
-                    eval: ctx.eval.clone(),
-                    batch_size: ctx.batch_size.max(1),
-                    chunk_to_batch_size: self.chunk_to_batch_size,
-                    active_file: None,
-                }) as Box<dyn PartitionStream>
-            })
-            .collect();
-        Ok(streams)
+        self.open_partitions_inner(spec, ctx, projected_schema, false)
     }
 
     fn explain_summary(&self, spec: &ScanSpec) -> String {
@@ -265,24 +683,25 @@ fn file_overlaps(file: &FileMeta, min_ns: Option<i64>, max_ns: Option<i64>) -> b
     true
 }
 
-fn distribute_files(mut files: Vec<Arc<FileMeta>>, target: usize) -> Vec<Vec<Arc<FileMeta>>> {
+fn distribute_file_work(mut files: Vec<FileWork>, target: usize) -> Vec<Vec<FileWork>> {
     let slots = target.max(1).min(files.len().max(1));
     files.sort_by(|left, right| {
         right
+            .file
             .total_bytes()
-            .cmp(&left.total_bytes())
-            .then_with(|| left.path.cmp(&right.path))
+            .cmp(&left.file.total_bytes())
+            .then_with(|| left.file.path.cmp(&right.file.path))
     });
-    let mut groups: Vec<(u64, Vec<Arc<FileMeta>>)> = (0..slots).map(|_| (0, Vec::new())).collect();
-    for file in files {
+    let mut groups: Vec<(u64, Vec<FileWork>)> = (0..slots).map(|_| (0, Vec::new())).collect();
+    for work in files {
         let mut best = 0;
         for (idx, (sz, _)) in groups.iter().enumerate().skip(1) {
             if *sz < groups[best].0 {
                 best = idx;
             }
         }
-        groups[best].0 = groups[best].0.saturating_add(file.total_bytes());
-        groups[best].1.push(file);
+        groups[best].0 = groups[best].0.saturating_add(work.file.total_bytes());
+        groups[best].1.push(work);
     }
     groups
         .into_iter()
@@ -296,13 +715,19 @@ struct CompiledScanSpec {
     projection: Option<Vec<usize>>,
     projected_schema: Arc<Schema>,
     output_cols: BTreeSet<usize>,
-    filters: Vec<Expr>,
-    filter_cols: BTreeSet<usize>,
-    base_map_projections: BTreeMap<String, MapProjection>,
+    /// Original filters (used if compaction `TakeRows` fallback runs without Statam pushdown).
+    raw_filters: Vec<Expr>,
+    /// Top-level `AND`-flattened conjuncts for per-file `exact_pushed` vs `residual` classification.
+    flat_filters: Vec<Expr>,
+    /// Output-only map projections (projected `MapUtf8` columns; absent means `Full`).
+    output_map_projections: BTreeMap<String, MapProjection>,
     time_range: TimeRange,
     id_lookups: Vec<IdLookup>,
-    predicates: Vec<Predicate>,
-    substrings: Vec<SubstringQuery>,
+    /// Pushdown-safe CNF substring clauses from `spec.substrings` (every disjunct targets `Utf8`
+    /// and every `case_insensitive` needle is ASCII).
+    substrings: Vec<Vec<SubstringQuery>>,
+    /// True when `spec.substrings` had any clause skipped (e.g. non-ASCII `ILIKE` or non-Utf8).
+    has_unpushed_substrings: bool,
     /// True only when the query's sort hint matches the single-key descending
     /// time-column fast path on `Traces` / `Scores` (Plan B4).
     eligible_sort_desc: bool,
@@ -310,6 +735,8 @@ struct CompiledScanSpec {
     limit: Option<usize>,
     /// Stream-level row cap enforced only when `sort_hints` is empty (unordered limit).
     stream_limit: Option<usize>,
+    /// True when opened via [`StatamSource::open_with_row_coords`].
+    emit_row_coords: bool,
 }
 
 impl CompiledScanSpec {
@@ -318,6 +745,7 @@ impl CompiledScanSpec {
         schema: &Arc<Schema>,
         projected_schema: Arc<Schema>,
         spec: &ScanSpec,
+        emit_row_coords: bool,
     ) -> Result<Self, QueryError> {
         let mut output_cols = BTreeSet::new();
         match &spec.projection {
@@ -339,15 +767,15 @@ impl CompiledScanSpec {
             }
         }
 
-        let mut filter_cols = BTreeSet::new();
+        let mut flat_filters = Vec::with_capacity(spec.filters.len());
         for filter in &spec.filters {
-            filter.referenced_columns(&mut filter_cols);
+            flatten_top_and(filter, &mut flat_filters);
         }
 
-        // B3: Compute merged `MapProjection` lattice over projected `MapUtf8` columns
-        // (treating any projected `MapUtf8` column absent from `spec.map_projections` as `Full`)
-        // plus all filter references. Per-file tombstones are merged later in `build_file_scan`.
-        let mut base_map_projections: BTreeMap<String, MapProjection> = BTreeMap::new();
+        // Output-only map projections: any projected `MapUtf8` column absent from
+        // `spec.map_projections` defaults to `Full`. Per-file residual + tombstone
+        // map projections are merged later in `open_next_file`.
+        let mut output_map_projections: BTreeMap<String, MapProjection> = BTreeMap::new();
         for &cidx in &output_cols {
             let field = &schema.fields()[cidx];
             if field.data_type == DataType::MapUtf8 {
@@ -356,11 +784,8 @@ impl CompiledScanSpec {
                     .get(&field.name)
                     .cloned()
                     .unwrap_or(MapProjection::Full);
-                base_map_projections.insert(field.name.clone(), proj);
+                output_map_projections.insert(field.name.clone(), proj);
             }
-        }
-        for filter in &spec.filters {
-            collect_expr_map_projections(filter, schema, &mut base_map_projections);
         }
 
         // Time range hint.
@@ -391,28 +816,37 @@ impl CompiledScanSpec {
             }
         }
 
-        // Pushdown-safe predicates extracted from `spec.filters` (residual filters remain exact).
-        let mut predicates = Vec::new();
-        for filter in &spec.filters {
-            extract_predicates(filter, schema, &mut predicates);
-        }
-
-        // B2: Push ONLY single-disjunct CNF clauses targeting `DataType::Utf8`.
-        // Multi-disjunct OR clauses (`clause.len() > 1`) stay in `spec.filters`.
+        // M3.5.1: Forward ALL CNF `spec.substrings` clauses whose disjuncts all target
+        // `DataType::Utf8` columns AND whose `case_insensitive` needles are ASCII (non-ASCII
+        // `ILIKE` stays in `residual` so `regex (?i)` simple case folding has zero false negatives).
         let mut substrings = Vec::new();
+        let mut has_unpushed_substrings = false;
         for clause in &spec.substrings {
-            if clause.len() != 1 {
+            if clause.is_empty() {
+                substrings.push(Vec::new());
                 continue;
             }
-            let hint = &clause[0];
-            if let Some(cidx) = schema.index_of(&hint.column)
-                && schema.fields()[cidx].data_type == DataType::Utf8
-            {
-                substrings.push(SubstringQuery {
+            let mut translated = Vec::with_capacity(clause.len());
+            let mut clause_ok = true;
+            for hint in clause {
+                let valid_col = schema
+                    .index_of(&hint.column)
+                    .is_some_and(|cidx| schema.fields()[cidx].data_type == DataType::Utf8);
+                let safe_case = !hint.case_insensitive || hint.needle.is_ascii();
+                if !valid_col || !safe_case {
+                    clause_ok = false;
+                    break;
+                }
+                translated.push(SubstringQuery {
                     column: hint.column.clone(),
                     needle: hint.needle.as_bytes().to_vec(),
                     case_insensitive: hint.case_insensitive,
                 });
+            }
+            if clause_ok {
+                substrings.push(translated);
+            } else {
+                has_unpushed_substrings = true;
             }
         }
 
@@ -430,19 +864,92 @@ impl CompiledScanSpec {
             projection: spec.projection.clone(),
             projected_schema,
             output_cols,
-            filters: spec.filters.clone(),
-            filter_cols,
-            base_map_projections,
+            raw_filters: spec.filters.clone(),
+            flat_filters,
+            output_map_projections,
             time_range,
             id_lookups,
-            predicates,
             substrings,
+            has_unpushed_substrings,
             eligible_sort_desc,
             has_sort_hints,
             limit: spec.limit,
             stream_limit,
+            emit_row_coords,
         })
     }
+}
+
+fn flatten_top_and(expr: &Expr, out: &mut Vec<Expr>) {
+    match expr {
+        Expr::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+            ..
+        } => {
+            flatten_top_and(left, out);
+            flatten_top_and(right, out);
+        }
+        other => out.push(other.clone()),
+    }
+}
+
+fn flatten_or<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match expr {
+        Expr::Binary {
+            left,
+            op: BinaryOp::Or,
+            right,
+            ..
+        } => {
+            flatten_or(left, out);
+            flatten_or(right, out);
+        }
+        other => out.push(other),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LikeToken {
+    Literal(String),
+    AnySeq,
+    AnyChar,
+}
+
+/// Escape-aware `LIKE` pattern tokenizer matching `crates/query/src/fn_string.rs:285-318`.
+fn tokenize_like_pattern(pattern: &str, escape: Option<char>) -> Vec<LikeToken> {
+    let mut tokens: Vec<LikeToken> = Vec::new();
+    let mut chars = pattern.chars();
+    let mut lit_buf = String::new();
+
+    let flush_lit = |buf: &mut String, out: &mut Vec<LikeToken>| {
+        if !buf.is_empty() {
+            out.push(LikeToken::Literal(std::mem::take(buf)));
+        }
+    };
+
+    while let Some(ch) = chars.next() {
+        if escape == Some(ch) {
+            if let Some(escaped) = chars.next() {
+                lit_buf.push(escaped);
+            } else {
+                lit_buf.push(ch);
+            }
+        } else if ch == '%' {
+            flush_lit(&mut lit_buf, &mut tokens);
+            if !matches!(tokens.last(), Some(LikeToken::AnySeq)) {
+                tokens.push(LikeToken::AnySeq);
+            }
+        } else if ch == '_' {
+            flush_lit(&mut lit_buf, &mut tokens);
+            tokens.push(LikeToken::AnyChar);
+        } else {
+            lit_buf.push(ch);
+        }
+    }
+    flush_lit(&mut lit_buf, &mut tokens);
+    tokens
 }
 
 fn is_supported_id_lookup_type(dt: &DataType) -> bool {
@@ -490,6 +997,8 @@ fn flip_cmp(op: BinaryOp) -> Option<BinaryOp> {
         BinaryOp::LtEq => Some(BinaryOp::GtEq),
         BinaryOp::Gt => Some(BinaryOp::Lt),
         BinaryOp::GtEq => Some(BinaryOp::LtEq),
+        BinaryOp::IsDistinctFrom => Some(BinaryOp::IsDistinctFrom),
+        BinaryOp::IsNotDistinctFrom => Some(BinaryOp::IsNotDistinctFrom),
         _ => None,
     }
 }
@@ -510,6 +1019,21 @@ fn cmp_to_zone_pred(op: BinaryOp, val: ZoneValue) -> Option<ZonePred> {
 enum PredTarget<'a> {
     Col { name: &'a str, dt: &'a DataType },
     MapKey { name: &'a str, key: &'a str },
+}
+
+impl<'a> PredTarget<'a> {
+    fn col_name(&self) -> &'a str {
+        match self {
+            Self::Col { name, .. } | Self::MapKey { name, .. } => name,
+        }
+    }
+
+    fn is_utf8_or_map_key(&self) -> bool {
+        match self {
+            Self::Col { dt, .. } => **dt == DataType::Utf8,
+            Self::MapKey { .. } => true,
+        }
+    }
 }
 
 fn extract_target<'a>(expr: &'a Expr, schema: &'a Schema) -> Option<PredTarget<'a>> {
@@ -541,11 +1065,11 @@ fn extract_target<'a>(expr: &'a Expr, schema: &'a Schema) -> Option<PredTarget<'
     }
 }
 
-fn push_target_pred(target: PredTarget<'_>, pred: ZonePred, out: &mut Vec<Predicate>) {
+fn make_target_pred(target: PredTarget<'_>, pred: ZonePred) -> Predicate {
     match target {
-        PredTarget::Col { name, .. } => out.push(Predicate::new(name.to_owned(), pred)),
+        PredTarget::Col { name, .. } => Predicate::new(name.to_owned(), pred),
         PredTarget::MapKey { name, key } => {
-            out.push(Predicate::map_key(name.to_owned(), key.to_owned(), pred));
+            Predicate::map_key(name.to_owned(), key.to_owned(), pred)
         }
     }
 }
@@ -557,7 +1081,116 @@ fn target_value(target: &PredTarget<'_>, sv: &ScalarValue) -> Option<ZoneValue> 
     }
 }
 
-fn extract_predicates(expr: &Expr, schema: &Schema, out: &mut Vec<Predicate>) {
+/// Checks if a top-level filter conjunct is a pure OR-of-substrings (`LIKE`/`ILIKE '%needle%'`
+/// or `contains(col, needle)`) with exact Statam parity (ASCII-only for `ILIKE`).
+fn extract_exact_substring_clause(expr: &Expr, schema: &Schema) -> Option<Vec<SubstringQuery>> {
+    let mut disjuncts = Vec::new();
+    flatten_or(expr, &mut disjuncts);
+    if disjuncts.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(disjuncts.len());
+    for d in disjuncts {
+        match d {
+            Expr::Like {
+                expr: col_expr,
+                pattern,
+                escape,
+                case_insensitive,
+                negated: false,
+            } => {
+                let Expr::Column { index, .. } = col_expr.as_ref() else {
+                    return None;
+                };
+                let field = schema.fields().get(*index)?;
+                if field.data_type != DataType::Utf8 {
+                    return None;
+                }
+                let Expr::Literal(ScalarValue::Utf8(pat)) = pattern.as_ref() else {
+                    return None;
+                };
+                let tokens = tokenize_like_pattern(pat, *escape);
+                let [
+                    LikeToken::AnySeq,
+                    LikeToken::Literal(needle),
+                    LikeToken::AnySeq,
+                ] = tokens.as_slice()
+                else {
+                    return None;
+                };
+                if needle.is_empty() {
+                    return None;
+                }
+                if *case_insensitive && !needle.is_ascii() {
+                    return None;
+                }
+                out.push(SubstringQuery {
+                    column: field.name.clone(),
+                    needle: needle.as_bytes().to_vec(),
+                    case_insensitive: *case_insensitive,
+                });
+            }
+            Expr::Call {
+                func: ScalarFn::Contains,
+                args,
+                ..
+            } if args.len() == 2 => {
+                let Expr::Column { index, .. } = &args[0] else {
+                    return None;
+                };
+                let field = schema.fields().get(*index)?;
+                if field.data_type != DataType::Utf8 {
+                    return None;
+                }
+                let Expr::Literal(ScalarValue::Utf8(needle)) = &args[1] else {
+                    return None;
+                };
+                if needle.is_empty() {
+                    return None;
+                }
+                out.push(SubstringQuery {
+                    column: field.name.clone(),
+                    needle: needle.as_bytes().to_vec(),
+                    case_insensitive: false,
+                });
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Checks whether a leaf predicate on `target` is accepted and exact for this file's `col_dir`.
+fn target_allows_pred_in_file(
+    target: &PredTarget<'_>,
+    pred: &ZonePred,
+    file_schema: &Schema,
+    meta: &StatamFileMeta,
+) -> bool {
+    let Some(cidx) = file_schema.index_of(target.col_name()) else {
+        return false;
+    };
+    let Some(cd) = meta.col_dir.get(cidx) else {
+        return false;
+    };
+    if cd.locality_group == LocalityGroup::ExternalPayload {
+        return matches!(pred, ZonePred::IsNull | ZonePred::IsNotNull);
+    }
+    true
+}
+
+/// Translates `expr` into a 100%-exact SQL-3VL [`FilterExpr`] for this opened file.
+///
+/// Returns `None` for any expression touching a missing schema-evolution column, ANY value
+/// predicate touching `LocalityGroup::ExternalPayload`, nullable-list `IN`/`NOT IN`,
+/// nullable-bound `BETWEEN`/`NOT BETWEEN`, `NaN` F64 literals, non-ASCII `ILIKE`, casts,
+/// arithmetic, cross-column comparisons, regex, or UDFs (keeping them in per-file `residual`).
+fn translate_exact_filter_expr(
+    expr: &Expr,
+    schema: &Schema,
+    file_schema: &Schema,
+    meta: &StatamFileMeta,
+) -> Option<FilterExpr> {
     match expr {
         Expr::Binary {
             left,
@@ -565,8 +1198,70 @@ fn extract_predicates(expr: &Expr, schema: &Schema, out: &mut Vec<Predicate>) {
             right,
             ..
         } => {
-            extract_predicates(left, schema, out);
-            extract_predicates(right, schema, out);
+            let l = translate_exact_filter_expr(left, schema, file_schema, meta)?;
+            let r = translate_exact_filter_expr(right, schema, file_schema, meta)?;
+            let mut children = Vec::new();
+            match l {
+                FilterExpr::And(cs) => children.extend(cs),
+                other => children.push(other),
+            }
+            match r {
+                FilterExpr::And(cs) => children.extend(cs),
+                other => children.push(other),
+            }
+            Some(FilterExpr::And(children))
+        }
+        Expr::Binary {
+            left,
+            op: BinaryOp::Or,
+            right,
+            ..
+        } => {
+            let l = translate_exact_filter_expr(left, schema, file_schema, meta)?;
+            let r = translate_exact_filter_expr(right, schema, file_schema, meta)?;
+            let mut children = Vec::new();
+            match l {
+                FilterExpr::Or(cs) => children.extend(cs),
+                other => children.push(other),
+            }
+            match r {
+                FilterExpr::Or(cs) => children.extend(cs),
+                other => children.push(other),
+            }
+            Some(FilterExpr::Or(children))
+        }
+        Expr::Unary {
+            op: UnaryOp::Not,
+            expr: inner,
+            ..
+        } => {
+            let child = translate_exact_filter_expr(inner, schema, file_schema, meta)?;
+            Some(FilterExpr::Not(Box::new(child)))
+        }
+        Expr::Unary {
+            op: UnaryOp::IsNull,
+            expr: inner,
+            ..
+        } => {
+            let target = extract_target(inner, schema)?;
+            if !target_allows_pred_in_file(&target, &ZonePred::IsNull, file_schema, meta) {
+                return None;
+            }
+            Some(FilterExpr::Pred(make_target_pred(target, ZonePred::IsNull)))
+        }
+        Expr::Unary {
+            op: UnaryOp::IsNotNull,
+            expr: inner,
+            ..
+        } => {
+            let target = extract_target(inner, schema)?;
+            if !target_allows_pred_in_file(&target, &ZonePred::IsNotNull, file_schema, meta) {
+                return None;
+            }
+            Some(FilterExpr::Pred(make_target_pred(
+                target,
+                ZonePred::IsNotNull,
+            )))
         }
         Expr::Binary {
             left, op, right, ..
@@ -578,85 +1273,755 @@ fn extract_predicates(expr: &Expr, schema: &Schema, out: &mut Vec<Predicate>) {
             } else if let (Expr::Literal(sv), Some(t)) =
                 (left.as_ref(), extract_target(right, schema))
             {
-                let Some(flipped) = flip_cmp(*op) else {
-                    return;
-                };
+                let flipped = flip_cmp(*op)?;
                 (t, flipped, sv)
             } else {
-                return;
+                return None;
             };
-            if let Some(val) = target_value(&target, sv)
-                && let Some(zpred) = cmp_to_zone_pred(cmp_op, val)
-            {
-                push_target_pred(target, zpred, out);
+
+            match cmp_op {
+                BinaryOp::IsDistinctFrom => {
+                    if sv.is_null() {
+                        if !target_allows_pred_in_file(
+                            &target,
+                            &ZonePred::IsNotNull,
+                            file_schema,
+                            meta,
+                        ) {
+                            return None;
+                        }
+                        return Some(FilterExpr::Pred(make_target_pred(
+                            target,
+                            ZonePred::IsNotNull,
+                        )));
+                    }
+                    let val = target_value(&target, sv)?;
+                    let ne_pred = ZonePred::Ne(val);
+                    if !target_allows_pred_in_file(&target, &ne_pred, file_schema, meta) {
+                        return None;
+                    }
+                    Some(FilterExpr::Or(vec![
+                        FilterExpr::Pred(make_target_pred(target, ZonePred::IsNull)),
+                        FilterExpr::Pred(make_target_pred(target, ne_pred)),
+                    ]))
+                }
+                BinaryOp::IsNotDistinctFrom => {
+                    if sv.is_null() {
+                        if !target_allows_pred_in_file(
+                            &target,
+                            &ZonePred::IsNull,
+                            file_schema,
+                            meta,
+                        ) {
+                            return None;
+                        }
+                        return Some(FilterExpr::Pred(make_target_pred(target, ZonePred::IsNull)));
+                    }
+                    let val = target_value(&target, sv)?;
+                    let eq_pred = ZonePred::Eq(val);
+                    if !target_allows_pred_in_file(&target, &eq_pred, file_schema, meta) {
+                        return None;
+                    }
+                    Some(FilterExpr::And(vec![
+                        FilterExpr::Pred(make_target_pred(target, ZonePred::IsNotNull)),
+                        FilterExpr::Pred(make_target_pred(target, eq_pred)),
+                    ]))
+                }
+                _ => {
+                    if sv.is_null() {
+                        return None;
+                    }
+                    let val = target_value(&target, sv)?;
+                    let zpred = cmp_to_zone_pred(cmp_op, val)?;
+                    if !target_allows_pred_in_file(&target, &zpred, file_schema, meta) {
+                        return None;
+                    }
+                    Some(FilterExpr::Pred(make_target_pred(target, zpred)))
+                }
             }
         }
         Expr::Between {
-            expr,
+            expr: inner,
+            low,
+            high,
+            negated,
+        } => {
+            let target = extract_target(inner, schema)?;
+            let (Expr::Literal(lo_sv), Expr::Literal(hi_sv)) = (low.as_ref(), high.as_ref()) else {
+                return None;
+            };
+            if lo_sv.is_null() || hi_sv.is_null() {
+                return None;
+            }
+            let lo = target_value(&target, lo_sv)?;
+            let hi = target_value(&target, hi_sv)?;
+            let zpred = ZonePred::Between(lo, hi);
+            if !target_allows_pred_in_file(&target, &zpred, file_schema, meta) {
+                return None;
+            }
+            let base = FilterExpr::Pred(make_target_pred(target, zpred));
+            if *negated {
+                Some(FilterExpr::Not(Box::new(base)))
+            } else {
+                Some(base)
+            }
+        }
+        Expr::InList {
+            expr: inner,
+            list,
+            negated,
+            ..
+        } => {
+            let target = extract_target(inner, schema)?;
+            let mut vals = Vec::with_capacity(list.len());
+            for item in list {
+                let Expr::Literal(sv) = item else {
+                    return None;
+                };
+                if sv.is_null() {
+                    return None;
+                }
+                vals.push(target_value(&target, sv)?);
+            }
+            let zpred = ZonePred::In(vals);
+            if !target_allows_pred_in_file(&target, &zpred, file_schema, meta) {
+                return None;
+            }
+            let base = FilterExpr::Pred(make_target_pred(target, zpred));
+            if *negated {
+                Some(FilterExpr::Not(Box::new(base)))
+            } else {
+                Some(base)
+            }
+        }
+        Expr::Like {
+            expr: inner,
+            pattern,
+            escape,
+            case_insensitive: false,
+            negated: false,
+        } => {
+            let target = extract_target(inner, schema)?;
+            if !target.is_utf8_or_map_key() {
+                return None;
+            }
+            let Expr::Literal(ScalarValue::Utf8(pat)) = pattern.as_ref() else {
+                return None;
+            };
+            let tokens = tokenize_like_pattern(pat, *escape);
+            let [LikeToken::Literal(prefix), LikeToken::AnySeq] = tokens.as_slice() else {
+                return None;
+            };
+            let zpred = ZonePred::Prefix(prefix.as_bytes().to_vec());
+            if !target_allows_pred_in_file(&target, &zpred, file_schema, meta) {
+                return None;
+            }
+            Some(FilterExpr::Pred(make_target_pred(target, zpred)))
+        }
+        _ => None,
+    }
+}
+
+/// Checks whether a top-level conjunct is trivially always-true or always-false on a file
+/// because it solely tests a missing nullable schema-evolution column (all-NULL in this file).
+enum MissingColOutcome {
+    AlwaysTrue,
+    AlwaysFalse,
+    Unknown,
+}
+
+fn classify_missing_col_top_conjunct(
+    expr: &Expr,
+    schema: &Schema,
+    file_schema: &Schema,
+) -> MissingColOutcome {
+    match expr {
+        Expr::Unary {
+            op: UnaryOp::IsNull,
+            expr: inner,
+            ..
+        } => {
+            if let Some(t) = extract_target(inner, schema)
+                && file_schema.index_of(t.col_name()).is_none()
+            {
+                return MissingColOutcome::AlwaysTrue;
+            }
+            MissingColOutcome::Unknown
+        }
+        Expr::Unary {
+            op: UnaryOp::IsNotNull,
+            expr: inner,
+            ..
+        } => {
+            if let Some(t) = extract_target(inner, schema)
+                && file_schema.index_of(t.col_name()).is_none()
+            {
+                return MissingColOutcome::AlwaysFalse;
+            }
+            MissingColOutcome::Unknown
+        }
+        Expr::Binary {
+            left,
+            op:
+                BinaryOp::Eq
+                | BinaryOp::NotEq
+                | BinaryOp::Lt
+                | BinaryOp::LtEq
+                | BinaryOp::Gt
+                | BinaryOp::GtEq,
+            right,
+            ..
+        } => {
+            let missing_target = match (
+                extract_target(left, schema),
+                right.as_ref(),
+                left.as_ref(),
+                extract_target(right, schema),
+            ) {
+                (Some(t), Expr::Literal(_), _, _) | (_, _, Expr::Literal(_), Some(t)) => {
+                    file_schema.index_of(t.col_name()).is_none()
+                }
+                _ => false,
+            };
+            if missing_target {
+                MissingColOutcome::AlwaysFalse
+            } else {
+                MissingColOutcome::Unknown
+            }
+        }
+        Expr::Between {
+            expr: inner,
+            negated: false,
+            ..
+        }
+        | Expr::InList {
+            expr: inner,
+            negated: false,
+            ..
+        }
+        | Expr::Like {
+            expr: inner,
+            negated: false,
+            ..
+        } => {
+            if let Some(t) = extract_target(inner, schema)
+                && file_schema.index_of(t.col_name()).is_none()
+            {
+                return MissingColOutcome::AlwaysFalse;
+            }
+            MissingColOutcome::Unknown
+        }
+        _ => MissingColOutcome::Unknown,
+    }
+}
+
+struct ClassifiedFileFilters {
+    id_lookups: Vec<IdLookup>,
+    predicates: Vec<Predicate>,
+    filter_exprs: Vec<FilterExpr>,
+    substrings: Vec<Vec<SubstringQuery>>,
+    residual_full: Vec<Expr>,
+}
+
+/// Classifies all pushdowns and `plan.flat_filters` for one opened file using `meta.col_dir`.
+/// Returns `Ok(None)` when the file is provably empty (0 matching rows).
+fn classify_file_filters(
+    plan: &CompiledScanSpec,
+    schema: &Schema,
+    meta: &StatamFileMeta,
+) -> Option<ClassifiedFileFilters> {
+    let file_schema = &meta.schema_meta.schema;
+
+    let mut id_lookups = Vec::with_capacity(plan.id_lookups.len());
+    for lk in &plan.id_lookups {
+        let cidx = file_schema.index_of(&lk.column)?;
+        if meta
+            .col_dir
+            .get(cidx)
+            .is_some_and(|cd| cd.locality_group != LocalityGroup::ExternalPayload)
+        {
+            id_lookups.push(lk.clone());
+        }
+    }
+
+    let mut substrings: Vec<Vec<SubstringQuery>> = Vec::with_capacity(plan.substrings.len());
+    for clause in &plan.substrings {
+        if clause.is_empty() {
+            return None;
+        }
+        let filtered: Vec<SubstringQuery> = clause
+            .iter()
+            .filter(|q| file_schema.index_of(&q.column).is_some())
+            .cloned()
+            .collect();
+        if filtered.is_empty() {
+            return None;
+        }
+        if !substrings.contains(&filtered) {
+            substrings.push(filtered);
+        }
+    }
+
+    let mut predicates = Vec::new();
+    let mut filter_exprs = Vec::new();
+    let mut residual_full = Vec::new();
+
+    for conjunct in &plan.flat_filters {
+        if let Some(clause) = extract_exact_substring_clause(conjunct, schema) {
+            let filtered: Vec<SubstringQuery> = clause
+                .into_iter()
+                .filter(|q| file_schema.index_of(&q.column).is_some())
+                .collect();
+            if filtered.is_empty() {
+                return None;
+            }
+            if !substrings.contains(&filtered) {
+                substrings.push(filtered);
+            }
+            continue;
+        }
+
+        if let Some(fe) = translate_exact_filter_expr(conjunct, schema, file_schema, meta) {
+            match fe {
+                FilterExpr::Pred(p) => predicates.push(p),
+                other => filter_exprs.push(other),
+            }
+            continue;
+        }
+
+        match classify_missing_col_top_conjunct(conjunct, schema, file_schema) {
+            MissingColOutcome::AlwaysTrue => continue,
+            MissingColOutcome::AlwaysFalse => return None,
+            MissingColOutcome::Unknown => residual_full.push(conjunct.clone()),
+        }
+    }
+
+    Some(ClassifiedFileFilters {
+        id_lookups,
+        predicates,
+        filter_exprs,
+        substrings,
+        residual_full,
+    })
+}
+
+/// Returns the `BlockEntry` slice belonging to Row Group `rg_idx` for physical column `pidx`.
+fn rg_blocks_in_meta(meta: &StatamFileMeta, pidx: usize, rg_idx: usize) -> &[BlockEntry] {
+    let cd = &meta.col_dir[pidx];
+    let rg = &meta.rg_dir[rg_idx];
+    let col_blocks =
+        &meta.block_dir[cd.first_block_idx as usize..(cd.first_block_idx + cd.num_blocks) as usize];
+    let rg_start = rg.first_row;
+    let rg_end = rg.first_row + rg.row_count;
+    let lo = col_blocks.partition_point(|b| b.first_row < rg_start);
+    let hi = col_blocks.partition_point(|b| b.first_row < rg_end);
+    &col_blocks[lo..hi]
+}
+
+fn id_lookup_zone_pred_in_meta(dt: &DataType, values: &[Vec<u8>]) -> Option<ZonePred> {
+    let to_zval = |b: &[u8]| -> Option<ZoneValue> {
+        match dt {
+            DataType::Utf8 | DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16 => {
+                Some(ZoneValue::Bytes(b.to_vec()))
+            }
+            _ => None,
+        }
+    };
+    if values.len() == 1 {
+        to_zval(&values[0]).map(ZonePred::Eq)
+    } else {
+        let mut zvals = Vec::with_capacity(values.len());
+        for v in values {
+            zvals.push(to_zval(v)?);
+        }
+        Some(ZonePred::In(zvals))
+    }
+}
+
+fn invert_zone_pred_for_3vl(pred: &ZonePred) -> Option<ZonePred> {
+    match pred {
+        ZonePred::Eq(v) => Some(ZonePred::Ne(v.clone())),
+        ZonePred::Ne(v) => Some(ZonePred::Eq(v.clone())),
+        ZonePred::Lt(v) => Some(ZonePred::Ge(v.clone())),
+        ZonePred::Le(v) => Some(ZonePred::Gt(v.clone())),
+        ZonePred::Gt(v) => Some(ZonePred::Le(v.clone())),
+        ZonePred::Ge(v) => Some(ZonePred::Lt(v.clone())),
+        ZonePred::IsNull => Some(ZonePred::IsNotNull),
+        ZonePred::IsNotNull => Some(ZonePred::IsNull),
+        ZonePred::Between(_, _) | ZonePred::In(_) | ZonePred::Prefix(_) => None,
+    }
+}
+
+fn filter_expr_may_be_true_in_meta(
+    meta: &StatamFileMeta,
+    rg_idx: usize,
+    mb_idx: usize,
+    expr: &FilterExpr,
+    dicts: &HashMap<usize, FileDict>,
+) -> bool {
+    let schema = &meta.schema_meta.schema;
+    match expr {
+        FilterExpr::Pred(pred) => {
+            if pred.map_key.is_some() {
+                return true;
+            }
+            let Some(cidx) = schema.index_of(&pred.column) else {
+                return true;
+            };
+            let blk = &rg_blocks_in_meta(meta, cidx, rg_idx)[mb_idx];
+            let dt = &schema.fields()[cidx].data_type;
+            zone_map_may_match(
+                blk,
+                dt,
+                meta.col_dir[cidx].col_flags,
+                &pred.pred,
+                dicts.get(&cidx),
+            )
+        }
+        FilterExpr::And(cs) => cs
+            .iter()
+            .all(|c| filter_expr_may_be_true_in_meta(meta, rg_idx, mb_idx, c, dicts)),
+        FilterExpr::Or(cs) => cs
+            .iter()
+            .any(|c| filter_expr_may_be_true_in_meta(meta, rg_idx, mb_idx, c, dicts)),
+        FilterExpr::Not(inner) => {
+            filter_expr_may_be_false_in_meta(meta, rg_idx, mb_idx, inner, dicts)
+        }
+    }
+}
+
+fn filter_expr_may_be_false_in_meta(
+    meta: &StatamFileMeta,
+    rg_idx: usize,
+    mb_idx: usize,
+    expr: &FilterExpr,
+    dicts: &HashMap<usize, FileDict>,
+) -> bool {
+    let schema = &meta.schema_meta.schema;
+    match expr {
+        FilterExpr::Pred(pred) => {
+            if pred.map_key.is_some() {
+                return true;
+            }
+            let Some(inv) = invert_zone_pred_for_3vl(&pred.pred) else {
+                return true;
+            };
+            let Some(cidx) = schema.index_of(&pred.column) else {
+                return true;
+            };
+            let blk = &rg_blocks_in_meta(meta, cidx, rg_idx)[mb_idx];
+            let dt = &schema.fields()[cidx].data_type;
+            if matches!(dt, DataType::F64) && (blk.block_flags & BLOCK_FLAG_HAS_NAN) != 0 {
+                return true;
+            }
+            zone_map_may_match(
+                blk,
+                dt,
+                meta.col_dir[cidx].col_flags,
+                &inv,
+                dicts.get(&cidx),
+            )
+        }
+        FilterExpr::And(cs) => cs
+            .iter()
+            .any(|c| filter_expr_may_be_false_in_meta(meta, rg_idx, mb_idx, c, dicts)),
+        FilterExpr::Or(cs) => cs
+            .iter()
+            .all(|c| filter_expr_may_be_false_in_meta(meta, rg_idx, mb_idx, c, dicts)),
+        FilterExpr::Not(inner) => {
+            filter_expr_may_be_true_in_meta(meta, rg_idx, mb_idx, inner, dicts)
+        }
+    }
+}
+
+/// Pre-prunes Row Groups using **strictly in-memory** `StatamFileMeta` (`time_range`, Hot blooms,
+/// Hot dicts, and RG/MB zone maps — NEVER performs any I/O or fetches Lazy blooms/dicts).
+fn pre_prune_rgs_in_memory(
+    meta: &StatamFileMeta,
+    table: FileTable,
+    schema: &Schema,
+    plan: &CompiledScanSpec,
+) -> Result<Vec<usize>, StatamError> {
+    let num_rgs = meta.rg_dir.len();
+    if num_rgs == 0 || meta.postscript.row_count == 0 || plan.time_range.is_empty() {
+        return Ok(Vec::new());
+    }
+    let file_schema = &meta.schema_meta.schema;
+    let Some(classified) = classify_file_filters(plan, schema, meta) else {
+        return Ok(Vec::new());
+    };
+
+    // Hot blooms ONLY (in-memory Hot Tail slice; returns Ok(None) for Lazy blooms -> 0 I/O).
+    let mut hot_blooms: Vec<(usize, BloomIndex, Vec<u64>)> = Vec::new();
+    let mut lookup_zpreds: Vec<(usize, ZonePred)> = Vec::new();
+    for lk in &classified.id_lookups {
+        if lk.values.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(cidx) = file_schema.index_of(&lk.column) {
+            let hashes: Vec<u64> = lk.values.iter().map(|v| statam_bloom_hash(v)).collect();
+            if let Some(bloom) = meta.hot_bloom(cidx)? {
+                if !bloom.contains_any_hash(&hashes) {
+                    return Ok(Vec::new());
+                }
+                hot_blooms.push((cidx, bloom, hashes));
+            }
+            if let Some(zp) =
+                id_lookup_zone_pred_in_meta(&file_schema.fields()[cidx].data_type, &lk.values)
+            {
+                lookup_zpreds.push((cidx, zp));
+            }
+        }
+    }
+
+    // Hot dicts ONLY for columns referenced by zone-map predicates (in-memory Hot Tail slice).
+    let mut hot_dicts: HashMap<usize, FileDict> = HashMap::new();
+    let mut try_load_hot_dict = |cidx: usize| -> Result<(), StatamError> {
+        if let std::collections::hash_map::Entry::Vacant(e) = hot_dicts.entry(cidx)
+            && let Some(dict) = meta.hot_dict(cidx)?
+        {
+            e.insert(dict);
+        }
+        Ok(())
+    };
+    for &(cidx, _) in &lookup_zpreds {
+        try_load_hot_dict(cidx)?;
+    }
+    for p in &classified.predicates {
+        if p.map_key.is_none()
+            && let Some(cidx) = file_schema.index_of(&p.column)
+        {
+            try_load_hot_dict(cidx)?;
+        }
+    }
+    fn collect_expr_cols(expr: &FilterExpr, file_schema: &Schema, out: &mut BTreeSet<usize>) {
+        match expr {
+            FilterExpr::Pred(p) => {
+                if p.map_key.is_none()
+                    && let Some(cidx) = file_schema.index_of(&p.column)
+                {
+                    out.insert(cidx);
+                }
+            }
+            FilterExpr::And(cs) | FilterExpr::Or(cs) => {
+                for c in cs {
+                    collect_expr_cols(c, file_schema, out);
+                }
+            }
+            FilterExpr::Not(inner) => collect_expr_cols(inner, file_schema, out),
+        }
+    }
+    let mut expr_cols = BTreeSet::new();
+    for fe in &classified.filter_exprs {
+        collect_expr_cols(fe, file_schema, &mut expr_cols);
+    }
+    for cidx in expr_cols {
+        try_load_hot_dict(cidx)?;
+    }
+
+    let time_col_idx = if plan.time_range.is_all() {
+        None
+    } else {
+        file_schema.index_of(time_column(table))
+    };
+    let time_zpred = ZonePred::Between(
+        ZoneValue::TimestampNs(plan.time_range.min_ns),
+        ZoneValue::TimestampNs(plan.time_range.max_ns),
+    );
+
+    let mut surviving_rgs = Vec::with_capacity(num_rgs);
+    let fields = file_schema.fields();
+
+    'rg: for rg_idx in 0..num_rgs {
+        for (_, bloom, hashes) in &hot_blooms {
+            if !bloom.rg_may_contain_any_hash(rg_idx, hashes) {
+                continue 'rg;
+            }
+        }
+        let mb_count = rg_blocks_in_meta(meta, 0, rg_idx).len();
+        if mb_count == 0 {
+            continue;
+        }
+        let mut any_mb_survives = false;
+        'mb: for mb_idx in 0..mb_count {
+            if let Some(tc) = time_col_idx {
+                let blk = &rg_blocks_in_meta(meta, tc, rg_idx)[mb_idx];
+                if !zone_map_may_match(
+                    blk,
+                    &fields[tc].data_type,
+                    meta.col_dir[tc].col_flags,
+                    &time_zpred,
+                    hot_dicts.get(&tc),
+                ) {
+                    continue 'mb;
+                }
+            }
+            for (cidx, zp) in &lookup_zpreds {
+                let blk = &rg_blocks_in_meta(meta, *cidx, rg_idx)[mb_idx];
+                if !zone_map_may_match(
+                    blk,
+                    &fields[*cidx].data_type,
+                    meta.col_dir[*cidx].col_flags,
+                    zp,
+                    hot_dicts.get(cidx),
+                ) {
+                    continue 'mb;
+                }
+            }
+            for p in &classified.predicates {
+                if p.map_key.is_some() {
+                    continue;
+                }
+                if let Some(cidx) = file_schema.index_of(&p.column) {
+                    let blk = &rg_blocks_in_meta(meta, cidx, rg_idx)[mb_idx];
+                    if !zone_map_may_match(
+                        blk,
+                        &fields[cidx].data_type,
+                        meta.col_dir[cidx].col_flags,
+                        &p.pred,
+                        hot_dicts.get(&cidx),
+                    ) {
+                        continue 'mb;
+                    }
+                }
+            }
+            for fe in &classified.filter_exprs {
+                if !filter_expr_may_be_true_in_meta(meta, rg_idx, mb_idx, fe, &hot_dicts) {
+                    continue 'mb;
+                }
+            }
+            any_mb_survives = true;
+            break;
+        }
+        if any_mb_survives {
+            surviving_rgs.push(rg_idx);
+        }
+    }
+
+    Ok(surviving_rgs)
+}
+
+/// Returns `true` iff `file` can be counted directly from `FileMeta::rows` with **0 disk / 0 S3 I/O**.
+fn can_zero_io_count(
+    file: &FileMeta,
+    rg_indices: Option<&[usize]>,
+    deletions: &[Arc<PendingDeletion>],
+    table: FileTable,
+    schema: &Schema,
+    plan: &CompiledScanSpec,
+) -> bool {
+    if plan.emit_row_coords || rg_indices.is_some() {
+        return false;
+    }
+    if plan.projection.as_deref() != Some(&[]) {
+        return false;
+    }
+    if !plan.id_lookups.is_empty() || !plan.substrings.is_empty() || plan.has_unpushed_substrings {
+        return false;
+    }
+    if !applicable(
+        deletions,
+        Some(file.deletions_applied_seq),
+        file.min_ingest_time,
+    )
+    .is_empty()
+    {
+        return false;
+    }
+    if file.min_time > file.max_time
+        || file.min_time < plan.time_range.min_ns
+        || file.max_time > plan.time_range.max_ns
+    {
+        return false;
+    }
+    if plan.flat_filters.is_empty() {
+        return true;
+    }
+    let Some(time_col_idx) = schema.index_of(time_column(table)) else {
+        return false;
+    };
+    let field = &schema.fields()[time_col_idx];
+    if field.nullable || !matches!(field.data_type, DataType::TimestampNs { .. }) {
+        return false;
+    }
+    plan.flat_filters.iter().all(|expr| {
+        time_expr_always_true_on_interval(expr, time_col_idx, file.min_time, file.max_time)
+    })
+}
+
+fn is_col_index(expr: &Expr, col_idx: usize) -> bool {
+    matches!(expr, Expr::Column { index, .. } if *index == col_idx)
+}
+
+/// Returns `true` ONLY when `expr` is a pure predicate on non-nullable timestamp column
+/// `time_col_idx` that evaluates to `TRUE` for EVERY `t` in `[min_t, max_t]`.
+fn time_expr_always_true_on_interval(
+    expr: &Expr,
+    time_col_idx: usize,
+    min_t: i64,
+    max_t: i64,
+) -> bool {
+    match expr {
+        Expr::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+            ..
+        } => {
+            time_expr_always_true_on_interval(left, time_col_idx, min_t, max_t)
+                && time_expr_always_true_on_interval(right, time_col_idx, min_t, max_t)
+        }
+        Expr::Unary {
+            op: UnaryOp::IsNotNull,
+            expr: inner,
+            ..
+        } => is_col_index(inner, time_col_idx),
+        Expr::Binary {
+            left, op, right, ..
+        } => {
+            let (cmp_op, lit) = if is_col_index(left, time_col_idx)
+                && let Expr::Literal(ScalarValue::TimestampNs { value, .. }) = right.as_ref()
+            {
+                (*op, *value)
+            } else if is_col_index(right, time_col_idx)
+                && let Expr::Literal(ScalarValue::TimestampNs { value, .. }) = left.as_ref()
+            {
+                let Some(flipped) = flip_cmp(*op) else {
+                    return false;
+                };
+                (flipped, *value)
+            } else {
+                return false;
+            };
+            match cmp_op {
+                BinaryOp::Eq | BinaryOp::IsNotDistinctFrom => min_t == lit && max_t == lit,
+                BinaryOp::NotEq | BinaryOp::IsDistinctFrom => max_t < lit || min_t > lit,
+                BinaryOp::Lt => max_t < lit,
+                BinaryOp::LtEq => max_t <= lit,
+                BinaryOp::Gt => min_t > lit,
+                BinaryOp::GtEq => min_t >= lit,
+                _ => false,
+            }
+        }
+        Expr::Between {
+            expr: inner,
             low,
             high,
             negated: false,
         } => {
-            let Some(target) = extract_target(expr, schema) else {
-                return;
+            if !is_col_index(inner, time_col_idx) {
+                return false;
+            }
+            let (
+                Expr::Literal(ScalarValue::TimestampNs { value: lo, .. }),
+                Expr::Literal(ScalarValue::TimestampNs { value: hi, .. }),
+            ) = (low.as_ref(), high.as_ref())
+            else {
+                return false;
             };
-            let (Expr::Literal(lo_sv), Expr::Literal(hi_sv)) = (low.as_ref(), high.as_ref()) else {
-                return;
-            };
-            if let (Some(lo), Some(hi)) =
-                (target_value(&target, lo_sv), target_value(&target, hi_sv))
-            {
-                push_target_pred(target, ZonePred::Between(lo, hi), out);
-            }
+            lo <= hi && min_t >= *lo && max_t <= *hi
         }
-        Expr::InList {
-            expr,
-            list,
-            negated: false,
-            ..
-        } => {
-            let Some(target) = extract_target(expr, schema) else {
-                return;
-            };
-            if list.is_empty() {
-                return;
-            }
-            let mut vals = Vec::with_capacity(list.len());
-            for item in list {
-                let Expr::Literal(sv) = item else {
-                    return;
-                };
-                if sv.is_null() {
-                    return;
-                }
-                let Some(zv) = target_value(&target, sv) else {
-                    return;
-                };
-                vals.push(zv);
-            }
-            if !vals.is_empty() {
-                push_target_pred(target, ZonePred::In(vals), out);
-            }
-        }
-        Expr::Unary {
-            op: UnaryOp::IsNull,
-            expr,
-            ..
-        } => {
-            if let Some(target) = extract_target(expr, schema) {
-                push_target_pred(target, ZonePred::IsNull, out);
-            }
-        }
-        Expr::Unary {
-            op: UnaryOp::IsNotNull,
-            expr,
-            ..
-        } => {
-            if let Some(target) = extract_target(expr, schema) {
-                push_target_pred(target, ZonePred::IsNotNull, out);
-            }
-        }
-        _ => {}
+        _ => false,
     }
 }
 
@@ -697,6 +2062,15 @@ impl PackResolver for SingleFilePackResolver {
 
 enum FileScanCursor {
     Iter(Box<StatamScanIter>),
+    IterWithCoords {
+        iter: Box<StatamScanIter>,
+        file_ordinal: u32,
+    },
+    ZeroIoCount {
+        schema: Arc<Schema>,
+        remaining_rows: u64,
+        chunk_size: usize,
+    },
     TakeRows {
         reader: Arc<StatamReader>,
         projection: Option<Vec<usize>>,
@@ -706,14 +2080,42 @@ enum FileScanCursor {
     },
 }
 
+type CursorNextBatch = (Batch, Option<(u32, Vec<u64>)>);
+
 impl FileScanCursor {
     fn next_batch(
         &mut self,
         cancel: &CancelToken,
         mut res: Option<&mut Reservation>,
-    ) -> Result<Option<Batch>, StatamError> {
+    ) -> Result<Option<CursorNextBatch>, StatamError> {
         match self {
-            Self::Iter(iter) => guard_sync(|| iter.next_batch(Some(cancel), res)),
+            Self::Iter(iter) => {
+                Ok(guard_sync(|| iter.next_batch(Some(cancel), res))?.map(|b| (b, None)))
+            }
+            Self::IterWithCoords { iter, file_ordinal } => {
+                let ord = *file_ordinal;
+                Ok(
+                    guard_sync(|| iter.next_batch_with_row_ids(Some(cancel), res))?
+                        .map(|(b, rids)| (b, Some((ord, rids)))),
+                )
+            }
+            Self::ZeroIoCount {
+                schema,
+                remaining_rows,
+                chunk_size,
+            } => {
+                if cancel.is_cancelled() {
+                    return Err(StatamError::Cancelled);
+                }
+                if *remaining_rows == 0 {
+                    return Ok(None);
+                }
+                let take_u64 = (*remaining_rows).min(*chunk_size as u64);
+                let take = usize::try_from(take_u64).unwrap_or(*chunk_size);
+                *remaining_rows -= take as u64;
+                let batch = Batch::try_new(Arc::clone(schema), Vec::new(), take, Selection::All)?;
+                Ok(Some((batch, None)))
+            }
             Self::TakeRows {
                 reader,
                 projection,
@@ -741,7 +2143,7 @@ impl FileScanCursor {
                             }
                             return Err(StatamError::MemoryExceeded);
                         }
-                        return Ok(Some(batch));
+                        return Ok(Some((batch, None)));
                     }
                     let mut row_ids: Vec<u64> = Vec::with_capacity(*batch_size);
                     while row_ids.len() < *batch_size {
@@ -762,8 +2164,15 @@ impl FileScanCursor {
                     if row_ids.is_empty() {
                         return Ok(None);
                     }
-                    let batches =
-                        guard_sync(|| reader.take_rows(&row_ids, projection.as_deref(), 1))?;
+                    let batches = guard_sync(|| {
+                        reader.take_rows_with_limits(
+                            &row_ids,
+                            projection.as_deref(),
+                            1,
+                            Some(cancel),
+                            None,
+                        )
+                    })?;
                     for b in batches {
                         if !b.is_empty() {
                             buffered.push_back(b);
@@ -789,6 +2198,7 @@ struct ActiveFileScan {
     file_id: FileId,
     cursor: FileScanCursor,
     fill_layout: Option<ScanBatchFill>,
+    coord_scan_schema: Option<Arc<Schema>>,
     tombstone_pred: Option<Expr>,
     remapped_filters: Vec<Expr>,
     /// Maps each output column slot to its position in the scanned batch (`None` if identity).
@@ -799,7 +2209,7 @@ struct StatamPartitionStream {
     io: StorageIo,
     table: FileTable,
     schema: Arc<Schema>,
-    files: VecDeque<Arc<FileMeta>>,
+    files: VecDeque<FileWork>,
     deletions: Arc<[Arc<PendingDeletion>]>,
     metadata_cache: Arc<MetadataCache>,
     suspects: Suspects,
@@ -809,33 +2219,57 @@ struct StatamPartitionStream {
     eval: EvalContext,
     batch_size: usize,
     chunk_to_batch_size: bool,
+    read_threads: usize,
+    executor: Option<Arc<dyn TaskExecutor>>,
     active_file: Option<ActiveFileScan>,
 }
 
 impl StatamPartitionStream {
-    fn map_statam_err(&self, file_id: FileId, err: StatamError) -> QueryError {
-        if err.is_corrupt() {
-            self.suspects.report_corrupt(file_id);
-            return QueryError::CorruptData("corrupt statam file".to_owned());
-        }
-        if err.is_store_error() {
-            return QueryError::StorageIo("storage read error".to_owned());
-        }
-        match err {
-            StatamError::Cancelled => QueryError::Cancelled,
-            StatamError::MemoryExceeded => QueryError::TooLarge,
-            StatamError::Column(c) => QueryError::Column(c),
-            _ => QueryError::internal("statam read failed"),
-        }
-    }
-
     fn open_next_file(
         &mut self,
         cancel: &CancelToken,
     ) -> Result<Option<ActiveFileScan>, QueryError> {
-        'next_file: while let Some(file) = self.files.pop_front() {
+        'next_file: while let Some(work) = self.files.pop_front() {
             if cancel.is_cancelled() {
                 return Err(QueryError::Cancelled);
+            }
+            let FileWork {
+                file_ordinal,
+                file,
+                rg_indices,
+            } = work;
+
+            // M3.5.4: Zero-I/O COUNT(*) fast path — emits 0-column batches directly from
+            // `FileMeta::rows` before touching `open_range_reader` or `MetadataCache`.
+            if can_zero_io_count(
+                &file,
+                rg_indices.as_deref(),
+                &self.deletions,
+                self.table,
+                &self.schema,
+                &self.plan,
+            ) {
+                let remaining_rows = match self.remaining {
+                    Some(rem) => file.rows.min(rem as u64),
+                    None => file.rows,
+                };
+                if remaining_rows == 0 {
+                    continue 'next_file;
+                }
+                let chunk_size = self.batch_size.clamp(1, ZERO_IO_COUNT_MAX_CHUNK);
+                return Ok(Some(ActiveFileScan {
+                    file_id: file.id,
+                    cursor: FileScanCursor::ZeroIoCount {
+                        schema: Arc::clone(&self.plan.projected_schema),
+                        remaining_rows,
+                        chunk_size,
+                    },
+                    fill_layout: None,
+                    coord_scan_schema: None,
+                    tombstone_pred: None,
+                    remapped_filters: Vec::new(),
+                    scan_to_output: None,
+                }));
             }
 
             let rr = open_range_reader(
@@ -845,7 +2279,7 @@ impl StatamPartitionStream {
                 self.runtime.clone(),
                 cancel.clone(),
             )
-            .map_err(|e| self.map_statam_err(file.id, e))?;
+            .map_err(|e| map_statam_err(&self.suspects, file.id, e))?;
 
             let meta = if let Some(cached) = self.metadata_cache.get_statam(file.id) {
                 cached
@@ -853,7 +2287,7 @@ impl StatamPartitionStream {
                 let loaded = guard_sync(|| {
                     StatamFileMeta::read_from_with_hint(rr.as_ref(), Some(file.footer_size))
                 })
-                .map_err(|e| self.map_statam_err(file.id, e))?;
+                .map_err(|e| map_statam_err(&self.suspects, file.id, e))?;
                 let meta = Arc::new(loaded);
                 self.metadata_cache
                     .insert_statam(file.id, Arc::clone(&meta));
@@ -888,65 +2322,11 @@ impl StatamPartitionStream {
                 }
             }
 
-            // Filter pushdowns against `file_schema` (short-circuiting this file to 0 rows
-            // whenever a conjunctive lookup/predicate/substring targets a missing nullable
-            // all-NULL column, and dropping `IS NULL` predicates on missing nullable columns).
-            let mut id_lookups: Vec<IdLookup> = Vec::with_capacity(self.plan.id_lookups.len());
-            for lk in &self.plan.id_lookups {
-                let Some(cidx) = file_schema.index_of(&lk.column) else {
-                    continue 'next_file;
-                };
-                if meta
-                    .col_dir
-                    .get(cidx)
-                    .is_some_and(|cd| cd.locality_group != LocalityGroup::ExternalPayload)
-                {
-                    id_lookups.push(lk.clone());
-                }
-            }
-
-            let mut predicates: Vec<Predicate> = Vec::with_capacity(self.plan.predicates.len());
-            for p in &self.plan.predicates {
-                match file_schema.index_of(&p.column) {
-                    None => {
-                        if !matches!(p.pred, ZonePred::IsNull) {
-                            continue 'next_file;
-                        }
-                    }
-                    Some(cidx) => {
-                        if meta.col_dir.get(cidx).is_some_and(|cd| {
-                            cd.locality_group != LocalityGroup::ExternalPayload
-                                || matches!(p.pred, ZonePred::IsNull | ZonePred::IsNotNull)
-                        }) {
-                            predicates.push(p.clone());
-                        }
-                    }
-                }
-            }
-
-            let mut substrings: Vec<SubstringQuery> =
-                Vec::with_capacity(self.plan.substrings.len());
-            for q in &self.plan.substrings {
-                if file_schema.index_of(&q.column).is_none() {
-                    continue 'next_file;
-                }
-                substrings.push(q.clone());
-            }
-
-            let packs: Option<Arc<dyn PackResolver>> = file.pack.as_ref().map(|pack| {
-                Arc::new(SingleFilePackResolver {
-                    pack: pack.clone(),
-                    io: self.io.clone(),
-                    metadata_cache: Arc::clone(&self.metadata_cache),
-                    runtime: self.runtime.clone(),
-                    cancel: cancel.clone(),
-                }) as Arc<dyn PackResolver>
-            });
-
-            let reader = Arc::new(
-                guard_sync(|| StatamReader::open_with_shared_meta(rr, Arc::clone(&meta), packs))
-                    .map_err(|e| self.map_statam_err(file.id, e))?,
-            );
+            // Per-file exact-pushed vs residual filter classification using `meta.col_dir`.
+            let Some(mut classified) = classify_file_filters(&self.plan, &self.schema, &meta)
+            else {
+                continue 'next_file;
+            };
 
             let file_deletions = applicable(
                 &self.deletions,
@@ -960,8 +2340,33 @@ impl StatamPartitionStream {
                 covered_predicate(tombstone_table(self.table), &self.schema, &specs)?
             };
 
+            // Determine whether compaction's bounded-RAM `TakeRows` windowing applies.
+            // Because `TakeRows` does not evaluate Statam filters, keep ALL `raw_filters` in
+            // `residual_full` whenever `use_take_rows` is chosen.
+            let max_mb_rows = meta
+                .block_dir
+                .iter()
+                .map(|b| usize::from(b.row_count))
+                .max()
+                .unwrap_or(0);
+            let use_take_rows = self.chunk_to_batch_size
+                && !self.plan.emit_row_coords
+                && rg_indices.is_none()
+                && max_mb_rows > self.batch_size
+                && classified.id_lookups.is_empty()
+                && classified.substrings.is_empty()
+                && !self.plan.eligible_sort_desc;
+
+            if use_take_rows {
+                classified.predicates.clear();
+                classified.filter_exprs.clear();
+                classified.residual_full = self.plan.raw_filters.clone();
+            }
+
             let mut scan_set = self.plan.output_cols.clone();
-            scan_set.extend(self.plan.filter_cols.iter().copied());
+            for residual in &classified.residual_full {
+                residual.referenced_columns(&mut scan_set);
+            }
             if let Some(ref pred) = tombstone_full {
                 pred.referenced_columns(&mut scan_set);
             }
@@ -993,12 +2398,20 @@ impl StatamPartitionStream {
             } else {
                 Some(file_proj)
             };
+            let scan_schema = Arc::new(self.schema.project(&scan_indices)?);
             let fill_layout = if has_missing_col {
-                let scan_schema = Arc::new(self.schema.project(&scan_indices)?);
                 Some(ScanBatchFill {
-                    schema: scan_schema,
+                    schema: Arc::clone(&scan_schema),
                     slots,
                 })
+            } else {
+                None
+            };
+            let coord_scan_schema = if self.plan.emit_row_coords {
+                let mut fields = scan_schema.fields().to_vec();
+                fields.push(Field::new(ROW_COORD_FILE_COL, DataType::I64, false));
+                fields.push(Field::new(ROW_COORD_ROW_COL, DataType::I64, false));
+                Some(Schema::try_new_arc(fields)?)
             } else {
                 None
             };
@@ -1012,56 +2425,95 @@ impl StatamPartitionStream {
                 Some(ref expr) => Some(expr.remap_columns(&full_to_scan)?),
                 None => None,
             };
-            let remapped_filters: Vec<Expr> = self
-                .plan
-                .filters
+            let remapped_filters: Vec<Expr> = classified
+                .residual_full
                 .iter()
                 .map(|f| f.remap_columns(&full_to_scan))
                 .collect::<Result<Vec<_>, _>>()?;
 
             let scan_to_output = match &self.plan.projection {
                 Some(out_indices) => {
-                    let mut map = Vec::with_capacity(out_indices.len());
+                    let mut map = Vec::with_capacity(
+                        out_indices.len() + if self.plan.emit_row_coords { 2 } else { 0 },
+                    );
                     for &full_idx in out_indices {
                         let pos = full_to_scan[full_idx]
                             .ok_or_else(|| QueryError::internal("projected column missing"))?;
                         map.push(pos);
                     }
-                    let identity = map.len() == scan_indices.len()
+                    if self.plan.emit_row_coords {
+                        map.push(scan_indices.len());
+                        map.push(scan_indices.len() + 1);
+                    }
+                    let expected_scan_len =
+                        scan_indices.len() + if self.plan.emit_row_coords { 2 } else { 0 };
+                    let identity = map.len() == expected_scan_len
                         && map.iter().enumerate().all(|(i, &p)| i == p);
                     if identity { None } else { Some(map) }
                 }
                 None => None,
             };
 
-            // B3: Merge per-file tombstone map projections into the base lattice.
-            let mut map_projections = self.plan.base_map_projections.clone();
-            if let Some(ref pred) = tombstone_full {
-                collect_expr_map_projections(pred, &self.schema, &mut map_projections);
+            // M3.5.4: Merge output + per-file residual + tombstone `MapProjection` lattice into
+            // native `MapReadMode::{Full, KeysOnly, Keys}`.
+            let mut merged_map_proj = self.plan.output_map_projections.clone();
+            for residual in &classified.residual_full {
+                collect_expr_map_projections(residual, &self.schema, &mut merged_map_proj);
             }
-            let mut map_keys = Vec::new();
-            for (col_name, proj) in &map_projections {
-                if let MapProjection::Keys(keys) = proj
-                    && !keys.is_empty()
-                    && file_schema.index_of(col_name).is_some_and(|cidx| {
-                        meta.col_dir.get(cidx).is_some()
-                            && file_schema
-                                .fields()
-                                .get(cidx)
-                                .is_some_and(|f| f.data_type == DataType::MapUtf8)
-                    })
-                {
-                    for key in keys {
-                        map_keys.push((col_name.clone(), key.clone()));
+            if let Some(ref pred) = tombstone_full {
+                collect_expr_map_projections(pred, &self.schema, &mut merged_map_proj);
+            }
+            let mut map_projections: HashMap<String, MapReadMode> = HashMap::new();
+            for (col_name, proj) in &merged_map_proj {
+                let is_valid_map = file_schema.index_of(col_name).is_some_and(|cidx| {
+                    meta.col_dir.get(cidx).is_some()
+                        && file_schema
+                            .fields()
+                            .get(cidx)
+                            .is_some_and(|f| f.data_type == DataType::MapUtf8)
+                });
+                if !is_valid_map {
+                    continue;
+                }
+                match proj {
+                    MapProjection::Full => {
+                        map_projections.insert(col_name.clone(), MapReadMode::Full);
                     }
+                    MapProjection::KeysOnly => {
+                        map_projections.insert(col_name.clone(), MapReadMode::KeysOnly);
+                    }
+                    MapProjection::Keys(keys) if !keys.is_empty() => {
+                        map_projections.insert(
+                            col_name.clone(),
+                            MapReadMode::Keys(keys.iter().cloned().collect()),
+                        );
+                    }
+                    MapProjection::Keys(_) => {}
                 }
             }
 
-            // B4: Exact `sort_desc_hint` and `req.limit` rules.
+            let packs: Option<Arc<dyn PackResolver>> = file.pack.as_ref().map(|pack| {
+                Arc::new(SingleFilePackResolver {
+                    pack: pack.clone(),
+                    io: self.io.clone(),
+                    metadata_cache: Arc::clone(&self.metadata_cache),
+                    runtime: self.runtime.clone(),
+                    cancel: cancel.clone(),
+                }) as Arc<dyn PackResolver>
+            });
+
+            let reader = Arc::new(
+                guard_sync(|| StatamReader::open_with_shared_meta(rr, Arc::clone(&meta), packs))
+                    .map_err(|e| map_statam_err(&self.suspects, file.id, e))?,
+            );
+
+            // M3.5.2: Exact `sort_desc_hint` and `req.limit` rules — now unlocked whenever
+            // per-file `residual` is empty and 0 applicable tombstones exist!
             let no_residual_or_tombstones = remapped_filters.is_empty() && tombstone_pred.is_none();
             let sort_desc_hint = self.plan.eligible_sort_desc
                 && no_residual_or_tombstones
-                && self.plan.limit.is_some();
+                && self.plan.limit.is_some()
+                && rg_indices.is_none();
             let req_limit =
                 if no_residual_or_tombstones && (!self.plan.has_sort_hints || sort_desc_hint) {
                     if !self.plan.has_sort_hints {
@@ -1073,18 +2525,10 @@ impl StatamPartitionStream {
                     None
                 };
 
-            let max_mb_rows = meta
-                .block_dir
-                .iter()
-                .map(|b| usize::from(b.row_count))
-                .max()
-                .unwrap_or(0);
-            let use_take_rows = self.chunk_to_batch_size
-                && max_mb_rows > self.batch_size
-                && id_lookups.is_empty()
-                && substrings.is_empty()
-                && !sort_desc_hint
-                && map_keys.is_empty();
+            let use_take_rows = use_take_rows
+                && map_projections
+                    .values()
+                    .all(|mode| matches!(mode, MapReadMode::Full));
 
             let cursor = if use_take_rows {
                 let mut ranges = VecDeque::new();
@@ -1105,26 +2549,36 @@ impl StatamPartitionStream {
             } else {
                 let req = ScanRequest {
                     projection: req_projection,
-                    map_keys,
+                    map_projections,
                     time_range: self.plan.time_range,
-                    id_lookups,
-                    predicates,
-                    substrings,
+                    id_lookups: classified.id_lookups,
+                    predicates: classified.predicates,
+                    filter_exprs: classified.filter_exprs,
+                    substrings: classified.substrings,
                     sort_desc_hint,
                     limit: req_limit,
                     coalesce_mode: CoalesceMode::Auto,
-                    // B5: Always 1 thread per Statam scan; parallelism lives in `cetra-query::WorkerPool`.
-                    read_threads: 1,
+                    read_threads: self.read_threads,
+                    rg_indices,
+                    executor: self.executor.clone(),
                 };
                 let iter = guard_sync(|| reader.scan_iter(req))
-                    .map_err(|e| self.map_statam_err(file.id, e))?;
-                FileScanCursor::Iter(Box::new(iter))
+                    .map_err(|e| map_statam_err(&self.suspects, file.id, e))?;
+                if self.plan.emit_row_coords {
+                    FileScanCursor::IterWithCoords {
+                        iter: Box::new(iter),
+                        file_ordinal,
+                    }
+                } else {
+                    FileScanCursor::Iter(Box::new(iter))
+                }
             };
 
             return Ok(Some(ActiveFileScan {
                 file_id: file.id,
                 cursor,
                 fill_layout,
+                coord_scan_schema,
                 tombstone_pred,
                 remapped_filters,
                 scan_to_output,
@@ -1156,6 +2610,55 @@ fn fill_missing_columns(batch: &Batch, layout: &ScanBatchFill) -> Result<Batch, 
     }
     Ok(Batch::try_new_shared(
         Arc::clone(&layout.schema),
+        cols,
+        raw_len,
+        batch.selection().clone(),
+    )?)
+}
+
+fn attach_row_coords(
+    batch: &Batch,
+    coord_schema: &Arc<Schema>,
+    file_ordinal: u32,
+    row_ids: &[u64],
+) -> Result<Batch, QueryError> {
+    if row_ids.len() != batch.num_rows() {
+        return Err(QueryError::internal(
+            "row_ids length mismatch in open_with_row_coords",
+        ));
+    }
+    let raw_len = batch.raw_len();
+    let mut row_idx_vals = vec![0i64; raw_len];
+    match batch.selection() {
+        Selection::All => {
+            for (pos, &rid) in row_ids.iter().enumerate() {
+                row_idx_vals[pos] = i64::try_from(rid).map_err(|_| QueryError::TooLarge)?;
+            }
+        }
+        Selection::Mask(bm) => {
+            for (phys, &rid) in bm.iter_ones().zip(row_ids.iter()) {
+                row_idx_vals[phys] = i64::try_from(rid).map_err(|_| QueryError::TooLarge)?;
+            }
+        }
+        Selection::Indices(idxs) => {
+            for (&phys, &rid) in idxs.iter().zip(row_ids.iter()) {
+                row_idx_vals[phys as usize] =
+                    i64::try_from(rid).map_err(|_| QueryError::TooLarge)?;
+            }
+        }
+    }
+    let mut cols = Vec::with_capacity(batch.columns().len() + 2);
+    cols.extend(batch.columns().iter().map(Arc::clone));
+    cols.push(Arc::new(Column::Const {
+        value: ScalarValue::I64(i64::from(file_ordinal)),
+        len: raw_len,
+    }));
+    cols.push(Arc::new(Column::Flat(FlatColumn::try_new(
+        FlatData::I64(row_idx_vals),
+        None,
+    )?)));
+    Ok(Batch::try_new_shared(
+        Arc::clone(coord_schema),
         cols,
         raw_len,
         batch.selection().clone(),
@@ -1242,8 +2745,8 @@ impl PartitionStream for StatamPartitionStream {
             };
             let file_id = active.file_id;
             let pulled = active.cursor.next_batch(cancel, res.as_deref_mut());
-            let raw_batch = match pulled {
-                Ok(Some(batch)) => batch,
+            let (raw_batch, coords_opt) = match pulled {
+                Ok(Some(pair)) => pair,
                 Ok(None) => {
                     self.active_file = None;
                     rollback_res(res.as_deref_mut(), before);
@@ -1252,7 +2755,7 @@ impl PartitionStream for StatamPartitionStream {
                 Err(err) => {
                     self.active_file = None;
                     rollback_res(res, before);
-                    return Err(self.map_statam_err(file_id, err));
+                    return Err(map_statam_err(&self.suspects, file_id, err));
                 }
             };
 
@@ -1260,6 +2763,14 @@ impl PartitionStream for StatamPartitionStream {
                 Some(layout) => fill_missing_columns(&raw_batch, layout)
                     .inspect_err(|_| rollback_res(res.as_deref_mut(), before))?,
                 None => raw_batch,
+            };
+
+            let raw_batch = match (&active.coord_scan_schema, coords_opt) {
+                (Some(coord_schema), Some((file_ord, row_ids))) => {
+                    attach_row_coords(&raw_batch, coord_schema, file_ord, &row_ids)
+                        .inspect_err(|_| rollback_res(res.as_deref_mut(), before))?
+                }
+                _ => raw_batch,
             };
 
             let filtered = apply_tombstones_and_filters(
@@ -1995,17 +3506,9 @@ pub(crate) mod tests {
 
         // Evolved schema inserts a new nullable Utf8 column at index 0 (shifting all
         // subsequent column indices) and appends another nullable Utf8 column at the end.
-        let mut evolved_fields = vec![cetra_column::Field::new(
-            "evolved_prefix",
-            DataType::Utf8,
-            true,
-        )];
+        let mut evolved_fields = vec![Field::new("evolved_prefix", DataType::Utf8, true)];
         evolved_fields.extend(FileTable::Spans.column_schema().fields().iter().cloned());
-        evolved_fields.push(cetra_column::Field::new(
-            "evolved_suffix",
-            DataType::Utf8,
-            true,
-        ));
+        evolved_fields.push(Field::new("evolved_suffix", DataType::Utf8, true));
         let evolved_schema = Schema::try_new_arc(evolved_fields).unwrap();
         let prefix_idx = evolved_schema.index_of("evolved_prefix").unwrap();
         let suffix_idx = evolved_schema.index_of("evolved_suffix").unwrap();
@@ -2148,11 +3651,7 @@ pub(crate) mod tests {
 
         // 6. Missing non-nullable column reports corrupt and enqueues suspect.
         let mut bad_fields = FileTable::Spans.column_schema().fields().to_vec();
-        bad_fields.push(cetra_column::Field::new(
-            "required_missing",
-            DataType::Utf8,
-            false,
-        ));
+        bad_fields.push(Field::new("required_missing", DataType::Utf8, false));
         let bad_schema = Schema::try_new_arc(bad_fields).unwrap();
         let bad_queue = Arc::new(VerifyQueue::default());
         let bad_source = StatamSource::new(
@@ -2168,5 +3667,824 @@ pub(crate) mod tests {
         let err = drain_source(&bad_source, &ScanSpec::default(), &ctx).unwrap_err();
         assert!(matches!(err, QueryError::CorruptData(_)), "got {err:?}");
         assert_eq!(bad_queue.take(10), vec![file.id]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn four_way_or_ui_substring_search_and_non_ascii_ilike_residual_safety() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut s1 = span_row(1, 0, ns(5, 10), ns(5, 11));
+        s1.name = "ui-TargetName-span".to_owned();
+        s1.input = None;
+        s1.output = None;
+        s1.system_instructions = None;
+
+        let mut s2 = span_row(2, 0, ns(5, 20), ns(5, 21));
+        s2.name = "other".to_owned();
+        s2.input = Some(format!("{}targetname{}", "x".repeat(1200), "y".repeat(200)));
+
+        let mut s3 = span_row(3, 0, ns(5, 30), ns(5, 31));
+        s3.name = "other".to_owned();
+        s3.output = Some(format!("{}TARGETNAME{}", "z".repeat(1200), "w".repeat(200)));
+
+        let mut s4 = span_row(4, 0, ns(5, 40), ns(5, 41));
+        s4.name = "other".to_owned();
+        s4.system_instructions = Some(format!("{}TaRgEtNaMe{}", "q".repeat(1200), "r".repeat(200)));
+
+        let mut s5 = span_row(5, 0, ns(5, 50), ns(5, 51));
+        s5.name = "song-of-ascii".to_owned();
+        s5.input = Some("no match here".to_owned());
+
+        let mut s6 = span_row(6, 0, ns(5, 60), ns(5, 61));
+        s6.name = "completely-unrelated".to_owned();
+        s6.input = None;
+
+        let batch = span_rows(&[s1, s2, s3, s4, s5, s6]);
+        let file = put_l1_spans_with_pack(&store, day(5), &batch).await;
+        assert!(file.pack.is_some());
+
+        let schema = FileTable::Spans.column_schema();
+        let name_idx = schema.index_of(spans::NAME).unwrap();
+        let in_idx = schema.index_of(spans::INPUT).unwrap();
+        let out_idx = schema.index_of(spans::OUTPUT).unwrap();
+        let sys_idx = schema.index_of(spans::SYSTEM_INSTRUCTIONS).unwrap();
+        let trace_idx = schema.index_of(spans::TRACE_ID).unwrap();
+
+        let source = StatamSource::new(
+            StorageIo::from_store(store),
+            FileTable::Spans,
+            Arc::clone(&schema),
+            vec![file],
+            Arc::from([]),
+            Arc::new(MetadataCache::new(4 * 1024 * 1024)),
+            Suspects::new(Arc::new(VerifyQueue::default())),
+            tokio::runtime::Handle::current(),
+        );
+        let ctx = make_exec_ctx(64 * 1024 * 1024, CancelToken::new());
+
+        // 1. 4-way UI OR search: `name ILIKE '%targetname%' OR input ILIKE '%targetname%' OR
+        //    output ILIKE '%targetname%' OR system_instructions ILIKE '%targetname%'`.
+        let mk_ilike = |idx: usize, col: &str, needle: &str| Expr::Like {
+            expr: Box::new(Expr::Column {
+                index: idx,
+                name: col.to_owned(),
+                data_type: DataType::Utf8,
+            }),
+            pattern: Box::new(Expr::Literal(ScalarValue::Utf8(format!("%{needle}%")))),
+            escape: Some('\\'),
+            case_insensitive: true,
+            negated: false,
+        };
+        let four_way_or = Expr::Binary {
+            left: Box::new(Expr::Binary {
+                left: Box::new(mk_ilike(name_idx, spans::NAME, "targetname")),
+                op: BinaryOp::Or,
+                right: Box::new(mk_ilike(in_idx, spans::INPUT, "targetname")),
+                data_type: DataType::Bool,
+            }),
+            op: BinaryOp::Or,
+            right: Box::new(Expr::Binary {
+                left: Box::new(mk_ilike(out_idx, spans::OUTPUT, "targetname")),
+                op: BinaryOp::Or,
+                right: Box::new(mk_ilike(sys_idx, spans::SYSTEM_INSTRUCTIONS, "targetname")),
+                data_type: DataType::Bool,
+            }),
+            data_type: DataType::Bool,
+        };
+        let spec_4way = ScanSpec {
+            projection: Some(vec![trace_idx]),
+            filters: vec![four_way_or],
+            substrings: vec![vec![
+                SubstringHint {
+                    column: spans::NAME.to_owned(),
+                    needle: "targetname".to_owned(),
+                    case_insensitive: true,
+                },
+                SubstringHint {
+                    column: spans::INPUT.to_owned(),
+                    needle: "targetname".to_owned(),
+                    case_insensitive: true,
+                },
+                SubstringHint {
+                    column: spans::OUTPUT.to_owned(),
+                    needle: "targetname".to_owned(),
+                    case_insensitive: true,
+                },
+                SubstringHint {
+                    column: spans::SYSTEM_INSTRUCTIONS.to_owned(),
+                    needle: "targetname".to_owned(),
+                    case_insensitive: true,
+                },
+            ]],
+            ..ScanSpec::default()
+        };
+        let batches = drain_source(&source, &spec_4way, &ctx).unwrap();
+        assert_eq!(
+            batches.iter().map(Batch::num_rows).sum::<usize>(),
+            4,
+            "4-way OR must match s1..s4 across name, input, output, system_instructions"
+        );
+
+        // 2. Non-ASCII ILIKE needle `"ſ"` (U+017F Latin small letter long s):
+        //    `cetra-query`'s `regex (?i)` folds `"ſ"` <-> `"s"`, so `"song-of-ascii"` MUST match!
+        //    Because Statam keeps non-ASCII ILIKE in residual (never exact-pushed), zero false negatives.
+        let non_ascii_filter = mk_ilike(name_idx, spans::NAME, "\u{017f}ong");
+        let spec_non_ascii = ScanSpec {
+            projection: Some(vec![name_idx]),
+            filters: vec![non_ascii_filter],
+            substrings: vec![vec![SubstringHint {
+                column: spans::NAME.to_owned(),
+                needle: "\u{017f}ong".to_owned(),
+                case_insensitive: true,
+            }]],
+            ..ScanSpec::default()
+        };
+        let batches = drain_source(&source, &spec_non_ascii, &ctx).unwrap();
+        assert_eq!(
+            batches.iter().map(Batch::num_rows).sum::<usize>(),
+            1,
+            "non-ASCII ILIKE must stay in residual and match 'song-of-ascii'"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn differential_filter_parity_3vl_prefix_external_payload_and_filtered_limit() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut rows = Vec::new();
+        for i in 0..12_u16 {
+            let mut s = span_row(i + 1, 0, ns(5, 10 + i64::from(i)), ns(5, 11 + i64::from(i)));
+            s.name = match i % 4 {
+                0 => "foo%bar_baz".to_owned(),
+                1 => "fooXbar_baz".to_owned(),
+                2 => "prefix_alpha".to_owned(),
+                _ => "other_name".to_owned(),
+            };
+            s.environment = match i % 3 {
+                0 => Some("prod".to_owned()),
+                1 => Some("staging".to_owned()),
+                _ => None,
+            };
+            s.total_tokens = match i {
+                0 => None,
+                1 => Some(1),
+                2 => Some(5),
+                3 => Some(10),
+                4 => Some(15),
+                5 => Some(20),
+                _ => Some(i64::from(i) * 3),
+            };
+            s.status = if i % 5 == 0 {
+                cetra_core::enums::SpanStatus::Error
+            } else {
+                cetra_core::enums::SpanStatus::Ok
+            };
+            // ExternalPayload column with >1KB payloads so it spills into `.stpk`.
+            s.input = match i {
+                1 | 7 => Some(format!("exact_payload_{}", "p".repeat(1200))),
+                2 => None,
+                _ => Some(format!("other_payload_{i}_{}", "q".repeat(1200))),
+            };
+            rows.push(s);
+        }
+        let batch = span_rows(&rows);
+        let file = put_l1_spans_with_pack(&store, day(5), &batch).await;
+        assert!(file.pack.is_some());
+
+        let schema = FileTable::Spans.column_schema();
+        let name_idx = schema.index_of(spans::NAME).unwrap();
+        let env_idx = schema.index_of(spans::ENVIRONMENT).unwrap();
+        let tok_idx = schema.index_of(spans::TOTAL_TOKENS).unwrap();
+        let status_idx = schema.index_of(spans::STATUS).unwrap();
+        let in_idx = schema.index_of(spans::INPUT).unwrap();
+        let start_idx = schema.index_of(spans::START_TIME).unwrap();
+
+        let col = |idx: usize| {
+            let f = &schema.fields()[idx];
+            Expr::Column {
+                index: idx,
+                name: f.name.clone(),
+                data_type: f.data_type.clone(),
+            }
+        };
+        let exact_payload = format!("exact_payload_{}", "p".repeat(1200));
+
+        let test_exprs: Vec<(&str, Expr)> = vec![
+            (
+                "NOT (a AND b) 3VL with NULLs",
+                Expr::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(Expr::Binary {
+                        left: Box::new(Expr::Binary {
+                            left: Box::new(col(env_idx)),
+                            op: BinaryOp::Eq,
+                            right: Box::new(Expr::Literal(ScalarValue::Utf8("prod".to_owned()))),
+                            data_type: DataType::Bool,
+                        }),
+                        op: BinaryOp::And,
+                        right: Box::new(Expr::Binary {
+                            left: Box::new(col(tok_idx)),
+                            op: BinaryOp::Gt,
+                            right: Box::new(Expr::Literal(ScalarValue::I64(5))),
+                            data_type: DataType::Bool,
+                        }),
+                        data_type: DataType::Bool,
+                    }),
+                    data_type: DataType::Bool,
+                },
+            ),
+            (
+                "NOT (a OR b) 3VL with NULLs",
+                Expr::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(Expr::Binary {
+                        left: Box::new(Expr::Binary {
+                            left: Box::new(col(env_idx)),
+                            op: BinaryOp::Eq,
+                            right: Box::new(Expr::Literal(ScalarValue::Utf8("prod".to_owned()))),
+                            data_type: DataType::Bool,
+                        }),
+                        op: BinaryOp::Or,
+                        right: Box::new(Expr::Binary {
+                            left: Box::new(col(tok_idx)),
+                            op: BinaryOp::Eq,
+                            right: Box::new(Expr::Literal(ScalarValue::I64(1))),
+                            data_type: DataType::Bool,
+                        }),
+                        data_type: DataType::Bool,
+                    }),
+                    data_type: DataType::Bool,
+                },
+            ),
+            (
+                "IN (1, NULL)",
+                Expr::InList {
+                    expr: Box::new(col(tok_idx)),
+                    list: vec![
+                        Expr::Literal(ScalarValue::I64(1)),
+                        Expr::Literal(ScalarValue::Null(DataType::I64)),
+                    ],
+                    negated: false,
+                    redacted: false,
+                },
+            ),
+            (
+                "NOT IN (1, NULL) -> always empty",
+                Expr::InList {
+                    expr: Box::new(col(tok_idx)),
+                    list: vec![
+                        Expr::Literal(ScalarValue::I64(1)),
+                        Expr::Literal(ScalarValue::Null(DataType::I64)),
+                    ],
+                    negated: true,
+                    redacted: false,
+                },
+            ),
+            (
+                "NOT BETWEEN 10 AND NULL",
+                Expr::Between {
+                    expr: Box::new(col(tok_idx)),
+                    low: Box::new(Expr::Literal(ScalarValue::I64(10))),
+                    high: Box::new(Expr::Literal(ScalarValue::Null(DataType::I64))),
+                    negated: true,
+                },
+            ),
+            (
+                "NOT BETWEEN 10 AND 5 (inverted bounds)",
+                Expr::Between {
+                    expr: Box::new(col(tok_idx)),
+                    low: Box::new(Expr::Literal(ScalarValue::I64(10))),
+                    high: Box::new(Expr::Literal(ScalarValue::I64(5))),
+                    negated: true,
+                },
+            ),
+            (
+                "LIKE escaped prefix 'foo\\%bar%' ESCAPE '\\'",
+                Expr::Like {
+                    expr: Box::new(col(name_idx)),
+                    pattern: Box::new(Expr::Literal(ScalarValue::Utf8("foo\\%bar%".to_owned()))),
+                    escape: Some('\\'),
+                    case_insensitive: false,
+                    negated: false,
+                },
+            ),
+            (
+                "ExternalPayload Eq never dropped",
+                Expr::Binary {
+                    left: Box::new(col(in_idx)),
+                    op: BinaryOp::Eq,
+                    right: Box::new(Expr::Literal(ScalarValue::Utf8(exact_payload.clone()))),
+                    data_type: DataType::Bool,
+                },
+            ),
+            (
+                "Or(status='error', ExternalPayload Eq) never dropped",
+                Expr::Binary {
+                    left: Box::new(Expr::Binary {
+                        left: Box::new(col(status_idx)),
+                        op: BinaryOp::Eq,
+                        right: Box::new(Expr::Literal(ScalarValue::Utf8("error".to_owned()))),
+                        data_type: DataType::Bool,
+                    }),
+                    op: BinaryOp::Or,
+                    right: Box::new(Expr::Binary {
+                        left: Box::new(col(in_idx)),
+                        op: BinaryOp::Eq,
+                        right: Box::new(Expr::Literal(ScalarValue::Utf8(exact_payload))),
+                        data_type: DataType::Bool,
+                    }),
+                    data_type: DataType::Bool,
+                },
+            ),
+        ];
+
+        let source = StatamSource::new(
+            StorageIo::from_store(store),
+            FileTable::Spans,
+            Arc::clone(&schema),
+            vec![file],
+            Arc::from([]),
+            Arc::new(MetadataCache::new(4 * 1024 * 1024)),
+            Suspects::new(Arc::new(VerifyQueue::default())),
+            tokio::runtime::Handle::current(),
+        );
+        let ctx = make_exec_ctx(64 * 1024 * 1024, CancelToken::new());
+        let eval_ctx = EvalContext::new(0, CancelToken::new());
+
+        for (label, expr) in test_exprs {
+            // Oracle: unpushed `cetra_query::eval_filter` directly on the full batch.
+            let mask = cetra_query::eval_filter(&expr, &batch, &eval_ctx, None).unwrap();
+            let mut expected_starts: Vec<i64> = mask
+                .iter_ones()
+                .map(|r| {
+                    let ScalarValue::TimestampNs { value, .. } =
+                        batch.column(start_idx).unwrap().get_scalar(r).unwrap()
+                    else {
+                        panic!("expected TimestampNs");
+                    };
+                    value
+                })
+                .collect();
+            expected_starts.sort_unstable();
+
+            let spec = ScanSpec {
+                projection: Some(vec![start_idx]),
+                filters: vec![expr],
+                ..ScanSpec::default()
+            };
+            let got_batches = drain_source(&source, &spec, &ctx).unwrap();
+            let mut got_starts = Vec::new();
+            for b in got_batches {
+                let idxs = b.selection().to_indices(b.raw_len()).unwrap();
+                for r in idxs {
+                    let ScalarValue::TimestampNs { value, .. } =
+                        b.column(0).unwrap().get_scalar(r as usize).unwrap()
+                    else {
+                        panic!("expected TimestampNs");
+                    };
+                    got_starts.push(value);
+                }
+            }
+            got_starts.sort_unstable();
+            assert_eq!(got_starts, expected_starts, "parity mismatch for: {label}");
+        }
+
+        // Filtered `LIMIT` unlocked when exact-pushed (`environment = 'prod' LIMIT 2`).
+        let limited_spec = ScanSpec {
+            projection: Some(vec![env_idx]),
+            filters: vec![Expr::Binary {
+                left: Box::new(col(env_idx)),
+                op: BinaryOp::Eq,
+                right: Box::new(Expr::Literal(ScalarValue::Utf8("prod".to_owned()))),
+                data_type: DataType::Bool,
+            }],
+            limit: Some(2),
+            ..ScanSpec::default()
+        };
+        let limited = drain_source(&source, &limited_spec, &ctx).unwrap();
+        assert_eq!(
+            limited.iter().map(Batch::num_rows).sum::<usize>(),
+            2,
+            "filtered exact-pushed LIMIT must return exactly 2 matching rows"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn multi_rg_partitioning_and_single_rg_worker_pool_executor() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let spans_vec: Vec<_> = (0..64_u16)
+            .map(|i| span_row(i + 1, 0, ns(5, 10 + i64::from(i)), ns(5, 11 + i64::from(i))))
+            .collect();
+        let batch = span_rows(&spans_vec);
+        let schema = FileTable::Spans.column_schema();
+
+        // Write a 4-RG Statam file (`row_group_size = 16`, `mini_block_size = 8`, 64 rows -> 4 RGs).
+        let mut opts = cetra_statam::WriteOptions::for_table(
+            cetra_statam::TableKind::Spans,
+            cetra_statam::WriteProfile::L1Compact,
+        );
+        opts.sort_cols = crate::statam_io::sort_col_indices(FileTable::Spans);
+        opts.row_group_size = 16;
+        opts.mini_block_size = 8;
+        let mut writer = cetra_statam::StatamWriter::new(
+            Cursor::new(Vec::new()),
+            Arc::clone(&schema),
+            opts,
+            None,
+        )
+        .unwrap();
+        writer.write_batch(&batch).unwrap();
+        let (cursor, stats, _) = writer.finish_into_inner().unwrap();
+        let bytes = Bytes::from(cursor.into_inner());
+        let (path, id) =
+            crate::objects::Objects::table_file_path(FileTable::Spans, project(), day(5), 1);
+        store
+            .put(
+                &ObjectPath::from(path.as_str()),
+                PutPayload::from(bytes.clone()),
+            )
+            .await
+            .unwrap();
+        let meta = Arc::new(
+            StatamFileMeta::read_from_with_hint(
+                &SliceReader::new(bytes.clone()),
+                Some(u64::from(stats.hot_tail_bytes)),
+            )
+            .unwrap(),
+        );
+        assert_eq!(meta.rg_dir.len(), 4, "expected 4 Row Groups");
+
+        let file = Arc::new(FileMeta {
+            id,
+            table: FileTable::Spans,
+            project: project(),
+            day: day(5),
+            level: 1,
+            path,
+            size: bytes.len() as u64,
+            footer_size: u64::from(stats.hot_tail_bytes),
+            rows: 64,
+            min_time: ns(5, 10),
+            max_time: ns(5, 73),
+            min_ingest_time: ns(5, 11),
+            max_ingest_time: ns(5, 74),
+            fully_merged: true,
+            deletions_applied_seq: 0,
+            pack: None,
+        });
+
+        let cache = Arc::new(MetadataCache::new(4 * 1024 * 1024));
+        cache.insert_statam(file.id, meta);
+
+        let source = StatamSource::new(
+            StorageIo::from_store(Arc::clone(&store)),
+            FileTable::Spans,
+            Arc::clone(&schema),
+            vec![file],
+            Arc::from([]),
+            cache,
+            Suspects::new(Arc::new(VerifyQueue::default())),
+            tokio::runtime::Handle::current(),
+        );
+
+        let workers = Arc::new(WorkerPool::new(4).unwrap());
+        let multi_ctx = ExecContext {
+            pool: GlobalPool::standalone(64 * 1024 * 1024),
+            eval: EvalContext::new(0, CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(PathBuf::new(), 0)),
+            workers: Arc::clone(&workers),
+            batch_size: 8192,
+            target_partitions: 4,
+            metrics: ExecMetrics::new(),
+        };
+
+        // 1. Multi-RG cached file splits into 4 parallel partition streams.
+        let spec = ScanSpec {
+            projection: Some(vec![schema.index_of(spans::START_TIME).unwrap()]),
+            ..ScanSpec::default()
+        };
+        let streams = source.open_partitions(&spec, &multi_ctx).unwrap();
+        assert_eq!(
+            streams.len(),
+            4,
+            "4-RG file with target_partitions=4 must split into 4 streams"
+        );
+        drop(streams);
+        let batches = drain_source(&source, &spec, &multi_ctx).unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).sum::<usize>(), 64);
+
+        // 2. 1-RG file with `target_partitions = 4` produces 1 stream that uses `WorkerPoolExecutor`
+        //    on `ctx.workers` (testing `WorkerPool::run_helping` from inside a pool worker without deadlock).
+        let one_rg_file = put_statam_file(&store, FileTable::Spans, 1, day(5), &batch).await;
+        let one_rg_source = StatamSource::new(
+            StorageIo::from_store(store),
+            FileTable::Spans,
+            Arc::clone(&schema),
+            vec![one_rg_file],
+            Arc::from([]),
+            Arc::new(MetadataCache::new(4 * 1024 * 1024)),
+            Suspects::new(Arc::new(VerifyQueue::default())),
+            tokio::runtime::Handle::current(),
+        );
+        let streams_1rg = one_rg_source.open_partitions(&spec, &multi_ctx).unwrap();
+        assert_eq!(streams_1rg.len(), 1);
+        drop(streams_1rg);
+        let batches_1rg = drain_source(&one_rg_source, &spec, &multi_ctx).unwrap();
+        assert_eq!(batches_1rg.iter().map(Batch::num_rows).sum::<usize>(), 64);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zero_io_count_uses_zero_store_gets_and_respects_bounds_limit_and_tombstones() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let b1 = span_rows(&[
+            span_row(1, 0, ns(5, 10), ns(5, 11)),
+            span_row(2, 0, ns(5, 20), ns(5, 21)),
+            span_row(3, 0, ns(5, 30), ns(5, 31)),
+        ]);
+        let b2 = span_rows(&[
+            span_row(4, 0, ns(6, 10), ns(6, 11)),
+            span_row(5, 0, ns(6, 20), ns(6, 21)),
+        ]);
+        let f1 = put_statam_file(&inner, FileTable::Spans, 1, day(5), &b1).await;
+        let f2 = put_statam_file(&inner, FileTable::Spans, 1, day(6), &b2).await;
+
+        let chaos = Arc::new(ChaosStore::new(Arc::clone(&inner)));
+        // Hold ALL `Get` calls: any disk/S3 read will immediately fail!
+        chaos.hold(&[Call::Get]);
+
+        let schema = FileTable::Spans.column_schema();
+        let start_idx = schema.index_of(spans::START_TIME).unwrap();
+        let source = StatamSource::new(
+            StorageIo::from_store(Arc::clone(&chaos) as Arc<dyn ObjectStore>),
+            FileTable::Spans,
+            Arc::clone(&schema),
+            vec![Arc::clone(&f1), Arc::clone(&f2)],
+            Arc::from([]),
+            Arc::new(MetadataCache::new(0)),
+            Suspects::new(Arc::new(VerifyQueue::default())),
+            tokio::runtime::Handle::current(),
+        );
+        let ctx = make_exec_ctx(64 * 1024 * 1024, CancelToken::new());
+
+        // 1. Unfiltered COUNT(*) -> 5 rows, 0 GET calls!
+        let spec_all = ScanSpec {
+            projection: Some(vec![]),
+            ..ScanSpec::default()
+        };
+        let batches = drain_source(&source, &spec_all, &ctx).unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).sum::<usize>(), 5);
+        assert_eq!(
+            chaos.count(Call::Get),
+            0,
+            "unfiltered COUNT(*) must do 0 GETs"
+        );
+
+        // 2. `visible_from`-bounded COUNT(*) covering both files -> 5 rows, 0 GET calls!
+        let spec_vf =
+            crate::engine::apply_visible_from(&spec_all, &schema, spans::START_TIME, ns(5, 10))
+                .unwrap();
+        let batches = drain_source(&source, &spec_vf, &ctx).unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).sum::<usize>(), 5);
+        assert_eq!(
+            chaos.count(Call::Get),
+            0,
+            "visible_from COUNT(*) covering files must do 0 GETs"
+        );
+
+        // 3. Window-aligned COUNT(*) covering f1 completely and pruning f2 -> 3 rows, 0 GETs!
+        let spec_win = ScanSpec {
+            projection: Some(vec![]),
+            time_range: TimeRangeHint {
+                min_ns: Some(ns(5, 0)),
+                max_ns: Some(ns(5, 100)),
+                around_ns: None,
+            },
+            filters: vec![
+                Expr::Binary {
+                    left: Box::new(Expr::Column {
+                        index: start_idx,
+                        name: spans::START_TIME.to_owned(),
+                        data_type: DataType::TimestampNs { utc: true },
+                    }),
+                    op: BinaryOp::GtEq,
+                    right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
+                        value: ns(5, 0),
+                        utc: true,
+                    })),
+                    data_type: DataType::Bool,
+                },
+                Expr::Binary {
+                    left: Box::new(Expr::Column {
+                        index: start_idx,
+                        name: spans::START_TIME.to_owned(),
+                        data_type: DataType::TimestampNs { utc: true },
+                    }),
+                    op: BinaryOp::Lt,
+                    right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
+                        value: ns(5, 100),
+                        utc: true,
+                    })),
+                    data_type: DataType::Bool,
+                },
+            ],
+            ..ScanSpec::default()
+        };
+        let batches = drain_source(&source, &spec_win, &ctx).unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).sum::<usize>(), 3);
+        assert_eq!(
+            chaos.count(Call::Get),
+            0,
+            "window-aligned COUNT(*) must do 0 GETs"
+        );
+
+        // 4. `limit`-capped COUNT(*) -> 4 rows, 0 GET calls!
+        let spec_lim = ScanSpec {
+            projection: Some(vec![]),
+            limit: Some(4),
+            ..ScanSpec::default()
+        };
+        let batches = drain_source(&source, &spec_lim, &ctx).unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).sum::<usize>(), 4);
+        assert_eq!(
+            chaos.count(Call::Get),
+            0,
+            "limit-capped COUNT(*) must do 0 GETs"
+        );
+
+        // 5. Partial-overlap window (`start_time >= ns(5, 20)` splits f1) MUST fall back to I/O.
+        chaos.release();
+        let spec_partial = ScanSpec {
+            projection: Some(vec![]),
+            time_range: TimeRangeHint {
+                min_ns: Some(ns(5, 20)),
+                max_ns: Some(ns(5, 100)),
+                around_ns: None,
+            },
+            filters: vec![Expr::Binary {
+                left: Box::new(Expr::Column {
+                    index: start_idx,
+                    name: spans::START_TIME.to_owned(),
+                    data_type: DataType::TimestampNs { utc: true },
+                }),
+                op: BinaryOp::GtEq,
+                right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
+                    value: ns(5, 20),
+                    utc: true,
+                })),
+                data_type: DataType::Bool,
+            }],
+            ..ScanSpec::default()
+        };
+        let batches = drain_source(&source, &spec_partial, &ctx).unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).sum::<usize>(), 2);
+        assert!(
+            chaos.count(Call::Get) > 0,
+            "partial-overlap window must read file"
+        );
+
+        // 6. Active tombstone MUST disable Zero-I/O COUNT(*) and filter out deleted trace.
+        let tid1 = *span_row(1, 0, 0, 0).trace_id.as_bytes();
+        let del = Arc::new(PendingDeletion {
+            id: Uuid::now_v7(),
+            seq: 1,
+            project: project(),
+            cutoff: ns(7, 0),
+            registered_at: ns(7, 0),
+            trace_ids: std::collections::HashSet::from([tid1]),
+            users: std::collections::HashSet::new(),
+            sessions: std::collections::HashSet::new(),
+        });
+        let tomb_source = StatamSource::new(
+            StorageIo::from_store(Arc::clone(&inner)),
+            FileTable::Spans,
+            Arc::clone(&schema),
+            vec![f1, f2],
+            Arc::from([del]),
+            Arc::new(MetadataCache::new(0)),
+            Suspects::new(Arc::new(VerifyQueue::default())),
+            tokio::runtime::Handle::current(),
+        );
+        let batches = drain_source(&tomb_source, &spec_all, &ctx).unwrap();
+        assert_eq!(
+            batches.iter().map(Batch::num_rows).sum::<usize>(),
+            4,
+            "tombstone must exclude deleted trace from COUNT(*)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_with_row_coords_and_take_rows_with_schema_evolution_and_oom() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut s1 = span_row(1, 0, ns(5, 10), ns(5, 11));
+        s1.name = "first".to_owned();
+        s1.end_time = s1.start_time + 500;
+        let mut s2 = span_row(2, 0, ns(5, 20), ns(5, 21));
+        s2.name = "second".to_owned();
+        s2.end_time = s2.start_time + 900;
+        let mut s3 = span_row(3, 0, ns(6, 10), ns(6, 11));
+        s3.name = "third".to_owned();
+        s3.end_time = s3.start_time + 700;
+
+        let f1 = put_statam_file(&store, FileTable::Spans, 1, day(5), &span_rows(&[s1, s2])).await;
+        let f2 = put_statam_file(&store, FileTable::Spans, 1, day(6), &span_rows(&[s3])).await;
+
+        let mut evolved_fields = FileTable::Spans.column_schema().fields().to_vec();
+        evolved_fields.push(Field::new("evolved_note", DataType::Utf8, true));
+        let evolved_schema = Schema::try_new_arc(evolved_fields).unwrap();
+        let dur_idx = evolved_schema.index_of(spans::DURATION_NS).unwrap();
+        let name_idx = evolved_schema.index_of(spans::NAME).unwrap();
+        let note_idx = evolved_schema.index_of("evolved_note").unwrap();
+
+        let source = StatamSource::new(
+            StorageIo::from_store(store),
+            FileTable::Spans,
+            Arc::clone(&evolved_schema),
+            vec![f1, f2],
+            Arc::from([]),
+            Arc::new(MetadataCache::new(4 * 1024 * 1024)),
+            Suspects::new(Arc::new(VerifyQueue::default())),
+            tokio::runtime::Handle::current(),
+        );
+        let ctx = make_exec_ctx(64 * 1024 * 1024, CancelToken::new());
+
+        let spec = ScanSpec {
+            projection: Some(vec![dur_idx]),
+            ..ScanSpec::default()
+        };
+        tokio::task::spawn_blocking(move || {
+            let (streams, coord_schema) = source.open_with_row_coords(&spec, &ctx).unwrap();
+            assert_eq!(coord_schema.len(), 3);
+            assert_eq!(coord_schema.fields()[1].name, ROW_COORD_FILE_COL);
+            assert_eq!(coord_schema.fields()[2].name, ROW_COORD_ROW_COL);
+
+            let mut winners: Vec<(i64, u32, u64)> = Vec::new();
+            let mut res = ctx.pool.register("test_coords", false);
+            for mut st in streams {
+                while let Some(b) = st.next_batch(&ctx.eval.cancel, Some(&mut res)).unwrap() {
+                    let idxs = b.selection().to_indices(b.raw_len()).unwrap();
+                    for r in idxs {
+                        let ScalarValue::I64(dur) =
+                            b.column(0).unwrap().get_scalar(r as usize).unwrap()
+                        else {
+                            panic!("expected I64 dur");
+                        };
+                        let ScalarValue::I64(fo) =
+                            b.column(1).unwrap().get_scalar(r as usize).unwrap()
+                        else {
+                            panic!("expected I64 file_ord");
+                        };
+                        let ScalarValue::I64(ri) =
+                            b.column(2).unwrap().get_scalar(r as usize).unwrap()
+                        else {
+                            panic!("expected I64 row_idx");
+                        };
+                        winners.push((dur, fo as u32, ri as u64));
+                    }
+                }
+                res.free();
+            }
+            winners.sort_by_key(|a| std::cmp::Reverse(a.0));
+            let top2_coords: Vec<(u32, u64)> =
+                winners.iter().take(2).map(|&(_, f, r)| (f, r)).collect();
+
+            let mut take_res = ctx.pool.register("test_take", false);
+            let batches = source
+                .take_rows(
+                    &top2_coords,
+                    &[name_idx, dur_idx, note_idx],
+                    &ctx,
+                    &mut take_res,
+                )
+                .unwrap();
+            let mut names = Vec::new();
+            for b in &batches {
+                assert_eq!(b.schema().len(), 3);
+                for r in b.selection().to_indices(b.raw_len()).unwrap() {
+                    let ScalarValue::Utf8(n) = b.column(0).unwrap().get_scalar(r as usize).unwrap()
+                    else {
+                        panic!("expected Utf8");
+                    };
+                    assert!(matches!(
+                        b.column(2).unwrap().get_scalar(r as usize).unwrap(),
+                        ScalarValue::Null(DataType::Utf8)
+                    ));
+                    names.push(n);
+                }
+            }
+            names.sort();
+            assert_eq!(names, vec!["second".to_owned(), "third".to_owned()]);
+            drop(batches);
+            take_res.free();
+
+            // OOM on take_rows rolls back reservation to 0.
+            let tiny_ctx = make_exec_ctx(16, CancelToken::new());
+            let mut tiny_res = tiny_ctx.pool.register("tiny_take", false);
+            let err = source
+                .take_rows(&top2_coords, &[name_idx, dur_idx], &tiny_ctx, &mut tiny_res)
+                .unwrap_err();
+            assert!(matches!(err, QueryError::TooLarge), "got {err:?}");
+            assert_eq!(tiny_res.size(), 0);
+            assert_eq!(tiny_ctx.pool.reserved(), 0);
+        })
+        .await
+        .unwrap();
     }
 }

@@ -687,6 +687,7 @@ impl Storage {
             max_age,
             upload_concurrency,
             anchors: Some(Arc::clone(&anchors)),
+            qe_runtime: Arc::clone(&qe_runtime),
         });
         let scores_flush = flush::spawn(flush::FlushStart {
             table: Table::Scores,
@@ -700,6 +701,7 @@ impl Storage {
             max_age,
             upload_concurrency,
             anchors: None,
+            qe_runtime: Arc::clone(&qe_runtime),
         });
         if let Err(error) =
             gc::collect_once(&committer, &objects, &hooks, catalog::now_ns(), gc::MAX_AGE).await

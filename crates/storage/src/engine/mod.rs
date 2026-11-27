@@ -19,16 +19,59 @@ use cetra_column::{
 use cetra_query::exec::sort_window::ExternalSort;
 use cetra_query::exec::{
     ControlFlow, ExecContext, MAX_MERGE_WAY, PartitionStream, PushSink, ScanSource, ScanSpec,
-    SortKey, SpillAppender, SpillFile,
+    SortKey, SpillAppender, SpillFile, WorkerPool,
 };
 use cetra_query::{
     BinaryOp, EvalContext, Expr, QueryError, TombstoneSpec, TombstoneTable, eval_filter,
     filter_uncovered,
 };
+use cetra_statam::{StatamError, TaskExecutor};
 use chrono::{Datelike, NaiveDate};
 
 use crate::catalog::FileTable;
 use crate::deletion::PendingDeletion;
+
+/// Concrete [`cetra_statam::TaskExecutor`] delegating Statam's internal parallel batches
+/// to [`WorkerPool::run_helping`] (deadlock-free even when called from inside pool workers).
+pub(crate) struct WorkerPoolExecutor {
+    pool: Arc<WorkerPool>,
+    cancel: CancelToken,
+    max_helpers: usize,
+}
+
+impl WorkerPoolExecutor {
+    /// Creates an executor capped at `max_threads` total concurrent threads (caller + up to
+    /// `max_threads - 1` optional helpers, clamped to `pool.num_workers()`).
+    pub(crate) fn new(pool: Arc<WorkerPool>, cancel: CancelToken, max_threads: usize) -> Self {
+        let max_helpers = max_threads
+            .saturating_sub(1)
+            .min(pool.num_workers().saturating_sub(1));
+        Self {
+            pool,
+            cancel,
+            max_helpers,
+        }
+    }
+}
+
+impl TaskExecutor for WorkerPoolExecutor {
+    fn max_threads(&self) -> usize {
+        self.max_helpers
+            .saturating_add(1)
+            .min(self.pool.num_workers().max(1))
+    }
+
+    fn run_batch(&self, tasks: Vec<Box<dyn FnOnce() + Send + 'static>>) -> Result<(), StatamError> {
+        self.pool
+            .run_helping(&self.cancel, self.max_helpers, tasks)
+            .map_err(|err| match err {
+                QueryError::Cancelled => StatamError::Cancelled,
+                _ => StatamError::Store {
+                    reason: "worker pool execution failed",
+                },
+            })
+    }
+}
 
 /// Nanoseconds in a UTC day.
 pub(super) const DAY_NS: i64 = 86_400_000_000_000;
@@ -554,13 +597,13 @@ pub(super) fn read_bool_at(col: &Column, row: usize) -> Option<bool> {
     }
 }
 
-pub(super) struct BufferedBatchStream {
+pub(crate) struct BufferedBatchStream {
     batches: std::collections::VecDeque<Batch>,
     res: Reservation,
 }
 
 impl BufferedBatchStream {
-    pub(super) fn new(batches: Vec<Batch>, res: Reservation) -> Self {
+    pub(crate) fn new(batches: Vec<Batch>, res: Reservation) -> Self {
         Self {
             batches: batches.into(),
             res,
