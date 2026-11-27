@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use bytesize::ByteSize;
-use cetra_column::{Batch, Column, FlatData};
+use cetra_column::{Batch, FlatData};
 use cetra_core::batch::spans_to_batch;
 use cetra_core::enums::{SpanKind, SpanStatus};
 use cetra_core::ids::{ProjectId, SpanId, TraceId};
@@ -252,16 +252,14 @@ async fn stored_ids(storage: &crate::Storage) -> Vec<Vec<u8>> {
     let mut ids = Vec::new();
     for batch in batches {
         let column = batch.column_by_name(spans::SPAN_ID).unwrap();
-        match column {
-            Column::Flat(flat) => match flat.data() {
-                FlatData::FixedBytes8(arr) => {
-                    for row in active_rows(&batch) {
-                        ids.push(arr[row].to_vec());
-                    }
+        let flat = column.materialize(None).unwrap();
+        match flat.data() {
+            FlatData::FixedBytes8(arr) => {
+                for row in active_rows(&batch) {
+                    ids.push(arr[row].to_vec());
                 }
-                other => panic!("unexpected span_id flat data: {other:?}"),
-            },
-            other => panic!("unexpected span_id column: {other:?}"),
+            }
+            other => panic!("unexpected span_id flat data: {other:?}"),
         }
     }
     ids.sort();

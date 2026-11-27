@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bytes::Bytes;
-use cetra_column::{Batch, Column, FlatData};
+use cetra_column::{Batch, FlatData};
 use cetra_core::batch::{scores_to_batch, spans_to_batch};
 use cetra_core::enums::{SpanKind, SpanStatus};
 use cetra_core::ids::TraceId;
@@ -95,12 +95,10 @@ pub(crate) fn trace_ids_of(rows: &Batch) -> Vec<[u8; 16]> {
     let column = rows
         .column_by_name(cetra_core::schema::spans::TRACE_ID)
         .unwrap();
-    match column {
-        Column::Flat(flat) => match flat.data() {
-            FlatData::FixedBytes16(arr) => active_rows(rows).map(|row| arr[row]).collect(),
-            other => panic!("unexpected trace_id flat data: {other:?}"),
-        },
-        other => panic!("unexpected trace_id column encoding: {other:?}"),
+    let flat = column.materialize(None).unwrap();
+    match flat.data() {
+        FlatData::FixedBytes16(arr) => active_rows(rows).map(|row| arr[row]).collect(),
+        other => panic!("unexpected trace_id flat data: {other:?}"),
     }
 }
 
