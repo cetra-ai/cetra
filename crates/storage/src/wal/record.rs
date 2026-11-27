@@ -582,12 +582,42 @@ mod tests {
         assert!(read_batch(&out[payload], Table::Spans).is_ok());
     }
 
+    fn decode_frame_body(frame: &[u8]) -> Vec<u8> {
+        let flags = frame[5];
+        let payload = &frame[cetra_column::frame::FRAME_HEADER_LEN..];
+        if flags & cetra_column::frame::FLAG_LZ4 != 0 {
+            let mut decoder = lz4_flex::frame::FrameDecoder::new(payload);
+            let mut body = Vec::new();
+            std::io::Read::read_to_end(&mut decoder, &mut body).unwrap();
+            body
+        } else {
+            payload.to_vec()
+        }
+    }
+
+    fn wrap_uncompressed_frame(body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(cetra_column::frame::FRAME_HEADER_LEN + body.len());
+        let mut hdr = [0u8; cetra_column::frame::FRAME_HEADER_LEN];
+        hdr[0..4].copy_from_slice(&cetra_column::frame::FRAME_MAGIC);
+        hdr[4] = cetra_column::frame::FRAME_VERSION;
+        hdr[5] = 0;
+        let len_bytes = (body.len() as u32).to_le_bytes();
+        hdr[8..12].copy_from_slice(&len_bytes);
+        hdr[12..16].copy_from_slice(&len_bytes);
+        let crc = crc32c::crc32c_append(crc32c::crc32c(&hdr[0..16]), body);
+        hdr[16..20].copy_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&hdr);
+        out.extend_from_slice(body);
+        out
+    }
+
     #[test]
     fn read_batch_rejects_top_level_const_u32_max_and_nested_list_const_bombs() {
         let base = sample_span_col_batch();
         let schema = Arc::clone(base.schema());
 
-        // 1. Top-level Column::Const(len = u32::MAX) across all columns -> ~500B bomb.
+        // 1. Top-level Column::Const(len = u32::MAX) across all columns: rejected by encode_batch,
+        // and a raw v1 wire frame with raw_len = u32::MAX is also rejected by read_batch.
         let mut const_cols = Vec::with_capacity(schema.len());
         for col in base.columns() {
             let scalar = col.get_scalar(0).unwrap();
@@ -595,16 +625,22 @@ mod tests {
         }
         let top_bomb =
             Batch::try_new_all(Arc::clone(&schema), const_cols, u32::MAX as usize).unwrap();
-        let mut top_payload = Vec::new();
-        cetra_column::frame::encode_batch(&top_bomb, &mut top_payload, None).unwrap();
-        assert!(top_payload.len() < 2048);
-        let err = read_batch(&top_payload, Table::Spans).unwrap_err();
+        let mut top_enc = Vec::new();
+        let err_enc_top =
+            cetra_column::frame::encode_batch(&top_bomb, &mut top_enc, None).unwrap_err();
         assert!(
-            matches!(err, WalError::InvalidPayload { reason } if reason == "batch raw_len exceeds max_decoded"),
-            "expected max_decoded rejection for top-level Const bomb, got {err:?}"
+            matches!(
+                err_enc_top,
+                cetra_column::ColumnError::InvalidFrame {
+                    reason: "batch raw_len exceeds max_decoded"
+                }
+            ),
+            "expected symmetric encode rejection for top-level Const bomb, got {err_enc_top:?}"
         );
+        assert!(top_enc.is_empty());
 
-        // 2. Nested FlatData::List { offsets: [0, u32::MAX], values: Const(u32::MAX) } bomb.
+        // 2. Nested FlatData::List { offsets: [0, u32::MAX], values: Const(u32::MAX) } bomb:
+        // rejected by encode_batch, and raw wire frame rejected by read_batch.
         let tags_idx = schema.index_of(span_cols::TAGS).unwrap();
         let child = Box::new(
             Column::try_new_const(ScalarValue::Utf8("x".to_owned()), u32::MAX as usize).unwrap(),
@@ -629,15 +665,22 @@ mod tests {
             cetra_column::Selection::All,
         )
         .unwrap();
-        let mut nested_payload = Vec::new();
-        cetra_column::frame::encode_batch(&nested_bomb, &mut nested_payload, None).unwrap();
-        let err = read_batch(&nested_payload, Table::Spans).unwrap_err();
+        let mut nested_enc = Vec::new();
+        let err_enc_nested =
+            cetra_column::frame::encode_batch(&nested_bomb, &mut nested_enc, None).unwrap_err();
         assert!(
-            matches!(err, WalError::InvalidPayload { reason } if reason == "list child length exceeds max_decoded"),
-            "expected max_decoded rejection for nested List(Const) bomb, got {err:?}"
+            matches!(
+                err_enc_nested,
+                cetra_column::ColumnError::InvalidFrame {
+                    reason: "list child length exceeds max_decoded"
+                }
+            ),
+            "expected symmetric encode rejection for nested List(Const) bomb, got {err_enc_nested:?}"
         );
+        assert!(nested_enc.is_empty());
 
-        // 2b. Small (1-row) top-level Const and nested List(Const) pass framing and are rejected by is_all_flat.
+        // 2b. Small (1-row) top-level Const and nested List(Const) pass framing and are rejected by is_all_flat;
+        // patching their uncompressed v1 wire bodies into u32::MAX bombs tests read_batch's wire-bomb rejection.
         let small_const_cols: Vec<Column> = base
             .columns()
             .iter()
@@ -654,12 +697,23 @@ mod tests {
             "expected non-flat rejection for 1-row Const, got {err:?}"
         );
 
+        let mut top_wire_body = decode_frame_body(&small_const_payload);
+        top_wire_body[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let top_payload = wrap_uncompressed_frame(&top_wire_body);
+        assert!(top_payload.len() < 4096);
+        let err = read_batch(&top_payload, Table::Spans).unwrap_err();
+        assert!(
+            matches!(err, WalError::InvalidPayload { reason } if reason == "batch raw_len exceeds max_decoded"),
+            "expected max_decoded rejection for top-level Const bomb, got {err:?}"
+        );
+
+        let marker = "__tags_bomb__";
         let small_list_col = Column::Flat(
             FlatColumn::try_new(
                 FlatData::List {
                     offsets: vec![0, 1],
                     values: Box::new(
-                        Column::try_new_const(ScalarValue::Utf8("x".to_owned()), 1).unwrap(),
+                        Column::try_new_const(ScalarValue::Utf8(marker.to_owned()), 1).unwrap(),
                     ),
                     item_type: DataType::Utf8,
                 },
@@ -683,6 +737,33 @@ mod tests {
         assert!(
             matches!(err, WalError::InvalidPayload { reason } if reason == "non-flat column encoding in WAL record"),
             "expected non-flat rejection for 1-row nested List(Const), got {err:?}"
+        );
+
+        let mut nested_wire_body = decode_frame_body(&small_nested_payload);
+        let mut needle = Vec::new();
+        needle.extend_from_slice(&[0u8, 0u8]); // Flat, has_nulls = false
+        needle.extend_from_slice(&0u32.to_le_bytes()); // offsets[0] = 0
+        needle.extend_from_slice(&1u32.to_le_bytes()); // offsets[1] = 1
+        needle.extend_from_slice(&1u32.to_le_bytes()); // child_len = 1
+        needle.extend_from_slice(&[1u8, 0u8]); // Const, is_null = false
+        needle.extend_from_slice(&0u32.to_le_bytes()); // utf8 offsets[0] = 0
+        needle.extend_from_slice(&(marker.len() as u32).to_le_bytes()); // utf8 offsets[1]
+        needle.extend_from_slice(&(marker.len() as u32).to_le_bytes()); // utf8 bytes_len
+        needle.extend_from_slice(marker.as_bytes());
+        let positions: Vec<usize> = nested_wire_body
+            .windows(needle.len())
+            .enumerate()
+            .filter_map(|(idx, win)| (win == needle.as_slice()).then_some(idx))
+            .collect();
+        assert_eq!(positions.len(), 1, "expected unique tags column wire slice");
+        let pos = positions[0];
+        nested_wire_body[pos + 6..pos + 10].copy_from_slice(&u32::MAX.to_le_bytes());
+        nested_wire_body[pos + 10..pos + 14].copy_from_slice(&u32::MAX.to_le_bytes());
+        let nested_payload = wrap_uncompressed_frame(&nested_wire_body);
+        let err = read_batch(&nested_payload, Table::Spans).unwrap_err();
+        assert!(
+            matches!(err, WalError::InvalidPayload { reason } if reason == "list child length exceeds max_decoded"),
+            "expected max_decoded rejection for nested List(Const) bomb, got {err:?}"
         );
 
         // 3. Dict and Rle encodings are also rejected in WAL records.

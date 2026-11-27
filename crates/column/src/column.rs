@@ -280,6 +280,10 @@ impl Utf8Data {
         &self.bytes
     }
 
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
     /// String slice at `row`, or `None` if out of bounds.
     pub fn get(&self, row: usize) -> Option<&str> {
         if row >= self.len() {
@@ -453,6 +457,10 @@ impl BinaryData {
     /// Contiguous raw bytes.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
     }
 
     /// Byte slice at `row`, or `None` if out of bounds.

@@ -318,35 +318,37 @@ impl Reservation {
     /// Releases `bytes.min(self.size)` bytes, returning surplus above `initial` to `GlobalPool`
     /// or the parent [`ScopedPool`].
     pub fn shrink(&mut self, bytes: usize) {
+        let global_freed = self.shrink_returning_global_freed(bytes);
+        if global_freed > 0 {
+            self.pool.shared.give_back(global_freed);
+        }
+    }
+
+    fn shrink_returning_global_freed(&mut self, bytes: usize) -> usize {
         let actual = bytes.min(self.size);
         if actual == 0 {
-            return;
+            return 0;
         }
 
-        let freed = {
-            let mut guard = self.pool.lock();
-            let state = &mut *guard;
+        let mut guard = self.pool.lock();
+        let state = &mut *guard;
 
-            state.sub(self.can_spill, actual);
-            state.used = state.used.saturating_sub(actual);
-            self.size -= actual;
+        state.sub(self.can_spill, actual);
+        state.used = state.used.saturating_sub(actual);
+        self.size -= actual;
 
-            let keep = state.used.max(self.pool.initial);
-            let freed = state.held.saturating_sub(keep);
-            state.held -= freed;
+        let keep = state.used.max(self.pool.initial);
+        let freed = state.held.saturating_sub(keep);
+        state.held -= freed;
 
-            if let Some(parent_res) = state.parent.as_mut() {
-                if freed > 0 {
-                    parent_res.shrink(freed);
-                }
-                0
+        if let Some(parent_res) = state.parent.as_mut() {
+            if freed > 0 {
+                parent_res.shrink_returning_global_freed(freed)
             } else {
-                freed
+                0
             }
-        };
-
-        if freed > 0 {
-            self.pool.shared.give_back(freed);
+        } else {
+            freed
         }
     }
 
@@ -428,7 +430,7 @@ impl Reservation {
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        let freed = {
+        let global_freed = {
             let mut guard = self.pool.lock();
             let state = &mut *guard;
 
@@ -444,16 +446,17 @@ impl Drop for Reservation {
 
             if let Some(parent_res) = state.parent.as_mut() {
                 if freed > 0 {
-                    parent_res.shrink(freed);
+                    parent_res.shrink_returning_global_freed(freed)
+                } else {
+                    0
                 }
-                0
             } else {
                 freed
             }
         };
 
-        if freed > 0 {
-            self.pool.shared.give_back(freed);
+        if global_freed > 0 {
+            self.pool.shared.give_back(global_freed);
         }
     }
 }
@@ -850,5 +853,72 @@ mod tests {
         drop(p_res);
         drop(parent);
         assert_eq!(global.used(), 0);
+    }
+
+    #[test]
+    fn release_hook_may_read_child_and_grandchild_pools_without_deadlock() {
+        use std::sync::{OnceLock, Weak};
+
+        type PoolTriplet = (Weak<ScopedPool>, Weak<ScopedPool>, Weak<ScopedPool>);
+
+        let pools: Arc<OnceLock<PoolTriplet>> = Arc::new(OnceLock::new());
+        let pools_hook = Arc::clone(&pools);
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls_clone = Arc::clone(&hook_calls);
+
+        let global = GlobalPool::with_release_hook(1000, move || {
+            hook_calls_clone.fetch_add(1, Ordering::SeqCst);
+            if let Some((root_w, child_w, grand_w)) = pools_hook.get() {
+                if let Some(r) = root_w.upgrade() {
+                    let _ = r.reserved();
+                }
+                if let Some(c) = child_w.upgrade() {
+                    let _ = c.reserved();
+                }
+                if let Some(g) = grand_w.upgrade() {
+                    let _ = g.reserved();
+                }
+            }
+        });
+
+        let root = global.try_admit(50, 800).expect("admit root");
+        let child = root.child("child", 600);
+        let grandchild = child.child("grandchild", 400);
+        pools
+            .set((
+                Arc::downgrade(&root),
+                Arc::downgrade(&child),
+                Arc::downgrade(&grandchild),
+            ))
+            .expect("set pool triplet");
+
+        let mut res = grandchild.register("op", true);
+        res.try_grow(200).expect("grow grandchild");
+        assert_eq!(global.used(), 200);
+        assert_eq!(root.reserved(), 200);
+        assert_eq!(child.reserved(), 200);
+        assert_eq!(grandchild.reserved(), 200);
+
+        // Shrink on grandchild bubbles through child -> root and fires release hook without holding any lock.
+        res.shrink(50);
+        assert_eq!(hook_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(global.used(), 150);
+        assert_eq!(root.reserved(), 150);
+        assert_eq!(child.reserved(), 150);
+        assert_eq!(grandchild.reserved(), 150);
+
+        // Drop on grandchild bubbles through child -> root and fires release hook without holding any lock.
+        drop(res);
+        assert_eq!(hook_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(global.used(), 50);
+        assert_eq!(root.reserved(), 0);
+        assert_eq!(child.reserved(), 0);
+        assert_eq!(grandchild.reserved(), 0);
+
+        drop(grandchild);
+        drop(child);
+        drop(root);
+        assert_eq!(global.used(), 0);
+        assert_eq!(hook_calls.load(Ordering::SeqCst), 3);
     }
 }
