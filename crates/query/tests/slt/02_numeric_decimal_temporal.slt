@@ -1,0 +1,501 @@
+# 02_numeric_decimal_temporal.slt
+# I64 overflow & div-by-zero, F64 special values & math, Decimal128 widening /
+# negative scales / precision-38 / scientific casts, Date/Timestamp/Interval arithmetic,
+# canonical interval equality, date_trunc, date_bin, extract, to_timestamp, now().
+
+statement ok
+CREATE TABLE nums (id BIGINT NOT NULL, a BIGINT, b BIGINT, f DOUBLE)
+
+statement ok
+INSERT INTO nums VALUES
+  (1, 7, 2, 2.5),
+  (2, -7, 2, -2.5),
+  (3, 7, -2, 0.0),
+  (4, -7, -2, -0.0),
+  (5, 0, 5, 16.0),
+  (6, NULL, 3, NULL)
+
+# Basic I64 arithmetic (+, -, *, unary -)
+query IIIII nosort
+SELECT id, (a + b) AS s, (a - b) AS d, (a * b) AS p, (-a) AS neg
+FROM nums
+ORDER BY id ASC NULLS LAST
+----
+1	9	5	14	-7
+2	-5	-9	-14	7
+3	5	9	-14	-7
+4	-9	-5	14	7
+5	5	-5	0	0
+6	NULL	NULL	NULL	NULL
+
+# I64 truncating division and remainder (toward zero)
+# duckdb: skip duckdb `/` on integers returns double
+query III nosort
+SELECT id, (a / b) AS q, (a % b) AS r
+FROM nums
+ORDER BY id ASC NULLS LAST
+----
+1	3	1
+2	-3	-1
+3	-3	1
+4	3	-1
+5	0	0
+6	NULL	NULL
+
+# I64 boundary literals (i64::MIN and i64::MAX)
+query II nosort
+SELECT -9223372036854775808 AS min_i64, 9223372036854775807 AS max_i64
+----
+-9223372036854775808	9223372036854775807
+
+# I64 overflow and div-by-zero errors
+# duckdb: skip error message wording
+statement error overflow
+SELECT 9223372036854775807 + 1 AS ovf
+
+# duckdb: skip error message wording
+statement error overflow
+SELECT -9223372036854775808 - 1 AS ovf
+
+# duckdb: skip error message wording
+statement error overflow
+SELECT 9223372036854775807 * 2 AS ovf
+
+# duckdb: skip error message wording
+statement error overflow
+SELECT -9223372036854775808 / -1 AS ovf
+
+# duckdb: skip error message wording
+statement error overflow
+SELECT -(-9223372036854775808) AS ovf
+
+# duckdb: skip error message wording
+statement error division by zero
+SELECT 10 / 0 AS dbz
+
+# duckdb: skip error message wording
+statement error division by zero
+SELECT 10 % 0 AS mbz
+
+# F64 div-by-zero and mod-by-zero return QueryError::Failed (cetra semantics)
+# duckdb: skip duckdb float div-by-zero returns inf/nan instead of error
+statement error division by zero
+SELECT 1.0 / 0.0 AS fdbz
+
+# duckdb: skip duckdb float mod-by-zero returns nan instead of error
+statement error division by zero
+SELECT 1.0 % 0.0 AS fmbz
+
+# F64 special values: -0.0, NaN, +Inf, -Inf comparisons and predicates
+query BBBBBB nosort
+SELECT
+  (CAST(-0.0 AS DOUBLE) = CAST(0.0 AS DOUBLE)) AS neg_zero_eq,
+  (CAST('NaN' AS DOUBLE) = CAST('NaN' AS DOUBLE)) AS nan_eq,
+  (CAST('NaN' AS DOUBLE) > CAST('Infinity' AS DOUBLE)) AS nan_gt_inf,
+  (CAST('-Infinity' AS DOUBLE) < -1e300) AS ninf_lt,
+  isnan(CAST('NaN' AS DOUBLE)) AS is_nan_t,
+  isnan(CAST('Infinity' AS DOUBLE)) AS is_nan_inf
+----
+true	true	true	true	true	false
+
+query BBBB nosort
+SELECT
+  isfinite(1.5) AS fin_t,
+  isfinite(CAST('NaN' AS DOUBLE)) AS fin_nan,
+  isfinite(CAST('Infinity' AS DOUBLE)) AS fin_inf,
+  isfinite(CAST('-Infinity' AS DOUBLE)) AS fin_ninf
+----
+true	false	false	false
+
+# F64 arithmetic producing Inf / NaN
+query RRR nosort
+SELECT
+  (CAST('Infinity' AS DOUBLE) + 1.0) AS inf_plus,
+  (CAST('Infinity' AS DOUBLE) - CAST('Infinity' AS DOUBLE)) AS inf_minus_inf,
+  sqrt(-1.0) AS sqrt_neg
+----
+Infinity	NaN	NaN
+
+# F64 math functions: abs, round, floor, ceil/ceiling, sqrt, ln, log10, power/pow
+query RRRRRRRR nosort
+SELECT
+  abs(-3.5) AS a1,
+  round(2.345, 2) AS r1,
+  round(-2.5) AS r2,
+  floor(-2.1) AS fl,
+  ceil(2.1) AS ce1,
+  ceiling(-2.1) AS ce2,
+  sqrt(9.0) AS sq,
+  power(2.0, 10.0) AS pw
+----
+3.5	2.35	-3	-3	3	-2	3	1024
+
+query RRR nosort
+SELECT ln(1.0) AS ln1, log10(1000.0) AS l10, pow(3.0, 3.0) AS p3
+----
+0	3	27
+
+# Integer abs and round (including negative decimal places)
+query IIII nosort
+SELECT abs(-42) AS ai, round(1234, -2) AS r_neg2, round(1250, -2) AS r_half, round(-1250, -2) AS r_nhalf
+----
+42	1200	1300	-1300
+
+# Unary + across I64, F64, Decimal, Interval
+# duckdb: skip duckdb has no unary + on INTERVAL
+query IRRT nosort
+SELECT
+  (+42) AS pi,
+  (+3.5) AS pf,
+  (+CAST('1.25' AS DECIMAL(10, 2))) AS pd,
+  (+INTERVAL '2 hours') AS piv
+----
+42	3.5	1.25	2 hours
+
+# Float round with negative decimal places; floor/ceil on integers
+query RII nosort
+SELECT round(1234.5, -2) AS rf_neg2, floor(7) AS fl_i, ceil(-7) AS ce_i
+----
+1200	7	-7
+
+# Float arithmetic with NULL propagates NULL; -0.0 formats as 0
+query IRR nosort
+SELECT id, (f + 1.0) AS fp1, (f * 2.0) AS fm2
+FROM nums
+WHERE id IN (3, 4, 6)
+ORDER BY id ASC NULLS LAST
+----
+3	1	0
+4	1	0
+6	NULL	NULL
+
+# Decimal128 table and arithmetic
+statement ok
+CREATE TABLE decs (
+  id BIGINT NOT NULL,
+  d1 DECIMAL(10, 2),
+  d2 DECIMAL(10, 3)
+)
+
+statement ok
+INSERT INTO decs VALUES
+  (1, CAST('12.34' AS DECIMAL(10, 2)), CAST('0.500' AS DECIMAL(10, 3))),
+  (2, CAST('-5.00' AS DECIMAL(10, 2)), CAST('2.250' AS DECIMAL(10, 3))),
+  (3, CAST('0.00' AS DECIMAL(10, 2)), CAST('1.000' AS DECIMAL(10, 3))),
+  (4, NULL, CAST('3.000' AS DECIMAL(10, 3)))
+
+# Decimal addition, subtraction, multiplication with different scales (widening)
+query IRRR nosort
+SELECT id, (d1 + d2) AS add_d, (d1 - d2) AS sub_d, (d1 * d2) AS mul_d
+FROM decs
+ORDER BY id ASC NULLS LAST
+----
+1	12.840	11.840	6.17000
+2	-2.750	-7.250	-11.25000
+3	1.000	-1.000	0.00000
+4	NULL	NULL	NULL
+
+# Decimal division and modulo
+# duckdb: skip decimal division scale rules differ slightly from duckdb
+query IRR nosort
+SELECT id, (d1 / d2) AS div_d, (d1 % d2) AS mod_d
+FROM decs
+ORDER BY id ASC NULLS LAST
+----
+1	24.6800000000000	0.340
+2	-2.2222222222222	-0.500
+3	0.0000000000000	0.000
+4	NULL	NULL
+
+# Decimal with I64 mixed arithmetic and comparison
+query RRB nosort
+SELECT
+  (CAST('10.25' AS DECIMAL(10, 2)) + 5) AS d_plus_i,
+  (CAST('10.25' AS DECIMAL(10, 2)) * 2) AS d_mul_i,
+  (CAST('10.00' AS DECIMAL(10, 2)) = 10) AS d_eq_i
+----
+15.25	20.50	true
+
+# Decimal abs, unary negation, cross-scale comparison, and casts to I64 / F64
+query RRBIR nosort
+SELECT
+  abs(CAST('-12.34' AS DECIMAL(10, 2))) AS d_abs,
+  (-CAST('12.34' AS DECIMAL(10, 2))) AS d_neg,
+  (CAST('1.50' AS DECIMAL(10, 2)) = CAST('1.5000' AS DECIMAL(10, 4))) AS d_eq_scale,
+  CAST(CAST('12.00' AS DECIMAL(10, 2)) AS BIGINT) AS d_to_i,
+  CAST(CAST('12.50' AS DECIMAL(10, 2)) AS DOUBLE) AS d_to_f
+----
+12.34	-12.34	true	12	12.5
+
+# Decimal to BIGINT truncates toward zero in cetra
+# duckdb: skip duckdb rounds CAST(DECIMAL AS BIGINT) to nearest
+query II nosort
+SELECT
+  CAST(CAST('12.90' AS DECIMAL(10, 2)) AS BIGINT) AS pos_trunc,
+  CAST(CAST('-12.90' AS DECIMAL(10, 2)) AS BIGINT) AS neg_trunc
+----
+12	-12
+
+# Negative scale Decimal128 (cetra-specific)
+# duckdb: skip duckdb does not support negative decimal scale
+query RR nosort
+SELECT
+  CAST('1234' AS DECIMAL(5, -2)) AS neg_scale_round,
+  CAST('1250' AS DECIMAL(5, -2)) AS neg_scale_up
+----
+1200	1300
+
+# duckdb: skip duckdb does not support negative decimal scale
+query R nosort
+SELECT (CAST('1200' AS DECIMAL(5, -2)) + CAST('300' AS DECIMAL(5, -2))) AS neg_scale_add
+----
+1500
+
+# Precision-38 Decimal128 boundary
+query RR nosort
+SELECT
+  CAST('99999999999999999999999999999999999999' AS DECIMAL(38, 0)) AS max_p38,
+  CAST('-99999999999999999999999999999999999999' AS DECIMAL(38, 0)) AS min_p38
+----
+99999999999999999999999999999999999999	-99999999999999999999999999999999999999
+
+# Scientific notation string casts to Decimal128
+query RRR nosort
+SELECT
+  CAST('1.25e3' AS DECIMAL(10, 2)) AS sci_pos,
+  CAST('1.5E-2' AS DECIMAL(10, 4)) AS sci_neg,
+  CAST('-2.5e+1' AS DECIMAL(10, 2)) AS sci_signed
+----
+1250.00	0.0150	-25.00
+
+# Decimal overflow error
+# duckdb: skip error message wording
+statement error overflow
+SELECT CAST('99999' AS DECIMAL(4, 0)) AS ovf_d
+
+# Temporal table: DATE, TIMESTAMP (naive), TIMESTAMPTZ (UTC), INTERVAL
+statement ok
+CREATE TABLE ts_tbl (
+  id BIGINT NOT NULL,
+  d DATE,
+  ts TIMESTAMP,
+  tstz TIMESTAMPTZ,
+  iv INTERVAL
+)
+
+statement ok
+INSERT INTO ts_tbl VALUES
+  (1, DATE '2026-01-08', TIMESTAMP '2026-01-08 14:25:36', CAST('2026-01-08 14:25:36+00:00' AS TIMESTAMP WITH TIME ZONE), INTERVAL '1 day'),
+  (2, DATE '2024-01-31', TIMESTAMP '2024-01-31 12:00:00', CAST('2024-01-31 12:00:00+00:00' AS TIMESTAMP WITH TIME ZONE), INTERVAL '24 hours'),
+  (3, DATE '2025-01-31', TIMESTAMP '2025-01-31 12:00:00', CAST('2025-01-31 12:00:00+00:00' AS TIMESTAMP WITH TIME ZONE), INTERVAL '1 month'),
+  (4, NULL, NULL, NULL, NULL)
+
+# Date subtraction -> I64 days; Date + Interval -> naive Timestamp
+query IIT nosort
+SELECT
+  (DATE '2026-01-10' - DATE '2026-01-01') AS day_diff,
+  (DATE '2025-12-31' - DATE '2026-01-01') AS neg_diff,
+  (DATE '2026-01-01' + INTERVAL '2 days') AS d_plus_iv
+----
+9	-1	2026-01-03T00:00:00.000000000
+
+# Timestamp + Interval with end-of-month clamping (leap 2024 vs non-leap 2025)
+query TT nosort
+SELECT
+  (TIMESTAMP '2024-01-31 12:00:00' + INTERVAL '1 month') AS leap_feb,
+  (TIMESTAMP '2025-01-31 12:00:00' + INTERVAL '1 month') AS non_leap_feb
+----
+2024-02-29T12:00:00.000000000	2025-02-28T12:00:00.000000000
+
+# Timestamp - Timestamp -> Interval; Timestamp - Interval -> Timestamp
+query TT nosort
+SELECT
+  (TIMESTAMP '2026-01-02 00:00:00' - TIMESTAMP '2026-01-01 00:00:00') AS ts_diff,
+  (TIMESTAMP '2026-01-08 14:25:36' - INTERVAL '2 hours 25 minutes 36 seconds') AS ts_sub
+----
+24 hours	2026-01-08T12:00:00.000000000
+
+# Interval arithmetic (+, -, unary -)
+query TTT nosort
+SELECT
+  (INTERVAL '1 day' + INTERVAL '2 hours') AS iv_add,
+  (INTERVAL '3 days' - INTERVAL '1 day') AS iv_sub,
+  (-INTERVAL '5 hours') AS iv_neg
+----
+1 days 2 hours	2 days	-5 hours
+
+# Canonical interval equality: 1 day = 24 hours, 1 hour = 60 minutes, 1 year = 12 months
+query BBBB nosort
+SELECT
+  (INTERVAL '1 day' = INTERVAL '24 hours') AS d_eq_h,
+  (INTERVAL '1 hour' = INTERVAL '60 minutes') AS h_eq_m,
+  (INTERVAL '1 year' = INTERVAL '12 months') AS y_eq_mo,
+  (INTERVAL '1 day' < INTERVAL '25 hours') AS d_lt_25h
+----
+true	true	true	true
+
+# Canonical interval comparison across table rows
+query IB nosort
+SELECT id, (iv = INTERVAL '24 hours') AS is_one_day
+FROM ts_tbl
+ORDER BY id ASC NULLS LAST
+----
+1	true
+2	true
+3	false
+4	NULL
+
+# date_trunc across units (2026-01-08 is Thursday -> week starts Monday 2026-01-05)
+query TTTTTT nosort
+SELECT
+  date_trunc('year', ts) AS y,
+  date_trunc('quarter', ts) AS q,
+  date_trunc('month', ts) AS m,
+  date_trunc('week', ts) AS w,
+  date_trunc('day', ts) AS d,
+  date_trunc('hour', ts) AS h
+FROM ts_tbl
+WHERE id = 1
+----
+2026-01-01T00:00:00.000000000	2026-01-01T00:00:00.000000000	2026-01-01T00:00:00.000000000	2026-01-05T00:00:00.000000000	2026-01-08T00:00:00.000000000	2026-01-08T14:00:00.000000000
+
+# date_trunc preserves UTC (TIMESTAMPTZ) and handles minute/second
+query TT nosort
+SELECT
+  date_trunc('minute', tstz) AS min_utc,
+  date_trunc('day', tstz) AS day_utc
+FROM ts_tbl
+WHERE id = 1
+----
+2026-01-08T14:25:00.000000000Z	2026-01-08T00:00:00.000000000Z
+
+# date_trunc sub-second units (second, millisecond, microsecond)
+query TTT nosort
+SELECT
+  date_trunc('second', TIMESTAMP '2026-01-08 14:25:36.123456') AS s_t,
+  date_trunc('millisecond', TIMESTAMP '2026-01-08 14:25:36.123456') AS ms_t,
+  date_trunc('microsecond', TIMESTAMP '2026-01-08 14:25:36.123456') AS us_t
+----
+2026-01-08T14:25:36.000000000	2026-01-08T14:25:36.123000000	2026-01-08T14:25:36.123456000
+
+# Temporal NULL propagation for +, -, and interval ops (using table NULL iv and untyped NULL)
+query TTTT nosort
+SELECT
+  (TIMESTAMP '2026-01-08 14:25:36' + iv) AS ts_add_null,
+  (DATE '2026-01-08' + iv) AS d_add_null,
+  (INTERVAL '1 day' + iv) AS iv_add_null,
+  (TIMESTAMP '2026-01-08 14:25:36' - ts) AS ts_sub_null
+FROM ts_tbl
+WHERE id = 4
+----
+NULL	NULL	NULL	NULL
+
+# Comparing naive TIMESTAMP and UTC TIMESTAMPTZ representing the same UTC instant
+# duckdb: skip duckdb requires explicit cast between TIMESTAMP_NS and TIMESTAMPTZ
+query BB nosort
+SELECT
+  (ts = tstz) AS ts_eq_tstz,
+  (ts < tstz + INTERVAL '1 second') AS ts_lt_next
+FROM ts_tbl
+WHERE id = 1
+----
+true	true
+
+# Negative interval extraction
+query III nosort
+SELECT
+  EXTRACT(YEAR FROM (-INTERVAL '1 year 2 months')) AS neg_y,
+  EXTRACT(MONTH FROM (-INTERVAL '1 year 2 months')) AS neg_m,
+  EXTRACT(DAY FROM (-INTERVAL '3 days')) AS neg_d
+----
+-1	-2	-3
+
+# date_trunc with NULL unit or NULL timestamp returns NULL
+query TT nosort
+SELECT
+  date_trunc(CAST(NULL AS VARCHAR), TIMESTAMP '2026-01-08 14:25:36') AS null_unit,
+  date_trunc('day', CAST(NULL AS TIMESTAMP)) AS null_ts
+----
+NULL	NULL
+
+# date_trunc invalid unit error
+# duckdb: skip error message wording
+statement error unsupported date_trunc unit
+SELECT date_trunc('century', TIMESTAMP '2026-01-08 14:25:36') AS bad_unit
+
+# date_bin: default epoch origin, explicit origin, and pre-1970 timestamp
+# duckdb: skip duckdb uses time_bucket rather than date_bin
+query TTT nosort
+SELECT
+  date_bin(INTERVAL '10 minutes', TIMESTAMP '2026-01-01 10:17:45') AS bin_default,
+  date_bin(INTERVAL '10 minutes', TIMESTAMP '2026-01-01 10:17:45', TIMESTAMP '2026-01-01 10:05:00') AS bin_origin,
+  date_bin(INTERVAL '10 minutes', TIMESTAMP '1969-12-31 23:54:10') AS bin_pre_epoch
+----
+2026-01-01T10:10:00.000000000	2026-01-01T10:15:00.000000000	1969-12-31T23:50:00.000000000
+
+# date_bin rejects month stride and zero/negative stride
+# duckdb: skip duckdb uses time_bucket rather than date_bin
+statement error month
+SELECT date_bin(INTERVAL '1 month', TIMESTAMP '2026-01-01 00:00:00') AS bad_stride
+
+# duckdb: skip duckdb uses time_bucket rather than date_bin
+statement error positive
+SELECT date_bin(INTERVAL '0 seconds', TIMESTAMP '2026-01-01 00:00:00') AS zero_stride
+
+# extract / date_part on timestamp
+query IIIIIIIII nosort
+SELECT
+  EXTRACT(YEAR FROM ts) AS yr,
+  EXTRACT(QUARTER FROM ts) AS qtr,
+  EXTRACT(MONTH FROM ts) AS mo,
+  EXTRACT(DAY FROM ts) AS dy,
+  EXTRACT(DOW FROM ts) AS dow,
+  EXTRACT(ISODOW FROM ts) AS isodow,
+  EXTRACT(DOY FROM ts) AS doy,
+  EXTRACT(HOUR FROM ts) AS hr,
+  date_part('minute', ts) AS mn
+FROM ts_tbl
+WHERE id = 1
+----
+2026	1	1	8	4	4	8	14	25
+
+# extract on DATE and INTERVAL, and extract(EPOCH ...)
+query IIIIR nosort
+SELECT
+  EXTRACT(YEAR FROM d) AS d_yr,
+  EXTRACT(MONTH FROM d) AS d_mo,
+  EXTRACT(DAY FROM d) AS d_dy,
+  EXTRACT(HOUR FROM INTERVAL '2 hours 30 minutes') AS iv_hr,
+  EXTRACT(EPOCH FROM TIMESTAMP '1970-01-01 00:01:30') AS ep
+FROM ts_tbl
+WHERE id = 1
+----
+2026	1	8	2	90
+
+# to_timestamp on integer epoch seconds, float epoch seconds, RFC3339 string, and NULL
+# duckdb: skip duckdb to_timestamp only accepts double epoch seconds
+query TTTT nosort
+SELECT
+  to_timestamp(0) AS ep0,
+  to_timestamp(1.5) AS ep_f,
+  to_timestamp('2026-01-08T14:25:36Z') AS ep_s,
+  to_timestamp(CAST(NULL AS BIGINT)) AS ep_n
+----
+1970-01-01T00:00:00.000000000Z	1970-01-01T00:00:01.500000000Z	2026-01-08T14:25:36.000000000Z	NULL
+
+# now() returns non-null UTC timestamp (metamorphic off because timestamp is wall-clock)
+# metamorphic: off
+# duckdb: skip wall-clock now() differs across processes
+query BB nosort
+SELECT (now() IS NOT NULL) AS has_now, (now() > CAST('2020-01-01 00:00:00+00:00' AS TIMESTAMP WITH TIME ZONE)) AS after_2020
+----
+true	true
+
+statement ok
+DROP TABLE ts_tbl
+
+statement ok
+DROP TABLE decs
+
+statement ok
+DROP TABLE nums

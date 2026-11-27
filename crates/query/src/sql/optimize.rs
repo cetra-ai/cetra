@@ -1184,11 +1184,22 @@ fn push_filter(conjuncts: Vec<Expr>, plan: LogicalPlan) -> Result<LogicalPlan, Q
             wrap_filter(proj, keep_above)
         }
         LogicalPlan::Sort { input, keys } => {
-            let pushed_input = push_filter(conjuncts, *input)?;
-            Ok(LogicalPlan::Sort {
-                input: Box::new(pushed_input),
-                keys,
-            })
+            if keys.iter().all(|k| is_infallible(&k.expr)) {
+                let pushed_input = push_filter(conjuncts, *input)?;
+                Ok(LogicalPlan::Sort {
+                    input: Box::new(pushed_input),
+                    keys,
+                })
+            } else {
+                let inner = pass2_filter_pushdown(*input)?;
+                wrap_filter(
+                    LogicalPlan::Sort {
+                        input: Box::new(inner),
+                        keys,
+                    },
+                    conjuncts,
+                )
+            }
         }
         LogicalPlan::Distinct { input } => {
             let pushed_input = push_filter(conjuncts, *input)?;
@@ -2106,7 +2117,9 @@ fn hex_literal(expr: &Expr, width: usize) -> Option<ScalarValue> {
         return None;
     };
     let expected = width.checked_mul(2)?;
-    if text.len() != expected || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+    // `encode(id, 'hex')` always emits lowercase hex; uppercase literals never match it,
+    // so rewriting them to raw byte equality would turn `false` into `true`.
+    if text.len() != expected || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return None;
     }
     let bytes = hex::decode(text).ok()?;
@@ -5133,7 +5146,7 @@ mod tests {
     #[test]
     fn filter_through_project_rewrites_hex_id_and_populates_hints_keeping_filters() {
         let view = spans_view_schema();
-        let hex_upper = "A1000000000000000000000000000001";
+        let hex_lower = "a1000000000000000000000000000001";
         let span_hex = "0123456789abcdef";
 
         let base_scan = raw_scan("spans", SqlViewKind::Spans, raw_spans_schema());
@@ -5144,7 +5157,7 @@ mod tests {
             bin(
                 col_expr(&view, "trace_id"),
                 BinaryOp::Eq,
-                Expr::Literal(ScalarValue::Utf8(hex_upper.to_owned())),
+                Expr::Literal(ScalarValue::Utf8(hex_lower.to_owned())),
             ),
             Expr::InList {
                 expr: Box::new(col_expr(&view, "span_id")),
@@ -5211,7 +5224,7 @@ mod tests {
 
         // Full pushed predicates retained in Scan.filters, with hex rewritten to FixedBytes16 / FixedBytes8
         assert_eq!(filters.len(), 4);
-        let expected_trace: [u8; 16] = hex::decode(hex_upper).unwrap().try_into().unwrap();
+        let expected_trace: [u8; 16] = hex::decode(hex_lower).unwrap().try_into().unwrap();
         let expected_span: [u8; 8] = hex::decode(span_hex).unwrap().try_into().unwrap();
         assert!(matches!(
             &filters[0],
@@ -5264,13 +5277,19 @@ mod tests {
         let view = spans_view_schema();
         let view_proj =
             spans_view_project(raw_scan("spans", SqlViewKind::Spans, raw_spans_schema()));
-        let pred = bin(
+        let pred = combine_and(vec![
             bin(
                 col_expr(&view, "trace_id"),
                 BinaryOp::Eq,
                 Expr::Literal(ScalarValue::Utf8("not-hex".to_owned())),
             ),
-            BinaryOp::And,
+            bin(
+                col_expr(&view, "trace_id"),
+                BinaryOp::Eq,
+                Expr::Literal(ScalarValue::Utf8(
+                    "A1000000000000000000000000000001".to_owned(),
+                )),
+            ),
             Expr::InList {
                 expr: Box::new(col_expr(&view, "trace_id")),
                 list: vec![
@@ -5282,7 +5301,8 @@ mod tests {
                 negated: false,
                 redacted: false,
             },
-        );
+        ])
+        .unwrap();
         let opt = optimize(LogicalPlan::Filter {
             input: Box::new(view_proj),
             predicate: pred,
@@ -5299,10 +5319,42 @@ mod tests {
         else {
             panic!("expected Scan");
         };
-        assert_eq!(filters.len(), 2);
+        assert_eq!(filters.len(), 3);
         assert!(filters[0].fmt_plan().contains("encode("));
         assert!(filters[1].fmt_plan().contains("encode("));
+        assert!(filters[2].fmt_plan().contains("encode("));
         assert!(id_lookups.is_empty());
+    }
+
+    #[test]
+    fn filter_is_blocked_above_fallible_sort_key() {
+        let schema = Schema::try_new_arc(vec![Field::new("x", DataType::I64, false)]).unwrap();
+        let scan = raw_scan("nums", SqlViewKind::Batch, Arc::clone(&schema));
+        let sort = LogicalPlan::Sort {
+            input: Box::new(scan),
+            keys: vec![SortKey {
+                expr: bin(
+                    Expr::Literal(ScalarValue::I64(10)),
+                    BinaryOp::Div,
+                    col_expr(&schema, "x"),
+                ),
+                descending: false,
+                nulls_first: false,
+            }],
+        };
+        let filtered = LogicalPlan::Filter {
+            input: Box::new(sort),
+            predicate: bin(
+                col_expr(&schema, "x"),
+                BinaryOp::Gt,
+                Expr::Literal(ScalarValue::I64(0)),
+            ),
+        };
+        let opt = optimize(filtered).unwrap();
+        assert!(
+            matches!(opt, LogicalPlan::Filter { ref input, .. } if matches!(input.as_ref(), LogicalPlan::Sort { .. })),
+            "filter must stay above Sort when a sort key is fallible: {opt:?}"
+        );
     }
 
     #[test]

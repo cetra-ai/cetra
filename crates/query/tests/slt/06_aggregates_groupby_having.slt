@@ -1,0 +1,513 @@
+# 06_aggregates_groupby_having.slt
+# COUNT(*)/COUNT(col)/COUNT(DISTINCT), SUM/AVG/MIN/MAX/BOOL_OR/BOOL_AND/ARRAY_AGG([DISTINCT])/
+# percentile_cont/approx_percentile_cont, FILTER (WHERE ...), 0-row global vs grouped agg,
+# GROUP BY aliases/ordinals/expressions/qualified subscripts, HAVING with subqueries.
+
+statement ok
+CREATE TABLE agg_t (
+  id BIGINT NOT NULL,
+  grp VARCHAR,
+  iv BIGINT,
+  fv DOUBLE,
+  dv DECIMAL(10, 2),
+  flag BOOLEAN
+)
+
+statement ok
+INSERT INTO agg_t VALUES
+  (1, 'a', 10, 1.5, CAST('10.00' AS DECIMAL(10, 2)), true),
+  (2, 'a', 20, 2.5, CAST('20.00' AS DECIMAL(10, 2)), false),
+  (3, 'a', 20, NULL, CAST('30.00' AS DECIMAL(10, 2)), NULL),
+  (4, 'b', 30, 4.0, CAST('40.00' AS DECIMAL(10, 2)), true),
+  (5, 'b', NULL, 6.0, NULL, true),
+  (6, 'c', NULL, NULL, NULL, NULL),
+  (7, NULL, 5, 1.0, CAST('5.00' AS DECIMAL(10, 2)), false),
+  (8, NULL, 15, 3.0, CAST('15.00' AS DECIMAL(10, 2)), NULL)
+
+statement ok
+CREATE TABLE agg_empty (
+  id BIGINT NOT NULL,
+  grp VARCHAR,
+  iv BIGINT,
+  flag BOOLEAN
+)
+
+# Global COUNT(*), COUNT(col), COUNT(DISTINCT col)
+query IIII nosort
+SELECT
+  COUNT(*) AS cnt_all,
+  COUNT(iv) AS cnt_iv,
+  COUNT(DISTINCT iv) AS cnt_dist_iv,
+  COUNT(DISTINCT grp) AS cnt_dist_grp
+FROM agg_t
+----
+8	6	5	3
+
+# Global SUM, AVG, MIN, MAX across I64, F64, Decimal128
+query IRRRRII nosort
+SELECT
+  SUM(iv) AS sum_i,
+  AVG(iv) AS avg_i,
+  SUM(fv) AS sum_f,
+  AVG(fv) AS avg_f,
+  SUM(dv) AS sum_d,
+  MIN(iv) AS min_i,
+  MAX(iv) AS max_i
+FROM agg_t
+----
+100	16.666666666666668	18	3	120.00	5	30
+
+# Decimal AVG precision/scale (Decimal(10,2) -> Decimal(14,6))
+query R nosort
+SELECT AVG(dv) AS avg_d FROM agg_t
+----
+20.000000
+
+# MIN/MAX on strings
+query TT nosort
+SELECT MIN(grp) AS min_g, MAX(grp) AS max_g FROM agg_t
+----
+a	c
+
+# Grouped SUM/AVG/MIN/MAX/COUNT including NULL group and all-NULL value group ('c')
+query TIIIRII nosort
+SELECT
+  grp,
+  COUNT(*) AS c_all,
+  COUNT(iv) AS c_iv,
+  SUM(iv) AS s_iv,
+  AVG(iv) AS a_iv,
+  MIN(iv) AS mn_iv,
+  MAX(iv) AS mx_iv
+FROM agg_t
+GROUP BY grp
+ORDER BY grp ASC NULLS LAST
+----
+a	3	3	50	16.666666666666668	10	20
+b	2	1	30	30	30	30
+c	1	0	NULL	NULL	NULL	NULL
+NULL	2	2	20	10	5	15
+
+# BOOL_OR and BOOL_AND across mixed true/false/NULL, all-true, all-NULL, false+NULL
+query TBB nosort
+SELECT grp, BOOL_OR(flag) AS any_t, BOOL_AND(flag) AS all_t
+FROM agg_t
+GROUP BY grp
+ORDER BY grp ASC NULLS LAST
+----
+a	true	false
+b	true	true
+c	NULL	NULL
+NULL	false	false
+
+# ARRAY_AGG and ARRAY_AGG(DISTINCT ...) with NULLs preserved (unordered across partitions)
+# unordered_arrays
+query TTT nosort
+SELECT grp, ARRAY_AGG(iv) AS vals, ARRAY_AGG(DISTINCT iv) AS dvals
+FROM agg_t
+GROUP BY grp
+ORDER BY grp ASC NULLS LAST
+----
+a	[10, 20, 20]	[10, 20]
+b	[30, NULL]	[30, NULL]
+c	[NULL]	[NULL]
+NULL	[5, 15]	[5, 15]
+
+# Global 0-row aggregate returns 1 row (COUNT=0, others=NULL)
+query IIIRBBT nosort
+SELECT
+  COUNT(*) AS c_all,
+  COUNT(iv) AS c_iv,
+  SUM(iv) AS s_iv,
+  AVG(iv) AS a_iv,
+  BOOL_OR(flag) AS bor,
+  BOOL_AND(flag) AS band,
+  ARRAY_AGG(iv) AS arr
+FROM agg_empty
+----
+0	0	NULL	NULL	NULL	NULL	NULL
+
+# Grouped 0-row aggregate returns 0 rows
+query TI nosort
+SELECT grp, COUNT(*) AS c FROM agg_empty GROUP BY grp ORDER BY grp ASC NULLS LAST
+----
+
+# Aggregate FILTER (WHERE ...) clause on COUNT, COUNT(DISTINCT), SUM, AVG, MIN, MAX, BOOL_OR
+query IIIIRIIBB nosort
+SELECT
+  COUNT(*) FILTER (WHERE iv >= 15) AS c_ge15,
+  COUNT(iv) FILTER (WHERE grp = 'a') AS c_a,
+  COUNT(DISTINCT iv) FILTER (WHERE grp = 'a') AS cd_a,
+  SUM(iv) FILTER (WHERE flag IS TRUE) AS s_true,
+  AVG(fv) FILTER (WHERE fv > 2.0) AS a_gt2,
+  MIN(iv) FILTER (WHERE iv > 10) AS mn_gt10,
+  MAX(iv) FILTER (WHERE iv < 20) AS mx_lt20,
+  BOOL_OR(flag) FILTER (WHERE grp = 'b') AS bor_b,
+  BOOL_AND(flag) FILTER (WHERE grp = 'a') AS band_a
+FROM agg_t
+----
+4	3	2	40	3.875	15	15	true	false
+
+# FILTER (WHERE ...) matching 0 rows within a group yields 0 for COUNT and NULL for SUM/ARRAY_AGG
+# unordered_arrays
+query TIIT nosort
+SELECT
+  grp,
+  COUNT(*) FILTER (WHERE iv > 100) AS c_none,
+  SUM(iv) FILTER (WHERE iv > 100) AS s_none,
+  ARRAY_AGG(iv) FILTER (WHERE iv > 100) AS a_none
+FROM agg_t
+GROUP BY grp
+ORDER BY grp ASC NULLS LAST
+----
+a	0	NULL	NULL
+b	0	NULL	NULL
+c	0	NULL	NULL
+NULL	0	NULL	NULL
+
+# Exact percentile_cont: 0.0, 0.25, 0.5, 0.75, 1.0 (sorted non-null iv: 5, 10, 15, 20, 20, 30)
+query RRRRR nosort
+SELECT
+  percentile_cont(0.0) WITHIN GROUP (ORDER BY iv) AS p0,
+  percentile_cont(0.25) WITHIN GROUP (ORDER BY iv) AS p25,
+  percentile_cont(0.5) WITHIN GROUP (ORDER BY iv) AS p50,
+  percentile_cont(0.75) WITHIN GROUP (ORDER BY iv) AS p75,
+  percentile_cont(1.0) WITHIN GROUP (ORDER BY iv) AS p100
+FROM agg_t
+----
+5	11.25	17.5	20	30
+
+# Exact percentile_cont with DESC order reverses quantile (0.25 DESC == 0.75 ASC)
+query RR nosort
+SELECT
+  percentile_cont(0.25) WITHIN GROUP (ORDER BY iv DESC) AS p25_desc,
+  percentile_cont(0.75) WITHIN GROUP (ORDER BY iv DESC) AS p75_desc
+FROM agg_t
+----
+20	11.25
+
+# Exact percentile_cont grouped (including single-value and all-NULL groups) and on 0 rows
+query TR nosort
+SELECT grp, percentile_cont(0.5) WITHIN GROUP (ORDER BY iv) AS med
+FROM agg_t
+GROUP BY grp
+ORDER BY grp ASC NULLS LAST
+----
+a	20
+b	30
+c	NULL
+NULL	10
+
+query R nosort
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY iv) AS med_empty FROM agg_empty
+----
+NULL
+
+# approx_percentile_cont (DDSketch): exact min at 0.0, exact max at 1.0, accurate median
+# metamorphic: off
+# duckdb: skip cetra DDSketch approx_percentile_cont
+query RRB nosort
+SELECT
+  approx_percentile_cont(iv, 0.0) AS ap0,
+  approx_percentile_cont(iv, 1.0) AS ap100,
+  (approx_percentile_cont(iv, 0.5) BETWEEN 14.0 AND 21.0) AS ap50_ok
+FROM agg_t
+----
+5	30	true
+
+# approx_percentile_cont on 0 rows returns NULL
+# metamorphic: off
+# duckdb: skip cetra DDSketch approx_percentile_cont
+query R nosort
+SELECT approx_percentile_cont(iv, 0.5) AS ap_empty FROM agg_empty
+----
+NULL
+
+# GROUP BY alias
+query TI nosort
+SELECT COALESCE(grp, 'missing') AS bucket, SUM(iv) AS total
+FROM agg_t
+GROUP BY bucket
+ORDER BY bucket ASC NULLS LAST
+----
+a	50
+b	30
+c	NULL
+missing	20
+
+# GROUP BY ordinal (1-based)
+query II nosort
+SELECT (iv % 10) AS rem, COUNT(*) AS cnt
+FROM agg_t
+WHERE iv IS NOT NULL
+GROUP BY 1
+ORDER BY 1 ASC NULLS LAST
+----
+0	4
+5	2
+
+# GROUP BY expression (CASE expression)
+query TI nosort
+SELECT
+  CASE WHEN iv >= 20 THEN 'high' ELSE 'low' END AS tier,
+  COUNT(*) AS cnt
+FROM agg_t
+WHERE iv IS NOT NULL
+GROUP BY CASE WHEN iv >= 20 THEN 'high' ELSE 'low' END
+ORDER BY tier ASC NULLS LAST
+----
+high	3
+low	3
+
+# GROUP BY qualified map subscript (t.m['env'])
+# duckdb: skip cetra MAP(...) constructor syntax
+statement ok
+CREATE TABLE agg_map (id BIGINT NOT NULL, m MAP(VARCHAR, VARCHAR), v BIGINT)
+
+# duckdb: skip cetra MAP(...) constructor syntax
+statement ok
+INSERT INTO agg_map VALUES
+  (1, MAP('env', 'prod'), 10),
+  (2, MAP('env', 'prod'), 25),
+  (3, MAP('env', 'dev'), 5),
+  (4, MAP(), 7)
+
+# duckdb: skip cetra MAP table
+query TI nosort
+SELECT t.m['env'] AS env_k, SUM(t.v) AS total
+FROM agg_map AS t
+GROUP BY t.m['env']
+ORDER BY env_k ASC NULLS LAST
+----
+dev	5
+prod	35
+NULL	7
+
+# duckdb: skip agg_map was skipped above
+statement ok
+DROP TABLE agg_map
+
+# HAVING with aggregate predicate
+query TI nosort
+SELECT grp, SUM(iv) AS total
+FROM agg_t
+GROUP BY grp
+HAVING SUM(iv) >= 25
+ORDER BY grp ASC NULLS LAST
+----
+a	50
+b	30
+
+# HAVING referencing aggregate not in SELECT list
+query T nosort
+SELECT grp
+FROM agg_t
+GROUP BY grp
+HAVING COUNT(iv) >= 2
+ORDER BY grp ASC NULLS LAST
+----
+a
+NULL
+
+# HAVING without GROUP BY (global aggregate filtered to 0 or 1 row)
+query I nosort
+SELECT COUNT(*) AS cnt FROM agg_t HAVING SUM(iv) = 100
+----
+8
+
+query I nosort
+SELECT COUNT(*) AS cnt FROM agg_t HAVING SUM(iv) > 1000
+----
+
+# HAVING with IN (SELECT ...) and NOT IN (SELECT ...) subqueries
+statement ok
+CREATE TABLE keep_grps (g VARCHAR)
+
+statement ok
+INSERT INTO keep_grps VALUES ('a'), ('c')
+
+query TI nosort
+SELECT grp, COUNT(*) AS cnt
+FROM agg_t
+GROUP BY grp
+HAVING grp IN (SELECT g FROM keep_grps)
+ORDER BY grp ASC NULLS LAST
+----
+a	3
+c	1
+
+query TI nosort
+SELECT grp, COUNT(*) AS cnt
+FROM agg_t
+GROUP BY grp
+HAVING grp NOT IN (SELECT g FROM keep_grps)
+ORDER BY grp ASC NULLS LAST
+----
+b	2
+
+# HAVING with EXISTS (SELECT ...) subquery
+query TI nosort
+SELECT grp, COUNT(*) AS cnt
+FROM agg_t
+GROUP BY grp
+HAVING COUNT(*) >= 2 AND EXISTS (SELECT 1 FROM keep_grps WHERE g = 'a')
+ORDER BY grp ASC NULLS LAST
+----
+a	3
+b	2
+NULL	2
+
+# Aggregate with ORDER BY on aggregate expression not in SELECT
+query T nosort
+SELECT grp
+FROM agg_t
+WHERE grp IS NOT NULL
+GROUP BY grp
+ORDER BY COALESCE(SUM(iv), -1) DESC NULLS LAST, grp ASC NULLS LAST
+----
+a
+b
+c
+
+# COUNT(DISTINCT) with multiple groups and NULLs
+query TII nosort
+SELECT grp, COUNT(iv) AS c_nonnull, COUNT(DISTINCT iv) AS c_distinct
+FROM agg_t
+GROUP BY grp
+ORDER BY grp ASC NULLS LAST
+----
+a	3	2
+b	1	1
+c	0	0
+NULL	2	2
+
+# COUNT(*), COUNT(1), COUNT(NULL)
+query III nosort
+SELECT COUNT(*) AS c_star, COUNT(1) AS c_one, COUNT(CAST(NULL AS BIGINT)) AS c_null
+FROM agg_t
+----
+8	8	0
+
+# MIN / MAX on DATE, TIMESTAMP, BOOLEAN, and DECIMAL
+statement ok
+CREATE TABLE agg_types (id BIGINT NOT NULL, d DATE, ts TIMESTAMP, b BOOLEAN, dec DECIMAL(8, 2))
+
+statement ok
+INSERT INTO agg_types VALUES
+  (1, DATE '2026-01-10', TIMESTAMP '2026-01-10 08:00:00', true, CAST('10.50' AS DECIMAL(8, 2))),
+  (2, DATE '2025-12-25', TIMESTAMP '2025-12-25 12:00:00', false, CAST('-2.25' AS DECIMAL(8, 2))),
+  (3, NULL, NULL, NULL, NULL)
+
+query IITTBBRR nosort
+SELECT
+  MIN(d) AS min_d,
+  MAX(d) AS max_d,
+  MIN(ts) AS min_ts,
+  MAX(ts) AS max_ts,
+  MIN(b) AS min_b,
+  MAX(b) AS max_b,
+  MIN(dec) AS min_dec,
+  MAX(dec) AS max_dec
+FROM agg_types
+----
+2025-12-25	2026-01-10	2025-12-25T12:00:00.000000000	2026-01-10T08:00:00.000000000	false	true	-2.25	10.50
+
+statement ok
+DROP TABLE agg_types
+
+# GROUP BY multiple columns (grp, flag) including NULL combinations
+query TBI nosort
+SELECT grp, flag, COUNT(*) AS cnt
+FROM agg_t
+GROUP BY grp, flag
+ORDER BY grp ASC NULLS LAST, flag ASC NULLS LAST
+----
+a	false	1
+a	true	1
+a	NULL	1
+b	true	2
+c	NULL	1
+NULL	false	1
+NULL	NULL	1
+
+# Expressions combining multiple aggregates (SUM + COUNT, CASE over aggregates)
+query TII nosort
+SELECT
+  grp,
+  (COALESCE(SUM(iv), 0) + COUNT(*)) AS sum_plus_cnt,
+  CASE WHEN COUNT(iv) >= 2 THEN SUM(iv) ELSE -1 END AS cond_sum
+FROM agg_t
+GROUP BY grp
+ORDER BY grp ASC NULLS LAST
+----
+a	53	50
+b	32	-1
+c	1	-1
+NULL	22	20
+
+# HAVING with BOOL_OR / BOOL_AND and COUNT(DISTINCT ...)
+query T nosort
+SELECT grp
+FROM agg_t
+GROUP BY grp
+HAVING BOOL_AND(flag) IS TRUE
+ORDER BY grp ASC NULLS LAST
+----
+b
+
+query T nosort
+SELECT grp
+FROM agg_t
+GROUP BY grp
+HAVING COUNT(DISTINCT iv) >= 2
+ORDER BY grp ASC NULLS LAST
+----
+a
+NULL
+
+# percentile_cont combined with FILTER (WHERE ...)
+query RR nosort
+SELECT
+  percentile_cont(0.5) WITHIN GROUP (ORDER BY iv) FILTER (WHERE grp = 'a') AS med_a,
+  percentile_cont(0.5) WITHIN GROUP (ORDER BY iv) FILTER (WHERE iv > 100) AS med_none
+FROM agg_t
+----
+20	NULL
+
+# Global ARRAY_AGG(DISTINCT grp) including NULL
+# unordered_arrays
+query T nosort
+SELECT ARRAY_AGG(DISTINCT grp) AS all_grps FROM agg_t
+----
+[a, b, c, NULL]
+
+# GROUP BY with ORDER BY + LIMIT + OFFSET (TopK over aggregation)
+query TI nosort
+SELECT grp, COUNT(*) AS cnt
+FROM agg_t
+GROUP BY grp
+ORDER BY cnt DESC NULLS LAST, grp ASC NULLS LAST
+LIMIT 2 OFFSET 1
+----
+b	2
+NULL	2
+
+# GROUP BY over a JOIN
+query TI nosort
+SELECT a.grp, COUNT(*) AS matched_rows
+FROM agg_t a
+INNER JOIN keep_grps k ON a.grp = k.g
+GROUP BY a.grp
+ORDER BY a.grp ASC NULLS LAST
+----
+a	3
+c	1
+
+statement ok
+DROP TABLE keep_grps
+
+statement ok
+DROP TABLE agg_empty
+
+statement ok
+DROP TABLE agg_t

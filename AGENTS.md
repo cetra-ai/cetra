@@ -82,6 +82,8 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - `CETRA_HOOK_CRASH_CASES=N just test` runs N model cases that crash inside their last operation (default 25; the last of the 26 pairs is not in the default run).
 - `CETRA_MODEL_CASES=N` sets the case count of the storage model test (`model_tests::storage_matches_the_model`, default 8); `just model N` runs it in release mode. `model_tests::storage_matches_the_model_in_interval_mode` (the `wal.sync` interval variant) runs `max(N/2, 2)` cases, and `just model` matches it too, since the filter is a substring. It is separate from `CETRA_PROPTEST_CASES`, which sets the count of the cheap property tests of otel and eval: one model case costs about a second, so one variable for both would make a high count unusable.
 - `CETRA_MODEL_S3_CASES=N` sets the case count of the S3-mode model test (`model_tests::storage_matches_the_model_on_s3`, default 8: six debug runs took 11 s to 32 s); `just model-s3 N` runs it in release mode with the statistics on.
+- `CETRA_METAMORPHIC_CASES=N` sets the case count of `cetra-query`'s metamorphic equivalence and SQLancer TLP harness (`crates/query/tests/verify/`, default 64; optional `CETRA_METAMORPHIC_SEED`); `just metamorphic N` runs it in release mode (track QE M9).
+- `cetra-query`'s verification integration tests live in one binary, `crates/query/tests/verify/` (`slt` curated `sqllogictest` corpus in `crates/query/tests/slt/` plus `metamorphic`).
 - Storage's integration tests that `cargo test` runs are modules of one binary, `crates/storage/tests/it/` (one relink per storage edit, not one per file); add new ones there, and select one with `--test it -- <module>::`. The benchmarks and S3 probes (`ingest_bench`, `trace_bench`, `s3_chaos`, `s3_probe`) are `test = false` targets: they build only when named with `--test`, and `just lint` names them because `--all-targets` skips them.
 - `CETRA_TEST_S3_ENDPOINT` (with `CETRA_TEST_S3_BUCKET` and the `AWS_*` credentials) runs the storage S3 test against a real S3-compatible server; `crates/storage/tests/it/s3.rs` shows how to start one (D119).
 - `CETRA_TEST_S3_REGION` and `CETRA_TEST_S3_PATH_STYLE` adapt it to a remote provider (R M4).
@@ -135,6 +137,7 @@ fixtures/saml/               test IdP keys and certificates for cetra-saml (trac
 fixtures/scim/               SCIM requests in the shape Okta and Entra ID send, replayed in tests (track EA M6; written from the vendors' documentation, not validator runs)
 tools/                       dev tools (fixture capture, benchmarks); not shipped
 tools/soak/                  soak plots (uv)
+tools/sql-diff/              format-agnostic DuckDB differential SQL harness (`cetra-sql-diff` + Python `uv`, track QE M9)
 tools/capture/               fixture capture: mock provider, OTLP receiver, scenarios (B2); `harness/` (the Python harness package), `envs/<env>/` (scenario environments), the Java scenario reactor `java/` and .NET projects `dotnet/` (M8), and the tool projects `litellm-proxy/`, `langflow/`, `n8n/`, `promptfoo/` (D-IN-26)
 tools/e2e/                   run.sh for just e2e: a real cetra serve and both SDK suites (D-G-20)
 fuzz/                        cargo-fuzz targets (nightly only), committed corpus and regressions (track R M3)
@@ -220,6 +223,9 @@ Run everything through `just`:
 | `just soak` | the storage soak (D-R-11), configured by `CETRA_SOAK_*` |
 | `just soak-plot <out>` | plots and a summary table of a soak run |
 | `just check-soak-plot` | lint and type-check `tools/soak` |
+| `just metamorphic [cases]` | `cetra-query` metamorphic equivalence and SQLancer TLP sweep, release mode (track QE M9) |
+| `just sql-diff [cases] [seed]` | differential SQL campaign of `cetra-query` against DuckDB (`tools/sql-diff/`, track QE M9) |
+| `just check-sql-diff` | build `cetra-sql-diff`, lint/type-check/unit-test `tools/sql-diff/py`, and run a 50-query + `.slt` smoke diff |
 | `just e2e` | build the web, run the Rust e2e tests with the UI embedded, then the Python and TypeScript SDK suites against a real `cetra serve` |
 | `just dist <target>` | release archive of one target into `target/dist` (and the image context on Linux) |
 | `just image [tag]` · `just image-smoke [tag]` | build and smoke-test the Docker image from `target/dist` |

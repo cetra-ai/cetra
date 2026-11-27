@@ -1,0 +1,526 @@
+# 01_literals_nulls_3vl.slt
+# Three-valued logic, NULL semantics, IS [NOT] TRUE/FALSE/UNKNOWN/NULL,
+# IS [NOT] DISTINCT FROM, CASE, COALESCE, NULLIF, GREATEST/LEAST, CAST/TRY_CAST.
+
+statement ok
+CREATE TABLE b3 (id BIGINT NOT NULL, a BOOLEAN, b BOOLEAN)
+
+statement ok
+INSERT INTO b3 VALUES
+  (1, true, true),
+  (2, true, false),
+  (3, true, NULL),
+  (4, false, true),
+  (5, false, false),
+  (6, false, NULL),
+  (7, NULL, true),
+  (8, NULL, false),
+  (9, NULL, NULL)
+
+# Full 3VL AND truth table
+query IBBB nosort
+SELECT id, a, b, (a AND b) AS res FROM b3 ORDER BY id ASC NULLS LAST
+----
+1	true	true	true
+2	true	false	false
+3	true	NULL	NULL
+4	false	true	false
+5	false	false	false
+6	false	NULL	false
+7	NULL	true	NULL
+8	NULL	false	false
+9	NULL	NULL	NULL
+
+# Full 3VL OR truth table
+query IBBB nosort
+SELECT id, a, b, (a OR b) AS res FROM b3 ORDER BY id ASC NULLS LAST
+----
+1	true	true	true
+2	true	false	true
+3	true	NULL	true
+4	false	true	true
+5	false	false	false
+6	false	NULL	NULL
+7	NULL	true	true
+8	NULL	false	NULL
+9	NULL	NULL	NULL
+
+# Full 3VL NOT truth table
+query IBB nosort
+SELECT id, a, (NOT a) AS res FROM b3 WHERE id IN (1, 4, 7) ORDER BY id ASC NULLS LAST
+----
+1	true	false
+4	false	true
+7	NULL	NULL
+
+# IS TRUE / IS NOT TRUE / IS FALSE / IS NOT FALSE / IS UNKNOWN / IS NOT UNKNOWN / IS NULL / IS NOT NULL
+query IBBBBBBBB nosort
+SELECT
+  id,
+  (a IS TRUE) AS is_t,
+  (a IS NOT TRUE) AS is_nt,
+  (a IS FALSE) AS is_f,
+  (a IS NOT FALSE) AS is_nf,
+  (a IS UNKNOWN) AS is_u,
+  (a IS NOT UNKNOWN) AS is_nu,
+  (a IS NULL) AS is_n,
+  (a IS NOT NULL) AS is_nn
+FROM b3
+WHERE id IN (1, 4, 7)
+ORDER BY id ASC NULLS LAST
+----
+1	true	false	false	true	false	true	false	true
+4	false	true	true	false	false	true	false	true
+7	false	true	false	true	true	false	true	false
+
+# 3VL WHERE filters drop both false and NULL
+query I nosort
+SELECT id FROM b3 WHERE a AND b ORDER BY id ASC NULLS LAST
+----
+1
+
+query I nosort
+SELECT id FROM b3 WHERE NOT (a AND b) ORDER BY id ASC NULLS LAST
+----
+2
+4
+5
+6
+8
+
+query I nosort
+SELECT id FROM b3 WHERE (a AND b) IS NULL ORDER BY id ASC NULLS LAST
+----
+3
+7
+9
+
+# Short-circuiting in AND/OR prevents div-by-zero on inactive rows
+# duckdb: skip integer division and div-by-zero semantics
+query IB nosort
+SELECT id, (a AND (1 / 0 = 1)) AS res FROM b3 WHERE id IN (4, 5, 6) ORDER BY id ASC NULLS LAST
+----
+4	false
+5	false
+6	false
+
+# duckdb: skip integer division and div-by-zero semantics
+query IB nosort
+SELECT id, (a OR (1 / 0 = 1)) AS res FROM b3 WHERE id IN (1, 2, 3) ORDER BY id ASC NULLS LAST
+----
+1	true
+2	true
+3	true
+
+# NULL AND false AND (1/0 = 1) short-circuits across multi-term spine
+# duckdb: skip integer division and div-by-zero semantics
+query B nosort
+SELECT (CAST(NULL AS BOOLEAN) AND false AND (1 / 0 = 1)) AS res
+----
+false
+
+# Table for IS [NOT] DISTINCT FROM, BETWEEN, IN, CASE, COALESCE, NULLIF, GREATEST/LEAST
+statement ok
+CREATE TABLE vals (
+  id BIGINT NOT NULL,
+  x BIGINT,
+  y BIGINT,
+  f DOUBLE,
+  s VARCHAR
+)
+
+statement ok
+INSERT INTO vals VALUES
+  (1, 10, 10, 0.0, 'alpha'),
+  (2, 10, 20, -0.0, 'beta'),
+  (3, 10, NULL, CAST('NaN' AS DOUBLE), 'alpha'),
+  (4, NULL, 10, CAST('NaN' AS DOUBLE), NULL),
+  (5, NULL, NULL, 1.5, ''),
+  (6, -5, 5, CAST('Infinity' AS DOUBLE), 'gamma')
+
+# IS DISTINCT FROM / IS NOT DISTINCT FROM on integers with NULLs
+query IBB nosort
+SELECT id, (x IS DISTINCT FROM y) AS df, (x IS NOT DISTINCT FROM y) AS ndf
+FROM vals
+ORDER BY id ASC NULLS LAST
+----
+1	false	true
+2	true	false
+3	true	false
+4	true	false
+5	false	true
+6	true	false
+
+# IS [NOT] DISTINCT FROM with -0.0 == 0.0 and NaN == NaN
+query BBBB nosort
+SELECT
+  (CAST(-0.0 AS DOUBLE) IS DISTINCT FROM CAST(0.0 AS DOUBLE)) AS neg_zero_df,
+  (CAST(-0.0 AS DOUBLE) IS NOT DISTINCT FROM CAST(0.0 AS DOUBLE)) AS neg_zero_ndf,
+  (CAST('NaN' AS DOUBLE) IS DISTINCT FROM CAST('NaN' AS DOUBLE)) AS nan_df,
+  (CAST('NaN' AS DOUBLE) IS NOT DISTINCT FROM CAST('NaN' AS DOUBLE)) AS nan_ndf
+----
+false	true	false	true
+
+# Equality with NULL produces NULL (not false)
+query IB nosort
+SELECT id, (x = y) AS eq FROM vals ORDER BY id ASC NULLS LAST
+----
+1	true
+2	false
+3	NULL
+4	NULL
+5	NULL
+6	false
+
+# BETWEEN and NOT BETWEEN with NULLs
+query IBB nosort
+SELECT
+  id,
+  (x BETWEEN 0 AND 15) AS in_rng,
+  (x NOT BETWEEN 0 AND 15) AS out_rng
+FROM vals
+ORDER BY id ASC NULLS LAST
+----
+1	true	false
+2	true	false
+3	true	false
+4	NULL	NULL
+5	NULL	NULL
+6	false	true
+
+# BETWEEN with NULL low/high bounds (3VL: x >= low AND x <= high)
+query BBBB nosort
+SELECT
+  (5 BETWEEN NULL AND 10) AS c0,
+  (15 BETWEEN NULL AND 10) AS c1,
+  (5 BETWEEN 1 AND NULL) AS c2,
+  (0 BETWEEN 1 AND NULL) AS c3
+----
+NULL	false	NULL	false
+
+# IN / NOT IN list with NULLs on left and inside list
+query IBBBB nosort
+SELECT
+  id,
+  (x IN (10, NULL)) AS in_with_null,
+  (x NOT IN (10, NULL)) AS not_in_with_null,
+  (x IN (20, NULL)) AS in_miss_with_null,
+  (x NOT IN (20, NULL)) AS not_in_miss_with_null
+FROM vals
+WHERE id IN (1, 4, 6)
+ORDER BY id ASC NULLS LAST
+----
+1	true	false	NULL	NULL
+4	NULL	NULL	NULL	NULL
+6	NULL	NULL	NULL	NULL
+
+# Simple CASE: NULL operand does NOT match WHEN NULL, falls through to ELSE
+query IT nosort
+SELECT
+  id,
+  CASE x
+    WHEN NULL THEN 'matched_null'
+    WHEN 10 THEN 'ten'
+    WHEN -5 THEN 'neg_five'
+    ELSE 'other'
+  END AS lbl
+FROM vals
+ORDER BY id ASC NULLS LAST
+----
+1	ten
+2	ten
+3	ten
+4	other
+5	other
+6	neg_five
+
+# Simple CASE without ELSE returns NULL when unmatched
+query IT nosort
+SELECT
+  id,
+  CASE x
+    WHEN 10 THEN 'ten'
+  END AS lbl
+FROM vals
+WHERE id IN (1, 4, 6)
+ORDER BY id ASC NULLS LAST
+----
+1	ten
+4	NULL
+6	NULL
+
+# Searched CASE with NULL conditions and widening result types (I64 + F64 -> F64)
+query IR nosort
+SELECT
+  id,
+  CASE
+    WHEN x IS NULL THEN 0.5
+    WHEN x > 0 THEN x
+    ELSE -1
+  END AS score
+FROM vals
+ORDER BY id ASC NULLS LAST
+----
+1	10
+2	10
+3	10
+4	0.5
+5	0.5
+6	-1
+
+# CASE short-circuiting: non-taken branches do not evaluate 1 / 0
+# duckdb: skip integer division and div-by-zero semantics
+query II nosort
+SELECT
+  id,
+  CASE
+    WHEN x IS NOT NULL AND x > 0 THEN 100 / x
+    ELSE 0
+  END AS safe_div
+FROM vals
+ORDER BY id ASC NULLS LAST
+----
+1	10
+2	10
+3	10
+4	0
+5	0
+6	0
+
+# Searched CASE short-circuits later WHEN predicates once an earlier WHEN is true
+# duckdb: skip integer division and div-by-zero semantics
+query I nosort
+SELECT CASE WHEN true THEN 7 WHEN (1 / 0 = 1) THEN 8 ELSE 9 END AS res
+----
+7
+
+# COALESCE with 2, 3, and all-NULL arguments
+query IIII nosort
+SELECT
+  id,
+  COALESCE(x, y, -1) AS c_xy,
+  COALESCE(y, x, -2) AS c_yx,
+  COALESCE(CAST(NULL AS BIGINT), x) AS c_nx
+FROM vals
+ORDER BY id ASC NULLS LAST
+----
+1	10	10	10
+2	10	20	10
+3	10	10	10
+4	10	10	NULL
+5	-1	-2	NULL
+6	-5	5	-5
+
+query ? nosort
+SELECT COALESCE(NULL, NULL, NULL) AS all_null
+----
+NULL
+
+# COALESCE widening I64 and F64 -> F64
+query R nosort
+SELECT COALESCE(CAST(NULL AS BIGINT), 2.5, 1) AS widened
+----
+2.5
+
+# COALESCE short-circuiting per row (only evaluates fallback where earlier args are NULL)
+# duckdb: skip integer division and div-by-zero semantics
+query II nosort
+SELECT id, COALESCE(x, 100 / COALESCE(y, 1)) AS res
+FROM vals
+WHERE id IN (1, 3, 4, 5)
+ORDER BY id ASC NULLS LAST
+----
+1	10
+3	10
+4	10
+5	100
+
+# duckdb: skip integer division and div-by-zero semantics
+query I nosort
+SELECT COALESCE(42, 1 / 0) AS short_circuit
+----
+42
+
+# NULLIF: equal -> NULL, unequal -> left, NULL left -> NULL, NULL right -> left
+query II nosort
+SELECT id, NULLIF(x, y) AS res FROM vals ORDER BY id ASC NULLS LAST
+----
+1	NULL
+2	10
+3	10
+4	NULL
+5	NULL
+6	-5
+
+# NULLIF type widening (I64 vs F64 -> F64)
+# duckdb: skip duckdb NULLIF(int, double) keeps lhs integer type instead of widening to float
+query RRR nosort
+SELECT
+  NULLIF(1, 1.0) AS eq_widen,
+  NULLIF(1, 2.5) AS ne_widen,
+  NULLIF(2, CAST(NULL AS DOUBLE)) AS null_rhs
+----
+NULL	1	2
+
+# GREATEST and LEAST skip NULLs and return NULL only when all args are NULL
+query III nosort
+SELECT
+  id,
+  GREATEST(x, y, 0) AS g0,
+  LEAST(x, y, 0) AS l0
+FROM vals
+ORDER BY id ASC NULLS LAST
+----
+1	10	0
+2	20	0
+3	10	0
+4	10	0
+5	0	0
+6	5	-5
+
+query II nosort
+SELECT
+  GREATEST(CAST(NULL AS BIGINT), CAST(NULL AS BIGINT)) AS g_null,
+  LEAST(CAST(NULL AS BIGINT), CAST(NULL AS BIGINT)) AS l_null
+----
+NULL	NULL
+
+query TT nosort
+SELECT
+  GREATEST('apple', NULL, 'zebra', 'mango') AS g_str,
+  LEAST('apple', NULL, 'zebra', 'mango') AS l_str
+----
+zebra	apple
+
+# GREATEST/LEAST with NaN (total order: NaN > +Infinity > finite)
+query RR nosort
+SELECT
+  GREATEST(1.0, CAST('NaN' AS DOUBLE), CAST('Infinity' AS DOUBLE)) AS g_nan,
+  LEAST(1.0, CAST('NaN' AS DOUBLE), CAST('-Infinity' AS DOUBLE)) AS l_nan
+----
+NaN	-Infinity
+
+# CAST: valid conversions across types
+query IBIRTT nosort
+SELECT
+  CAST('42' AS BIGINT) AS c_i,
+  CAST('true' AS BOOLEAN) AS c_b,
+  CAST(true AS BIGINT) AS c_bi,
+  CAST('3.25' AS DOUBLE) AS c_f,
+  CAST(123 AS VARCHAR) AS c_s,
+  CAST(DATE '2026-03-15' AS VARCHAR) AS c_ds
+----
+42	true	1	3.25	123	2026-03-15
+
+# CAST boolean strings (PostgreSQL/cetra truthy/falsy spellings)
+# duckdb: skip postgres bool string aliases y/n/on/off
+query BBBBBB nosort
+SELECT
+  CAST('t' AS BOOLEAN) AS b1,
+  CAST('yes' AS BOOLEAN) AS b2,
+  CAST('on' AS BOOLEAN) AS b3,
+  CAST('f' AS BOOLEAN) AS b4,
+  CAST('no' AS BOOLEAN) AS b5,
+  CAST('off' AS BOOLEAN) AS b6
+----
+true	true	true	false	false	false
+
+# CAST integer to boolean (0 -> false, nonzero -> true)
+query BBB nosort
+SELECT
+  CAST(0 AS BOOLEAN) AS z,
+  CAST(1 AS BOOLEAN) AS pos,
+  CAST(-7 AS BOOLEAN) AS neg
+----
+false	true	true
+
+# CAST float to integer truncates toward zero in cetra-query
+# duckdb: skip duckdb rounds CAST(double AS bigint) to nearest
+query IIII nosort
+SELECT
+  CAST(2.9 AS BIGINT) AS p1,
+  CAST(2.1 AS BIGINT) AS p2,
+  CAST(-2.9 AS BIGINT) AS n1,
+  CAST(-2.1 AS BIGINT) AS n2
+----
+2	2	-2	-2
+
+# CAST string to date and timestamp, and timestamp to date
+query ITI nosort
+SELECT
+  CAST('2026-06-15' AS DATE) AS d,
+  CAST('2026-06-15T12:30:45' AS TIMESTAMP) AS ts,
+  CAST(TIMESTAMP '2026-06-15 12:30:45' AS DATE) AS ts_d
+----
+2026-06-15	2026-06-15T12:30:45.000000000	2026-06-15
+
+# Double-colon PostgreSQL cast syntax
+query IT nosort
+SELECT ('99'::BIGINT) AS n, (99::VARCHAR) AS s
+----
+99	99
+
+# TRY_CAST returns NULL on invalid inputs instead of failing
+query IRITB nosort
+SELECT
+  TRY_CAST('not_a_number' AS BIGINT) AS bad_i,
+  TRY_CAST('not_a_float' AS DOUBLE) AS bad_f,
+  TRY_CAST('not_a_date' AS DATE) AS bad_d,
+  TRY_CAST('not_a_ts' AS TIMESTAMP) AS bad_ts,
+  TRY_CAST('maybe' AS BOOLEAN) AS bad_b
+----
+NULL	NULL	NULL	NULL	NULL
+
+# TRY_CAST on valid inputs succeeds; TRY_CAST on non-finite float to BIGINT returns NULL
+query III nosort
+SELECT
+  TRY_CAST('123' AS BIGINT) AS ok_i,
+  TRY_CAST(CAST('NaN' AS DOUBLE) AS BIGINT) AS nan_i,
+  TRY_CAST(CAST('Infinity' AS DOUBLE) AS BIGINT) AS inf_i
+----
+123	NULL	NULL
+
+# TRY_CAST on column with mixed valid and invalid rows
+statement ok
+CREATE TABLE raw_strs (id BIGINT NOT NULL, s VARCHAR)
+
+statement ok
+INSERT INTO raw_strs VALUES (1, '10'), (2, 'bad'), (3, NULL), (4, '-99')
+
+query II nosort
+SELECT id, TRY_CAST(s AS BIGINT) AS parsed FROM raw_strs ORDER BY id ASC NULLS LAST
+----
+1	10
+2	NULL
+3	NULL
+4	-99
+
+# Empty string representation in SLT
+query IT nosort
+SELECT id, s FROM vals WHERE id IN (1, 4, 5) ORDER BY id ASC NULLS LAST
+----
+1	alpha
+4	NULL
+5	(empty)
+
+# Strict CAST errors on invalid strings / out-of-range values
+# duckdb: skip strict cast error message wording
+statement error cannot cast string to integer
+SELECT CAST('abc' AS BIGINT) AS bad
+
+# duckdb: skip strict cast error message wording
+statement error invalid date string
+SELECT CAST('2026-02-30' AS DATE) AS bad
+
+# duckdb: skip strict cast error message wording
+statement error cannot cast non-finite
+SELECT CAST(CAST('NaN' AS DOUBLE) AS BIGINT) AS bad
+
+statement ok
+DROP TABLE raw_strs
+
+statement ok
+DROP TABLE vals
+
+statement ok
+DROP TABLE b3

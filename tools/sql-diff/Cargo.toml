@@ -1,0 +1,24 @@
+[package]
+name = "cetra-sql-diff"
+description = "Format-agnostic CLI runner for DuckDB differential testing against cetra-query"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cetra-sql-diff"
+path = "src/main.rs"
+
+[dependencies]
+cetra-column = { workspace = true }
+cetra-query = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

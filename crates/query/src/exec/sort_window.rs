@@ -762,21 +762,25 @@ impl PushSink for ExternalSort {
         if !buffered {
             return Ok(ControlFlow::Continue);
         }
-        // Leave enough pool headroom after `consume` returns: an upstream `OpStream`
-        // (source pull + operator scratch + output queue) can transiently hold ~3x one batch
-        // across unspillable reservations before releasing them.
+        // Leave enough pool headroom after `consume` returns: each active parallel worker's
+        // upstream chain (`scan_res` + operator scratch + output batch) can transiently hold
+        // ~3x one batch across unspillable reservations before releasing them.
         let cap = self.ctx.pool.cap();
+        let workers = self
+            .ctx
+            .workers
+            .num_workers()
+            .min(self.ctx.target_partitions.max(1))
+            .max(1);
+        let shared_headroom = self
+            .max_batch_bytes
+            .saturating_mul(workers.saturating_mul(3));
         if self.buffered_rows > 0
             && (self
                 .res_size()
                 .saturating_add(self.max_batch_bytes.saturating_mul(3))
                 > cap
-                || self
-                    .ctx
-                    .pool
-                    .reserved()
-                    .saturating_add(self.max_batch_bytes)
-                    > cap)
+                || self.ctx.pool.reserved().saturating_add(shared_headroom) > cap)
         {
             self.spill_buffered()?;
         }
@@ -795,10 +799,15 @@ impl PushSink for ExternalSort {
         }
         if self.ctx.target_partitions > 1 {
             let cap = self.ctx.pool.cap();
-            let workers = self.ctx.workers.num_workers().max(1);
+            let workers = self
+                .ctx
+                .workers
+                .num_workers()
+                .min(self.ctx.target_partitions.max(1))
+                .max(1);
             let headroom = self
                 .max_batch_bytes
-                .saturating_mul(workers.saturating_add(1))
+                .saturating_mul(workers.saturating_mul(3))
                 .min(cap / 2);
             if self.ctx.pool.reserved().saturating_add(headroom) > cap {
                 self.spill_buffered()?;

@@ -1,0 +1,285 @@
+# 09_sandbox_errors.slt
+# Every Shape B SQL sandbox refusal on sqlparser 0.62.0.
+# All statements/queries here are skipped by DuckDB differential runs.
+
+# duckdb: skip sandbox test fixture
+statement ok
+CREATE TABLE sb_a (id BIGINT NOT NULL, grp VARCHAR, val BIGINT)
+
+# duckdb: skip sandbox test fixture
+statement ok
+INSERT INTO sb_a VALUES (1, 'a', 10), (2, 'b', 20)
+
+# duckdb: skip sandbox test fixture
+statement ok
+CREATE TABLE sb_b (id BIGINT NOT NULL, grp VARCHAR, val BIGINT)
+
+# duckdb: skip sandbox test fixture
+statement ok
+INSERT INTO sb_b VALUES (1, 'a', 100)
+
+# Non-SELECT DML statements are rejected
+# duckdb: skip sandbox refusal
+statement error only SELECT queries are allowed
+DELETE FROM sb_a
+
+# duckdb: skip sandbox refusal
+statement error only SELECT queries are allowed
+UPDATE sb_a SET val = 0
+
+# EXPLAIN variants other than plain EXPLAIN are rejected
+# duckdb: skip sandbox refusal
+statement error only plain EXPLAIN of a query is allowed
+EXPLAIN ANALYZE SELECT id FROM sb_a
+
+# duckdb: skip sandbox refusal
+statement error only plain EXPLAIN of a query is allowed
+EXPLAIN VERBOSE SELECT id FROM sb_a
+
+# Multiple statements separated by semicolon are rejected
+# duckdb: skip sandbox refusal
+statement error only one statement is allowed
+SELECT 1 AS a; SELECT 2 AS b
+
+# Pipe syntax (`|>`) is rejected
+# duckdb: skip sandbox refusal
+statement error pipe syntax
+SELECT 1 AS a |> WHERE true
+
+# Correlated subqueries (EXISTS and IN) are rejected
+# duckdb: skip sandbox refusal
+statement error correlated subqueries are not supported
+SELECT a.id FROM sb_a a WHERE EXISTS (SELECT 1 FROM sb_b b WHERE b.id = a.id)
+
+# duckdb: skip sandbox refusal
+statement error correlated subqueries are not supported
+SELECT a.id FROM sb_a a WHERE a.id IN (SELECT b.id FROM sb_b b WHERE b.grp = a.grp)
+
+# Scalar subqueries in SELECT/WHERE are rejected
+# duckdb: skip sandbox refusal
+statement error unsupported SQL expression
+SELECT (SELECT 1 AS x) AS sub
+
+# WITH RECURSIVE is rejected
+# duckdb: skip sandbox refusal
+statement error recursive queries are not allowed
+WITH RECURSIVE r AS (SELECT 1 AS x) SELECT x FROM r
+
+# LATERAL derived tables are rejected
+# duckdb: skip sandbox refusal
+statement error LATERAL subqueries are not supported
+SELECT sub.x FROM sb_a, LATERAL (SELECT 1 AS x) sub
+
+# ROLLUP, CUBE, and GROUPING SETS are rejected
+# duckdb: skip sandbox refusal
+statement error ROLLUP, CUBE, and GROUPING SETS are not supported
+SELECT grp, COUNT(*) AS cnt FROM sb_a GROUP BY ROLLUP(grp)
+
+# duckdb: skip sandbox refusal
+statement error ROLLUP, CUBE, and GROUPING SETS are not supported
+SELECT grp, COUNT(*) AS cnt FROM sb_a GROUP BY CUBE(grp)
+
+# duckdb: skip sandbox refusal
+statement error ROLLUP, CUBE, and GROUPING SETS are not supported
+SELECT grp, COUNT(*) AS cnt FROM sb_a GROUP BY GROUPING SETS ((grp), ())
+
+# GROUP BY ALL is rejected
+# duckdb: skip sandbox refusal
+statement error GROUP BY ALL is not supported
+SELECT grp, COUNT(*) AS cnt FROM sb_a GROUP BY ALL
+
+# ORDER BY ALL is rejected (GenericDialect parses ALL as identifier when no column `all` exists)
+# duckdb: skip sandbox refusal
+statement error unknown column
+SELECT id FROM sb_a ORDER BY ALL
+
+# ORDER BY ... WITH FILL is rejected
+# duckdb: skip sandbox refusal
+statement error ORDER BY WITH FILL is not supported
+SELECT id FROM sb_a ORDER BY id WITH FILL
+
+# ORDER BY ... INTERPOLATE is rejected
+# duckdb: skip sandbox refusal
+statement error ORDER BY INTERPOLATE is not supported
+SELECT id FROM sb_a ORDER BY id INTERPOLATE (id)
+
+# BY NAME set operations are rejected
+# duckdb: skip sandbox refusal
+statement error BY NAME set operations are not supported
+SELECT id FROM sb_a UNION BY NAME SELECT id FROM sb_b
+
+# INTERSECT ALL and EXCEPT ALL are rejected
+# duckdb: skip sandbox refusal
+statement error INTERSECT ALL and EXCEPT ALL are not supported
+SELECT id FROM sb_a INTERSECT ALL SELECT id FROM sb_b
+
+# duckdb: skip sandbox refusal
+statement error INTERSECT ALL and EXCEPT ALL are not supported
+SELECT id FROM sb_a EXCEPT ALL SELECT id FROM sb_b
+
+# GROUPS window frames are rejected
+# duckdb: skip sandbox refusal
+statement error GROUPS window frames are not supported
+SELECT SUM(val) OVER (ORDER BY id GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) AS s FROM sb_a
+
+# Offset RANGE window frames are rejected
+# duckdb: skip sandbox refusal
+statement error non-row RANGE window frames are not supported
+SELECT SUM(val) OVER (ORDER BY id RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) AS s FROM sb_a
+
+# Named WINDOW with GROUPS or offset RANGE is rejected
+# duckdb: skip sandbox refusal
+statement error GROUPS window frames are not supported
+SELECT SUM(val) OVER w AS s FROM sb_a WINDOW w AS (ORDER BY id GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW)
+
+# duckdb: skip sandbox refusal
+statement error non-row RANGE window frames are not supported
+SELECT SUM(val) OVER w AS s FROM sb_a WINDOW w AS (ORDER BY id RANGE BETWEEN 10 PRECEDING AND CURRENT ROW)
+
+# Denied functions (DoS / metadata-leak guards) are rejected
+# duckdb: skip sandbox refusal
+statement error function `repeat` is not available
+SELECT repeat('x', 5) AS r
+
+# duckdb: skip sandbox refusal
+statement error function `lpad` is not available
+SELECT lpad('x', 10, '0') AS p
+
+# duckdb: skip sandbox refusal
+statement error function `rpad` is not available
+SELECT rpad('x', 10, '0') AS p
+
+# duckdb: skip sandbox refusal
+statement error function `replace` is not available
+SELECT replace('abc', 'a', 'z') AS r
+
+# duckdb: skip sandbox refusal
+statement error function `regexp_replace` is not available
+SELECT regexp_replace('abc', 'a', 'z') AS r
+
+# duckdb: skip sandbox refusal
+statement error function `levenshtein` is not available
+SELECT levenshtein('abc', 'abd') AS d
+
+# duckdb: skip sandbox refusal
+statement error function `input_file_name` is not available
+SELECT input_file_name() AS f FROM sb_a
+
+# duckdb: skip sandbox refusal
+statement error function `file_row_index` is not available
+SELECT file_row_index() AS i FROM sb_a
+
+# duckdb: skip sandbox refusal
+statement error function `array_repeat` is not available
+SELECT array_repeat(1, 5) AS a
+
+# Score functions are filter-only and rejected in SQL
+# duckdb: skip sandbox refusal
+statement error score functions are only available in filters
+SELECT score('quality') AS s FROM sb_a
+
+# duckdb: skip sandbox refusal
+statement error score functions are only available in filters
+SELECT score_label('category') AS s FROM sb_a
+
+# duckdb: skip sandbox refusal
+statement error score functions are only available in filters
+SELECT has_score('quality') AS s FROM sb_a
+
+# Empty quoted identifier is rejected
+# duckdb: skip sandbox refusal
+statement error empty identifier is not allowed
+SELECT 1 AS ""
+
+# SELECT INTO is rejected
+# duckdb: skip sandbox refusal
+statement error SELECT INTO is not allowed
+SELECT id INTO sb_copy FROM sb_a
+
+# TABLESAMPLE is rejected
+# duckdb: skip sandbox refusal
+statement error TABLESAMPLE is not supported
+SELECT id FROM sb_a TABLESAMPLE BERNOULLI (50)
+
+# NATURAL JOIN is rejected
+# duckdb: skip sandbox refusal
+statement error NATURAL JOIN is not supported
+SELECT id FROM sb_a NATURAL JOIN sb_b
+
+# Non-equi OUTER JOIN is rejected
+# duckdb: skip sandbox refusal
+statement error OUTER JOIN requires at least one equality predicate
+SELECT a.id, b.id AS bid FROM sb_a a LEFT JOIN sb_b b ON a.id < b.id
+
+# Raw positional placeholder $1 is rejected
+# duckdb: skip sandbox refusal
+statement error write parameters as {name:Type}
+SELECT $1 AS p
+
+# Invalid LIKE ESCAPE (multi-character) is rejected
+# duckdb: skip sandbox refusal
+statement error ESCAPE must be a single character or empty string
+SELECT 'abc' LIKE 'a%' ESCAPE 'ab' AS m
+
+# Table functions in FROM are rejected
+# duckdb: skip sandbox refusal
+statement error table functions are not allowed
+SELECT * FROM generate_series(1, 3)
+
+# Schema/catalog-qualified table names are rejected
+# duckdb: skip sandbox refusal
+statement error use the view name alone
+SELECT id FROM public.sb_a
+
+# Unknown table is rejected
+# duckdb: skip sandbox refusal
+statement error unknown table
+SELECT id FROM no_such_view
+
+# SELECT DISTINCT ON is rejected
+# duckdb: skip sandbox refusal
+statement error SELECT DISTINCT ON is not supported
+SELECT DISTINCT ON (grp) grp, id FROM sb_a
+
+# Duplicate top-level output column names are rejected
+# duckdb: skip sandbox refusal
+statement error appears twice
+SELECT 1 AS dup, 2 AS dup
+
+# UNNEST WITH ORDINALITY is rejected
+# duckdb: skip sandbox refusal
+statement error WITH ORDINALITY
+SELECT u FROM sb_a, UNNEST(ARRAY[1, 2]) WITH ORDINALITY AS u
+
+# Circular named WINDOW reference is rejected
+# duckdb: skip sandbox refusal
+statement error circular reference in WINDOW definition
+SELECT ROW_NUMBER() OVER w1 AS rn FROM sb_a WINDOW w1 AS (w2), w2 AS (w1)
+
+# Invalid window frame bound ordering is rejected
+# duckdb: skip sandbox refusal
+statement error window frame start cannot follow window frame end
+SELECT SUM(val) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 1 PRECEDING) AS s FROM sb_a
+
+# CROSS JOIN with ON is rejected (sqlparser rejects ON after CROSS JOIN)
+# duckdb: skip sandbox refusal
+statement error unexpected text
+SELECT a.id FROM sb_a a CROSS JOIN sb_b b ON a.id = b.id
+
+# QUALIFY clause is rejected
+# duckdb: skip sandbox refusal
+statement error unsupported SELECT clause
+SELECT id FROM sb_a QUALIFY id > 0
+
+# Qualified function names are rejected
+# duckdb: skip sandbox refusal
+statement error qualified function names are not supported
+SELECT pg_catalog.lower('ABC') AS lo
+
+# duckdb: skip sandbox test fixture
+statement ok
+DROP TABLE sb_b
+
+# duckdb: skip sandbox test fixture
+statement ok
+DROP TABLE sb_a

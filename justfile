@@ -157,6 +157,20 @@ soak-plot out:
 check-soak-plot:
     cd tools/soak && uv sync --locked && uv run ruff format --check && uv run ruff check && uv run mypy plot.py
 
+# Deep metamorphic equivalence and SQLancer TLP sweep of `cetra-query` (track QE M9), release mode.
+metamorphic cases="1000":
+    CETRA_METAMORPHIC_CASES={{cases}} cargo test --release -p cetra-query --all-features --test verify -- metamorphic:: --nocapture
+
+# Differential SQL test of `cetra-query` against DuckDB (track QE M9, not part of `just check`).
+sql-diff cases="2000" seed="0":
+    cargo build --release -p cetra-sql-diff
+    cd tools/sql-diff/py && uv run --locked python diff_runner.py --cetra-bin "${CARGO_TARGET_DIR:-{{justfile_directory()}}/target}/release/cetra-sql-diff" --cases {{cases}} --seed {{seed}} --slt
+
+# Lint, type-check, unit-test, and smoke-diff `tools/sql-diff` (not part of `just check`).
+check-sql-diff:
+    cargo build -p cetra-sql-diff
+    cd tools/sql-diff/py && uv sync --locked && uv run ruff format --check && uv run ruff check && uv run mypy diff_runner.py dialect.py test_dialect.py && uv run python -m unittest discover -s . -p "test_*.py" && uv run python diff_runner.py --cetra-bin "${CARGO_TARGET_DIR:-{{justfile_directory()}}/target}/debug/cetra-sql-diff" --cases 50 --seed 1 --slt
+
 # Write the fuzz seed corpus from the test fixtures (track R M3)
 fuzz-seed:
     cargo test --workspace --all-features -- --ignored --exact fuzz_entry::tests::write_seed_corpus

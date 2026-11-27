@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "tools/capture", "tools/demo", "tools/license"]
+members = ["crates/*", "tools/capture", "tools/demo", "tools/license", "tools/sql-diff"]
 
 [workspace.package]
 version = "0.1.0-rc.2"

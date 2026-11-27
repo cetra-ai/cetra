@@ -1,0 +1,563 @@
+# 08_windows.slt
+# ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD/FIRST_VALUE/LAST_VALUE, running aggregates,
+# PARTITION BY NULLs, RANGE peers vs ROWS, ROWS BETWEEN bounded/unbounded frames,
+# multi-group windows, named WINDOW inheritance, windows over GROUP BY, empty input.
+
+statement ok
+CREATE TABLE win_t (
+  id BIGINT NOT NULL,
+  p VARCHAR,
+  k BIGINT,
+  v BIGINT
+)
+
+statement ok
+INSERT INTO win_t VALUES
+  (1, 'a', 10, 1),
+  (2, 'a', 10, 2),
+  (3, 'a', 20, 4),
+  (4, 'a', 30, 8),
+  (5, 'b', 5, 10),
+  (6, 'b', 5, NULL),
+  (7, 'b', 15, 20),
+  (8, NULL, 1, 100),
+  (9, NULL, 2, 200)
+
+statement ok
+CREATE TABLE win_empty (
+  id BIGINT NOT NULL,
+  p VARCHAR,
+  k BIGINT,
+  v BIGINT
+)
+
+# ROW_NUMBER with deterministic tie-breaker per partition (including NULL partition)
+query ITII nosort
+SELECT
+  id,
+  p,
+  k,
+  ROW_NUMBER() OVER (PARTITION BY p ORDER BY k ASC NULLS LAST, id ASC NULLS LAST) AS rn
+FROM win_t
+ORDER BY p ASC NULLS LAST, k ASC NULLS LAST, id ASC NULLS LAST
+----
+1	a	10	1
+2	a	10	2
+3	a	20	3
+4	a	30	4
+5	b	5	1
+6	b	5	2
+7	b	15	3
+8	NULL	1	1
+9	NULL	2	2
+
+# RANK and DENSE_RANK with ties (k=10 ties in 'a'; k=5 ties in 'b')
+query ITIII nosort
+SELECT
+  id,
+  p,
+  k,
+  RANK() OVER (PARTITION BY p ORDER BY k ASC NULLS LAST) AS rnk,
+  DENSE_RANK() OVER (PARTITION BY p ORDER BY k ASC NULLS LAST) AS drnk
+FROM win_t
+ORDER BY p ASC NULLS LAST, k ASC NULLS LAST, id ASC NULLS LAST
+----
+1	a	10	1	1
+2	a	10	1	1
+3	a	20	3	2
+4	a	30	4	3
+5	b	5	1	1
+6	b	5	1	1
+7	b	15	3	2
+8	NULL	1	1	1
+9	NULL	2	2	2
+
+# Global ROW_NUMBER without PARTITION BY
+query II nosort
+SELECT id, ROW_NUMBER() OVER (ORDER BY id DESC NULLS LAST) AS rn
+FROM win_t
+WHERE p = 'a'
+ORDER BY id ASC NULLS LAST
+----
+1	4
+2	3
+3	2
+4	1
+
+# LAG with default offset 1, explicit offset 2, and explicit default value (distinguishes NULL cell vs out-of-partition!)
+query IIIII nosort
+SELECT
+  id,
+  v,
+  LAG(v) OVER (PARTITION BY p ORDER BY k ASC NULLS LAST, id ASC NULLS LAST) AS lag1,
+  LAG(v, 2) OVER (PARTITION BY p ORDER BY k ASC NULLS LAST, id ASC NULLS LAST) AS lag2,
+  LAG(v, 1, -1) OVER (PARTITION BY p ORDER BY k ASC NULLS LAST, id ASC NULLS LAST) AS lag1_def
+FROM win_t
+WHERE p IN ('a', 'b')
+ORDER BY p ASC NULLS LAST, k ASC NULLS LAST, id ASC NULLS LAST
+----
+1	1	NULL	NULL	-1
+2	2	1	NULL	1
+3	4	2	1	2
+4	8	4	2	4
+5	10	NULL	NULL	-1
+6	NULL	10	NULL	10
+7	20	NULL	10	NULL
+
+# LEAD with default offset 1, explicit offset 2, and explicit default value
+query IIIII nosort
+SELECT
+  id,
+  v,
+  LEAD(v) OVER (PARTITION BY p ORDER BY k ASC NULLS LAST, id ASC NULLS LAST) AS lead1,
+  LEAD(v, 2) OVER (PARTITION BY p ORDER BY k ASC NULLS LAST, id ASC NULLS LAST) AS lead2,
+  LEAD(v, 1, 999) OVER (PARTITION BY p ORDER BY k ASC NULLS LAST, id ASC NULLS LAST) AS lead1_def
+FROM win_t
+WHERE p IN ('a', 'b')
+ORDER BY p ASC NULLS LAST, k ASC NULLS LAST, id ASC NULLS LAST
+----
+1	1	2	4	2
+2	2	4	8	4
+3	4	8	NULL	8
+4	8	NULL	NULL	999
+5	10	NULL	20	NULL
+6	NULL	20	NULL	20
+7	20	NULL	NULL	999
+
+# LAG / LEAD with offset 0 returns current row's own value
+query IIII nosort
+SELECT
+  id,
+  v,
+  LAG(v, 0, -1) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST) AS lag0,
+  LEAD(v, 0, 999) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST) AS lead0
+FROM win_t
+WHERE p = 'b'
+ORDER BY id ASC NULLS LAST
+----
+5	10	10	10
+6	NULL	NULL	NULL
+7	20	20	20
+
+# FIRST_VALUE and LAST_VALUE with default ROWS vs full partition frame
+query IIIII nosort
+SELECT
+  id,
+  FIRST_VALUE(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS fv_run,
+  LAST_VALUE(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS lv_run,
+  FIRST_VALUE(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS fv_all,
+  LAST_VALUE(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS lv_all
+FROM win_t
+WHERE p = 'a'
+ORDER BY id ASC NULLS LAST
+----
+1	1	1	1	8
+2	1	2	1	8
+3	1	4	1	8
+4	1	8	1	8
+
+# RANGE peers (default ORDER BY frame) vs ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+# On tie k=10 (id=1 v=1, id=2 v=2): RANGE sum is 3 for both rows, ROWS sum is 1 then 3!
+query IIII nosort
+SELECT
+  id,
+  k,
+  SUM(v) OVER (PARTITION BY p ORDER BY k ASC NULLS LAST) AS range_sum,
+  SUM(v) OVER (PARTITION BY p ORDER BY k ASC NULLS LAST, id ASC NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS rows_sum
+FROM win_t
+WHERE p = 'a'
+ORDER BY id ASC NULLS LAST
+----
+1	10	3	1
+2	10	3	3
+3	20	7	7
+4	30	15	15
+
+# Explicit RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW and UNBOUNDED FOLLOWING
+query III nosort
+SELECT
+  id,
+  SUM(v) OVER (PARTITION BY p ORDER BY k ASC NULLS LAST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS rng_cur,
+  SUM(v) OVER (PARTITION BY p ORDER BY k ASC NULLS LAST RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS rng_all
+FROM win_t
+WHERE p = 'a'
+ORDER BY id ASC NULLS LAST
+----
+1	3	15
+2	3	15
+3	7	15
+4	15	15
+
+# Running COUNT(*), COUNT(v), AVG(v), MIN(v), MAX(v) across NULL values in partition 'b'
+query IIIRII nosort
+SELECT
+  id,
+  COUNT(*) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS c_all,
+  COUNT(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS c_v,
+  AVG(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS avg_v,
+  MIN(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS min_v,
+  MAX(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS max_v
+FROM win_t
+WHERE p = 'b'
+ORDER BY id ASC NULLS LAST
+----
+5	1	1	10	10	10
+6	2	1	10	10	10
+7	3	2	15	10	20
+
+# Sliding window: ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING
+query IIII nosort
+SELECT
+  id,
+  SUM(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS s_win,
+  COUNT(*) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS c_win,
+  MAX(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS mx_win
+FROM win_t
+WHERE p = 'a'
+ORDER BY id ASC NULLS LAST
+----
+1	3	2	2
+2	7	3	4
+3	14	3	8
+4	12	2	8
+
+# Bounded preceding frame: ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+query II nosort
+SELECT
+  id,
+  SUM(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS s_p2
+FROM win_t
+WHERE p = 'a'
+ORDER BY id ASC NULLS LAST
+----
+1	1
+2	3
+3	7
+4	14
+
+# Bounded following frame: ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING
+query II nosort
+SELECT
+  id,
+  SUM(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING) AS s_f2
+FROM win_t
+WHERE p = 'a'
+ORDER BY id ASC NULLS LAST
+----
+1	7
+2	14
+3	12
+4	8
+
+# Strictly preceding frame: ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING (first row has empty frame -> SUM=NULL, COUNT=0!)
+query III nosort
+SELECT
+  id,
+  SUM(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS s_prev,
+  COUNT(*) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS c_prev
+FROM win_t
+WHERE p = 'a'
+ORDER BY id ASC NULLS LAST
+----
+1	NULL	0
+2	1	1
+3	3	2
+4	6	2
+
+# Strictly following frame: ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING (last row has empty frame -> SUM=NULL, COUNT=0!)
+query III nosort
+SELECT
+  id,
+  SUM(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) AS s_next,
+  COUNT(*) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) AS c_next
+FROM win_t
+WHERE p = 'a'
+ORDER BY id ASC NULLS LAST
+----
+1	6	2
+2	12	2
+3	8	1
+4	NULL	0
+
+# Unordered partition aggregates: OVER (PARTITION BY p) and OVER ()
+query ITII nosort
+SELECT
+  id,
+  p,
+  SUM(v) OVER (PARTITION BY p) AS part_sum,
+  SUM(v) OVER () AS grand_sum
+FROM win_t
+ORDER BY id ASC NULLS LAST
+----
+1	a	15	345
+2	a	15	345
+3	a	15	345
+4	a	15	345
+5	b	30	345
+6	b	30	345
+7	b	30	345
+8	NULL	300	345
+9	NULL	300	345
+
+# Multi-group windows: two distinct PARTITION BY / ORDER BY specs in one SELECT
+query IIII nosort
+SELECT
+  id,
+  ROW_NUMBER() OVER (PARTITION BY p ORDER BY id ASC NULLS LAST) AS rn_part,
+  ROW_NUMBER() OVER (ORDER BY v DESC NULLS LAST, id ASC NULLS LAST) AS rn_global_v,
+  SUM(v) OVER (PARTITION BY p) AS p_sum
+FROM win_t
+ORDER BY id ASC NULLS LAST
+----
+1	1	8	15
+2	2	7	15
+3	3	6	15
+4	4	5	15
+5	1	4	30
+6	2	9	30
+7	3	3	30
+8	1	2	300
+9	2	1	300
+
+# Named WINDOW clause and chained WINDOW inheritance (w1 -> w2 -> w3)
+query IIII nosort
+SELECT
+  id,
+  SUM(v) OVER w1 AS part_total,
+  ROW_NUMBER() OVER w2 AS rn,
+  SUM(v) OVER w3 AS win_sum
+FROM win_t
+WHERE p = 'a'
+WINDOW
+  w1 AS (PARTITION BY p),
+  w2 AS (w1 ORDER BY id ASC NULLS LAST),
+  w3 AS (w2 ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+ORDER BY id ASC NULLS LAST
+----
+1	15	1	1
+2	15	2	3
+3	15	3	6
+4	15	4	12
+
+# Window function over GROUP BY aggregates
+query TIII nosort
+SELECT
+  p,
+  SUM(v) AS grp_sum,
+  SUM(SUM(v)) OVER (ORDER BY p ASC NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cum_sum,
+  RANK() OVER (ORDER BY SUM(v) DESC NULLS LAST) AS sum_rank
+FROM win_t
+GROUP BY p
+ORDER BY p ASC NULLS LAST
+----
+a	15	15	3
+b	30	45	2
+NULL	300	345	1
+
+# Window function combined with arithmetic expression in SELECT
+query II nosort
+SELECT
+  id,
+  (v - LAG(v, 1, 0) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST)) AS delta
+FROM win_t
+WHERE p = 'a'
+ORDER BY id ASC NULLS LAST
+----
+1	1
+2	1
+3	2
+4	4
+
+# Window function on empty table returns 0 rows
+query II nosort
+SELECT
+  id,
+  ROW_NUMBER() OVER (PARTITION BY p ORDER BY id ASC NULLS LAST) AS rn
+FROM win_empty
+----
+
+# Window function with ORDER BY + LIMIT (TopK after Window)
+query II nosort
+SELECT
+  id,
+  ROW_NUMBER() OVER (ORDER BY v DESC NULLS LAST, id ASC NULLS LAST) AS rn
+FROM win_t
+ORDER BY rn ASC NULLS LAST
+LIMIT 3
+----
+9	1
+8	2
+7	3
+
+# FIRST_VALUE and LAST_VALUE on partition 'b' containing a NULL cell
+query IIIII nosort
+SELECT
+  id,
+  FIRST_VALUE(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS fv_p1,
+  LAST_VALUE(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS lv_p1,
+  FIRST_VALUE(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS fv_f1,
+  LAST_VALUE(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS lv_f1
+FROM win_t
+WHERE p = 'b'
+ORDER BY id ASC NULLS LAST
+----
+5	10	10	10	NULL
+6	10	NULL	NULL	20
+7	NULL	20	20	20
+
+# LAG and LEAD on VARCHAR column with string default
+query ITTT nosort
+SELECT
+  id,
+  p,
+  LAG(p, 1, 'START') OVER (ORDER BY id ASC NULLS LAST) AS prev_p,
+  LEAD(p, 1, 'END') OVER (ORDER BY id ASC NULLS LAST) AS next_p
+FROM win_t
+WHERE id IN (4, 5, 8, 9)
+ORDER BY id ASC NULLS LAST
+----
+4	a	START	b
+5	b	a	NULL
+8	NULL	b	NULL
+9	NULL	NULL	END
+
+# Reverse running sum: ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+query II nosort
+SELECT
+  id,
+  SUM(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS suffix_sum
+FROM win_t
+WHERE p = 'a'
+ORDER BY id ASC NULLS LAST
+----
+1	15
+2	14
+3	12
+4	8
+
+# Single-row frame: ROWS BETWEEN 0 PRECEDING AND 0 FOLLOWING
+query III nosort
+SELECT
+  id,
+  SUM(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN 0 PRECEDING AND 0 FOLLOWING) AS cur_sum,
+  COUNT(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN 0 PRECEDING AND 0 FOLLOWING) AS cur_cnt
+FROM win_t
+WHERE p = 'b'
+ORDER BY id ASC NULLS LAST
+----
+5	10	1
+6	NULL	0
+7	20	1
+
+# Sliding AVG, MIN, COUNT(v) across NULLs in partition 'b'
+query IRII nosort
+SELECT
+  id,
+  AVG(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS avg_w,
+  MIN(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS min_w,
+  COUNT(v) OVER (PARTITION BY p ORDER BY id ASC NULLS LAST ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS cnt_w
+FROM win_t
+WHERE p = 'b'
+ORDER BY id ASC NULLS LAST
+----
+5	10	10	1
+6	15	10	2
+7	20	20	1
+
+# ROW_NUMBER with DESC NULLS FIRST ordering
+query II nosort
+SELECT
+  id,
+  ROW_NUMBER() OVER (PARTITION BY p ORDER BY v DESC NULLS FIRST, id ASC NULLS LAST) AS rn_desc
+FROM win_t
+WHERE p = 'b'
+ORDER BY rn_desc ASC NULLS LAST
+----
+6	1
+7	2
+5	3
+
+# Named WINDOW direct alias (w2 AS w1)
+# duckdb: skip duckdb requires parens in WINDOW w2 AS (w1)
+query III nosort
+SELECT
+  id,
+  ROW_NUMBER() OVER w1 AS rn1,
+  SUM(v) OVER w2 AS run_s
+FROM win_t
+WHERE p = 'a'
+WINDOW
+  w1 AS (PARTITION BY p ORDER BY id ASC NULLS LAST),
+  w2 AS w1
+ORDER BY id ASC NULLS LAST
+----
+1	1	1
+2	2	3
+3	3	7
+4	4	15
+
+# Top-1 per partition pattern using CTE + ROW_NUMBER() + outer WHERE rn = 1
+query ITII nosort
+WITH ranked AS (
+  SELECT
+    id,
+    p,
+    v,
+    ROW_NUMBER() OVER (PARTITION BY p ORDER BY v DESC NULLS LAST, id ASC NULLS LAST) AS rn
+  FROM win_t
+)
+SELECT id, p, v, rn
+FROM ranked
+WHERE rn = 1
+ORDER BY p ASC NULLS LAST
+----
+4	a	8	1
+7	b	20	1
+9	NULL	200	1
+
+# Window function over a JOIN result
+statement ok
+CREATE TABLE p_meta (p VARCHAR NOT NULL, weight BIGINT NOT NULL)
+
+statement ok
+INSERT INTO p_meta VALUES ('a', 10), ('b', 100)
+
+query ITII nosort
+SELECT
+  w.id,
+  w.p,
+  m.weight,
+  SUM(w.v) OVER (PARTITION BY w.p ORDER BY w.id ASC NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS run_v
+FROM win_t w
+INNER JOIN p_meta m ON w.p = m.p
+WHERE w.id IN (1, 2, 5, 7)
+ORDER BY w.p ASC NULLS LAST, w.id ASC NULLS LAST
+----
+1	a	10	1
+2	a	10	3
+5	b	100	10
+7	b	100	30
+
+statement ok
+DROP TABLE p_meta
+
+# Multiple windows over GROUP BY (grand total + partition-less ROW_NUMBER)
+query TIII nosort
+SELECT
+  p,
+  COUNT(*) AS cnt,
+  SUM(COUNT(*)) OVER () AS total_rows,
+  ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC NULLS LAST, p ASC NULLS LAST) AS grp_rn
+FROM win_t
+GROUP BY p
+ORDER BY grp_rn ASC NULLS LAST
+----
+a	4	9	1
+b	3	9	2
+NULL	2	9	3
+
+statement ok
+DROP TABLE win_empty
+
+statement ok
+DROP TABLE win_t

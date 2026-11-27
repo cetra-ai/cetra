@@ -17,3 +17,12 @@ The recipes are in the tool; their design is in K9–K10 of [`docs/plans/b2-capt
 - `just check-capture` runs the scenario projects' lint and type checks, then recaptures every scenario and compares it with the committed `input.json` (timing excluded).
 
 A captured `input.json` is never edited by hand. Change the scenario and recapture (D122).
+
+## SQL differential harness (`tools/sql-diff/`)
+
+`cetra-sql-diff` and its Python DuckDB runner (`tools/sql-diff/py/`, uv) cross-check `cetra-query` against DuckDB over format-agnostic `BatchSource` datasets:
+
+- `just sql-diff [cases] [seed]` builds `cetra-sql-diff` in release mode and runs the curated `.slt` corpus plus generated Shape B SQL queries against DuckDB.
+- `just check-sql-diff` lints, type-checks, unit-tests, and runs a 50-query + `.slt` smoke diff.
+
+See [`tools/sql-diff/README.md`](sql-diff/README.md) for the wire protocol and documented dialect differences.

@@ -1,0 +1,583 @@
+# 05_joins_subqueries.slt
+# INNER/LEFT/RIGHT/FULL/CROSS joins, USING (incl. FULL JOIN ... USING coalescing),
+# NULL join keys, skewed duplicates, outer-join residuals, IN/NOT IN with NULLs,
+# EXISTS/NOT EXISTS, empty tables, CTEs, derived tables.
+
+statement ok
+CREATE TABLE lhs (id BIGINT NOT NULL, k BIGINT, lv VARCHAR, score BIGINT)
+
+statement ok
+INSERT INTO lhs VALUES
+  (1, 1, 'L1', 10),
+  (2, 2, 'L2a', 20),
+  (3, 2, 'L2b', 30),
+  (4, 3, 'L3', 40),
+  (5, NULL, 'Ln', 50)
+
+statement ok
+CREATE TABLE rhs (id BIGINT NOT NULL, k BIGINT, rv VARCHAR, bonus BIGINT)
+
+statement ok
+INSERT INTO rhs VALUES
+  (10, 1, 'R1', 5),
+  (11, 2, 'R2a', 15),
+  (12, 2, 'R2b', 25),
+  (13, 4, 'R4', 35),
+  (14, NULL, 'Rn', 45)
+
+statement ok
+CREATE TABLE empty_t (id BIGINT NOT NULL, k BIGINT, ev VARCHAR)
+
+# INNER JOIN with skewed duplicates (k=2 produces 2x2=4 rows) and NULL keys excluded
+query IIIIT nosort
+SELECT a.id AS lid, b.id AS rid, a.k AS lk, b.bonus, (a.lv || '-' || b.rv) AS pair
+FROM lhs a
+INNER JOIN rhs b ON a.k = b.k
+ORDER BY a.id ASC NULLS LAST, b.id ASC NULLS LAST
+----
+1	10	1	5	L1-R1
+2	11	2	15	L2a-R2a
+2	12	2	25	L2a-R2b
+3	11	2	15	L2b-R2a
+3	12	2	25	L2b-R2b
+
+# LEFT OUTER JOIN preserves unmatched k=3 and NULL key rows
+query IITT nosort
+SELECT a.id AS lid, b.id AS rid, a.lv, b.rv
+FROM lhs a
+LEFT JOIN rhs b ON a.k = b.k
+ORDER BY a.id ASC NULLS LAST, b.id ASC NULLS LAST
+----
+1	10	L1	R1
+2	11	L2a	R2a
+2	12	L2a	R2b
+3	11	L2b	R2a
+3	12	L2b	R2b
+4	NULL	L3	NULL
+5	NULL	Ln	NULL
+
+# RIGHT OUTER JOIN preserves unmatched k=4 and NULL key rows from rhs
+query IITT nosort
+SELECT a.id AS lid, b.id AS rid, a.lv, b.rv
+FROM lhs a
+RIGHT JOIN rhs b ON a.k = b.k
+ORDER BY b.id ASC NULLS LAST, a.id ASC NULLS LAST
+----
+1	10	L1	R1
+2	11	L2a	R2a
+3	11	L2b	R2a
+2	12	L2a	R2b
+3	12	L2b	R2b
+NULL	13	NULL	R4
+NULL	14	NULL	Rn
+
+# FULL OUTER JOIN preserves unmatched rows on both sides (including both NULL keys separately!)
+query IITT nosort
+SELECT a.id AS lid, b.id AS rid, a.lv, b.rv
+FROM lhs a
+FULL OUTER JOIN rhs b ON a.k = b.k
+ORDER BY a.id ASC NULLS LAST, b.id ASC NULLS LAST
+----
+1	10	L1	R1
+2	11	L2a	R2a
+2	12	L2a	R2b
+3	11	L2b	R2a
+3	12	L2b	R2b
+4	NULL	L3	NULL
+5	NULL	Ln	NULL
+NULL	13	NULL	R4
+NULL	14	NULL	Rn
+
+# CROSS JOIN cardinality (2 x 2 = 4 rows)
+query IITT nosort
+SELECT a.id AS lid, b.id AS rid, a.lv, b.rv
+FROM lhs a
+CROSS JOIN rhs b
+WHERE a.id <= 2 AND b.id <= 11
+ORDER BY a.id ASC NULLS LAST, b.id ASC NULLS LAST
+----
+1	10	L1	R1
+1	11	L1	R2a
+2	10	L2a	R1
+2	11	L2a	R2a
+
+# INNER JOIN ... USING (k)
+query ITT nosort
+SELECT k, a.lv, b.rv
+FROM lhs a
+INNER JOIN rhs b USING (k)
+ORDER BY k ASC NULLS LAST, a.lv ASC NULLS LAST, b.rv ASC NULLS LAST
+----
+1	L1	R1
+2	L2a	R2a
+2	L2a	R2b
+2	L2b	R2a
+2	L2b	R2b
+
+# LEFT JOIN ... USING (k)
+query ITT nosort
+SELECT k, a.lv, b.rv
+FROM lhs a
+LEFT JOIN rhs b USING (k)
+ORDER BY k ASC NULLS LAST, a.lv ASC NULLS LAST, b.rv ASC NULLS LAST
+----
+1	L1	R1
+2	L2a	R2a
+2	L2a	R2b
+2	L2b	R2a
+2	L2b	R2b
+3	L3	NULL
+NULL	Ln	NULL
+
+# RIGHT JOIN ... USING (k)
+query ITT nosort
+SELECT k, a.lv, b.rv
+FROM lhs a
+RIGHT JOIN rhs b USING (k)
+ORDER BY k ASC NULLS LAST, b.rv ASC NULLS LAST, a.lv ASC NULLS LAST
+----
+1	L1	R1
+2	L2a	R2a
+2	L2b	R2a
+2	L2a	R2b
+2	L2b	R2b
+4	NULL	R4
+NULL	NULL	Rn
+
+# FULL OUTER JOIN ... USING (k): unqualified k is COALESCE(a.k, b.k), while a.k / b.k stay distinct
+query IIITT nosort
+SELECT k, a.k AS ak, b.k AS bk, a.lv, b.rv
+FROM lhs a
+FULL OUTER JOIN rhs b USING (k)
+ORDER BY k ASC NULLS LAST, a.lv ASC NULLS LAST, b.rv ASC NULLS LAST
+----
+1	1	1	L1	R1
+2	2	2	L2a	R2a
+2	2	2	L2a	R2b
+2	2	2	L2b	R2a
+2	2	2	L2b	R2b
+3	3	NULL	L3	NULL
+4	NULL	4	NULL	R4
+NULL	NULL	NULL	Ln	NULL
+NULL	NULL	NULL	NULL	Rn
+
+# Outer join residual predicate in ON vs WHERE:
+# Residual in ON keeps left row with NULL right columns when residual is false!
+query IITT nosort
+SELECT a.id AS lid, b.id AS rid, a.lv, b.rv
+FROM lhs a
+LEFT JOIN rhs b ON a.k = b.k AND b.bonus > 20
+ORDER BY a.id ASC NULLS LAST, b.id ASC NULLS LAST
+----
+1	NULL	L1	NULL
+2	12	L2a	R2b
+3	12	L2b	R2b
+4	NULL	L3	NULL
+5	NULL	Ln	NULL
+
+# Residual involving BOTH sides in LEFT JOIN ON (a.score > b.bonus)
+query IITT nosort
+SELECT a.id AS lid, b.id AS rid, a.lv, b.rv
+FROM lhs a
+LEFT JOIN rhs b ON a.k = b.k AND a.score > b.bonus
+ORDER BY a.id ASC NULLS LAST, b.id ASC NULLS LAST
+----
+1	10	L1	R1
+2	11	L2a	R2a
+3	11	L2b	R2a
+3	12	L2b	R2b
+4	NULL	L3	NULL
+5	NULL	Ln	NULL
+
+# Residual in RIGHT JOIN ON keeps unmatched right rows with NULL left columns
+query IITT nosort
+SELECT a.id AS lid, b.id AS rid, a.lv, b.rv
+FROM lhs a
+RIGHT JOIN rhs b ON a.k = b.k AND a.score >= 30
+ORDER BY b.id ASC NULLS LAST, a.id ASC NULLS LAST
+----
+NULL	10	NULL	R1
+3	11	L2b	R2a
+3	12	L2b	R2b
+NULL	13	NULL	R4
+NULL	14	NULL	Rn
+
+# Residual in FULL OUTER JOIN ON keeps unmatched rows on both sides
+query IITT nosort
+SELECT a.id AS lid, b.id AS rid, a.lv, b.rv
+FROM lhs a
+FULL OUTER JOIN rhs b ON a.k = b.k AND a.score > b.bonus
+ORDER BY a.id ASC NULLS LAST, b.id ASC NULLS LAST
+----
+1	10	L1	R1
+2	11	L2a	R2a
+3	11	L2b	R2a
+3	12	L2b	R2b
+4	NULL	L3	NULL
+5	NULL	Ln	NULL
+NULL	13	NULL	R4
+NULL	14	NULL	Rn
+
+# Non-equi INNER JOIN (rewritten to Cross + Filter)
+query IITT nosort
+SELECT a.id AS lid, b.id AS rid, a.lv, b.rv
+FROM lhs a
+INNER JOIN rhs b ON a.k < b.k AND a.id <= 2 AND b.id <= 11
+ORDER BY a.id ASC NULLS LAST, b.id ASC NULLS LAST
+----
+1	11	L1	R2a
+
+# Self-join with aliases
+query II nosort
+SELECT a.id AS id1, b.id AS id2
+FROM lhs a
+INNER JOIN lhs b ON a.k = b.k AND a.id < b.id
+ORDER BY a.id ASC NULLS LAST, b.id ASC NULLS LAST
+----
+2	3
+
+# Multi-way 3-table join
+statement ok
+CREATE TABLE tags_map (k BIGINT NOT NULL, label VARCHAR NOT NULL)
+
+statement ok
+INSERT INTO tags_map VALUES (1, 'one'), (2, 'two'), (4, 'four')
+
+query IIT nosort
+SELECT a.id AS lid, b.id AS rid, t.label
+FROM lhs a
+INNER JOIN rhs b ON a.k = b.k
+INNER JOIN tags_map t ON b.k = t.k
+WHERE a.id <= 2
+ORDER BY a.id ASC NULLS LAST, b.id ASC NULLS LAST
+----
+1	10	one
+2	11	two
+2	12	two
+
+# Empty table joins (empty left, empty right, both empty)
+query II nosort
+SELECT a.id AS lid, e.id AS eid
+FROM lhs a
+INNER JOIN empty_t e ON a.k = e.k
+ORDER BY a.id ASC NULLS LAST
+----
+
+query II nosort
+SELECT a.id AS lid, e.id AS eid
+FROM lhs a
+LEFT JOIN empty_t e ON a.k = e.k
+ORDER BY a.id ASC NULLS LAST
+----
+1	NULL
+2	NULL
+3	NULL
+4	NULL
+5	NULL
+
+query II nosort
+SELECT e.id AS eid, b.id AS rid
+FROM empty_t e
+RIGHT JOIN rhs b ON e.k = b.k
+ORDER BY b.id ASC NULLS LAST
+----
+NULL	10
+NULL	11
+NULL	12
+NULL	13
+NULL	14
+
+query II nosort
+SELECT e1.id AS id1, e2.id AS id2
+FROM empty_t e1
+FULL OUTER JOIN empty_t e2 ON e1.k = e2.k
+----
+
+# IN (SELECT ...) when right subquery contains NULLs (matches non-null keys; NULL left never matches)
+query I nosort
+SELECT id FROM lhs WHERE k IN (SELECT k FROM rhs) ORDER BY id ASC NULLS LAST
+----
+1
+2
+3
+
+# NOT IN (SELECT ...) when right subquery has NO NULLs (NULL left row id=5 is excluded by 3VL!)
+query I nosort
+SELECT id
+FROM lhs
+WHERE k NOT IN (SELECT k FROM rhs WHERE k IS NOT NULL)
+ORDER BY id ASC NULLS LAST
+----
+4
+
+# NOT IN (SELECT ...) when right subquery CONTAINS a NULL -> returns 0 rows!
+query I nosort
+SELECT id
+FROM lhs
+WHERE k NOT IN (SELECT k FROM rhs)
+ORDER BY id ASC NULLS LAST
+----
+
+# IN (empty subquery) -> 0 rows; NOT IN (empty subquery) -> ALL rows including NULL k!
+query I nosort
+SELECT id FROM lhs WHERE k IN (SELECT k FROM empty_t) ORDER BY id ASC NULLS LAST
+----
+
+query I nosort
+SELECT id FROM lhs WHERE k NOT IN (SELECT k FROM empty_t) ORDER BY id ASC NULLS LAST
+----
+1
+2
+3
+4
+5
+
+# IN subquery combined with extra WHERE predicate
+query I nosort
+SELECT id
+FROM lhs
+WHERE k IN (SELECT k FROM rhs WHERE bonus >= 15) AND score >= 25
+ORDER BY id ASC NULLS LAST
+----
+3
+
+# EXISTS (non-empty) -> all rows; EXISTS (empty) -> 0 rows
+query I nosort
+SELECT id FROM lhs WHERE EXISTS (SELECT 1 FROM rhs WHERE k = 1) ORDER BY id ASC NULLS LAST
+----
+1
+2
+3
+4
+5
+
+query I nosort
+SELECT id FROM lhs WHERE EXISTS (SELECT 1 FROM empty_t) ORDER BY id ASC NULLS LAST
+----
+
+# EXISTS with subquery returning a single NULL row is STILL true!
+query I nosort
+SELECT id
+FROM lhs
+WHERE EXISTS (SELECT k FROM rhs WHERE k IS NULL) AND id <= 2
+ORDER BY id ASC NULLS LAST
+----
+1
+2
+
+# NOT EXISTS (empty) -> all rows; NOT EXISTS (non-empty) -> 0 rows
+query I nosort
+SELECT id FROM lhs WHERE NOT EXISTS (SELECT 1 FROM empty_t) ORDER BY id ASC NULLS LAST
+----
+1
+2
+3
+4
+5
+
+query I nosort
+SELECT id FROM lhs WHERE NOT EXISTS (SELECT 1 FROM rhs) ORDER BY id ASC NULLS LAST
+----
+
+# Derived tables in FROM and joined with base table
+query IIT nosort
+SELECT d.k, d.cnt, t.label
+FROM (
+  SELECT k, COUNT(*) AS cnt
+  FROM lhs
+  WHERE k IS NOT NULL
+  GROUP BY k
+) AS d
+INNER JOIN tags_map t ON d.k = t.k
+ORDER BY d.k ASC NULLS LAST
+----
+1	1	one
+2	2	two
+
+# CTE: single CTE, chained CTEs, and CTE referenced twice (self-join on CTE)
+query IIT nosort
+WITH filtered AS (
+  SELECT id, k, lv FROM lhs WHERE k IS NOT NULL
+)
+SELECT f.id, f.k, t.label
+FROM filtered f
+LEFT JOIN tags_map t ON f.k = t.k
+ORDER BY f.id ASC NULLS LAST
+----
+1	1	one
+2	2	two
+3	2	two
+4	3	NULL
+
+query II nosort
+WITH
+  a AS (SELECT id, k FROM lhs WHERE k IS NOT NULL),
+  b AS (SELECT k, COUNT(*) AS cnt FROM a GROUP BY k)
+SELECT k, cnt FROM b ORDER BY k ASC NULLS LAST
+----
+1	1
+2	2
+3	1
+
+query II nosort
+WITH pairs AS (
+  SELECT id, k FROM lhs WHERE k = 2
+)
+SELECT p1.id AS id1, p2.id AS id2
+FROM pairs p1
+INNER JOIN pairs p2 ON p1.k = p2.k AND p1.id != p2.id
+ORDER BY p1.id ASC NULLS LAST, p2.id ASC NULLS LAST
+----
+2	3
+3	2
+
+# Join key type widening (I64 = DOUBLE)
+statement ok
+CREATE TABLE float_keys (fk DOUBLE NOT NULL, tag VARCHAR NOT NULL)
+
+statement ok
+INSERT INTO float_keys VALUES (1.0, 'f1'), (3.0, 'f3')
+
+query IT nosort
+SELECT a.id, f.tag
+FROM lhs a
+INNER JOIN float_keys f ON a.k = f.fk
+ORDER BY a.id ASC NULLS LAST
+----
+1	f1
+4	f3
+
+# LEFT JOIN anti-join pattern (WHERE b.id IS NULL)
+query IT nosort
+SELECT a.id, a.lv
+FROM lhs a
+LEFT JOIN rhs b ON a.k = b.k
+WHERE b.id IS NULL
+ORDER BY a.id ASC NULLS LAST
+----
+4	L3
+5	Ln
+
+# INNER JOIN with expression key (ON a.k + 1 = b.k)
+query IITT nosort
+SELECT a.id AS lid, b.id AS rid, a.lv, b.rv
+FROM lhs a
+INNER JOIN rhs b ON (a.k + 1) = b.k
+ORDER BY a.id ASC NULLS LAST, b.id ASC NULLS LAST
+----
+1	11	L1	R2a
+1	12	L1	R2b
+4	13	L3	R4
+
+# Multi-column equi-join ON two keys
+query II nosort
+SELECT a.id AS lid, b.id AS rid
+FROM lhs a
+INNER JOIN rhs b ON a.k = b.k AND a.score = (b.bonus * 2)
+ORDER BY a.id ASC NULLS LAST, b.id ASC NULLS LAST
+----
+1	10
+3	11
+
+# FULL OUTER JOIN on disjoint key sets returns union with NULLs
+query II nosort
+SELECT a.id AS lid, b.id AS rid
+FROM (SELECT id, k FROM lhs WHERE k = 3) a
+FULL OUTER JOIN (SELECT id, k FROM rhs WHERE k = 4) b ON a.k = b.k
+ORDER BY a.id ASC NULLS LAST, b.id ASC NULLS LAST
+----
+4	NULL
+NULL	13
+
+# LEFT JOIN with duplicates followed by GROUP BY aggregation
+query II nosort
+SELECT a.id, COUNT(b.id) AS matched_rhs
+FROM lhs a
+LEFT JOIN rhs b ON a.k = b.k
+GROUP BY a.id
+ORDER BY a.id ASC NULLS LAST
+----
+1	1
+2	2
+3	2
+4	0
+5	0
+
+# Negated subquery forms: NOT (k IN (SELECT ...)) and NOT (EXISTS (SELECT ...))
+query I nosort
+SELECT id
+FROM lhs
+WHERE NOT (k IN (SELECT k FROM rhs WHERE k IS NOT NULL))
+ORDER BY id ASC NULLS LAST
+----
+4
+
+query I nosort
+SELECT id
+FROM lhs
+WHERE NOT (EXISTS (SELECT 1 FROM empty_t)) AND id <= 3
+ORDER BY id ASC NULLS LAST
+----
+1
+2
+3
+
+# Multiple IN subqueries + EXISTS combined in one WHERE
+query I nosort
+SELECT id
+FROM lhs
+WHERE k IN (SELECT k FROM rhs WHERE bonus >= 15)
+  AND k IN (SELECT k FROM tags_map WHERE label = 'two')
+  AND EXISTS (SELECT 1 FROM tags_map)
+ORDER BY id ASC NULLS LAST
+----
+2
+3
+
+# Nested 3-level derived tables
+query II nosort
+SELECT outer_q.k, outer_q.total
+FROM (
+  SELECT mid.k, SUM(mid.score) AS total
+  FROM (
+    SELECT k, score FROM lhs WHERE k IS NOT NULL
+  ) AS mid
+  GROUP BY mid.k
+) AS outer_q
+WHERE outer_q.total >= 20
+ORDER BY outer_q.k ASC NULLS LAST
+----
+2	50
+3	40
+
+# CTE combining UNION and JOIN
+query IT nosort
+WITH all_keys AS (
+  SELECT k FROM lhs WHERE k IS NOT NULL
+  UNION
+  SELECT k FROM rhs WHERE k IS NOT NULL
+)
+SELECT ak.k, t.label
+FROM all_keys ak
+LEFT JOIN tags_map t ON ak.k = t.k
+ORDER BY ak.k ASC NULLS LAST
+----
+1	one
+2	two
+3	NULL
+4	four
+
+statement ok
+DROP TABLE float_keys
+
+statement ok
+DROP TABLE tags_map
+
+statement ok
+DROP TABLE empty_t
+
+statement ok
+DROP TABLE rhs
+
+statement ok
+DROP TABLE lhs
