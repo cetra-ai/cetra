@@ -1,5 +1,7 @@
 use std::fmt::Write;
 
+use crate::real_s3::{RealS3Mode, s3_only_mode};
+
 #[derive(Debug, Clone)]
 pub struct WriteBenchRow {
     pub workload: String,
@@ -56,10 +58,20 @@ pub fn render_markdown_report(
     let _ = writeln!(out, "- **Statam Write Threads:** `{statam_write_threads}`");
     let _ = writeln!(out, "- **Statam Read Threads:** `{statam_read_threads}`");
     let _ = writeln!(out, "- **Formats:** `{}`", enabled_formats.join("`, `"));
-    let _ = writeln!(
-        out,
-        "- **Simulated S3 Model:** `1 MiB` `ReadCache` block rounding + run coalescing, `25.0 ms / GET`, `100 MiB/s`"
-    );
+    let s3_mode = RealS3Mode::from_env();
+    if s3_mode.is_real() {
+        let _ = writeln!(
+            out,
+            "- **S3 Mode:** `{}` (real remote S3, `s3_only={}`)",
+            s3_mode.label(),
+            s3_only_mode()
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "- **Simulated S3 Model:** `1 MiB` `ReadCache` block rounding + run coalescing, `25.0 ms / GET`, `100 MiB/s`"
+        );
+    }
 
     let _ = writeln!(out, "\n## 1. Storage Size & Write Speed");
     let _ = writeln!(
@@ -86,7 +98,12 @@ pub fn render_markdown_report(
         );
     }
 
-    let _ = writeln!(out, "\n## 2. Read Latency (Local Warm CPU & Simulated S3)");
+    let s3_heading = if s3_mode.is_real() {
+        format!("Real S3: {}", s3_mode.label())
+    } else {
+        "Simulated S3".to_owned()
+    };
+    let _ = writeln!(out, "\n## 2. Read Latency (Local Warm CPU & {s3_heading})");
     let _ = writeln!(
         out,
         "\n| Workload | Query | Format | Matched | Local Median (ms) | Local p95 (ms) | S3 (ms) | S3 GETs | S3 KiB | Cold-Open GETs |"

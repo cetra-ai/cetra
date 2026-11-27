@@ -11,7 +11,7 @@ cetra-statam = { path = "../../../../crates/statam" }
 cetra-column = { path = "../../../../crates/column" }
 strata = { path = "../../../../../strata-src" }
 arrow = { version = "59.3", features = ["ipc"] }
-parquet = { version = "59.3", features = ["arrow", "zstd"] }
+parquet = { version = "59.3", features = ["arrow", "zstd", "async"] }
 object_store = "0.13"
 bytes = "1.12"
 futures = "0.3"
@@ -20,6 +20,7 @@ async-trait = "0.1"
 rand = "0.10"
 serde_json = "1"
 flate2 = "1"
+sha2 = "0.10"
 vortex = { version = "0.95.0", features = ["files", "zstd", "tokio"] }
 vortex-io = "0.95.0"
 arrow-array-60 = { package = "arrow-array", version = "60.1.0" }
@@ -33,7 +34,7 @@ lance-core = "14.0.3"
 arrow-array-58 = { package = "arrow-array", version = "58.0.0" }
 arrow-schema-58 = { package = "arrow-schema", version = "58.0.0" }
 arrow-ipc-58 = { package = "arrow-ipc", version = "58.0.0" }
-object-store-14 = { package = "object_store", version = "0.14.2" }
+object-store-14 = { package = "object_store", version = "0.14.2", features = ["aws"] }
 
 [profile.release]
 debug = 1

@@ -7,6 +7,7 @@
 
 pub mod lance_bench;
 pub mod queries;
+pub mod real_s3;
 pub mod report;
 pub mod s3_parquet;
 pub mod schema;

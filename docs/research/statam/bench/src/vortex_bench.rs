@@ -18,7 +18,7 @@ use arrow_schema_60::{
     TimeUnit as TimeUnit60,
 };
 use bytes::Bytes;
-use cetra_statam::{RangeReader, SimulatedS3Config, SimulatedS3Reader, SliceReader};
+use cetra_statam::{RangeReader, SimulatedS3Config, SliceReader};
 use futures::future::BoxFuture;
 use futures::stream::TryStreamExt;
 use vortex::VortexSessionDefault;
@@ -40,16 +40,30 @@ use vortex::session::VortexSession;
 use vortex_io::VortexReadAt;
 
 use crate::queries::{contains_ascii_ci, push_topk};
+use crate::real_s3::{BenchS3Reader, run_s3_adaptive};
 use crate::schema::{BenchResult, TableKindBench};
 use crate::workloads::{ABSENT_NEEDLE, DAY_START, HOUR_NS, RARE_NEEDLE};
 
+enum VortexReadBackend {
+    Local(Arc<dyn RangeReader>),
+    S3(Arc<BenchS3Reader>),
+}
+
 pub struct SimS3VortexRead {
-    reader: Arc<dyn RangeReader>,
+    backend: VortexReadBackend,
 }
 
 impl SimS3VortexRead {
     pub fn new(reader: Arc<dyn RangeReader>) -> Self {
-        Self { reader }
+        Self {
+            backend: VortexReadBackend::Local(reader),
+        }
+    }
+
+    pub fn from_s3(reader: Arc<BenchS3Reader>) -> Self {
+        Self {
+            backend: VortexReadBackend::S3(reader),
+        }
     }
 }
 
@@ -63,7 +77,11 @@ impl VortexReadAt for SimS3VortexRead {
     }
 
     fn size(&self) -> BoxFuture<'static, VortexResult<u64>> {
-        Box::pin(futures::future::ok(self.reader.file_len()))
+        let len = match &self.backend {
+            VortexReadBackend::Local(r) => r.file_len(),
+            VortexReadBackend::S3(r) => r.file_len(),
+        };
+        Box::pin(futures::future::ok(len))
     }
 
     fn read_at(
@@ -72,16 +90,32 @@ impl VortexReadAt for SimS3VortexRead {
         length: usize,
         alignment: Alignment,
     ) -> BoxFuture<'static, VortexResult<BufferHandle>> {
-        let reader = Arc::clone(&self.reader);
-        Box::pin(async move {
-            let end = offset.saturating_add(length as u64);
-            let bytes = reader
-                .read_range(offset..end)
-                .map_err(|e| vortex_err!("vortex range read failed: {e}"))?;
-            Ok(BufferHandle::new_host(ByteBuffer::copy_from_aligned(
-                &bytes, alignment,
-            )))
-        })
+        let end = offset.saturating_add(length as u64);
+        match &self.backend {
+            VortexReadBackend::Local(r) => {
+                let reader = Arc::clone(r);
+                Box::pin(async move {
+                    let bytes = reader
+                        .read_range(offset..end)
+                        .map_err(|e| vortex_err!("vortex range read failed: {e}"))?;
+                    Ok(BufferHandle::new_host(ByteBuffer::copy_from_aligned(
+                        &bytes, alignment,
+                    )))
+                })
+            }
+            VortexReadBackend::S3(s3) => {
+                let s3 = Arc::clone(s3);
+                Box::pin(async move {
+                    let bytes = s3
+                        .read_range_async(offset..end)
+                        .await
+                        .map_err(|e| vortex_err!("vortex s3 range read failed: {e}"))?;
+                    Ok(BufferHandle::new_host(ByteBuffer::copy_from_aligned(
+                        &bytes, alignment,
+                    )))
+                })
+            }
+        }
     }
 }
 
@@ -307,27 +341,34 @@ pub async fn run_vortex_query_s3(
     qname: &str,
     sample_tid: [u8; 16],
 ) -> BenchResult<(usize, u64, u64, f64)> {
-    let s3_readers: Vec<Arc<SimulatedS3Reader>> = files
+    let s3_readers: Vec<Arc<BenchS3Reader>> = files
         .iter()
-        .map(|b| Arc::new(SimulatedS3Reader::from_bytes(b.clone(), s3_cfg)))
+        .map(|b| BenchS3Reader::from_bytes(b.clone(), s3_cfg))
         .collect();
-    for r in &s3_readers {
-        r.evict_all();
-        r.reset_counters();
-    }
 
-    let mut opened = Vec::with_capacity(s3_readers.len());
-    for r in &s3_readers {
-        let vx_reader = Arc::new(SimS3VortexRead::new(Arc::clone(r) as Arc<dyn RangeReader>));
-        let vxf = session.open_options().open_read(vx_reader).await?;
-        opened.push(vxf);
-    }
+    run_s3_adaptive(|| {
+        let s3_readers = s3_readers.clone();
+        async move {
+            for r in &s3_readers {
+                r.evict_all();
+                r.reset_counters();
+            }
 
-    let matched = run_vortex_query(session, &opened, table, qname, sample_tid).await?;
-    let gets: u64 = s3_readers.iter().map(|r| r.counters().gets).sum();
-    let bytes: u64 = s3_readers.iter().map(|r| r.counters().bytes_from_s3).sum();
-    let s3_ms: f64 = s3_readers.iter().map(|r| r.simulated_latency_ms()).sum();
-    Ok((matched, gets, bytes, s3_ms))
+            let mut opened = Vec::with_capacity(s3_readers.len());
+            for r in &s3_readers {
+                let vx_reader = Arc::new(SimS3VortexRead::from_s3(Arc::clone(r)));
+                let vxf = session.open_options().open_read(vx_reader).await?;
+                opened.push(vxf);
+            }
+
+            let matched = run_vortex_query(session, &opened, table, qname, sample_tid).await?;
+            let gets: u64 = s3_readers.iter().map(|r| r.counters().gets).sum();
+            let bytes: u64 = s3_readers.iter().map(|r| r.counters().bytes_from_s3).sum();
+            let s3_ms: f64 = s3_readers.iter().map(|r| r.simulated_latency_ms()).sum();
+            Ok((matched, gets, bytes, s3_ms))
+        }
+    })
+    .await
 }
 
 fn ts_scalar(session: &VortexSession, ns: i64) -> BenchResult<Scalar> {

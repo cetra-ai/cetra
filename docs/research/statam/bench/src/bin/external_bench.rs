@@ -41,8 +41,8 @@ use cetra_column::{
 use cetra_statam::{
     ChunkPackBuilder, ChunkPackReader, CoalesceMode, IdLookup, InMemoryPackResolver, PackResolver,
     PackWriteOptions, Predicate as StatamPred, RangeReader, ScanRequest, SimulatedS3Config,
-    SimulatedS3Reader, SliceReader, StatamReader, StatamWriter, SubstringQuery, TableKind,
-    WriteOptions, WriteProfile, ZonePred, ZoneValue,
+    SliceReader, StatamReader, StatamWriter, SubstringQuery, TableKind, WriteOptions, WriteProfile,
+    ZonePred, ZoneValue,
 };
 use flate2::read::GzDecoder;
 use futures::stream::TryStreamExt;
@@ -55,6 +55,7 @@ use parquet::arrow::arrow_reader::{
     ParquetRecordBatchReaderBuilder, RowFilter, RowSelection, RowSelector,
 };
 use parquet::arrow::arrow_writer::ArrowWriter;
+use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 use parquet::bloom_filter::Sbbf;
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData, RowGroupMetaData};
 use parquet::file::page_index::column_index::ColumnIndexMetaData;
@@ -74,14 +75,17 @@ use vortex::file::{OpenOptionsSessionExt, VortexFile};
 use vortex::session::VortexSession;
 
 use statam_bench7::lance_bench::{
-    lance_scan_projected, lance_take_indices, open_lance_local, open_lance_s3,
+    lance_scan_projected, lance_take_indices, open_lance_from_bench_s3, open_lance_local,
     prepare_lance_batches, write_lance_bytes,
 };
 use statam_bench7::queries::{
     PACK_ID, SimS3PackResolver, check_parity, measure_local_async_ms, measure_local_ms,
 };
+use statam_bench7::real_s3::{
+    BenchS3ParquetAsyncReader, BenchS3Reader, RealS3Mode, run_s3_adaptive, s3_only_mode,
+};
 use statam_bench7::report::{QueryBenchRow, WriteBenchRow, format_kib};
-use statam_bench7::s3_parquet::{SimS3ChunkReader, find_leaf_idx, open_parquet_builder};
+use statam_bench7::s3_parquet::{find_leaf_idx, open_parquet_async_builder};
 use statam_bench7::schema::{
     BenchResult, ParquetVariant, arrow_to_cetra_batch, generic_parquet_writer_props,
     normalize_arrow_batch,
@@ -588,21 +592,15 @@ async fn open_single_strata_local(bytes: &Bytes) -> BenchResult<Arc<StrataFile>>
     Ok(Arc::new(f))
 }
 
-async fn open_single_strata_s3(
-    bytes: &Bytes,
-    s3_cfg: SimulatedS3Config,
-) -> BenchResult<(Arc<StrataFile>, Arc<SimulatedS3Reader>)> {
+async fn open_single_strata_from_bench_s3(s3: Arc<BenchS3Reader>) -> BenchResult<Arc<StrataFile>> {
     let path = ObjectPath::from("part_000.strata");
-    let s3 = Arc::new(SimulatedS3Reader::from_bytes(bytes.clone(), s3_cfg));
-    s3.evict_all();
-    s3.reset_counters();
     let mut map = HashMap::with_capacity(1);
-    map.insert(path.clone(), Arc::clone(&s3));
+    map.insert(path.clone(), s3);
     let store: Arc<dyn ObjectStore> = Arc::new(SimS3ObjectStore::new(map));
     let mut cfg = StrataConfig::default();
     cfg.point_gap = 256 * 1024;
     let f = StrataFile::open(store, path, None, &cfg).await?;
-    Ok((Arc::new(f), s3))
+    Ok(Arc::new(f))
 }
 
 #[derive(Clone)]
@@ -1166,14 +1164,104 @@ fn execute_gen_parquet_local(
     execute_gen_parquet_scan_with_builder(bytes, builder, proj_roots, filters)
 }
 
-fn execute_gen_parquet_s3(
-    reader: &SimS3ChunkReader,
+async fn execute_gen_parquet_s3(
+    reader: &Arc<BenchS3Reader>,
     with_pi: bool,
     proj_roots: &[usize],
     filters: &[GenPqPred],
 ) -> BenchResult<usize> {
-    let builder = open_parquet_builder(reader, with_pi)?;
-    execute_gen_parquet_scan_with_builder(reader, builder, proj_roots, filters)
+    let mut builder = open_parquet_async_builder(reader, with_pi).await?;
+    let meta = Arc::clone(builder.metadata());
+    let parquet_schema = meta.file_metadata().schema_descr_ptr();
+    let descr = meta.file_metadata().schema_descr();
+
+    let mut surviving = Vec::new();
+    for rg_idx in 0..meta.num_row_groups() {
+        let rg = meta.row_group(rg_idx);
+        if !gen_rg_matches_filters(rg, descr, filters) {
+            continue;
+        }
+        let mut bloom_ok = true;
+        for f in filters {
+            if let Some(leaf_idx) = find_leaf_idx(descr, f.col_name()) {
+                match f {
+                    GenPqPred::I64Eq { val, .. } => {
+                        if let Some(sbbf) = builder
+                            .get_row_group_column_bloom_filter(rg_idx, leaf_idx)
+                            .await?
+                            && !sbbf.check(val)
+                        {
+                            bloom_ok = false;
+                            break;
+                        }
+                    }
+                    GenPqPred::Utf8Eq { val, .. } => {
+                        if let Some(sbbf) = builder
+                            .get_row_group_column_bloom_filter(rg_idx, leaf_idx)
+                            .await?
+                            && !sbbf.check(val.as_bytes())
+                        {
+                            bloom_ok = false;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !bloom_ok {
+            continue;
+        }
+        let kept = prune_gen_rg_pages(&meta, rg_idx, filters);
+        if !kept.is_empty() {
+            surviving.push((rg_idx, kept));
+        }
+    }
+
+    if surviving.is_empty() {
+        return Ok(0);
+    }
+
+    let rgs: Vec<usize> = surviving.iter().map(|(rg, _)| *rg).collect();
+    let mut all_full = true;
+    let mut selectors = Vec::new();
+    for (rg_idx, kept) in &surviving {
+        let num_rows = usize::try_from(meta.row_group(*rg_idx).num_rows()).unwrap_or(0);
+        if kept.len() != 1 || kept[0] != (0..num_rows) {
+            all_full = false;
+        }
+        let mut cursor = 0usize;
+        for r in kept {
+            if r.start > cursor {
+                selectors.push(RowSelector::skip(r.start - cursor));
+            }
+            selectors.push(RowSelector::select(r.end - r.start));
+            cursor = r.end;
+        }
+        if cursor < num_rows {
+            selectors.push(RowSelector::skip(num_rows - cursor));
+        }
+    }
+
+    builder = builder
+        .with_row_groups(rgs)
+        .with_projection(ProjectionMask::roots(
+            &parquet_schema,
+            proj_roots.iter().copied(),
+        ))
+        .with_batch_size(16_384);
+
+    if !all_full {
+        builder = builder.with_row_selection(RowSelection::from(selectors));
+    }
+    let row_preds = build_gen_row_preds(&parquet_schema, filters);
+    if !row_preds.is_empty() {
+        builder = builder.with_row_filter(RowFilter::new(row_preds));
+    }
+
+    let stream = builder.build()?;
+    let batches: Vec<RecordBatch> = stream.try_collect().await?;
+    Ok(batches.iter().map(RecordBatch::num_rows).sum())
 }
 
 #[derive(Clone, Copy)]
@@ -1384,7 +1472,7 @@ fn eval_arrow_map_key_eq(batch: &RecordBatch, col_name: &str, key: &str, val: &s
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_parquet_bench_query(
+async fn run_parquet_bench_query(
     wl: &str,
     qname: &str,
     pq_default: &Option<Bytes>,
@@ -1397,33 +1485,51 @@ fn run_parquet_bench_query(
     expected_matches: &mut Option<usize>,
     query_rows: &mut Vec<QueryBenchRow>,
 ) -> BenchResult<()> {
+    let s3_only = s3_only_mode();
     for (fmt, bytes_opt, with_pi) in [
         ("pq_default", pq_default, false),
         ("pq_tuned", pq_tuned, true),
         ("pq_cetra", pq_cetra, true),
     ] {
         let Some(bytes) = bytes_opt else { continue };
-        let opts = ArrowReaderOptions::new().with_page_index_policy(if with_pi {
-            PageIndexPolicy::Optional
+        let (local_matched_opt, local_ms, local_p95_ms) = if s3_only {
+            (None, 0.0, 0.0)
         } else {
-            PageIndexPolicy::Skip
-        });
-        let meta = ArrowReaderMetadata::load(bytes, opts)?;
-        let (matched, local_ms, local_p95_ms) = measure_local_ms(
-            || execute_gen_parquet_local(bytes, &meta, pq_proj, pq_preds),
-            warm_runs,
-        )?;
+            let opts = ArrowReaderOptions::new().with_page_index_policy(if with_pi {
+                PageIndexPolicy::Optional
+            } else {
+                PageIndexPolicy::Skip
+            });
+            let meta = ArrowReaderMetadata::load(bytes, opts)?;
+            let (m, med, p95) = measure_local_ms(
+                || execute_gen_parquet_local(bytes, &meta, pq_proj, pq_preds),
+                warm_runs,
+            )?;
+            (Some(m), med, p95)
+        };
 
-        let s3_reader = SimS3ChunkReader::new(Arc::new(SimulatedS3Reader::from_bytes(
-            bytes.clone(),
-            s3_cfg,
-        )));
-        s3_reader.s3().evict_all();
-        s3_reader.s3().reset_counters();
-        let s3_matched = execute_gen_parquet_s3(&s3_reader, with_pi, pq_proj, pq_preds)?;
-        if s3_matched != matched {
-            return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {matched}").into());
+        let s3_reader = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+        let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+            let s3_reader = Arc::clone(&s3_reader);
+            async move {
+                s3_reader.evict_all();
+                s3_reader.reset_counters();
+                let m = execute_gen_parquet_s3(&s3_reader, with_pi, pq_proj, pq_preds).await?;
+                Ok((
+                    m,
+                    s3_reader.counters().gets,
+                    s3_reader.counters().bytes_from_s3,
+                    s3_reader.simulated_latency_ms(),
+                ))
+            }
+        })
+        .await?;
+        if let Some(lm) = local_matched_opt
+            && s3_matched != lm
+        {
+            return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {lm}").into());
         }
+        let matched = s3_matched;
         check_parity(expected_matches, wl, qname, fmt, matched)?;
         query_rows.push(QueryBenchRow {
             workload: wl.to_owned(),
@@ -1432,9 +1538,9 @@ fn run_parquet_bench_query(
             rows_matched: matched,
             local_ms,
             local_p95_ms,
-            s3_ms: s3_reader.s3().simulated_latency_ms(),
-            s3_gets: s3_reader.s3().counters().gets,
-            s3_bytes: s3_reader.s3().counters().bytes_from_s3,
+            s3_ms,
+            s3_gets,
+            s3_bytes,
             cold_open_gets: None,
             cold_open_tail_bytes: None,
         });
@@ -1457,24 +1563,42 @@ async fn run_vortex_bench_query(
     expected_matches: &mut Option<usize>,
     query_rows: &mut Vec<QueryBenchRow>,
 ) -> BenchResult<()> {
-    let (matched, local_ms, local_p95_ms) = measure_local_async_ms(
-        || execute_vortex_scan_with_post(vortex_session, local_file, proj, filt, post),
-        warm_runs,
-    )
-    .await?;
+    let (local_matched_opt, local_ms, local_p95_ms) = if s3_only_mode() {
+        (None, 0.0, 0.0)
+    } else {
+        let (m, med, p95) = measure_local_async_ms(
+            || execute_vortex_scan_with_post(vortex_session, local_file, proj, filt, post),
+            warm_runs,
+        )
+        .await?;
+        (Some(m), med, p95)
+    };
 
-    let s3_reader = Arc::new(SimulatedS3Reader::from_bytes(bytes.clone(), s3_cfg));
-    s3_reader.evict_all();
-    s3_reader.reset_counters();
-    let vx_read = Arc::new(SimS3VortexRead::new(
-        Arc::clone(&s3_reader) as Arc<dyn RangeReader>
-    ));
-    let s3_file = vortex_session.open_options().open_read(vx_read).await?;
-    let s3_matched =
-        execute_vortex_scan_with_post(vortex_session, &s3_file, proj, filt, post).await?;
-    if s3_matched != matched {
-        return Err(format!("vortex {qname}: s3 {s3_matched} != local {matched}").into());
+    let s3_reader = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+    let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+        let s3_reader = Arc::clone(&s3_reader);
+        async move {
+            s3_reader.evict_all();
+            s3_reader.reset_counters();
+            let vx_read = Arc::new(SimS3VortexRead::from_s3(Arc::clone(&s3_reader)));
+            let s3_file = vortex_session.open_options().open_read(vx_read).await?;
+            let m =
+                execute_vortex_scan_with_post(vortex_session, &s3_file, proj, filt, post).await?;
+            Ok((
+                m,
+                s3_reader.counters().gets,
+                s3_reader.counters().bytes_from_s3,
+                s3_reader.simulated_latency_ms(),
+            ))
+        }
+    })
+    .await?;
+    if let Some(lm) = local_matched_opt
+        && s3_matched != lm
+    {
+        return Err(format!("vortex {qname}: s3 {s3_matched} != local {lm}").into());
     }
+    let matched = s3_matched;
     check_parity(expected_matches, wl, qname, "vortex", matched)?;
     query_rows.push(QueryBenchRow {
         workload: wl.to_owned(),
@@ -1483,9 +1607,9 @@ async fn run_vortex_bench_query(
         rows_matched: matched,
         local_ms,
         local_p95_ms,
-        s3_ms: s3_reader.simulated_latency_ms(),
-        s3_gets: s3_reader.counters().gets,
-        s3_bytes: s3_reader.counters().bytes_from_s3,
+        s3_ms,
+        s3_gets,
+        s3_bytes,
         cold_open_gets: None,
         cold_open_tail_bytes: None,
     });
@@ -1498,40 +1622,64 @@ async fn run_lance_bench_query<F>(
     qname: &str,
     bytes: &Bytes,
     local_reader: &LanceFileReader,
-    mut exec: F,
+    exec: F,
     warm_runs: usize,
     s3_cfg: SimulatedS3Config,
     expected_matches: &mut Option<usize>,
     query_rows: &mut Vec<QueryBenchRow>,
 ) -> BenchResult<()>
 where
-    F: AsyncFnMut(&LanceFileReader) -> BenchResult<usize>,
+    F: AsyncFn(&LanceFileReader) -> BenchResult<usize>,
 {
-    let mut samples = Vec::with_capacity(warm_runs.max(1));
-    let mut matched = 0usize;
-    let runs = warm_runs.max(1);
-    for i in 0..=runs {
-        let t0 = Instant::now();
-        let n = exec(local_reader).await?;
-        let ms = t0.elapsed().as_secs_f64() * 1_000.0;
-        if i == 0 {
-            matched = n;
-        } else {
-            samples.push(ms);
+    let (local_matched_opt, local_ms, local_p95_ms) = if s3_only_mode() {
+        (None, 0.0, 0.0)
+    } else {
+        let mut samples = Vec::with_capacity(warm_runs.max(1));
+        let mut matched = 0usize;
+        let runs = warm_runs.max(1);
+        for i in 0..=runs {
+            let t0 = Instant::now();
+            let n = exec(local_reader).await?;
+            let ms = t0.elapsed().as_secs_f64() * 1_000.0;
+            if i == 0 {
+                matched = n;
+            } else {
+                samples.push(ms);
+            }
         }
-    }
-    samples.sort_by(f64::total_cmp);
-    let local_ms = samples[samples.len() / 2];
-    let p95_idx = ((samples.len() as f64 * 0.95).ceil() as usize)
-        .saturating_sub(1)
-        .min(samples.len() - 1);
-    let local_p95_ms = samples[p95_idx];
+        samples.sort_by(f64::total_cmp);
+        let local_ms = samples[samples.len() / 2];
+        let p95_idx = ((samples.len() as f64 * 0.95).ceil() as usize)
+            .saturating_sub(1)
+            .min(samples.len() - 1);
+        let local_p95_ms = samples[p95_idx];
+        (Some(matched), local_ms, local_p95_ms)
+    };
 
-    let (s3_reader, s3_file) = open_lance_s3(bytes, s3_cfg).await?;
-    let s3_matched = exec(&s3_reader).await?;
-    if s3_matched != matched {
-        return Err(format!("lance {qname}: s3 {s3_matched} != local {matched}").into());
+    let s3_file = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+    let exec_ref = &exec;
+    let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+        let s3_file = Arc::clone(&s3_file);
+        async move {
+            s3_file.evict_all();
+            s3_file.reset_counters();
+            let s3_reader = open_lance_from_bench_s3(Arc::clone(&s3_file)).await?;
+            let m = exec_ref(&s3_reader).await?;
+            Ok((
+                m,
+                s3_file.counters().gets,
+                s3_file.counters().bytes_from_s3,
+                s3_file.simulated_latency_ms(),
+            ))
+        }
+    })
+    .await?;
+    if let Some(lm) = local_matched_opt
+        && s3_matched != lm
+    {
+        return Err(format!("lance {qname}: s3 {s3_matched} != local {lm}").into());
     }
+    let matched = s3_matched;
     check_parity(expected_matches, wl, qname, "lance", matched)?;
     query_rows.push(QueryBenchRow {
         workload: wl.to_owned(),
@@ -1540,9 +1688,9 @@ where
         rows_matched: matched,
         local_ms,
         local_p95_ms,
-        s3_ms: s3_file.simulated_latency_ms(),
-        s3_gets: s3_file.counters().gets,
-        s3_bytes: s3_file.counters().bytes_from_s3,
+        s3_ms,
+        s3_gets,
+        s3_bytes,
         cold_open_gets: None,
         cold_open_tail_bytes: None,
     });
@@ -1550,7 +1698,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_statam_bench_query(
+async fn run_statam_bench_query(
     wl: &str,
     qname: &str,
     statam_l0: &Option<Bytes>,
@@ -1567,55 +1715,73 @@ fn run_statam_bench_query(
     {
         return Ok(());
     }
+    let s3_only = s3_only_mode();
     for (fmt, bytes_opt, pack_opt) in [
         ("statam_l0", statam_l0, None),
         ("statam_l1", statam_l1, statam_l1_pack),
     ] {
         let Some(bytes) = bytes_opt else { continue };
-        let warm_pack: Option<Arc<dyn PackResolver>> = if let Some(pb) = pack_opt {
-            let mut res = InMemoryPackResolver::new();
-            res.insert_bytes(PACK_ID, pb.clone())?;
-            Some(Arc::new(res))
+        let (local_matched_opt, local_ms, local_p95_ms) = if s3_only {
+            (None, 0.0, 0.0)
         } else {
-            None
+            let warm_pack: Option<Arc<dyn PackResolver>> = if let Some(pb) = pack_opt {
+                let mut res = InMemoryPackResolver::new();
+                res.insert_bytes(PACK_ID, pb.clone())?;
+                Some(Arc::new(res))
+            } else {
+                None
+            };
+            let local_reader =
+                StatamReader::open(Arc::new(SliceReader::new(bytes.clone())), warm_pack)?;
+            let (m, med, p95) =
+                measure_local_ms(|| execute_statam_scan(&local_reader, req), warm_runs)?;
+            (Some(m), med, p95)
         };
-        let local_reader =
-            StatamReader::open(Arc::new(SliceReader::new(bytes.clone())), warm_pack)?;
-        let (matched, local_ms, local_p95_ms) =
-            measure_local_ms(|| execute_statam_scan(&local_reader, req), warm_runs)?;
 
-        let s3_file = Arc::new(SimulatedS3Reader::from_bytes(bytes.clone(), s3_cfg));
-        s3_file.evict_all();
-        s3_file.reset_counters();
-        let s3_pack =
-            pack_opt.map(|pb| Arc::new(SimulatedS3Reader::from_bytes(pb.clone(), s3_cfg)));
+        let s3_file = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+        let s3_pack = pack_opt.map(|pb| BenchS3Reader::from_bytes(pb.clone(), s3_cfg));
         let s3_resolver = s3_pack
             .as_ref()
             .map(|ps3| Arc::new(SimS3PackResolver::new(PACK_ID, Arc::clone(ps3))));
-        if let Some(ps3) = &s3_pack {
-            ps3.evict_all();
-            ps3.reset_counters();
-        }
-        if let Some(res) = &s3_resolver {
-            res.reset_opened();
-        }
-        let pack_dyn = s3_resolver
-            .as_ref()
-            .map(|r| Arc::clone(r) as Arc<dyn PackResolver>);
-        let s3_reader = StatamReader::open(Arc::clone(&s3_file) as Arc<dyn RangeReader>, pack_dyn)?;
-        let s3_matched = execute_statam_scan(&s3_reader, req)?;
-        if s3_matched != matched {
-            return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {matched}").into());
-        }
 
-        let mut gets = s3_file.counters().gets;
-        let mut s3_bytes = s3_file.counters().bytes_from_s3;
-        let mut s3_ms = s3_file.simulated_latency_ms();
-        if let Some(ps3) = &s3_pack {
-            gets += ps3.counters().gets;
-            s3_bytes += ps3.counters().bytes_from_s3;
-            s3_ms += ps3.simulated_latency_ms();
+        let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+            let s3_file = Arc::clone(&s3_file);
+            let s3_pack = s3_pack.clone();
+            let s3_resolver = s3_resolver.clone();
+            async move {
+                s3_file.evict_all();
+                s3_file.reset_counters();
+                if let Some(ps3) = &s3_pack {
+                    ps3.evict_all();
+                    ps3.reset_counters();
+                }
+                if let Some(res) = &s3_resolver {
+                    res.reset_opened();
+                }
+                let pack_dyn = s3_resolver
+                    .as_ref()
+                    .map(|r| Arc::clone(r) as Arc<dyn PackResolver>);
+                let s3_reader =
+                    StatamReader::open(Arc::clone(&s3_file) as Arc<dyn RangeReader>, pack_dyn)?;
+                let m = execute_statam_scan(&s3_reader, req)?;
+                let mut gets = s3_file.counters().gets;
+                let mut s3_bytes = s3_file.counters().bytes_from_s3;
+                let mut s3_ms = s3_file.simulated_latency_ms();
+                if let Some(ps3) = &s3_pack {
+                    gets += ps3.counters().gets;
+                    s3_bytes += ps3.counters().bytes_from_s3;
+                    s3_ms += ps3.simulated_latency_ms();
+                }
+                Ok((m, gets, s3_bytes, s3_ms))
+            }
+        })
+        .await?;
+        if let Some(lm) = local_matched_opt
+            && s3_matched != lm
+        {
+            return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {lm}").into());
         }
+        let matched = s3_matched;
 
         check_parity(expected_matches, wl, qname, fmt, matched)?;
         query_rows.push(QueryBenchRow {
@@ -1626,7 +1792,7 @@ fn run_statam_bench_query(
             local_ms,
             local_p95_ms,
             s3_ms,
-            s3_gets: gets,
+            s3_gets,
             s3_bytes,
             cold_open_gets: None,
             cold_open_tail_bytes: None,
@@ -1991,33 +2157,53 @@ async fn run_clickbench_suite(
         let mut expected_matches: Option<usize> = None;
         let (pq_proj, pq_preds) = clickbench_pq_spec(qname, &params);
 
+        let s3_only = s3_only_mode();
         for (fmt, bytes_opt, with_pi) in [
             ("pq_default", &pq_default, false),
             ("pq_tuned", &pq_tuned, true),
             ("pq_cetra", &pq_cetra, true),
         ] {
             let Some(bytes) = bytes_opt else { continue };
-            let opts = ArrowReaderOptions::new().with_page_index_policy(if with_pi {
-                PageIndexPolicy::Optional
+            let (local_matched_opt, local_ms, local_p95_ms) = if s3_only {
+                (None, 0.0, 0.0)
             } else {
-                PageIndexPolicy::Skip
-            });
-            let meta = ArrowReaderMetadata::load(bytes, opts)?;
-            let (matched, local_ms, local_p95_ms) = measure_local_ms(
-                || execute_gen_parquet_local(bytes, &meta, &pq_proj, &pq_preds),
-                warm_runs,
-            )?;
+                let opts = ArrowReaderOptions::new().with_page_index_policy(if with_pi {
+                    PageIndexPolicy::Optional
+                } else {
+                    PageIndexPolicy::Skip
+                });
+                let meta = ArrowReaderMetadata::load(bytes, opts)?;
+                let (m, med, p95) = measure_local_ms(
+                    || execute_gen_parquet_local(bytes, &meta, &pq_proj, &pq_preds),
+                    warm_runs,
+                )?;
+                (Some(m), med, p95)
+            };
 
-            let s3_reader = SimS3ChunkReader::new(Arc::new(SimulatedS3Reader::from_bytes(
-                bytes.clone(),
-                s3_cfg,
-            )));
-            s3_reader.s3().evict_all();
-            s3_reader.s3().reset_counters();
-            let s3_matched = execute_gen_parquet_s3(&s3_reader, with_pi, &pq_proj, &pq_preds)?;
-            if s3_matched != matched {
-                return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {matched}").into());
+            let s3_reader = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+            let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+                let s3_reader = Arc::clone(&s3_reader);
+                let pq_proj = &pq_proj;
+                let pq_preds = &pq_preds;
+                async move {
+                    s3_reader.evict_all();
+                    s3_reader.reset_counters();
+                    let m = execute_gen_parquet_s3(&s3_reader, with_pi, pq_proj, pq_preds).await?;
+                    Ok((
+                        m,
+                        s3_reader.counters().gets,
+                        s3_reader.counters().bytes_from_s3,
+                        s3_reader.simulated_latency_ms(),
+                    ))
+                }
+            })
+            .await?;
+            if let Some(lm) = local_matched_opt
+                && s3_matched != lm
+            {
+                return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {lm}").into());
             }
+            let matched = s3_matched;
             check_parity(&mut expected_matches, wl, qname, fmt, matched)?;
             query_rows.push(QueryBenchRow {
                 workload: wl.to_owned(),
@@ -2026,9 +2212,9 @@ async fn run_clickbench_suite(
                 rows_matched: matched,
                 local_ms,
                 local_p95_ms,
-                s3_ms: s3_reader.s3().simulated_latency_ms(),
-                s3_gets: s3_reader.s3().counters().gets,
-                s3_bytes: s3_reader.s3().counters().bytes_from_s3,
+                s3_ms,
+                s3_gets,
+                s3_bytes,
                 cold_open_gets: None,
                 cold_open_tail_bytes: None,
             });
@@ -2036,24 +2222,51 @@ async fn run_clickbench_suite(
 
         if let (Some(bytes), Some(local_files)) = (&vortex_bytes, &vortex_file_local) {
             let (proj, filt, like) = clickbench_vortex_spec(qname, &params);
-            let (matched, local_ms, local_p95_ms) = measure_local_async_ms(
-                || execute_vortex_scan(vortex_session, &local_files[0], &proj, filt.as_ref(), like),
-                warm_runs,
-            )
-            .await?;
+            let (local_matched_opt, local_ms, local_p95_ms) = if s3_only {
+                (None, 0.0, 0.0)
+            } else {
+                let (m, med, p95) = measure_local_async_ms(
+                    || {
+                        execute_vortex_scan(
+                            vortex_session,
+                            &local_files[0],
+                            &proj,
+                            filt.as_ref(),
+                            like,
+                        )
+                    },
+                    warm_runs,
+                )
+                .await?;
+                (Some(m), med, p95)
+            };
 
-            let s3_reader = Arc::new(SimulatedS3Reader::from_bytes(bytes.clone(), s3_cfg));
-            s3_reader.evict_all();
-            s3_reader.reset_counters();
-            let vx_read = Arc::new(SimS3VortexRead::new(
-                Arc::clone(&s3_reader) as Arc<dyn RangeReader>
-            ));
-            let s3_file = vortex_session.open_options().open_read(vx_read).await?;
-            let s3_matched =
-                execute_vortex_scan(vortex_session, &s3_file, &proj, filt.as_ref(), like).await?;
-            if s3_matched != matched {
-                return Err(format!("vortex {qname}: s3 {s3_matched} != local {matched}").into());
+            let s3_reader = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+            let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+                let s3_reader = Arc::clone(&s3_reader);
+                let proj = &proj;
+                let filt = filt.as_ref();
+                async move {
+                    s3_reader.evict_all();
+                    s3_reader.reset_counters();
+                    let vx_read = Arc::new(SimS3VortexRead::from_s3(Arc::clone(&s3_reader)));
+                    let s3_file = vortex_session.open_options().open_read(vx_read).await?;
+                    let m = execute_vortex_scan(vortex_session, &s3_file, proj, filt, like).await?;
+                    Ok((
+                        m,
+                        s3_reader.counters().gets,
+                        s3_reader.counters().bytes_from_s3,
+                        s3_reader.simulated_latency_ms(),
+                    ))
+                }
+            })
+            .await?;
+            if let Some(lm) = local_matched_opt
+                && s3_matched != lm
+            {
+                return Err(format!("vortex {qname}: s3 {s3_matched} != local {lm}").into());
             }
+            let matched = s3_matched;
             check_parity(&mut expected_matches, wl, qname, "vortex", matched)?;
             query_rows.push(QueryBenchRow {
                 workload: wl.to_owned(),
@@ -2062,9 +2275,9 @@ async fn run_clickbench_suite(
                 rows_matched: matched,
                 local_ms,
                 local_p95_ms,
-                s3_ms: s3_reader.simulated_latency_ms(),
-                s3_gets: s3_reader.counters().gets,
-                s3_bytes: s3_reader.counters().bytes_from_s3,
+                s3_ms,
+                s3_gets,
+                s3_bytes,
                 cold_open_gets: None,
                 cold_open_tail_bytes: None,
             });
@@ -2109,18 +2322,42 @@ async fn run_clickbench_suite(
                 false
             };
 
-            let (matched, local_ms, local_p95_ms) = measure_local_async_ms(
-                || execute_clickbench_strata(local_file, qname, &params, use_contains),
-                warm_runs,
-            )
-            .await?;
+            let (local_matched_opt, local_ms, local_p95_ms) = if s3_only {
+                (None, 0.0, 0.0)
+            } else {
+                let (m, med, p95) = measure_local_async_ms(
+                    || execute_clickbench_strata(local_file, qname, &params, use_contains),
+                    warm_runs,
+                )
+                .await?;
+                (Some(m), med, p95)
+            };
 
-            let (s3_file, s3_reader) = open_single_strata_s3(bytes, s3_cfg).await?;
-            let s3_matched =
-                execute_clickbench_strata(&s3_file, qname, &params, use_contains).await?;
-            if s3_matched != matched {
-                return Err(format!("strata {qname}: s3 {s3_matched} != local {matched}").into());
+            let s3_reader = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+            let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+                let s3_reader = Arc::clone(&s3_reader);
+                let params = &params;
+                async move {
+                    s3_reader.evict_all();
+                    s3_reader.reset_counters();
+                    let s3_file = open_single_strata_from_bench_s3(Arc::clone(&s3_reader)).await?;
+                    let m =
+                        execute_clickbench_strata(&s3_file, qname, params, use_contains).await?;
+                    Ok((
+                        m,
+                        s3_reader.counters().gets,
+                        s3_reader.counters().bytes_from_s3,
+                        s3_reader.simulated_latency_ms(),
+                    ))
+                }
+            })
+            .await?;
+            if let Some(lm) = local_matched_opt
+                && s3_matched != lm
+            {
+                return Err(format!("strata {qname}: s3 {s3_matched} != local {lm}").into());
             }
+            let matched = s3_matched;
             check_parity(&mut expected_matches, wl, qname, "strata", matched)?;
             query_rows.push(QueryBenchRow {
                 workload: wl.to_owned(),
@@ -2129,9 +2366,9 @@ async fn run_clickbench_suite(
                 rows_matched: matched,
                 local_ms,
                 local_p95_ms,
-                s3_ms: s3_reader.simulated_latency_ms(),
-                s3_gets: s3_reader.counters().gets,
-                s3_bytes: s3_reader.counters().bytes_from_s3,
+                s3_ms,
+                s3_gets,
+                s3_bytes,
                 cold_open_gets: None,
                 cold_open_tail_bytes: None,
             });
@@ -2151,17 +2388,39 @@ async fn run_clickbench_suite(
             };
             let mut req = clickbench_statam_spec(qname, &params);
             req.read_threads = read_threads;
-            let (matched, local_ms, local_p95_ms) =
-                measure_local_ms(|| execute_statam_scan(local_reader, &req), warm_runs)?;
+            let (local_matched_opt, local_ms, local_p95_ms) = if s3_only {
+                (None, 0.0, 0.0)
+            } else {
+                let (m, med, p95) =
+                    measure_local_ms(|| execute_statam_scan(local_reader, &req), warm_runs)?;
+                (Some(m), med, p95)
+            };
 
-            let s3_file = Arc::new(SimulatedS3Reader::from_bytes(bytes.clone(), s3_cfg));
-            s3_file.evict_all();
-            s3_file.reset_counters();
-            let s3_reader = StatamReader::open(Arc::clone(&s3_file) as Arc<dyn RangeReader>, None)?;
-            let s3_matched = execute_statam_scan(&s3_reader, &req)?;
-            if s3_matched != matched {
-                return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {matched}").into());
+            let s3_file = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+            let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+                let s3_file = Arc::clone(&s3_file);
+                let req = &req;
+                async move {
+                    s3_file.evict_all();
+                    s3_file.reset_counters();
+                    let s3_reader =
+                        StatamReader::open(Arc::clone(&s3_file) as Arc<dyn RangeReader>, None)?;
+                    let m = execute_statam_scan(&s3_reader, req)?;
+                    Ok((
+                        m,
+                        s3_file.counters().gets,
+                        s3_file.counters().bytes_from_s3,
+                        s3_file.simulated_latency_ms(),
+                    ))
+                }
+            })
+            .await?;
+            if let Some(lm) = local_matched_opt
+                && s3_matched != lm
+            {
+                return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {lm}").into());
             }
+            let matched = s3_matched;
             check_parity(&mut expected_matches, wl, qname, fmt, matched)?;
             query_rows.push(QueryBenchRow {
                 workload: wl.to_owned(),
@@ -2170,9 +2429,9 @@ async fn run_clickbench_suite(
                 rows_matched: matched,
                 local_ms,
                 local_p95_ms,
-                s3_ms: s3_file.simulated_latency_ms(),
-                s3_gets: s3_file.counters().gets,
-                s3_bytes: s3_file.counters().bytes_from_s3,
+                s3_ms,
+                s3_gets,
+                s3_bytes,
                 cold_open_gets: None,
                 cold_open_tail_bytes: None,
             });
@@ -2919,33 +3178,53 @@ async fn run_row_filter_suite(
             val: filter_val.to_owned(),
         }];
 
+        let s3_only = s3_only_mode();
         for (fmt, bytes_opt, with_pi) in [
             ("pq_default", &pq_default, false),
             ("pq_tuned", &pq_tuned, true),
             ("pq_cetra", &pq_cetra, true),
         ] {
             let Some(bytes) = bytes_opt else { continue };
-            let opts = ArrowReaderOptions::new().with_page_index_policy(if with_pi {
-                PageIndexPolicy::Optional
+            let (local_matched_opt, local_ms, local_p95_ms) = if s3_only {
+                (None, 0.0, 0.0)
             } else {
-                PageIndexPolicy::Skip
-            });
-            let meta = ArrowReaderMetadata::load(bytes, opts)?;
-            let (matched, local_ms, local_p95_ms) = measure_local_ms(
-                || execute_gen_parquet_local(bytes, &meta, &proj_cols, &pq_preds),
-                warm_runs,
-            )?;
+                let opts = ArrowReaderOptions::new().with_page_index_policy(if with_pi {
+                    PageIndexPolicy::Optional
+                } else {
+                    PageIndexPolicy::Skip
+                });
+                let meta = ArrowReaderMetadata::load(bytes, opts)?;
+                let (m, med, p95) = measure_local_ms(
+                    || execute_gen_parquet_local(bytes, &meta, &proj_cols, &pq_preds),
+                    warm_runs,
+                )?;
+                (Some(m), med, p95)
+            };
 
-            let s3_reader = SimS3ChunkReader::new(Arc::new(SimulatedS3Reader::from_bytes(
-                bytes.clone(),
-                s3_cfg,
-            )));
-            s3_reader.s3().evict_all();
-            s3_reader.s3().reset_counters();
-            let s3_matched = execute_gen_parquet_s3(&s3_reader, with_pi, &proj_cols, &pq_preds)?;
-            if s3_matched != matched {
-                return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {matched}").into());
+            let s3_reader = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+            let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+                let s3_reader = Arc::clone(&s3_reader);
+                let pq_preds = &pq_preds;
+                async move {
+                    s3_reader.evict_all();
+                    s3_reader.reset_counters();
+                    let m =
+                        execute_gen_parquet_s3(&s3_reader, with_pi, &proj_cols, pq_preds).await?;
+                    Ok((
+                        m,
+                        s3_reader.counters().gets,
+                        s3_reader.counters().bytes_from_s3,
+                        s3_reader.simulated_latency_ms(),
+                    ))
+                }
+            })
+            .await?;
+            if let Some(lm) = local_matched_opt
+                && s3_matched != lm
+            {
+                return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {lm}").into());
             }
+            let matched = s3_matched;
             check_parity(&mut expected_matches, wl, qname, fmt, matched)?;
             query_rows.push(QueryBenchRow {
                 workload: wl.to_owned(),
@@ -2954,9 +3233,9 @@ async fn run_row_filter_suite(
                 rows_matched: matched,
                 local_ms,
                 local_p95_ms,
-                s3_ms: s3_reader.s3().simulated_latency_ms(),
-                s3_gets: s3_reader.s3().counters().gets,
-                s3_bytes: s3_reader.s3().counters().bytes_from_s3,
+                s3_ms,
+                s3_gets,
+                s3_bytes,
                 cold_open_gets: None,
                 cold_open_tail_bytes: None,
             });
@@ -2965,24 +3244,52 @@ async fn run_row_filter_suite(
         if let (Some(bytes), Some(local_files)) = (&vortex_bytes, &vortex_file_local) {
             let proj = select(["int64", "float64", "utf8", "ts"], root());
             let filt = eq(col(filter_col), lit(filter_val));
-            let (matched, local_ms, local_p95_ms) = measure_local_async_ms(
-                || execute_vortex_scan(vortex_session, &local_files[0], &proj, Some(&filt), None),
-                warm_runs,
-            )
-            .await?;
+            let (local_matched_opt, local_ms, local_p95_ms) = if s3_only {
+                (None, 0.0, 0.0)
+            } else {
+                let (m, med, p95) = measure_local_async_ms(
+                    || {
+                        execute_vortex_scan(
+                            vortex_session,
+                            &local_files[0],
+                            &proj,
+                            Some(&filt),
+                            None,
+                        )
+                    },
+                    warm_runs,
+                )
+                .await?;
+                (Some(m), med, p95)
+            };
 
-            let s3_reader = Arc::new(SimulatedS3Reader::from_bytes(bytes.clone(), s3_cfg));
-            s3_reader.evict_all();
-            s3_reader.reset_counters();
-            let vx_read = Arc::new(SimS3VortexRead::new(
-                Arc::clone(&s3_reader) as Arc<dyn RangeReader>
-            ));
-            let s3_file = vortex_session.open_options().open_read(vx_read).await?;
-            let s3_matched =
-                execute_vortex_scan(vortex_session, &s3_file, &proj, Some(&filt), None).await?;
-            if s3_matched != matched {
-                return Err(format!("vortex {qname}: s3 {s3_matched} != local {matched}").into());
+            let s3_reader = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+            let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+                let s3_reader = Arc::clone(&s3_reader);
+                let proj = &proj;
+                let filt = &filt;
+                async move {
+                    s3_reader.evict_all();
+                    s3_reader.reset_counters();
+                    let vx_read = Arc::new(SimS3VortexRead::from_s3(Arc::clone(&s3_reader)));
+                    let s3_file = vortex_session.open_options().open_read(vx_read).await?;
+                    let m = execute_vortex_scan(vortex_session, &s3_file, proj, Some(filt), None)
+                        .await?;
+                    Ok((
+                        m,
+                        s3_reader.counters().gets,
+                        s3_reader.counters().bytes_from_s3,
+                        s3_reader.simulated_latency_ms(),
+                    ))
+                }
+            })
+            .await?;
+            if let Some(lm) = local_matched_opt
+                && s3_matched != lm
+            {
+                return Err(format!("vortex {qname}: s3 {s3_matched} != local {lm}").into());
             }
+            let matched = s3_matched;
             check_parity(&mut expected_matches, wl, qname, "vortex", matched)?;
             query_rows.push(QueryBenchRow {
                 workload: wl.to_owned(),
@@ -2991,9 +3298,9 @@ async fn run_row_filter_suite(
                 rows_matched: matched,
                 local_ms,
                 local_p95_ms,
-                s3_ms: s3_reader.simulated_latency_ms(),
-                s3_gets: s3_reader.counters().gets,
-                s3_bytes: s3_reader.counters().bytes_from_s3,
+                s3_ms,
+                s3_gets,
+                s3_bytes,
                 cold_open_gets: None,
                 cold_open_tail_bytes: None,
             });
@@ -3049,14 +3356,39 @@ async fn run_row_filter_suite(
                     batches.iter().map(RecordBatch::num_rows).sum(),
                 )
             };
-            let (matched, local_ms, local_p95_ms) =
-                measure_local_async_ms(|| run_strata(Arc::clone(local_file)), warm_runs).await?;
+            let (local_matched_opt, local_ms, local_p95_ms) = if s3_only {
+                (None, 0.0, 0.0)
+            } else {
+                let (m, med, p95) =
+                    measure_local_async_ms(|| run_strata(Arc::clone(local_file)), warm_runs)
+                        .await?;
+                (Some(m), med, p95)
+            };
 
-            let (s3_file, s3_reader) = open_single_strata_s3(bytes, s3_cfg).await?;
-            let s3_matched = run_strata(s3_file).await?;
-            if s3_matched != matched {
-                return Err(format!("strata {qname}: s3 {s3_matched} != local {matched}").into());
+            let s3_reader = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+            let run_strata_ref = &run_strata;
+            let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+                let s3_reader = Arc::clone(&s3_reader);
+                async move {
+                    s3_reader.evict_all();
+                    s3_reader.reset_counters();
+                    let s3_file = open_single_strata_from_bench_s3(Arc::clone(&s3_reader)).await?;
+                    let m = run_strata_ref(s3_file).await?;
+                    Ok((
+                        m,
+                        s3_reader.counters().gets,
+                        s3_reader.counters().bytes_from_s3,
+                        s3_reader.simulated_latency_ms(),
+                    ))
+                }
+            })
+            .await?;
+            if let Some(lm) = local_matched_opt
+                && s3_matched != lm
+            {
+                return Err(format!("strata {qname}: s3 {s3_matched} != local {lm}").into());
             }
+            let matched = s3_matched;
             check_parity(&mut expected_matches, wl, qname, "strata", matched)?;
             query_rows.push(QueryBenchRow {
                 workload: wl.to_owned(),
@@ -3065,9 +3397,9 @@ async fn run_row_filter_suite(
                 rows_matched: matched,
                 local_ms,
                 local_p95_ms,
-                s3_ms: s3_reader.simulated_latency_ms(),
-                s3_gets: s3_reader.counters().gets,
-                s3_bytes: s3_reader.counters().bytes_from_s3,
+                s3_ms,
+                s3_gets,
+                s3_bytes,
                 cold_open_gets: None,
                 cold_open_tail_bytes: None,
             });
@@ -3094,17 +3426,39 @@ async fn run_row_filter_suite(
                 read_threads,
                 ..ScanRequest::default()
             };
-            let (matched, local_ms, local_p95_ms) =
-                measure_local_ms(|| execute_statam_scan(local_reader, &req), warm_runs)?;
+            let (local_matched_opt, local_ms, local_p95_ms) = if s3_only {
+                (None, 0.0, 0.0)
+            } else {
+                let (m, med, p95) =
+                    measure_local_ms(|| execute_statam_scan(local_reader, &req), warm_runs)?;
+                (Some(m), med, p95)
+            };
 
-            let s3_file = Arc::new(SimulatedS3Reader::from_bytes(bytes.clone(), s3_cfg));
-            s3_file.evict_all();
-            s3_file.reset_counters();
-            let s3_reader = StatamReader::open(Arc::clone(&s3_file) as Arc<dyn RangeReader>, None)?;
-            let s3_matched = execute_statam_scan(&s3_reader, &req)?;
-            if s3_matched != matched {
-                return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {matched}").into());
+            let s3_file = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+            let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+                let s3_file = Arc::clone(&s3_file);
+                let req = &req;
+                async move {
+                    s3_file.evict_all();
+                    s3_file.reset_counters();
+                    let s3_reader =
+                        StatamReader::open(Arc::clone(&s3_file) as Arc<dyn RangeReader>, None)?;
+                    let m = execute_statam_scan(&s3_reader, req)?;
+                    Ok((
+                        m,
+                        s3_file.counters().gets,
+                        s3_file.counters().bytes_from_s3,
+                        s3_file.simulated_latency_ms(),
+                    ))
+                }
+            })
+            .await?;
+            if let Some(lm) = local_matched_opt
+                && s3_matched != lm
+            {
+                return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {lm}").into());
             }
+            let matched = s3_matched;
             check_parity(&mut expected_matches, wl, qname, fmt, matched)?;
             query_rows.push(QueryBenchRow {
                 workload: wl.to_owned(),
@@ -3113,9 +3467,9 @@ async fn run_row_filter_suite(
                 rows_matched: matched,
                 local_ms,
                 local_p95_ms,
-                s3_ms: s3_file.simulated_latency_ms(),
-                s3_gets: s3_file.counters().gets,
-                s3_bytes: s3_file.counters().bytes_from_s3,
+                s3_ms,
+                s3_gets,
+                s3_bytes,
                 cold_open_gets: None,
                 cold_open_tail_bytes: None,
             });
@@ -3263,6 +3617,57 @@ fn execute_parquet_row_selection<R: ChunkReader + 'static>(
         rows += b?.num_rows();
     }
     Ok(rows)
+}
+
+async fn execute_parquet_row_selection_async(
+    mut builder: ParquetRecordBatchStreamBuilder<BenchS3ParquetAsyncReader>,
+    sorted_indices: &[u64],
+) -> BenchResult<usize> {
+    let meta = Arc::clone(builder.metadata());
+    let mut rgs = Vec::new();
+    let mut selectors = Vec::new();
+    let mut rg_start = 0u64;
+    let mut idx_pos = 0usize;
+
+    for rg_idx in 0..meta.num_row_groups() {
+        let rg_rows = u64::try_from(meta.row_group(rg_idx).num_rows()).unwrap_or(0);
+        let rg_end = rg_start + rg_rows;
+        while idx_pos < sorted_indices.len() && sorted_indices[idx_pos] < rg_start {
+            idx_pos += 1;
+        }
+        let mut cursor = rg_start;
+        let mut rg_has_hit = false;
+        while idx_pos < sorted_indices.len() && sorted_indices[idx_pos] < rg_end {
+            let target = sorted_indices[idx_pos];
+            if !rg_has_hit {
+                rgs.push(rg_idx);
+                rg_has_hit = true;
+            }
+            if target > cursor {
+                selectors.push(RowSelector::skip((target - cursor) as usize));
+            }
+            selectors.push(RowSelector::select(1));
+            cursor = target + 1;
+            idx_pos += 1;
+        }
+        if rg_has_hit && cursor < rg_end {
+            selectors.push(RowSelector::skip((rg_end - cursor) as usize));
+        }
+        rg_start = rg_end;
+    }
+
+    if rgs.is_empty() {
+        return Ok(0);
+    }
+
+    builder = builder
+        .with_row_groups(rgs)
+        .with_row_selection(RowSelection::from(selectors))
+        .with_batch_size(16_384);
+
+    let stream = builder.build()?;
+    let batches: Vec<RecordBatch> = stream.try_collect().await?;
+    Ok(batches.iter().map(RecordBatch::num_rows).sum())
 }
 
 async fn execute_vortex_take(
@@ -3443,40 +3848,58 @@ async fn run_random_access_suite(
     for &(qname, indices) in &cases {
         let mut expected_matches: Option<usize> = Some(indices.len());
 
+        let s3_only = s3_only_mode();
         for (fmt, bytes_opt, with_pi) in [
             ("pq_default", &pq_default, false),
             ("pq_tuned", &pq_tuned, true),
             ("pq_cetra", &pq_cetra, true),
         ] {
             let Some(bytes) = bytes_opt else { continue };
-            let opts = ArrowReaderOptions::new().with_page_index_policy(if with_pi {
-                PageIndexPolicy::Optional
+            let (local_matched_opt, local_ms, local_p95_ms) = if s3_only {
+                (None, 0.0, 0.0)
             } else {
-                PageIndexPolicy::Skip
-            });
-            let meta = ArrowReaderMetadata::load(bytes, opts)?;
-            let (matched, local_ms, local_p95_ms) = measure_local_ms(
-                || {
-                    let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
-                        bytes.clone(),
-                        meta.clone(),
-                    );
-                    execute_parquet_row_selection(builder, indices)
-                },
-                warm_runs,
-            )?;
+                let opts = ArrowReaderOptions::new().with_page_index_policy(if with_pi {
+                    PageIndexPolicy::Optional
+                } else {
+                    PageIndexPolicy::Skip
+                });
+                let meta = ArrowReaderMetadata::load(bytes, opts)?;
+                let (m, med, p95) = measure_local_ms(
+                    || {
+                        let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
+                            bytes.clone(),
+                            meta.clone(),
+                        );
+                        execute_parquet_row_selection(builder, indices)
+                    },
+                    warm_runs,
+                )?;
+                (Some(m), med, p95)
+            };
 
-            let s3_reader = SimS3ChunkReader::new(Arc::new(SimulatedS3Reader::from_bytes(
-                bytes.clone(),
-                s3_cfg,
-            )));
-            s3_reader.s3().evict_all();
-            s3_reader.s3().reset_counters();
-            let s3_builder = open_parquet_builder(&s3_reader, with_pi)?;
-            let s3_matched = execute_parquet_row_selection(s3_builder, indices)?;
-            if s3_matched != matched {
-                return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {matched}").into());
+            let s3_reader = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+            let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+                let s3_reader = Arc::clone(&s3_reader);
+                async move {
+                    s3_reader.evict_all();
+                    s3_reader.reset_counters();
+                    let s3_builder = open_parquet_async_builder(&s3_reader, with_pi).await?;
+                    let m = execute_parquet_row_selection_async(s3_builder, indices).await?;
+                    Ok((
+                        m,
+                        s3_reader.counters().gets,
+                        s3_reader.counters().bytes_from_s3,
+                        s3_reader.simulated_latency_ms(),
+                    ))
+                }
+            })
+            .await?;
+            if let Some(lm) = local_matched_opt
+                && s3_matched != lm
+            {
+                return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {lm}").into());
             }
+            let matched = s3_matched;
             check_parity(&mut expected_matches, wl, qname, fmt, matched)?;
             query_rows.push(QueryBenchRow {
                 workload: wl.to_owned(),
@@ -3485,32 +3908,50 @@ async fn run_random_access_suite(
                 rows_matched: matched,
                 local_ms,
                 local_p95_ms,
-                s3_ms: s3_reader.s3().simulated_latency_ms(),
-                s3_gets: s3_reader.s3().counters().gets,
-                s3_bytes: s3_reader.s3().counters().bytes_from_s3,
+                s3_ms,
+                s3_gets,
+                s3_bytes,
                 cold_open_gets: None,
                 cold_open_tail_bytes: None,
             });
         }
 
         if let (Some(bytes), Some(local_files)) = (&vortex_bytes, &vortex_file_local) {
-            let (matched, local_ms, local_p95_ms) = measure_local_async_ms(
-                || execute_vortex_take(vortex_session, &local_files[0], indices),
-                warm_runs,
-            )
-            .await?;
+            let (local_matched_opt, local_ms, local_p95_ms) = if s3_only {
+                (None, 0.0, 0.0)
+            } else {
+                let (m, med, p95) = measure_local_async_ms(
+                    || execute_vortex_take(vortex_session, &local_files[0], indices),
+                    warm_runs,
+                )
+                .await?;
+                (Some(m), med, p95)
+            };
 
-            let s3_reader = Arc::new(SimulatedS3Reader::from_bytes(bytes.clone(), s3_cfg));
-            s3_reader.evict_all();
-            s3_reader.reset_counters();
-            let vx_read = Arc::new(SimS3VortexRead::new(
-                Arc::clone(&s3_reader) as Arc<dyn RangeReader>
-            ));
-            let s3_file = vortex_session.open_options().open_read(vx_read).await?;
-            let s3_matched = execute_vortex_take(vortex_session, &s3_file, indices).await?;
-            if s3_matched != matched {
-                return Err(format!("vortex {qname}: s3 {s3_matched} != local {matched}").into());
+            let s3_reader = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+            let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+                let s3_reader = Arc::clone(&s3_reader);
+                async move {
+                    s3_reader.evict_all();
+                    s3_reader.reset_counters();
+                    let vx_read = Arc::new(SimS3VortexRead::from_s3(Arc::clone(&s3_reader)));
+                    let s3_file = vortex_session.open_options().open_read(vx_read).await?;
+                    let m = execute_vortex_take(vortex_session, &s3_file, indices).await?;
+                    Ok((
+                        m,
+                        s3_reader.counters().gets,
+                        s3_reader.counters().bytes_from_s3,
+                        s3_reader.simulated_latency_ms(),
+                    ))
+                }
+            })
+            .await?;
+            if let Some(lm) = local_matched_opt
+                && s3_matched != lm
+            {
+                return Err(format!("vortex {qname}: s3 {s3_matched} != local {lm}").into());
             }
+            let matched = s3_matched;
             check_parity(&mut expected_matches, wl, qname, "vortex", matched)?;
             query_rows.push(QueryBenchRow {
                 workload: wl.to_owned(),
@@ -3519,9 +3960,9 @@ async fn run_random_access_suite(
                 rows_matched: matched,
                 local_ms,
                 local_p95_ms,
-                s3_ms: s3_reader.simulated_latency_ms(),
-                s3_gets: s3_reader.counters().gets,
-                s3_bytes: s3_reader.counters().bytes_from_s3,
+                s3_ms,
+                s3_gets,
+                s3_bytes,
                 cold_open_gets: None,
                 cold_open_tail_bytes: None,
             });
@@ -3563,17 +4004,38 @@ async fn run_random_access_suite(
                 let batches = reader.take_rows(indices, None, read_threads)?;
                 Ok(batches.iter().map(Batch::num_rows).sum())
             };
-            let (matched, local_ms, local_p95_ms) =
-                measure_local_ms(|| execute_take(local_reader), warm_runs)?;
+            let (local_matched_opt, local_ms, local_p95_ms) = if s3_only {
+                (None, 0.0, 0.0)
+            } else {
+                let (m, med, p95) = measure_local_ms(|| execute_take(local_reader), warm_runs)?;
+                (Some(m), med, p95)
+            };
 
-            let s3_file = Arc::new(SimulatedS3Reader::from_bytes(bytes.clone(), s3_cfg));
-            s3_file.evict_all();
-            s3_file.reset_counters();
-            let s3_reader = StatamReader::open(Arc::clone(&s3_file) as Arc<dyn RangeReader>, None)?;
-            let s3_matched = execute_take(&s3_reader)?;
-            if s3_matched != matched {
-                return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {matched}").into());
+            let s3_file = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+            let execute_take_ref = &execute_take;
+            let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+                let s3_file = Arc::clone(&s3_file);
+                async move {
+                    s3_file.evict_all();
+                    s3_file.reset_counters();
+                    let s3_reader =
+                        StatamReader::open(Arc::clone(&s3_file) as Arc<dyn RangeReader>, None)?;
+                    let m = execute_take_ref(&s3_reader)?;
+                    Ok((
+                        m,
+                        s3_file.counters().gets,
+                        s3_file.counters().bytes_from_s3,
+                        s3_file.simulated_latency_ms(),
+                    ))
+                }
+            })
+            .await?;
+            if let Some(lm) = local_matched_opt
+                && s3_matched != lm
+            {
+                return Err(format!("{fmt} {qname}: s3 {s3_matched} != local {lm}").into());
             }
+            let matched = s3_matched;
             check_parity(&mut expected_matches, wl, qname, fmt, matched)?;
             query_rows.push(QueryBenchRow {
                 workload: wl.to_owned(),
@@ -3582,9 +4044,9 @@ async fn run_random_access_suite(
                 rows_matched: matched,
                 local_ms,
                 local_p95_ms,
-                s3_ms: s3_file.simulated_latency_ms(),
-                s3_gets: s3_file.counters().gets,
-                s3_bytes: s3_file.counters().bytes_from_s3,
+                s3_ms,
+                s3_gets,
+                s3_bytes,
                 cold_open_gets: None,
                 cold_open_tail_bytes: None,
             });
@@ -3842,24 +4304,48 @@ async fn run_strata_bench_query<F, Fut>(
     qname: &str,
     bytes: &Bytes,
     local_file: &Arc<StrataFile>,
-    mut exec: F,
+    exec: F,
     warm_runs: usize,
     s3_cfg: SimulatedS3Config,
     expected_matches: &mut Option<usize>,
     query_rows: &mut Vec<QueryBenchRow>,
 ) -> BenchResult<()>
 where
-    F: FnMut(Arc<StrataFile>) -> Fut,
+    F: Fn(Arc<StrataFile>) -> Fut,
     Fut: std::future::Future<Output = BenchResult<usize>>,
 {
-    let (matched, local_ms, local_p95_ms) =
-        measure_local_async_ms(|| exec(Arc::clone(local_file)), warm_runs).await?;
+    let (local_matched_opt, local_ms, local_p95_ms) = if s3_only_mode() {
+        (None, 0.0, 0.0)
+    } else {
+        let (m, med, p95) =
+            measure_local_async_ms(|| exec(Arc::clone(local_file)), warm_runs).await?;
+        (Some(m), med, p95)
+    };
 
-    let (s3_file, s3_reader) = open_single_strata_s3(bytes, s3_cfg).await?;
-    let s3_matched = exec(s3_file).await?;
-    if s3_matched != matched {
-        return Err(format!("strata {qname}: s3 {s3_matched} != local {matched}").into());
+    let s3_reader = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+    let exec_ref = &exec;
+    let (s3_matched, s3_gets, s3_bytes, s3_ms) = run_s3_adaptive(|| {
+        let s3_reader = Arc::clone(&s3_reader);
+        async move {
+            s3_reader.evict_all();
+            s3_reader.reset_counters();
+            let s3_file = open_single_strata_from_bench_s3(Arc::clone(&s3_reader)).await?;
+            let m = exec_ref(s3_file).await?;
+            Ok((
+                m,
+                s3_reader.counters().gets,
+                s3_reader.counters().bytes_from_s3,
+                s3_reader.simulated_latency_ms(),
+            ))
+        }
+    })
+    .await?;
+    if let Some(lm) = local_matched_opt
+        && s3_matched != lm
+    {
+        return Err(format!("strata {qname}: s3 {s3_matched} != local {lm}").into());
     }
+    let matched = s3_matched;
     check_parity(expected_matches, wl, qname, "strata", matched)?;
     query_rows.push(QueryBenchRow {
         workload: wl.to_owned(),
@@ -3868,9 +4354,9 @@ where
         rows_matched: matched,
         local_ms,
         local_p95_ms,
-        s3_ms: s3_reader.simulated_latency_ms(),
-        s3_gets: s3_reader.counters().gets,
-        s3_bytes: s3_reader.counters().bytes_from_s3,
+        s3_ms,
+        s3_gets,
+        s3_bytes,
         cold_open_gets: None,
         cold_open_tail_bytes: None,
     });
@@ -4378,7 +4864,8 @@ async fn run_jsonbench_suite(
             s3_cfg,
             &mut expected_matches,
             query_rows,
-        )?;
+        )
+        .await?;
 
         if let (Some(bytes), Some(local_files)) = (&vortex_bytes, &vortex_file_local) {
             let (proj, filt, post): (Expression, Option<Expression>, VortexPostFilter<'_>) =
@@ -4708,7 +5195,8 @@ async fn run_jsonbench_suite(
             s3_cfg,
             &mut expected_matches,
             query_rows,
-        )?;
+        )
+        .await?;
     }
 
     Ok(())
@@ -5175,7 +5663,8 @@ async fn run_wildchat_suite(
             s3_cfg,
             &mut expected_matches,
             query_rows,
-        )?;
+        )
+        .await?;
 
         if let (Some(bytes), Some(local_files)) = (&vortex_bytes, &vortex_file_local) {
             let (proj, filt, post): (Expression, Option<Expression>, VortexPostFilter<'_>) =
@@ -5516,7 +6005,8 @@ async fn run_wildchat_suite(
             s3_cfg,
             &mut expected_matches,
             query_rows,
-        )?;
+        )
+        .await?;
     }
 
     Ok(())
@@ -5925,7 +6415,8 @@ async fn run_hermes_suite(
             s3_cfg,
             &mut expected_matches,
             query_rows,
-        )?;
+        )
+        .await?;
 
         if let (Some(bytes), Some(local_files)) = (&vortex_bytes, &vortex_file_local) {
             let (proj, filt, post): (Expression, Option<Expression>, VortexPostFilter<'_>) =
@@ -6235,7 +6726,8 @@ async fn run_hermes_suite(
             s3_cfg,
             &mut expected_matches,
             query_rows,
-        )?;
+        )
+        .await?;
     }
 
     Ok(())
@@ -6266,10 +6758,20 @@ fn render_external_report(
         cli.statam_read_threads
     );
     let _ = writeln!(out, "- **Formats:** `{}`", cli.formats.join("`, `"));
-    let _ = writeln!(
-        out,
-        "- **Simulated S3 Model:** `1 MiB` `ReadCache` block rounding + run coalescing, `25.0 ms / GET`, `100 MiB/s`"
-    );
+    let s3_mode = RealS3Mode::from_env();
+    if s3_mode.is_real() {
+        let _ = writeln!(
+            out,
+            "- **S3 Mode:** `{}` (real remote S3, `s3_only={}`)",
+            s3_mode.label(),
+            s3_only_mode()
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "- **Simulated S3 Model:** `1 MiB` `ReadCache` block rounding + run coalescing, `25.0 ms / GET`, `100 MiB/s`"
+        );
+    }
 
     if !notes.is_empty() {
         let _ = writeln!(out, "\n## Notes");
@@ -6330,6 +6832,14 @@ fn render_external_report(
 
 async fn run() -> BenchResult<()> {
     let cli = parse_cli_args()?;
+    let s3_mode = RealS3Mode::from_env();
+    if s3_mode.is_real() {
+        eprintln!(
+            "[external_bench] S3 mode: {} (s3_only={})",
+            s3_mode.label(),
+            s3_only_mode()
+        );
+    }
     let scale = BenchScale::from_env();
     let warm_runs = std::env::var("STATAM_WARM_RUNS")
         .ok()

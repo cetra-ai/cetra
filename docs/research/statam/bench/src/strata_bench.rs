@@ -6,7 +6,7 @@ use std::time::{Instant, SystemTime};
 
 use arrow::array::RecordBatch;
 use bytes::Bytes;
-use cetra_statam::{RangeReader, SimulatedS3Config, SimulatedS3Reader, SliceReader};
+use cetra_statam::{RangeReader, SimulatedS3Config, SliceReader};
 use futures::stream::{BoxStream, StreamExt};
 use object_store::path::Path as ObjectPath;
 use object_store::{
@@ -18,6 +18,7 @@ use strata::{
 };
 
 use crate::queries::agg_pq_filtered_batch;
+use crate::real_s3::{BenchS3Reader, run_s3_adaptive};
 use crate::schema::{BenchResult, TableKindBench, arrow_spans_schema};
 use crate::workloads::{ABSENT_NEEDLE, DAY_START, HOUR_NS, RARE_NEEDLE};
 
@@ -26,7 +27,7 @@ pub struct RangeObjectStore<R: RangeReader + 'static> {
 }
 
 pub type SliceObjectStore = RangeObjectStore<SliceReader>;
-pub type SimS3ObjectStore = RangeObjectStore<SimulatedS3Reader>;
+pub type SimS3ObjectStore = RangeObjectStore<BenchS3Reader>;
 
 impl<R: RangeReader + 'static> RangeObjectStore<R> {
     pub fn new(files: HashMap<ObjectPath, Arc<R>>) -> Self {
@@ -233,31 +234,41 @@ pub async fn run_strata_query_s3(
     sample_tid: [u8; 16],
 ) -> BenchResult<(usize, u64, u64, f64)> {
     let paths = object_paths(files.len())?;
-    let s3_readers: Vec<Arc<SimulatedS3Reader>> = files
+    let s3_readers: Vec<Arc<BenchS3Reader>> = files
         .iter()
-        .map(|b| Arc::new(SimulatedS3Reader::from_bytes(b.clone(), s3_cfg)))
+        .map(|b| BenchS3Reader::from_bytes(b.clone(), s3_cfg))
         .collect();
     let mut map = HashMap::with_capacity(files.len());
     for (p, r) in paths.iter().zip(&s3_readers) {
-        r.evict_all();
-        r.reset_counters();
         map.insert(p.clone(), Arc::clone(r));
     }
     let store: Arc<dyn ObjectStore> = Arc::new(SimS3ObjectStore::new(map));
     let mut cfg = StrataConfig::default();
     cfg.point_gap = 256 * 1024;
 
-    let mut opened = Vec::with_capacity(paths.len());
-    for p in paths {
-        let f = StrataFile::open(Arc::clone(&store), p, None, &cfg).await?;
-        opened.push(Arc::new(f));
-    }
-
-    let matched = run_strata_query(&opened, table, qname, sample_tid).await?;
-    let gets: u64 = s3_readers.iter().map(|r| r.counters().gets).sum();
-    let bytes: u64 = s3_readers.iter().map(|r| r.counters().bytes_from_s3).sum();
-    let s3_ms: f64 = s3_readers.iter().map(|r| r.simulated_latency_ms()).sum();
-    Ok((matched, gets, bytes, s3_ms))
+    run_s3_adaptive(|| {
+        let paths = paths.clone();
+        let s3_readers = s3_readers.clone();
+        let store = Arc::clone(&store);
+        let cfg = cfg.clone();
+        async move {
+            for r in &s3_readers {
+                r.evict_all();
+                r.reset_counters();
+            }
+            let mut opened = Vec::with_capacity(paths.len());
+            for p in paths {
+                let f = StrataFile::open(Arc::clone(&store), p, None, &cfg).await?;
+                opened.push(Arc::new(f));
+            }
+            let matched = run_strata_query(&opened, table, qname, sample_tid).await?;
+            let gets: u64 = s3_readers.iter().map(|r| r.counters().gets).sum();
+            let bytes: u64 = s3_readers.iter().map(|r| r.counters().bytes_from_s3).sum();
+            let s3_ms: f64 = s3_readers.iter().map(|r| r.simulated_latency_ms()).sum();
+            Ok((matched, gets, bytes, s3_ms))
+        }
+    })
+    .await
 }
 
 pub async fn run_strata_query(

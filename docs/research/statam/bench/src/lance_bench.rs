@@ -15,7 +15,7 @@ use arrow_array_58::{
     TimestampNanosecondArray as TimestampNanosecondArray58, UInt32Array as UInt32Array58,
 };
 use bytes::Bytes;
-use cetra_statam::{RangeReader, SimulatedS3Config, SimulatedS3Reader};
+use cetra_statam::{RangeReader, SimulatedS3Config};
 use futures::stream::{BoxStream, StreamExt, TryStreamExt};
 use lance_core::cache::LanceCache;
 use lance_core::datatypes::Schema as LanceSchema;
@@ -36,6 +36,7 @@ use object_store_14::{
 };
 
 use crate::queries::{contains_ascii_ci, push_topk};
+use crate::real_s3::{BenchS3Reader, run_s3_adaptive};
 use crate::schema::{BenchResult, TableKindBench};
 use crate::workloads::{ABSENT_NEEDLE, DAY_START, HOUR_NS, RARE_NEEDLE};
 
@@ -43,15 +44,15 @@ fn test_cache() -> LanceCache {
     LanceCache::no_cache()
 }
 
-/// Minimal `object_store 0.14` adapter backed by [`SimulatedS3Reader`] so Lance reads go through
-/// the exact same 1 MiB `ReadCache` and S3 cost model as Parquet, Vortex, Strata, and Statam.
+/// Minimal `object_store 0.14` adapter backed by [`BenchS3Reader`] so Lance reads go through
+/// the exact same S3 backend (simulated or real S3) as Parquet, Vortex, Strata, and Statam.
 pub struct SimulatedS3ObjectStore14 {
     path: ObjectPath14,
-    reader: Arc<SimulatedS3Reader>,
+    reader: Arc<BenchS3Reader>,
 }
 
 impl SimulatedS3ObjectStore14 {
-    pub fn new(path: ObjectPath14, reader: Arc<SimulatedS3Reader>) -> Self {
+    pub fn new(path: ObjectPath14, reader: Arc<BenchS3Reader>) -> Self {
         Self { path, reader }
     }
 }
@@ -137,13 +138,14 @@ impl ObjectStore14 for SimulatedS3ObjectStore14 {
                 })?,
             None => 0..size,
         };
-        let bytes =
-            self.reader
-                .read_range(range.clone())
-                .map_err(|e| object_store_14::Error::Generic {
-                    store: "SimulatedS3ObjectStore14",
-                    source: Box::new(e),
-                })?;
+        let bytes = self
+            .reader
+            .read_range_async(range.clone())
+            .await
+            .map_err(|e| object_store_14::Error::Generic {
+                store: "SimulatedS3ObjectStore14",
+                source: Box::new(e),
+            })?;
         Ok(GetResult {
             payload: GetResultPayload::Stream(
                 futures::stream::once(futures::future::ok(bytes)).boxed(),
@@ -167,7 +169,8 @@ impl ObjectStore14 for SimulatedS3ObjectStore14 {
             });
         }
         self.reader
-            .read_ranges(ranges)
+            .read_ranges_async(ranges)
+            .await
             .map_err(|e| object_store_14::Error::Generic {
                 store: "SimulatedS3ObjectStore14",
                 source: Box::new(e),
@@ -319,24 +322,24 @@ pub async fn open_lance_local(bytes: &Bytes) -> BenchResult<FileReader> {
     Ok(reader)
 }
 
-/// Opens a Lance V2.2 reader backed by [`SimulatedS3Reader`] with cold cache & zeroed counters.
-pub async fn open_lance_s3(
-    bytes: &Bytes,
-    s3_cfg: SimulatedS3Config,
-) -> BenchResult<(FileReader, Arc<SimulatedS3Reader>)> {
-    let s3_reader = Arc::new(SimulatedS3Reader::from_bytes(bytes.clone(), s3_cfg));
-    s3_reader.evict_all();
-    s3_reader.reset_counters();
-
+/// Opens a Lance V2.2 reader backed by an existing [`BenchS3Reader`].
+/// Passes known file size to avoid an unfair extra HEAD round-trip, and uses
+/// `SchedulerConfig::max_bandwidth` on real S3.
+pub async fn open_lance_from_bench_s3(s3_reader: Arc<BenchS3Reader>) -> BenchResult<FileReader> {
     let path = ObjectPath14::from("bench.lance");
+    let file_len = s3_reader.file_len();
+    let is_real = s3_reader.is_real_s3();
     let mut store = LanceObjectStore::memory();
-    store.inner = Arc::new(SimulatedS3ObjectStore14::new(
-        path.clone(),
-        Arc::clone(&s3_reader),
-    ));
-    let scheduler = ScanScheduler::new(Arc::new(store), SchedulerConfig::default_for_testing());
+    store.inner = Arc::new(SimulatedS3ObjectStore14::new(path.clone(), s3_reader));
+    let store = Arc::new(store);
+    let sched_cfg = if is_real {
+        SchedulerConfig::max_bandwidth(&store)
+    } else {
+        SchedulerConfig::default_for_testing()
+    };
+    let scheduler = ScanScheduler::new(store, sched_cfg);
     let file_scheduler = scheduler
-        .open_file(&path, &CachedFileSize::unknown())
+        .open_file(&path, &CachedFileSize::new(file_len))
         .await?;
     let reader = FileReader::try_open(
         file_scheduler,
@@ -346,6 +349,18 @@ pub async fn open_lance_s3(
         FileReaderOptions::default(),
     )
     .await?;
+    Ok(reader)
+}
+
+/// Opens a Lance V2.2 reader backed by [`BenchS3Reader`] with cold cache & zeroed counters.
+pub async fn open_lance_s3(
+    bytes: &Bytes,
+    s3_cfg: SimulatedS3Config,
+) -> BenchResult<(FileReader, Arc<BenchS3Reader>)> {
+    let s3_reader = BenchS3Reader::from_bytes(bytes.clone(), s3_cfg);
+    s3_reader.evict_all();
+    s3_reader.reset_counters();
+    let reader = open_lance_from_bench_s3(Arc::clone(&s3_reader)).await?;
     Ok((reader, s3_reader))
 }
 
@@ -456,7 +471,7 @@ pub async fn open_lance_local_files(files: &[Bytes]) -> BenchResult<Vec<FileRead
     Ok(opened)
 }
 
-/// Runs a `W1`–`W4` benchmark query over Lance V2.2 files backed by [`SimulatedS3Reader`].
+/// Runs a `W1`–`W4` benchmark query over Lance V2.2 files backed by [`BenchS3Reader`].
 pub async fn run_lance_query_s3(
     files: &[Bytes],
     s3_cfg: SimulatedS3Config,
@@ -464,18 +479,28 @@ pub async fn run_lance_query_s3(
     qname: &str,
     sample_tid: [u8; 16],
 ) -> BenchResult<(usize, u64, u64, f64)> {
-    let mut readers = Vec::with_capacity(files.len());
-    let mut s3_readers = Vec::with_capacity(files.len());
-    for b in files {
-        let (r, s3) = open_lance_s3(b, s3_cfg).await?;
-        readers.push(r);
-        s3_readers.push(s3);
-    }
-    let matched = run_lance_query(&readers, table, qname, sample_tid).await?;
-    let gets: u64 = s3_readers.iter().map(|r| r.counters().gets).sum();
-    let bytes: u64 = s3_readers.iter().map(|r| r.counters().bytes_from_s3).sum();
-    let s3_ms: f64 = s3_readers.iter().map(|r| r.simulated_latency_ms()).sum();
-    Ok((matched, gets, bytes, s3_ms))
+    let s3_readers: Vec<Arc<BenchS3Reader>> = files
+        .iter()
+        .map(|b| BenchS3Reader::from_bytes(b.clone(), s3_cfg))
+        .collect();
+
+    run_s3_adaptive(|| {
+        let s3_readers = s3_readers.clone();
+        async move {
+            let mut readers = Vec::with_capacity(s3_readers.len());
+            for s3 in &s3_readers {
+                s3.evict_all();
+                s3.reset_counters();
+                readers.push(open_lance_from_bench_s3(Arc::clone(s3)).await?);
+            }
+            let matched = run_lance_query(&readers, table, qname, sample_tid).await?;
+            let gets: u64 = s3_readers.iter().map(|r| r.counters().gets).sum();
+            let bytes: u64 = s3_readers.iter().map(|r| r.counters().bytes_from_s3).sum();
+            let s3_ms: f64 = s3_readers.iter().map(|r| r.simulated_latency_ms()).sum();
+            Ok((matched, gets, bytes, s3_ms))
+        }
+    })
+    .await
 }
 
 /// Evaluates a `W1`–`W4` benchmark query natively on Arrow 58 `RecordBatch`es from Lance V2.2

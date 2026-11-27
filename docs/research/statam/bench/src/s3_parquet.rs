@@ -5,35 +5,42 @@ use std::sync::Arc;
 use arrow::array::{
     Array, BooleanArray, FixedSizeBinaryArray, RecordBatch, StringArray, TimestampNanosecondArray,
 };
-use cetra_statam::{RangeReader, S3_CACHE_BLOCK_BYTES, SimulatedS3Reader};
+use cetra_statam::{RangeReader, S3_CACHE_BLOCK_BYTES};
+use futures::stream::TryStreamExt;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
-    ArrowPredicateFn, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowFilter, RowSelection,
-    RowSelector,
+    ArrowPredicate, ArrowPredicateFn, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
+    RowFilter, RowSelection, RowSelector,
 };
+use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 use parquet::bloom_filter::Sbbf;
 use parquet::errors::ParquetError;
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData, RowGroupMetaData};
 use parquet::file::page_index::column_index::ColumnIndexMetaData;
 use parquet::file::reader::{ChunkReader, Length};
 use parquet::file::statistics::Statistics;
-use parquet::schema::types::SchemaDescriptor;
+use parquet::schema::types::{SchemaDescPtr, SchemaDescriptor};
 
+use crate::real_s3::{BenchS3ParquetAsyncReader, BenchS3Reader, RealS3Mode};
 use crate::schema::BenchResult;
 
-/// Wraps [`SimulatedS3Reader`] for [`parquet::file::reader::ChunkReader`], ensuring Parquet
-/// footer/index/bloom/page reads go through the exact same 1 MiB `ReadCache` and S3 cost model.
+/// Wraps [`BenchS3Reader`] for [`parquet::file::reader::ChunkReader`], ensuring Parquet
+/// footer/index/bloom/page reads go through the exact same S3 reader & cost model.
 #[derive(Clone)]
 pub struct SimS3ChunkReader {
-    inner: Arc<SimulatedS3Reader>,
+    inner: Arc<BenchS3Reader>,
 }
 
 impl SimS3ChunkReader {
-    pub fn new(inner: Arc<SimulatedS3Reader>) -> Self {
+    pub fn new(inner: Arc<BenchS3Reader>) -> Self {
         Self { inner }
     }
 
-    pub fn s3(&self) -> &SimulatedS3Reader {
+    pub fn s3(&self) -> &BenchS3Reader {
+        &self.inner
+    }
+
+    pub fn s3_arc(&self) -> &Arc<BenchS3Reader> {
         &self.inner
     }
 }
@@ -45,7 +52,7 @@ impl Length for SimS3ChunkReader {
 }
 
 pub struct SimS3Read {
-    inner: Arc<SimulatedS3Reader>,
+    inner: Arc<BenchS3Reader>,
     pos: u64,
     file_len: u64,
     buf: bytes::Bytes,
@@ -58,12 +65,17 @@ impl Read for SimS3Read {
             return Ok(0);
         }
         if self.buf_pos >= self.buf.len() {
-            let block_end = ((self.pos / S3_CACHE_BLOCK_BYTES) + 1) * S3_CACHE_BLOCK_BYTES;
-            let wanted_end = self
-                .pos
-                .saturating_add(dst.len() as u64)
-                .max(block_end)
-                .min(self.file_len);
+            let wanted_end = if self.inner.mode() != RealS3Mode::Direct {
+                let block_end = ((self.pos / S3_CACHE_BLOCK_BYTES) + 1) * S3_CACHE_BLOCK_BYTES;
+                self.pos
+                    .saturating_add(dst.len() as u64)
+                    .max(block_end)
+                    .min(self.file_len)
+            } else {
+                self.pos
+                    .saturating_add(dst.len().max(16 * 1024) as u64)
+                    .min(self.file_len)
+            };
             self.buf = self
                 .inner
                 .read_range(self.pos..wanted_end)
@@ -129,6 +141,19 @@ pub fn open_parquet_builder(
         reader.clone(),
         opts,
     )?)
+}
+
+pub async fn open_parquet_async_builder(
+    reader: &Arc<BenchS3Reader>,
+    with_page_index: bool,
+) -> BenchResult<ParquetRecordBatchStreamBuilder<BenchS3ParquetAsyncReader>> {
+    let opts = ArrowReaderOptions::new().with_page_index_policy(if with_page_index {
+        PageIndexPolicy::Optional
+    } else {
+        PageIndexPolicy::Skip
+    });
+    let async_reader = BenchS3ParquetAsyncReader::new(Arc::clone(reader), with_page_index);
+    Ok(ParquetRecordBatchStreamBuilder::new_with_options(async_reader, opts).await?)
 }
 
 pub fn find_leaf_idx(descr: &SchemaDescriptor, name: &str) -> Option<usize> {
@@ -350,26 +375,56 @@ pub fn prune_parquet_rgs_and_pages(
     Ok(surviving)
 }
 
-pub fn execute_parquet_scan(
-    reader: &SimS3ChunkReader,
-    with_page_index: bool,
-    proj_roots: &[usize],
+/// Async version of [`prune_parquet_rgs_and_pages`]: checks RG min/max + async SBBF bloom filters
+/// + page index pruning.
+pub async fn prune_parquet_rgs_and_pages_async(
+    builder: &mut ParquetRecordBatchStreamBuilder<BenchS3ParquetAsyncReader>,
     filters: &[PqFilter],
-    batch_size: usize,
-) -> BenchResult<Vec<RecordBatch>> {
-    let mut builder = open_parquet_builder(reader, with_page_index)?;
+) -> BenchResult<Vec<(usize, Vec<Range<usize>>)>> {
     let meta = Arc::clone(builder.metadata());
-    let parquet_schema = meta.file_metadata().schema_descr_ptr();
-
-    let surviving = prune_parquet_rgs_and_pages(reader, &meta, filters)?;
-    if surviving.is_empty() {
-        return Ok(Vec::new());
+    let descr = meta.file_metadata().schema_descr();
+    let mut surviving = Vec::new();
+    for rg_idx in 0..meta.num_row_groups() {
+        let rg = meta.row_group(rg_idx);
+        if !rg_matches_filters(rg, descr, filters) {
+            continue;
+        }
+        let mut bloom_ok = true;
+        for f in filters {
+            let (col_name, key): (&str, &[u8]) = match f {
+                PqFilter::EqBytes { col, val } => (col.as_str(), val.as_slice()),
+                PqFilter::EqStr { col, val } => (col.as_str(), val.as_bytes()),
+                PqFilter::I64Between { .. } => continue,
+            };
+            if let Some(leaf_idx) = find_leaf_idx(descr, col_name)
+                && let Some(sbbf) = builder
+                    .get_row_group_column_bloom_filter(rg_idx, leaf_idx)
+                    .await?
+                && !sbbf.check(key)
+            {
+                bloom_ok = false;
+                break;
+            }
+        }
+        if !bloom_ok {
+            continue;
+        }
+        let kept = prune_rg_pages(&meta, rg_idx, filters);
+        if !kept.is_empty() {
+            surviving.push((rg_idx, kept));
+        }
     }
+    Ok(surviving)
+}
 
+fn build_row_selection(
+    meta: &ParquetMetaData,
+    surviving: &[(usize, Vec<Range<usize>>)],
+) -> (Vec<usize>, Option<RowSelection>) {
     let rgs: Vec<usize> = surviving.iter().map(|(rg, _)| *rg).collect();
     let mut all_full = true;
     let mut selectors = Vec::new();
-    for (rg_idx, kept) in &surviving {
+    for (rg_idx, kept) in surviving {
         let num_rows = usize::try_from(meta.row_group(*rg_idx).num_rows()).unwrap_or(0);
         if kept.len() != 1 || kept[0] != (0..num_rows) {
             all_full = false;
@@ -386,20 +441,15 @@ pub fn execute_parquet_scan(
             selectors.push(RowSelector::skip(num_rows - cursor));
         }
     }
+    let selection = (!all_full).then(|| RowSelection::from(selectors));
+    (rgs, selection)
+}
 
-    builder = builder
-        .with_row_groups(rgs)
-        .with_projection(ProjectionMask::roots(
-            &parquet_schema,
-            proj_roots.iter().copied(),
-        ))
-        .with_batch_size(batch_size);
-
-    if !all_full {
-        builder = builder.with_row_selection(RowSelection::from(selectors));
-    }
-
-    let mut row_preds: Vec<Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>> = Vec::new();
+fn build_row_preds(
+    parquet_schema: &SchemaDescPtr,
+    filters: &[PqFilter],
+) -> Vec<Box<dyn ArrowPredicate>> {
+    let mut row_preds: Vec<Box<dyn ArrowPredicate>> = Vec::new();
     for f in filters {
         match f {
             PqFilter::EqBytes { col, val } => {
@@ -410,7 +460,7 @@ pub fn execute_parquet_scan(
                     .position(|fld| fld.name() == col)
                 {
                     let target = val.clone();
-                    let mask = ProjectionMask::roots(&parquet_schema, [root_idx]);
+                    let mask = ProjectionMask::roots(parquet_schema, [root_idx]);
                     let pred = ArrowPredicateFn::new(mask, move |batch| {
                         let arr = batch.column(0);
                         let fsb = arr
@@ -437,7 +487,7 @@ pub fn execute_parquet_scan(
                     .position(|fld| fld.name() == col)
                 {
                     let target = val.clone();
-                    let mask = ProjectionMask::roots(&parquet_schema, [root_idx]);
+                    let mask = ProjectionMask::roots(parquet_schema, [root_idx]);
                     let pred = ArrowPredicateFn::new(mask, move |batch| {
                         let arr = batch.column(0);
                         let sa = arr.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
@@ -461,7 +511,7 @@ pub fn execute_parquet_scan(
                     .position(|fld| fld.name() == col)
                 {
                     let (lo_v, hi_v) = (*lo, *hi);
-                    let mask = ProjectionMask::roots(&parquet_schema, [root_idx]);
+                    let mask = ProjectionMask::roots(parquet_schema, [root_idx]);
                     let pred = ArrowPredicateFn::new(mask, move |batch| {
                         let arr = batch.column(0);
                         let ta = arr
@@ -487,7 +537,40 @@ pub fn execute_parquet_scan(
             }
         }
     }
+    row_preds
+}
 
+pub fn execute_parquet_scan(
+    reader: &SimS3ChunkReader,
+    with_page_index: bool,
+    proj_roots: &[usize],
+    filters: &[PqFilter],
+    batch_size: usize,
+) -> BenchResult<Vec<RecordBatch>> {
+    let mut builder = open_parquet_builder(reader, with_page_index)?;
+    let meta = Arc::clone(builder.metadata());
+    let parquet_schema = meta.file_metadata().schema_descr_ptr();
+
+    let surviving = prune_parquet_rgs_and_pages(reader, &meta, filters)?;
+    if surviving.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let (rgs, selection) = build_row_selection(&meta, &surviving);
+
+    builder = builder
+        .with_row_groups(rgs)
+        .with_projection(ProjectionMask::roots(
+            &parquet_schema,
+            proj_roots.iter().copied(),
+        ))
+        .with_batch_size(batch_size);
+
+    if let Some(sel) = selection {
+        builder = builder.with_row_selection(sel);
+    }
+
+    let row_preds = build_row_preds(&parquet_schema, filters);
     if !row_preds.is_empty() {
         builder = builder.with_row_filter(RowFilter::new(row_preds));
     }
@@ -501,4 +584,47 @@ pub fn execute_parquet_scan(
         }
     }
     Ok(batches)
+}
+
+pub async fn execute_parquet_scan_async(
+    reader: &Arc<BenchS3Reader>,
+    with_page_index: bool,
+    proj_roots: &[usize],
+    filters: &[PqFilter],
+    batch_size: usize,
+) -> BenchResult<Vec<RecordBatch>> {
+    let mut builder = open_parquet_async_builder(reader, with_page_index).await?;
+    let meta = Arc::clone(builder.metadata());
+    let parquet_schema = meta.file_metadata().schema_descr_ptr();
+
+    let surviving = prune_parquet_rgs_and_pages_async(&mut builder, filters).await?;
+    if surviving.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let (rgs, selection) = build_row_selection(&meta, &surviving);
+
+    builder = builder
+        .with_row_groups(rgs)
+        .with_projection(ProjectionMask::roots(
+            &parquet_schema,
+            proj_roots.iter().copied(),
+        ))
+        .with_batch_size(batch_size);
+
+    if let Some(sel) = selection {
+        builder = builder.with_row_selection(sel);
+    }
+
+    let row_preds = build_row_preds(&parquet_schema, filters);
+    if !row_preds.is_empty() {
+        builder = builder.with_row_filter(RowFilter::new(row_preds));
+    }
+
+    let stream = builder.build()?;
+    let all_batches: Vec<RecordBatch> = stream.try_collect().await?;
+    Ok(all_batches
+        .into_iter()
+        .filter(|b| b.num_rows() > 0)
+        .collect())
 }
