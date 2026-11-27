@@ -215,6 +215,10 @@ impl StatamSource {
     /// Directly materializes the requested `(file_ordinal, row_idx)` coordinates with
     /// `projection` using [`StatamReader::take_rows_with_limits`], respecting cancellation,
     /// `Reservation` accounting, schema evolution, metadata caching, and corrupt-file reporting.
+    ///
+    /// Duplicate `(file_ordinal, row_idx)` coordinates are deduplicated and rows are returned in
+    /// ascending `(file_ordinal, row_idx)` order (not input `coords` order); callers needing a
+    /// specific order must re-sort the returned batches.
     pub(crate) fn take_rows(
         &self,
         coords: &[(u32, u64)],
@@ -253,10 +257,32 @@ impl StatamSource {
         self.suspects.record(&touched_files);
 
         let res_before = res.size();
+        let out_batches = run_off_current_thread(&self.io, &self.runtime, || {
+            self.take_rows_inner(&by_file, projection, &out_schema, ctx, res, res_before)
+        })
+        .inspect_err(|_| rollback_res(Some(res), res_before))?;
+
+        let total_bytes: usize = out_batches
+            .iter()
+            .map(Batch::memory_bytes)
+            .fold(0usize, usize::saturating_add);
+        reconcile_res(Some(res), res_before, total_bytes)?;
+        Ok(out_batches)
+    }
+
+    fn take_rows_inner(
+        &self,
+        by_file: &BTreeMap<u32, Vec<u64>>,
+        projection: &[usize],
+        out_schema: &Arc<Schema>,
+        ctx: &ExecContext,
+        res: &mut Reservation,
+        res_before: usize,
+    ) -> Result<Vec<Batch>, QueryError> {
         let (read_threads, executor) = make_query_executor(ctx);
         let mut out_batches: Vec<Batch> = Vec::new();
 
-        for (file_ord, row_ids) in by_file {
+        for (&file_ord, row_ids) in by_file {
             if ctx.eval.cancel.is_cancelled() {
                 rollback_res(Some(res), res_before);
                 return Err(QueryError::Cancelled);
@@ -290,35 +316,28 @@ impl StatamSource {
                 meta
             };
 
-            let file_schema = &meta.schema_meta.schema;
+            let full_to_file = validate_file_schema(
+                &self.schema,
+                &meta.schema_meta.schema,
+                &self.suspects,
+                file.id,
+            )
+            .inspect_err(|_| rollback_res(Some(res), res_before))?;
             let mut file_proj = Vec::with_capacity(projection.len());
             let mut slots = Vec::with_capacity(projection.len());
             let mut has_missing_col = false;
             for &full_idx in projection {
-                let field = &self.schema.fields()[full_idx];
-                match file_schema.index_of(&field.name) {
+                match full_to_file[full_idx] {
                     Some(file_idx) => {
-                        if file_schema.fields()[file_idx].data_type != field.data_type {
-                            self.suspects.report_corrupt(file.id);
-                            rollback_res(Some(res), res_before);
-                            return Err(QueryError::CorruptData(
-                                "column type mismatch in statam file".to_owned(),
-                            ));
-                        }
                         let file_pos = file_proj.len();
                         file_proj.push(file_idx);
                         slots.push(ScanColSlot::FromFile(file_pos));
                     }
                     None => {
-                        if !field.nullable {
-                            self.suspects.report_corrupt(file.id);
-                            rollback_res(Some(res), res_before);
-                            return Err(QueryError::CorruptData(
-                                "missing non-nullable column in statam file".to_owned(),
-                            ));
-                        }
                         has_missing_col = true;
-                        slots.push(ScanColSlot::FillNull(field.data_type.clone()));
+                        slots.push(ScanColSlot::FillNull(
+                            self.schema.fields()[full_idx].data_type.clone(),
+                        ));
                     }
                 }
             }
@@ -345,7 +364,7 @@ impl StatamSource {
 
             let batches = guard_sync(|| {
                 reader.take_rows_with_limits(
-                    &row_ids,
+                    row_ids,
                     Some(&file_proj),
                     read_threads,
                     Some(&ctx.eval.cancel),
@@ -359,7 +378,7 @@ impl StatamSource {
 
             if has_missing_col {
                 let fill_layout = ScanBatchFill {
-                    schema: Arc::clone(&out_schema),
+                    schema: Arc::clone(out_schema),
                     slots,
                 };
                 for batch in batches {
@@ -379,11 +398,6 @@ impl StatamSource {
             }
         }
 
-        let total_bytes: usize = out_batches
-            .iter()
-            .map(Batch::memory_bytes)
-            .fold(0usize, usize::saturating_add);
-        reconcile_res(Some(res), res_before, total_bytes)?;
         Ok(out_batches)
     }
 
@@ -503,18 +517,20 @@ impl StatamSource {
             let meta_opt = if let Some(cached) = self.metadata_cache.get_statam(file.id) {
                 Some(cached)
             } else if file.total_bytes() >= RG_SPLIT_OPEN_THRESHOLD_BYTES {
-                let rr = open_range_reader(
-                    &self.io,
-                    &file.path,
-                    file.size,
-                    self.runtime.clone(),
-                    ctx.eval.cancel.clone(),
-                )
-                .map_err(|e| map_statam_err(&self.suspects, file.id, e))?;
-                let loaded = guard_sync(|| {
-                    StatamFileMeta::read_from_with_hint(rr.as_ref(), Some(file.footer_size))
-                })
-                .map_err(|e| map_statam_err(&self.suspects, file.id, e))?;
+                let loaded = run_off_current_thread(&self.io, &self.runtime, || {
+                    let rr = open_range_reader(
+                        &self.io,
+                        &file.path,
+                        file.size,
+                        self.runtime.clone(),
+                        ctx.eval.cancel.clone(),
+                    )
+                    .map_err(|e| map_statam_err(&self.suspects, file.id, e))?;
+                    guard_sync(|| {
+                        StatamFileMeta::read_from_with_hint(rr.as_ref(), Some(file.footer_size))
+                    })
+                    .map_err(|e| map_statam_err(&self.suspects, file.id, e))
+                })?;
                 let meta = Arc::new(loaded);
                 self.metadata_cache
                     .insert_statam(file.id, Arc::clone(&meta));
@@ -532,6 +548,16 @@ impl StatamSource {
                 rr_cursor += 1;
                 continue;
             };
+
+            // Validate file schema BEFORE RG pre-pruning so corrupt files missing a required
+            // non-nullable column or with a DataType mismatch fail loudly and report suspects
+            // instead of silently pruning to 0 RGs.
+            validate_file_schema(
+                &self.schema,
+                &meta.schema_meta.schema,
+                &self.suspects,
+                file.id,
+            )?;
 
             if meta.rg_dir.len() <= 1 {
                 buckets[rr_cursor % target].push(FileWork {
@@ -578,6 +604,69 @@ impl StatamSource {
 
         Ok(buckets.into_iter().filter(|b| !b.is_empty()).collect())
     }
+}
+
+/// Runs synchronous `ObjectStore`-backed Statam I/O outside a `CurrentThread` Tokio runtime
+/// context (such as `tokio::task::spawn_blocking` on a `CurrentThread` runtime), where calling
+/// `Handle::block_on` directly would deadlock/error. On local FS, `MultiThread` runtimes, or
+/// non-Tokio threads (`WorkerPool`), runs `f` inline with zero thread-spawn overhead.
+fn run_off_current_thread<T, F>(
+    io: &StorageIo,
+    runtime: &tokio::runtime::Handle,
+    f: F,
+) -> Result<T, QueryError>
+where
+    T: Send,
+    F: FnOnce() -> Result<T, QueryError> + Send,
+{
+    if io.local_root().is_some()
+        || runtime.runtime_flavor() != tokio::runtime::RuntimeFlavor::CurrentThread
+        || tokio::runtime::Handle::try_current().is_err()
+    {
+        return f();
+    }
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(f);
+        match handle.join() {
+            Ok(res) => res,
+            Err(_) => Err(QueryError::internal("off-thread statam worker panicked")),
+        }
+    })
+}
+
+/// Validates `file_schema` against the target table `schema` (spec 03 §3 schema evolution):
+/// missing nullable columns map to `None` (`Const(Null)`); missing non-nullable columns or
+/// `DataType` mismatches report `file_id` as corrupt and return [`QueryError::CorruptData`].
+fn validate_file_schema(
+    schema: &Schema,
+    file_schema: &Schema,
+    suspects: &Suspects,
+    file_id: FileId,
+) -> Result<Vec<Option<usize>>, QueryError> {
+    let mut full_to_file: Vec<Option<usize>> = Vec::with_capacity(schema.len());
+    for field in schema.fields() {
+        match file_schema.index_of(&field.name) {
+            Some(file_idx) => {
+                if file_schema.fields()[file_idx].data_type != field.data_type {
+                    suspects.report_corrupt(file_id);
+                    return Err(QueryError::CorruptData(
+                        "column type mismatch in statam file".to_owned(),
+                    ));
+                }
+                full_to_file.push(Some(file_idx));
+            }
+            None => {
+                if !field.nullable {
+                    suspects.report_corrupt(file_id);
+                    return Err(QueryError::CorruptData(
+                        "missing non-nullable column in statam file".to_owned(),
+                    ));
+                }
+                full_to_file.push(None);
+            }
+        }
+    }
+    Ok(full_to_file)
 }
 
 fn make_query_executor(ctx: &ExecContext) -> (usize, Option<Arc<dyn TaskExecutor>>) {
@@ -833,7 +922,7 @@ impl CompiledScanSpec {
                     .index_of(&hint.column)
                     .is_some_and(|cidx| schema.fields()[cidx].data_type == DataType::Utf8);
                 let safe_case = !hint.case_insensitive || hint.needle.is_ascii();
-                if !valid_col || !safe_case {
+                if !valid_col || hint.needle.is_empty() || !safe_case {
                     clause_ok = false;
                     break;
                 }
@@ -1491,20 +1580,41 @@ fn classify_missing_col_top_conjunct(
         }
         Expr::Between {
             expr: inner,
+            low,
+            high,
             negated: false,
-            ..
+        } => {
+            if matches!(low.as_ref(), Expr::Literal(_))
+                && matches!(high.as_ref(), Expr::Literal(_))
+                && let Some(t) = extract_target(inner, schema)
+                && file_schema.index_of(t.col_name()).is_none()
+            {
+                return MissingColOutcome::AlwaysFalse;
+            }
+            MissingColOutcome::Unknown
         }
-        | Expr::InList {
+        Expr::InList {
             expr: inner,
-            negated: false,
-            ..
-        }
-        | Expr::Like {
-            expr: inner,
+            list,
             negated: false,
             ..
         } => {
-            if let Some(t) = extract_target(inner, schema)
+            if list.iter().all(|item| matches!(item, Expr::Literal(_)))
+                && let Some(t) = extract_target(inner, schema)
+                && file_schema.index_of(t.col_name()).is_none()
+            {
+                return MissingColOutcome::AlwaysFalse;
+            }
+            MissingColOutcome::Unknown
+        }
+        Expr::Like {
+            expr: inner,
+            pattern,
+            negated: false,
+            ..
+        } => {
+            if matches!(pattern.as_ref(), Expr::Literal(_))
+                && let Some(t) = extract_target(inner, schema)
                 && file_schema.index_of(t.col_name()).is_none()
             {
                 return MissingColOutcome::AlwaysFalse;
@@ -2298,29 +2408,8 @@ impl StatamPartitionStream {
             // (spec 03 §3 schema evolution: missing nullable columns become `Const(Null)`;
             // missing non-nullable columns or type mismatches are corrupt).
             let file_schema = &meta.schema_meta.schema;
-            let mut full_to_file: Vec<Option<usize>> = Vec::with_capacity(self.schema.len());
-            for field in self.schema.fields() {
-                match file_schema.index_of(&field.name) {
-                    Some(file_idx) => {
-                        if file_schema.fields()[file_idx].data_type != field.data_type {
-                            self.suspects.report_corrupt(file.id);
-                            return Err(QueryError::CorruptData(
-                                "column type mismatch in statam file".to_owned(),
-                            ));
-                        }
-                        full_to_file.push(Some(file_idx));
-                    }
-                    None => {
-                        if !field.nullable {
-                            self.suspects.report_corrupt(file.id);
-                            return Err(QueryError::CorruptData(
-                                "missing non-nullable column in statam file".to_owned(),
-                            ));
-                        }
-                        full_to_file.push(None);
-                    }
-                }
-            }
+            let full_to_file =
+                validate_file_schema(&self.schema, file_schema, &self.suspects, file.id)?;
 
             // Per-file exact-pushed vs residual filter classification using `meta.col_dir`.
             let Some(mut classified) = classify_file_filters(&self.plan, &self.schema, &meta)
@@ -4486,5 +4575,284 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// B1 regression: on a `CurrentThread` Tokio runtime against an `ObjectStore` (`InMemory`),
+    /// both `build_rg_partitioned_groups` (opening an uncached >= 16 MiB file) AND `take_rows`
+    /// MUST succeed when called from inside `tokio::task::spawn_blocking` (as `EngineContext::run_with_ctx`
+    /// does) without failing with `"cannot block on current_thread runtime"`.
+    #[tokio::test]
+    async fn current_thread_runtime_spawn_blocking_supports_rg_split_open_and_take_rows() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let spans_vec: Vec<_> = (0..64_u16)
+            .map(|i| {
+                let mut s = span_row(i + 1, 0, ns(5, 10 + i64::from(i)), ns(5, 11 + i64::from(i)));
+                s.name = format!("ct-span-{i}");
+                s.end_time = s.start_time + i64::from(i + 1) * 100;
+                s
+            })
+            .collect();
+        let batch = span_rows(&spans_vec);
+        let schema = FileTable::Spans.column_schema();
+
+        let mut opts = cetra_statam::WriteOptions::for_table(
+            cetra_statam::TableKind::Spans,
+            cetra_statam::WriteProfile::L1Compact,
+        );
+        opts.sort_cols = crate::statam_io::sort_col_indices(FileTable::Spans);
+        opts.row_group_size = 16;
+        opts.mini_block_size = 8;
+        let mut writer = cetra_statam::StatamWriter::new(
+            Cursor::new(Vec::new()),
+            Arc::clone(&schema),
+            opts,
+            None,
+        )
+        .unwrap();
+        writer.write_batch(&batch).unwrap();
+        let (cursor, stats, _) = writer.finish_into_inner().unwrap();
+        let bytes = Bytes::from(cursor.into_inner());
+        let (path, id) =
+            crate::objects::Objects::table_file_path(FileTable::Spans, project(), day(5), 1);
+        store
+            .put(
+                &ObjectPath::from(path.as_str()),
+                PutPayload::from(bytes.clone()),
+            )
+            .await
+            .unwrap();
+
+        // Give `file` a `total_bytes() >= 16 MiB` via `PackMeta::size` so uncached Hot Tail open
+        // in `build_rg_partitioned_groups` executes against `InMemory` ObjectStore.
+        let file = Arc::new(FileMeta {
+            id,
+            table: FileTable::Spans,
+            project: project(),
+            day: day(5),
+            level: 1,
+            path,
+            size: bytes.len() as u64,
+            footer_size: u64::from(stats.hot_tail_bytes),
+            rows: 64,
+            min_time: ns(5, 10),
+            max_time: ns(5, 73),
+            min_ingest_time: ns(5, 11),
+            max_ingest_time: ns(5, 74),
+            fully_merged: true,
+            deletions_applied_seq: 0,
+            pack: Some(PackMeta {
+                id: *Uuid::now_v7().as_bytes(),
+                path: "unused.stpk".to_owned(),
+                size: RG_SPLIT_OPEN_THRESHOLD_BYTES,
+                toc_size: 0,
+            }),
+        });
+
+        let name_idx = schema.index_of(spans::NAME).unwrap();
+        let dur_idx = schema.index_of(spans::DURATION_NS).unwrap();
+        let cache = Arc::new(MetadataCache::new(4 * 1024 * 1024));
+        let source = StatamSource::new(
+            StorageIo::from_store(store),
+            FileTable::Spans,
+            Arc::clone(&schema),
+            vec![Arc::clone(&file)],
+            Arc::from([]),
+            Arc::clone(&cache),
+            Suspects::new(Arc::new(VerifyQueue::default())),
+            tokio::runtime::Handle::current(),
+        );
+        let workers = Arc::new(WorkerPool::new(4).unwrap());
+        let ctx = ExecContext {
+            pool: GlobalPool::standalone(64 * 1024 * 1024),
+            eval: EvalContext::new(0, CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(PathBuf::new(), 0)),
+            workers,
+            batch_size: 8192,
+            target_partitions: 4,
+            metrics: ExecMetrics::new(),
+        };
+
+        tokio::task::spawn_blocking(move || {
+            assert_eq!(
+                tokio::runtime::Handle::current().runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::CurrentThread
+            );
+            // 1. Uncached >= 16 MiB file triggers `build_rg_partitioned_groups` Hot Tail open.
+            let spec = ScanSpec {
+                projection: Some(vec![dur_idx]),
+                ..ScanSpec::default()
+            };
+            let streams = source.open_partitions(&spec, &ctx).unwrap();
+            assert_eq!(
+                streams.len(),
+                4,
+                "uncached >=16 MiB 4-RG file must split into 4 streams on CurrentThread runtime"
+            );
+            drop(streams);
+
+            // 2. Uncached `take_rows` (using a fresh empty cache so both meta read and data read
+            //    hit `ObjectStoreRangeReader` inside `spawn_blocking`).
+            let uncached_source = StatamSource::new(
+                source.io.clone(),
+                FileTable::Spans,
+                Arc::clone(&schema),
+                vec![file],
+                Arc::from([]),
+                Arc::new(MetadataCache::new(0)),
+                Suspects::new(Arc::new(VerifyQueue::default())),
+                source.runtime.clone(),
+            );
+            let mut take_res = ctx.pool.register("ct_take", false);
+            let batches = uncached_source
+                .take_rows(
+                    &[(0, 63), (0, 0), (0, 63)],
+                    &[name_idx],
+                    &ctx,
+                    &mut take_res,
+                )
+                .unwrap();
+            let mut got = Vec::new();
+            for b in &batches {
+                for r in b.selection().to_indices(b.raw_len()).unwrap() {
+                    let ScalarValue::Utf8(s) = b.column(0).unwrap().get_scalar(r as usize).unwrap()
+                    else {
+                        panic!("expected Utf8");
+                    };
+                    got.push(s);
+                }
+            }
+            assert_eq!(
+                got,
+                vec!["ct-span-0".to_owned(), "ct-span-63".to_owned()],
+                "take_rows must deduplicate and return rows in ascending row_idx order"
+            );
+            drop(batches);
+            take_res.free();
+        })
+        .await
+        .unwrap();
+    }
+
+    /// M1 regression: a corrupt multi-RG file missing a required non-nullable column (or with a
+    /// DataType mismatch) MUST fail with `QueryError::CorruptData` and report `suspects` even when
+    /// a filter would otherwise prune all RGs in `build_rg_partitioned_groups`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn corrupt_multi_rg_file_reports_corrupt_before_rg_pruning() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let spans_vec: Vec<_> = (0..64_u16)
+            .map(|i| span_row(i + 1, 0, ns(5, 10 + i64::from(i)), ns(5, 11 + i64::from(i))))
+            .collect();
+        let batch = span_rows(&spans_vec);
+        let base_schema = FileTable::Spans.column_schema();
+
+        let mut opts = cetra_statam::WriteOptions::for_table(
+            cetra_statam::TableKind::Spans,
+            cetra_statam::WriteProfile::L1Compact,
+        );
+        opts.sort_cols = crate::statam_io::sort_col_indices(FileTable::Spans);
+        opts.row_group_size = 16;
+        opts.mini_block_size = 8;
+        let mut writer = cetra_statam::StatamWriter::new(
+            Cursor::new(Vec::new()),
+            Arc::clone(&base_schema),
+            opts,
+            None,
+        )
+        .unwrap();
+        writer.write_batch(&batch).unwrap();
+        let (cursor, stats, _) = writer.finish_into_inner().unwrap();
+        let bytes = Bytes::from(cursor.into_inner());
+        let (path, id) =
+            crate::objects::Objects::table_file_path(FileTable::Spans, project(), day(5), 1);
+        store
+            .put(
+                &ObjectPath::from(path.as_str()),
+                PutPayload::from(bytes.clone()),
+            )
+            .await
+            .unwrap();
+        let meta = Arc::new(
+            StatamFileMeta::read_from_with_hint(
+                &SliceReader::new(bytes.clone()),
+                Some(u64::from(stats.hot_tail_bytes)),
+            )
+            .unwrap(),
+        );
+        assert_eq!(meta.rg_dir.len(), 4);
+
+        let file = Arc::new(FileMeta {
+            id,
+            table: FileTable::Spans,
+            project: project(),
+            day: day(5),
+            level: 1,
+            path,
+            size: bytes.len() as u64,
+            footer_size: u64::from(stats.hot_tail_bytes),
+            rows: 64,
+            min_time: ns(5, 10),
+            max_time: ns(5, 73),
+            min_ingest_time: ns(5, 11),
+            max_ingest_time: ns(5, 74),
+            fully_merged: true,
+            deletions_applied_seq: 0,
+            pack: None,
+        });
+
+        let cache = Arc::new(MetadataCache::new(4 * 1024 * 1024));
+        cache.insert_statam(file.id, meta);
+
+        // Schema requires a non-nullable column absent from the 4-RG file.
+        let mut bad_fields = base_schema.fields().to_vec();
+        bad_fields.push(Field::new("required_missing_col", DataType::Utf8, false));
+        let bad_schema = Schema::try_new_arc(bad_fields).unwrap();
+        let start_idx = bad_schema.index_of(spans::START_TIME).unwrap();
+
+        let queue = Arc::new(VerifyQueue::default());
+        let source = StatamSource::new(
+            StorageIo::from_store(store),
+            FileTable::Spans,
+            Arc::clone(&bad_schema),
+            vec![Arc::clone(&file)],
+            Arc::from([]),
+            cache,
+            Suspects::new(Arc::clone(&queue)),
+            tokio::runtime::Handle::current(),
+        );
+        let multi_ctx = ExecContext {
+            pool: GlobalPool::standalone(64 * 1024 * 1024),
+            eval: EvalContext::new(0, CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(PathBuf::new(), 0)),
+            workers: Arc::new(WorkerPool::new(4).unwrap()),
+            batch_size: 8192,
+            target_partitions: 4,
+            metrics: ExecMetrics::new(),
+        };
+
+        // Filter on `start_time = ns(5, 999)` would prune all 4 RGs via zone maps; schema
+        // validation MUST fire first and surface `CorruptData` + report `file.id` as suspect!
+        let pruning_spec = ScanSpec {
+            projection: Some(vec![start_idx]),
+            filters: vec![Expr::Binary {
+                left: Box::new(Expr::Column {
+                    index: start_idx,
+                    name: spans::START_TIME.to_owned(),
+                    data_type: DataType::TimestampNs { utc: true },
+                }),
+                op: BinaryOp::Eq,
+                right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
+                    value: ns(5, 999),
+                    utc: true,
+                })),
+                data_type: DataType::Bool,
+            }],
+            ..ScanSpec::default()
+        };
+        let err = match source.open_partitions(&pruning_spec, &multi_ctx) {
+            Ok(_) => panic!("expected CorruptData for corrupt multi-RG file"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, QueryError::CorruptData(_)), "got {err:?}");
+        assert_eq!(queue.take(10), vec![file.id]);
     }
 }
