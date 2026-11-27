@@ -83,6 +83,7 @@ use statam_bench7::queries::{
 };
 use statam_bench7::real_s3::{
     BenchS3ParquetAsyncReader, BenchS3Reader, RealS3Mode, run_s3_adaptive, s3_only_mode,
+    sim_s3_header_summary,
 };
 use statam_bench7::report::{QueryBenchRow, WriteBenchRow, format_kib};
 use statam_bench7::s3_parquet::{find_leaf_idx, open_parquet_async_builder};
@@ -6769,7 +6770,8 @@ fn render_external_report(
     } else {
         let _ = writeln!(
             out,
-            "- **Simulated S3 Model:** `1 MiB` `ReadCache` block rounding + run coalescing, `25.0 ms / GET`, `100 MiB/s`"
+            "- **Simulated S3 Model:** {}",
+            sim_s3_header_summary(s3_mode)
         );
     }
 
@@ -6837,6 +6839,12 @@ async fn run() -> BenchResult<()> {
         eprintln!(
             "[external_bench] S3 mode: {} (s3_only={})",
             s3_mode.label(),
+            s3_only_mode()
+        );
+    } else {
+        eprintln!(
+            "[external_bench] Simulated S3: {} (s3_only={})",
+            sim_s3_header_summary(s3_mode),
             s3_only_mode()
         );
     }

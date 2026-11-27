@@ -328,11 +328,11 @@ pub async fn open_lance_local(bytes: &Bytes) -> BenchResult<FileReader> {
 pub async fn open_lance_from_bench_s3(s3_reader: Arc<BenchS3Reader>) -> BenchResult<FileReader> {
     let path = ObjectPath14::from("bench.lance");
     let file_len = s3_reader.file_len();
-    let is_real = s3_reader.is_real_s3();
+    let is_remote = s3_reader.is_remote();
     let mut store = LanceObjectStore::memory();
     store.inner = Arc::new(SimulatedS3ObjectStore14::new(path.clone(), s3_reader));
     let store = Arc::new(store);
-    let sched_cfg = if is_real {
+    let sched_cfg = if is_remote {
         SchedulerConfig::max_bandwidth(&store)
     } else {
         SchedulerConfig::default_for_testing()

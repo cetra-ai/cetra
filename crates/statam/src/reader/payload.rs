@@ -17,7 +17,7 @@ use crate::format::{
 use crate::parallel::MAX_PARALLEL_THREADS;
 use crate::payload::pack::ChunkPackReader;
 use crate::payload::search::{
-    RetainedPackChunks, pack_short_circuits_all, search_pack_rows_flat_masked_with_threads,
+    RetainedPackChunks, pack_short_circuits_all, search_pack_rows_flat_multi_masked_with_threads,
 };
 use crate::payload::{
     FLAT_REF_CHUNKS, FLAT_REF_INLINE, FLAT_REF_NULL, FlatPayloadRefs, PayloadRefRow,
@@ -819,14 +819,42 @@ impl StatamReader {
         read_threads: usize,
         retain: Option<&RetainedPackChunks>,
     ) -> Result<Bitmap, StatamError> {
-        let mut results = Bitmap::new_zeroed(refs.len());
-        if active_mask.all_zeros() {
+        let mut out = self.eval_payload_refs_substring_batch(
+            &[(refs, active_mask)],
+            needle,
+            case_insensitive,
+            l0_local,
+            read_threads,
+            retain,
+        )?;
+        out.pop().ok_or(StatamError::Corrupt {
+            reason: "missing single-mb payload substring result",
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn eval_payload_refs_substring_batch(
+        &self,
+        mb_inputs: &[(&FlatPayloadRefs, &Bitmap)],
+        needle: &[u8],
+        case_insensitive: bool,
+        l0_local: Option<&ParsedL0Payload<'_>>,
+        read_threads: usize,
+        retain: Option<&RetainedPackChunks>,
+    ) -> Result<Vec<Bitmap>, StatamError> {
+        let mut results: Vec<Bitmap> = mb_inputs
+            .iter()
+            .map(|(refs, _)| Bitmap::new_zeroed(refs.len()))
+            .collect();
+        if mb_inputs.is_empty() || mb_inputs.iter().all(|(_, mask)| mask.all_zeros()) {
             return Ok(results);
         }
         if needle.is_empty() {
-            for i in active_mask.iter_ones() {
-                if refs.row_kind(i) != FLAT_REF_NULL {
-                    let _ = results.set(i, true);
+            for (m, &(refs, active_mask)) in mb_inputs.iter().enumerate() {
+                for i in active_mask.iter_ones() {
+                    if i < refs.len() && refs.row_kind(i) != FLAT_REF_NULL {
+                        let _ = results[m].set(i, true);
+                    }
                 }
             }
             return Ok(results);
@@ -836,31 +864,37 @@ impl StatamReader {
         let mut matcher = Utf8Matcher::new(needle, case_insensitive);
         let mut external_pack_idxs = BTreeSet::new();
         let mut has_l0_chunks = false;
-        let mut active_chunk_rows = Vec::new();
+        let mut active_chunk_rows: Vec<Vec<usize>> = vec![Vec::new(); mb_inputs.len()];
 
-        for i in active_mask.iter_ones() {
-            match refs.row_kind(i) {
-                FLAT_REF_NULL => {}
-                FLAT_REF_INLINE => {
-                    if matcher.matches(refs.inline_bytes(i)) {
-                        let _ = results.set(i, true);
-                    }
+        for (m, &(refs, active_mask)) in mb_inputs.iter().enumerate() {
+            for i in active_mask.iter_ones() {
+                if i >= refs.len() {
+                    break;
                 }
-                FLAT_REF_CHUNKS => {
-                    active_chunk_rows.push(i);
-                    let (ps, _) = refs.chunk_refs(i);
-                    for &pidx in ps {
-                        if pidx == L0_LOCAL_PACK_IDX {
-                            has_l0_chunks = true;
-                        } else {
-                            external_pack_idxs.insert(pidx);
+                match refs.row_kind(i) {
+                    FLAT_REF_NULL => {}
+                    FLAT_REF_INLINE => {
+                        if matcher.matches(refs.inline_bytes(i)) {
+                            let _ = results[m].set(i, true);
                         }
                     }
+                    FLAT_REF_CHUNKS => {
+                        active_chunk_rows[m].push(i);
+                        let (ps, _) = refs.chunk_refs(i);
+                        for &pidx in ps {
+                            if pidx == L0_LOCAL_PACK_IDX {
+                                has_l0_chunks = true;
+                            } else {
+                                external_pack_idxs.insert(pidx);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
 
+        let all_mb_refs: Vec<&FlatPayloadRefs> = mb_inputs.iter().map(|&(refs, _)| refs).collect();
         for pack_idx in external_pack_idxs {
             let pack_id = *self
                 .meta
@@ -874,21 +908,23 @@ impl StatamReader {
             if pack_short_circuits_all(&pack, needle, case_insensitive)? {
                 let pack_chunk_count = pack.toc().chunks.len();
                 let no_edges = pack.postscript().edge_table_len == 0;
-                for &r in &active_chunk_rows {
-                    let (ps, cs) = refs.chunk_refs(r);
-                    let mut pack_refs = 0usize;
-                    for (&p, &cid) in ps.iter().zip(cs.iter()) {
-                        if p == pack_idx {
-                            if (cid as usize) >= pack_chunk_count {
-                                return Err(StatamError::Corrupt {
-                                    reason: "payload ref chunk_id out of pack bounds",
-                                });
-                            }
-                            pack_refs += 1;
-                            if no_edges && pack_refs > 1 {
-                                return Err(StatamError::Corrupt {
-                                    reason: "multi-chunk row references pack without edge table",
-                                });
+                for (m, &(refs, _)) in mb_inputs.iter().enumerate() {
+                    for &r in &active_chunk_rows[m] {
+                        let (ps, cs) = refs.chunk_refs(r);
+                        let mut pack_refs = 0usize;
+                        for (&p, &cid) in ps.iter().zip(cs.iter()) {
+                            if p == pack_idx {
+                                if (cid as usize) >= pack_chunk_count {
+                                    return Err(StatamError::Corrupt {
+                                        reason: "payload ref chunk_id out of pack bounds",
+                                    });
+                                }
+                                pack_refs += 1;
+                                if no_edges && pack_refs > 1 {
+                                    return Err(StatamError::Corrupt {
+                                        reason: "multi-chunk row references pack without edge table",
+                                    });
+                                }
                             }
                         }
                     }
@@ -896,33 +932,41 @@ impl StatamReader {
                 continue;
             }
 
-            let mut pack_mask = Bitmap::new_zeroed(refs.len());
+            let mut pack_masks: Vec<Bitmap> = Vec::with_capacity(mb_inputs.len());
             let mut any_pack_row = false;
-            for &r in &active_chunk_rows {
-                if results.get(r) {
-                    continue;
+            for (m, &(refs, _)) in mb_inputs.iter().enumerate() {
+                let mut pack_mask = Bitmap::new_zeroed(refs.len());
+                for &r in &active_chunk_rows[m] {
+                    if results[m].get(r) {
+                        continue;
+                    }
+                    let (ps, _) = refs.chunk_refs(r);
+                    if ps.contains(&pack_idx) {
+                        let _ = pack_mask.set(r, true);
+                        any_pack_row = true;
+                    }
                 }
-                let (ps, _) = refs.chunk_refs(r);
-                if ps.contains(&pack_idx) {
-                    let _ = pack_mask.set(r, true);
-                    any_pack_row = true;
-                }
+                pack_masks.push(pack_mask);
             }
             if !any_pack_row {
                 continue;
             }
-            let bm = search_pack_rows_flat_masked_with_threads(
+
+            let pack_mask_refs: Vec<&Bitmap> = pack_masks.iter().collect();
+            let bms = search_pack_rows_flat_multi_masked_with_threads(
                 &pack,
-                refs,
-                &pack_mask,
+                &all_mb_refs,
+                &pack_mask_refs,
                 pack_idx,
                 needle,
                 case_insensitive,
                 read_threads,
                 retain.map(|r| (pack_id, r)),
             )?;
-            for bit in bm.iter_ones() {
-                let _ = results.set(bit, true);
+            for (m, bm) in bms.into_iter().enumerate() {
+                for bit in bm.iter_ones() {
+                    let _ = results[m].set(bit, true);
+                }
             }
         }
 
@@ -930,94 +974,99 @@ impl StatamReader {
             let l0 = l0_local.ok_or(StatamError::Corrupt {
                 reason: "missing L0 local payload region for chunked L0 row",
             })?;
-            let mut single_by_frame: BTreeMap<u32, Vec<(u32, usize)>> = BTreeMap::new();
-            let mut multi_chunk_rows: Vec<usize> = Vec::new();
-
-            for &r in &active_chunk_rows {
-                if results.get(r) {
+            for (m, &(refs, _)) in mb_inputs.iter().enumerate() {
+                if active_chunk_rows[m].is_empty() {
                     continue;
                 }
-                let (ps, cs) = refs.chunk_refs(r);
-                if ps.first().copied() != Some(L0_LOCAL_PACK_IDX) {
-                    continue;
-                }
-                for &cid in cs {
-                    if (cid as usize) >= l0.chunks.len() {
-                        return Err(StatamError::Corrupt {
-                            reason: "L0 chunk_id out of bounds",
-                        });
-                    }
-                }
-                if cs.len() == 1 {
-                    let cid = cs[0];
-                    let fid = l0.chunks[cid as usize].frame_id;
-                    single_by_frame.entry(fid).or_default().push((cid, r));
-                } else if cs.len() > 1 {
-                    multi_chunk_rows.push(r);
-                }
-            }
+                let mut single_by_frame: BTreeMap<u32, Vec<(u32, usize)>> = BTreeMap::new();
+                let mut multi_chunk_rows: Vec<usize> = Vec::new();
 
-            // Stream single-chunk L0 rows one frame at a time (<= 1 frame in RAM),
-            // deduplicating repeated chunk IDs per frame to prevent aliased-chunk DoS.
-            for (fid, mut cid_rows) in single_by_frame {
-                let decoded = l0.decompress_frame(fid)?;
-                cid_rows.sort_unstable_by_key(|&(cid, _)| cid);
-                let mut idx = 0usize;
-                while idx < cid_rows.len() {
-                    let cid = cid_rows[idx].0;
-                    let loc = l0.chunks[cid as usize];
-                    let s = loc.offset_in_frame as usize;
-                    let e = s + loc.raw_len as usize;
-                    let slice = decoded.get(s..e).ok_or(StatamError::Corrupt {
-                        reason: "L0 chunk slice out of frame bounds",
-                    })?;
-                    let hit = matcher.matches(slice);
-                    while idx < cid_rows.len() && cid_rows[idx].0 == cid {
-                        if hit {
-                            let _ = results.set(cid_rows[idx].1, true);
-                        }
-                        idx += 1;
+                for &r in &active_chunk_rows[m] {
+                    if results[m].get(r) {
+                        continue;
                     }
-                }
-            }
-
-            // Reconstruct rare multi-chunk L0 rows row-by-row with a 1-frame cache.
-            if !multi_chunk_rows.is_empty() {
-                let mut cached_frame: Option<(u32, Vec<u8>)> = None;
-                let mut buf = Vec::new();
-                for r in multi_chunk_rows {
-                    let (_, cs) = refs.chunk_refs(r);
-                    buf.clear();
+                    let (ps, cs) = refs.chunk_refs(r);
+                    if ps.first().copied() != Some(L0_LOCAL_PACK_IDX) {
+                        continue;
+                    }
                     for &cid in cs {
-                        let loc = l0.chunks[cid as usize];
-                        let next_len = buf.len().checked_add(loc.raw_len as usize).ok_or(
-                            StatamError::BoundsExceeded {
-                                reason: "L0 payload exceeds MAX_ROW_PAYLOAD_BYTES",
-                            },
-                        )?;
-                        if next_len > MAX_ROW_PAYLOAD_BYTES {
-                            return Err(StatamError::BoundsExceeded {
-                                reason: "L0 payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                        if (cid as usize) >= l0.chunks.len() {
+                            return Err(StatamError::Corrupt {
+                                reason: "L0 chunk_id out of bounds",
                             });
                         }
-                        if cached_frame
-                            .as_ref()
-                            .is_none_or(|(cfid, _)| *cfid != loc.frame_id)
-                        {
-                            let decoded = l0.decompress_frame(loc.frame_id)?;
-                            cached_frame = Some((loc.frame_id, decoded));
-                        }
-                        if let Some((_, ref frame_buf)) = cached_frame {
-                            let s = loc.offset_in_frame as usize;
-                            let e = s + loc.raw_len as usize;
-                            let slice = frame_buf.get(s..e).ok_or(StatamError::Corrupt {
-                                reason: "L0 chunk slice out of frame bounds",
-                            })?;
-                            buf.extend_from_slice(slice);
+                    }
+                    if cs.len() == 1 {
+                        let cid = cs[0];
+                        let fid = l0.chunks[cid as usize].frame_id;
+                        single_by_frame.entry(fid).or_default().push((cid, r));
+                    } else if cs.len() > 1 {
+                        multi_chunk_rows.push(r);
+                    }
+                }
+
+                // Stream single-chunk L0 rows one frame at a time (<= 1 frame in RAM),
+                // deduplicating repeated chunk IDs per frame to prevent aliased-chunk DoS.
+                for (fid, mut cid_rows) in single_by_frame {
+                    let decoded = l0.decompress_frame(fid)?;
+                    cid_rows.sort_unstable_by_key(|&(cid, _)| cid);
+                    let mut idx = 0usize;
+                    while idx < cid_rows.len() {
+                        let cid = cid_rows[idx].0;
+                        let loc = l0.chunks[cid as usize];
+                        let s = loc.offset_in_frame as usize;
+                        let e = s + loc.raw_len as usize;
+                        let slice = decoded.get(s..e).ok_or(StatamError::Corrupt {
+                            reason: "L0 chunk slice out of frame bounds",
+                        })?;
+                        let hit = matcher.matches(slice);
+                        while idx < cid_rows.len() && cid_rows[idx].0 == cid {
+                            if hit {
+                                let _ = results[m].set(cid_rows[idx].1, true);
+                            }
+                            idx += 1;
                         }
                     }
-                    if matcher.matches(&buf) {
-                        let _ = results.set(r, true);
+                }
+
+                // Reconstruct rare multi-chunk L0 rows row-by-row with a 1-frame cache.
+                if !multi_chunk_rows.is_empty() {
+                    let mut cached_frame: Option<(u32, Vec<u8>)> = None;
+                    let mut buf = Vec::new();
+                    for r in multi_chunk_rows {
+                        let (_, cs) = refs.chunk_refs(r);
+                        buf.clear();
+                        for &cid in cs {
+                            let loc = l0.chunks[cid as usize];
+                            let next_len = buf.len().checked_add(loc.raw_len as usize).ok_or(
+                                StatamError::BoundsExceeded {
+                                    reason: "L0 payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                                },
+                            )?;
+                            if next_len > MAX_ROW_PAYLOAD_BYTES {
+                                return Err(StatamError::BoundsExceeded {
+                                    reason: "L0 payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                                });
+                            }
+                            if cached_frame
+                                .as_ref()
+                                .is_none_or(|(cfid, _)| *cfid != loc.frame_id)
+                            {
+                                let decoded = l0.decompress_frame(loc.frame_id)?;
+                                cached_frame = Some((loc.frame_id, decoded));
+                            }
+                            if let Some((_, ref frame_buf)) = cached_frame {
+                                let s = loc.offset_in_frame as usize;
+                                let e = s + loc.raw_len as usize;
+                                let slice = frame_buf.get(s..e).ok_or(StatamError::Corrupt {
+                                    reason: "L0 chunk slice out of frame bounds",
+                                })?;
+                                buf.extend_from_slice(slice);
+                            }
+                        }
+                        if matcher.matches(&buf) {
+                            let _ = results[m].set(r, true);
+                        }
                     }
                 }
             }

@@ -44,8 +44,8 @@ pub use gdpr::{
     RewrittenStatamFile, gdpr_rewrite_day,
 };
 pub use io::{
-    FileReader, IoCounters, RangeReader, S3_CACHE_BLOCK_BYTES, SimulatedS3Config,
-    SimulatedS3Reader, SliceReader,
+    FileReader, IoCounters, RangeReader, S3_CACHE_BLOCK_BYTES, SimulatedS3Config, SimulatedS3Mode,
+    SimulatedS3Reader, SliceReader, simulate_wave_latency_ms,
 };
 pub use payload::{
     PayloadRefRow,

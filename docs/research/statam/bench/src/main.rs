@@ -13,7 +13,7 @@ use statam_bench7::queries::{
     bench_tiny_flushes, encode_scores_workload, encode_spans_workload, parse_enabled_formats,
     run_all_queries,
 };
-use statam_bench7::real_s3::{RealS3Mode, s3_only_mode};
+use statam_bench7::real_s3::{RealS3Mode, s3_only_mode, sim_s3_header_summary};
 use statam_bench7::report::{GateCheck, QueryBenchRow, WriteBenchRow, render_markdown_report};
 use statam_bench7::schema::{self, BenchResult};
 use statam_bench7::vortex_bench::new_vortex_session;
@@ -289,6 +289,12 @@ async fn run_suite() -> BenchResult<()> {
         eprintln!(
             "[statam-bench7] S3 mode: {} (s3_only={})",
             s3_mode.label(),
+            s3_only_mode()
+        );
+    } else {
+        eprintln!(
+            "[statam-bench7] Simulated S3: {} (s3_only={})",
+            sim_s3_header_summary(s3_mode),
             s3_only_mode()
         );
     }

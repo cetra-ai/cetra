@@ -39,6 +39,8 @@ const MULTIPART_PART_BYTES: usize = 8 * 1024 * 1024;
 pub enum RealS3Mode {
     /// Existing in-memory 1 MiB ReadCache S3 simulator (default when `STATAM_REAL_S3` is unset).
     Sim,
+    /// In-memory Direct S3 simulator (exact HTTP Range GETs + 64 KiB coalescing).
+    SimDirect,
     /// Real remote S3 (`AmazonS3`), exact HTTP Range GETs (no 1 MiB rounding, no block cache).
     Direct,
     /// Real remote S3 (`AmazonS3`) behind a per-reader 1 MiB ReadCache matching Cetra's ReadCache.
@@ -53,6 +55,7 @@ impl RealS3Mode {
             .to_ascii_lowercase()
             .as_str()
         {
+            "sim-direct" | "sim_direct" | "simdirect" => Self::SimDirect,
             "direct" | "raw" => Self::Direct,
             "readcache" | "read_cache" | "cache" | "1mib" => Self::ReadCache1MiB,
             _ => Self::Sim,
@@ -60,16 +63,74 @@ impl RealS3Mode {
     }
 
     pub fn is_real(self) -> bool {
-        self != Self::Sim
+        matches!(self, Self::Direct | Self::ReadCache1MiB)
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Sim => "simulated",
+            Self::Sim => "sim-readcache-1mib",
+            Self::SimDirect => "sim-direct",
             Self::Direct => "real-s3-direct",
             Self::ReadCache1MiB => "real-s3-readcache-1mib",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimS3Profile {
+    Default,
+    WanGarage,
+}
+
+impl SimS3Profile {
+    pub fn from_env() -> Self {
+        match std::env::var("STATAM_S3_PROFILE")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "garage" | "wan-garage" | "wan_garage" => Self::WanGarage,
+            _ => Self::Default,
+        }
+    }
+
+    /// Effective simulated profile for `mode` (`SimDirect` always uses `WanGarage`).
+    pub fn effective(mode: RealS3Mode) -> Self {
+        if mode == RealS3Mode::SimDirect {
+            Self::WanGarage
+        } else {
+            Self::from_env()
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::WanGarage => "wan-garage",
+        }
+    }
+}
+
+/// Human-readable description of the active simulated S3 mode & profile for report headers.
+pub fn sim_s3_header_summary(mode: RealS3Mode) -> String {
+    let profile = SimS3Profile::effective(mode);
+    let cfg = match (mode, profile) {
+        (RealS3Mode::SimDirect, _) => {
+            SimulatedS3Config::wan_garage().with_direct_mode(DIRECT_COALESCE_GAP_BYTES)
+        }
+        (_, SimS3Profile::WanGarage) => SimulatedS3Config::wan_garage(),
+        (_, SimS3Profile::Default) => SimulatedS3Config::default(),
+    };
+    format!(
+        "`{}` (profile=`{}`, `rtt={:.1} ms`, `agg={:.0} MiB/s`, `stream={:.0} MiB/s`, `conc={}`)",
+        mode.label(),
+        profile.label(),
+        cfg.rtt_ms,
+        cfg.bandwidth_bytes_per_sec / (1024.0 * 1024.0),
+        cfg.per_stream_bandwidth_bytes_per_sec / (1024.0 * 1024.0),
+        cfg.max_concurrent_gets,
+    )
 }
 
 /// Returns `true` when `STATAM_S3_ONLY=1` is set (skip warm local CPU timing loops).
@@ -223,9 +284,135 @@ type InflightResult = Option<Result<(), String>>;
 type InflightTx = tokio::sync::watch::Sender<InflightResult>;
 type InflightRx = tokio::sync::watch::Receiver<InflightResult>;
 
+type SimBatchItem = (
+    Range<u64>,
+    tokio::sync::oneshot::Sender<Result<Bytes, StatamError>>,
+);
+
+struct SimBatchQueue {
+    pending: Vec<SimBatchItem>,
+    flushing: bool,
+}
+
+/// Cancel-safe async micro-batcher for simulated S3 `read_range_async` calls so concurrent
+/// futures (e.g. Vortex `VortexReadAt` and Lance `ScanScheduler`) schedule into one parallel wave.
+struct SimAsyncBatcher {
+    queue: Mutex<SimBatchQueue>,
+}
+
+struct LeaderGuard<'a> {
+    batcher: &'a SimAsyncBatcher,
+    armed: bool,
+}
+
+impl Drop for LeaderGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let drained = {
+            let mut guard = self
+                .batcher
+                .queue
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            guard.flushing = false;
+            std::mem::take(&mut guard.pending)
+        };
+        drop(drained);
+    }
+}
+
+impl SimAsyncBatcher {
+    fn new() -> Self {
+        Self {
+            queue: Mutex::new(SimBatchQueue {
+                pending: Vec::new(),
+                flushing: false,
+            }),
+        }
+    }
+
+    async fn read_range(
+        &self,
+        sim: &SimulatedS3Reader,
+        range: Range<u64>,
+    ) -> Result<Bytes, StatamError> {
+        loop {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let is_leader = {
+                let mut guard = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+                guard.pending.push((range.clone(), tx));
+                if !guard.flushing {
+                    guard.flushing = true;
+                    true
+                } else {
+                    false
+                }
+            };
+
+            if is_leader {
+                let mut leader_guard = LeaderGuard {
+                    batcher: self,
+                    armed: true,
+                };
+                tokio::task::yield_now().await;
+                tokio::task::yield_now().await;
+
+                let batch = {
+                    let mut guard = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+                    guard.flushing = false;
+                    leader_guard.armed = false;
+                    std::mem::take(&mut guard.pending)
+                };
+
+                let ranges: Vec<Range<u64>> = batch.iter().map(|(r, _)| r.clone()).collect();
+                match sim.read_ranges_uncoalesced(&ranges) {
+                    Ok(parts) if parts.len() == batch.len() => {
+                        for ((_, sender), part) in batch.into_iter().zip(parts) {
+                            let _ = sender.send(Ok(part));
+                        }
+                    }
+                    Ok(_) => {
+                        for (_, sender) in batch {
+                            let _ = sender.send(Err(StatamError::Corrupt {
+                                reason: "sim batcher range count mismatch",
+                            }));
+                        }
+                    }
+                    Err(err) => {
+                        let msg = err.to_string();
+                        let mut iter = batch.into_iter();
+                        if let Some((_, first_sender)) = iter.next() {
+                            let _ = first_sender.send(Err(err));
+                        }
+                        for (_, sender) in iter {
+                            let _ = sender
+                                .send(Err(StatamError::Io(std::io::Error::other(msg.clone()))));
+                        }
+                    }
+                }
+            }
+
+            match rx.await {
+                Ok(res) => return res,
+                Err(_) => {
+                    // Leader task was dropped while parked; retry so this surviving waiter
+                    // starts or joins a fresh simulated wave.
+                    continue;
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 enum BenchS3Inner {
-    Sim(Arc<SimulatedS3Reader>),
+    Sim {
+        sim: Arc<SimulatedS3Reader>,
+        mode: RealS3Mode,
+        batcher: Arc<SimAsyncBatcher>,
+    },
     Real {
         client: Arc<RealS3Client>,
         path: ObjectPath14,
@@ -249,8 +436,23 @@ impl BenchS3Reader {
     pub fn from_bytes(bytes: Bytes, s3_cfg: SimulatedS3Config) -> Arc<Self> {
         let mode = RealS3Mode::from_env();
         if !mode.is_real() {
+            let profile = SimS3Profile::effective(mode);
+            let (effective_cfg, remote_hint) = match (mode, profile) {
+                (RealS3Mode::SimDirect, _) => (
+                    SimulatedS3Config::wan_garage().with_direct_mode(DIRECT_COALESCE_GAP_BYTES),
+                    true,
+                ),
+                (_, SimS3Profile::WanGarage) => (SimulatedS3Config::wan_garage(), true),
+                (_, SimS3Profile::Default) => (s3_cfg, false),
+            };
+            let sim = SimulatedS3Reader::from_bytes(bytes, effective_cfg)
+                .with_remote_hint(remote_hint);
             return Arc::new(Self {
-                inner: BenchS3Inner::Sim(Arc::new(SimulatedS3Reader::from_bytes(bytes, s3_cfg))),
+                inner: BenchS3Inner::Sim {
+                    sim: Arc::new(sim),
+                    mode,
+                    batcher: Arc::new(SimAsyncBatcher::new()),
+                },
             });
         }
         let handle = tokio::runtime::Handle::current();
@@ -280,14 +482,14 @@ impl BenchS3Reader {
 
     pub fn mode(&self) -> RealS3Mode {
         match &self.inner {
-            BenchS3Inner::Sim(_) => RealS3Mode::Sim,
+            BenchS3Inner::Sim { mode, .. } => *mode,
             BenchS3Inner::Real { mode, .. } => *mode,
         }
     }
 
     pub fn evict_all(&self) {
         match &self.inner {
-            BenchS3Inner::Sim(sim) => sim.evict_all(),
+            BenchS3Inner::Sim { sim, .. } => sim.evict_all(),
             BenchS3Inner::Real { cache, .. } => {
                 cache.lock().unwrap_or_else(|p| p.into_inner()).clear();
             }
@@ -296,7 +498,7 @@ impl BenchS3Reader {
 
     pub fn reset_counters(&self) {
         match &self.inner {
-            BenchS3Inner::Sim(sim) => sim.reset_counters(),
+            BenchS3Inner::Sim { sim, .. } => sim.reset_counters(),
             BenchS3Inner::Real {
                 gets,
                 bytes,
@@ -312,7 +514,7 @@ impl BenchS3Reader {
 
     pub fn counters(&self) -> IoCounters {
         match &self.inner {
-            BenchS3Inner::Sim(sim) => sim.counters(),
+            BenchS3Inner::Sim { sim, .. } => sim.counters(),
             BenchS3Inner::Real { gets, bytes, .. } => IoCounters {
                 gets: gets.load(Ordering::Relaxed),
                 bytes_from_s3: bytes.load(Ordering::Relaxed),
@@ -320,6 +522,7 @@ impl BenchS3Reader {
                 cache_hits: 0,
                 cache_misses: 0,
                 waves: 0,
+                wave_latency_ms: 0.0,
             },
         }
     }
@@ -328,7 +531,7 @@ impl BenchS3Reader {
     /// `reset_counters()` in Real S3 mode.
     pub fn simulated_latency_ms(&self) -> f64 {
         match &self.inner {
-            BenchS3Inner::Sim(sim) => sim.simulated_latency_ms(),
+            BenchS3Inner::Sim { sim, .. } => sim.simulated_latency_ms(),
             BenchS3Inner::Real { t_start, .. } => {
                 t_start
                     .lock()
@@ -377,7 +580,7 @@ impl BenchS3Reader {
 
     pub async fn read_range_async(&self, range: Range<u64>) -> Result<Bytes, StatamError> {
         match &self.inner {
-            BenchS3Inner::Sim(sim) => sim.read_range(range),
+            BenchS3Inner::Sim { sim, batcher, .. } => batcher.read_range(sim, range).await,
             BenchS3Inner::Real {
                 client,
                 path,
@@ -580,7 +783,7 @@ impl BenchS3Reader {
         ranges: &[Range<u64>],
     ) -> Result<Vec<Bytes>, StatamError> {
         match &self.inner {
-            BenchS3Inner::Sim(sim) => sim.read_ranges(ranges),
+            BenchS3Inner::Sim { sim, .. } => sim.read_ranges(ranges),
             BenchS3Inner::Real {
                 client,
                 path,
@@ -652,18 +855,21 @@ impl BenchS3Reader {
 impl RangeReader for BenchS3Reader {
     fn file_len(&self) -> u64 {
         match &self.inner {
-            BenchS3Inner::Sim(sim) => sim.file_len(),
+            BenchS3Inner::Sim { sim, .. } => sim.file_len(),
             BenchS3Inner::Real { file_len, .. } => *file_len,
         }
     }
 
     fn is_remote(&self) -> bool {
-        self.is_real_s3()
+        match &self.inner {
+            BenchS3Inner::Sim { sim, .. } => sim.is_remote(),
+            BenchS3Inner::Real { .. } => true,
+        }
     }
 
     fn read_range(&self, range: Range<u64>) -> Result<Bytes, StatamError> {
         match &self.inner {
-            BenchS3Inner::Sim(sim) => sim.read_range(range),
+            BenchS3Inner::Sim { sim, .. } => sim.read_range(range),
             BenchS3Inner::Real { handle, .. } => {
                 run_blocking_on(handle, self.read_range_async(range))
             }
@@ -672,7 +878,7 @@ impl RangeReader for BenchS3Reader {
 
     fn read_ranges(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>, StatamError> {
         match &self.inner {
-            BenchS3Inner::Sim(sim) => sim.read_ranges(ranges),
+            BenchS3Inner::Sim { sim, .. } => sim.read_ranges(ranges),
             BenchS3Inner::Real { handle, .. } => {
                 run_blocking_on(handle, self.read_ranges_async(ranges))
             }

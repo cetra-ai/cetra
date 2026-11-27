@@ -353,33 +353,140 @@ impl RangeReader for FileReader {
     }
 }
 
+/// Caching and coalescing mode for [`SimulatedS3Reader`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimulatedS3Mode {
+    /// 1 MiB aligned LRU block cache + consecutive-run coalescing (Cetra ReadCache).
+    ReadCache1MiB,
+    /// Uncached exact HTTP Range GETs coalesced within `coalesce_gap_bytes` (Direct S3).
+    Direct { coalesce_gap_bytes: u64 },
+}
+
 /// Configuration for [`SimulatedS3Reader`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SimulatedS3Config {
+    /// Caching and coalescing mode (default: [`SimulatedS3Mode::ReadCache1MiB`]).
+    pub mode: SimulatedS3Mode,
     /// Maximum number of 1 MiB blocks retained in the LRU cache (`0` disables caching).
     pub cache_capacity_blocks: usize,
     /// Simulated per-GET round-trip latency in milliseconds (default: `25.0`).
     pub rtt_ms: f64,
-    /// Simulated S3 transfer bandwidth in bytes/second (default: `100 MiB/s`).
+    /// Simulated aggregate S3 transfer bandwidth in bytes/second (default: `100 MiB/s`).
     pub bandwidth_bytes_per_sec: f64,
+    /// Maximum concurrent in-flight HTTP range GETs per wave (default: `16`).
+    pub max_concurrent_gets: usize,
+    /// Simulated per-stream transfer bandwidth in bytes/second (default: `40 MiB/s`).
+    pub per_stream_bandwidth_bytes_per_sec: f64,
 }
 
 impl Default for SimulatedS3Config {
     fn default() -> Self {
         Self {
+            mode: SimulatedS3Mode::ReadCache1MiB,
             cache_capacity_blocks: 256,
             rtt_ms: 25.0,
             bandwidth_bytes_per_sec: 100.0 * 1024.0 * 1024.0,
+            max_concurrent_gets: 16,
+            per_stream_bandwidth_bytes_per_sec: 40.0 * 1024.0 * 1024.0,
         }
     }
 }
 
+impl SimulatedS3Config {
+    /// Calibrated WAN S3 profile matching live Garage S3 measurements
+    /// (`59.0 ms` RTT, `75 MiB/s` aggregate, `30 MiB/s` per-stream, `16` concurrent GETs).
+    pub fn wan_garage() -> Self {
+        Self {
+            mode: SimulatedS3Mode::ReadCache1MiB,
+            cache_capacity_blocks: 256,
+            rtt_ms: 59.0,
+            bandwidth_bytes_per_sec: 75.0 * 1024.0 * 1024.0,
+            max_concurrent_gets: 16,
+            per_stream_bandwidth_bytes_per_sec: 30.0 * 1024.0 * 1024.0,
+        }
+    }
+
+    /// Switches this configuration into [`SimulatedS3Mode::Direct`] with `coalesce_gap_bytes`.
+    pub fn with_direct_mode(mut self, coalesce_gap_bytes: u64) -> Self {
+        self.mode = SimulatedS3Mode::Direct { coalesce_gap_bytes };
+        self
+    }
+}
+
+#[inline]
+fn transfer_ms(bytes: f64, bw: f64) -> f64 {
+    if !bw.is_finite() || bw <= 0.0 || bytes <= 0.0 {
+        0.0
+    } else {
+        (bytes / bw) * 1000.0
+    }
+}
+
+#[inline]
+fn ms_to_duration(ms: f64) -> Duration {
+    if ms.is_nan() || ms <= 0.0 {
+        Duration::ZERO
+    } else if !ms.is_finite() {
+        Duration::MAX
+    } else {
+        Duration::try_from_secs_f64(ms / 1000.0).unwrap_or(Duration::MAX)
+    }
+}
+
+/// Models the wall-clock latency (ms) of one parallel HTTP GET wave with `get_lens` byte sizes
+/// dispatched in order across up to `config.max_concurrent_gets` concurrent streams, bounded below
+/// by the aggregate WAN bandwidth floor.
+pub fn simulate_wave_latency_ms(get_lens: &[u64], config: &SimulatedS3Config) -> f64 {
+    if get_lens.is_empty() {
+        return 0.0;
+    }
+    if config.rtt_ms.is_nan() {
+        return f64::NAN;
+    }
+    if config.rtt_ms.is_infinite() {
+        return if config.rtt_ms.is_sign_positive() {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+    }
+    let rtt = config.rtt_ms.max(0.0);
+    let stream_bw = if config.per_stream_bandwidth_bytes_per_sec.is_finite()
+        && config.per_stream_bandwidth_bytes_per_sec > 0.0
+    {
+        config.per_stream_bandwidth_bytes_per_sec
+    } else {
+        config.bandwidth_bytes_per_sec
+    };
+    let c = config.max_concurrent_gets.max(1).min(get_lens.len());
+    let mut slots = vec![0.0f64; c];
+    let mut total_bytes = 0.0f64;
+
+    for &len in get_lens {
+        let len_f = len as f64;
+        total_bytes += len_f;
+        let mut best_idx = 0usize;
+        let mut best_val = slots[0];
+        for (s, &val) in slots.iter().enumerate().skip(1) {
+            if val < best_val {
+                best_val = val;
+                best_idx = s;
+            }
+        }
+        slots[best_idx] += rtt + transfer_ms(len_f, stream_bw);
+    }
+
+    let parallel_ms = slots.into_iter().fold(0.0f64, f64::max);
+    let agg_floor_ms = rtt + transfer_ms(total_bytes, config.bandwidth_bytes_per_sec);
+    parallel_ms.max(agg_floor_ms)
+}
+
 /// I/O telemetry counters recorded by [`SimulatedS3Reader`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct IoCounters {
-    /// Number of coalesced S3 GET requests issued on cache misses.
+    /// Number of coalesced S3 GET requests issued on cache misses (or Direct ranges).
     pub gets: u64,
-    /// Total raw bytes fetched from the backing S3 store (1 MiB aligned, clamped to file length).
+    /// Total raw bytes fetched from the backing S3 store.
     pub bytes_from_s3: u64,
     /// Total logical bytes requested by callers via `read_range` / `read_ranges`.
     pub bytes_requested: u64,
@@ -389,31 +496,45 @@ pub struct IoCounters {
     pub cache_misses: u64,
     /// Number of `read_range` / `read_ranges` invocations (read waves).
     pub waves: u64,
+    /// Accumulated per-wave simulated latency in milliseconds recorded by [`SimulatedS3Reader`].
+    pub wave_latency_ms: f64,
 }
 
 impl IoCounters {
-    /// Computes simulated latency in milliseconds:
-    /// `gets * rtt_ms + (bytes_from_s3 / bandwidth_bytes_per_sec) * 1000.0`.
+    /// Returns simulated latency in milliseconds.
+    ///
+    /// When `self.wave_latency_ms` was recorded by [`SimulatedS3Reader`] (`> 0.0` or `NaN`),
+    /// returns that exact accumulated wave latency (use
+    /// [`SimulatedS3Reader::simulated_latency_ms_for`] to re-evaluate recorded waves under a
+    /// different [`SimulatedS3Config`]). Otherwise, computes a stateless O(1) wave-aware fallback
+    /// `(ceil(gets / max_concurrent_gets) * rtt_ms) + transfer_ms(bytes_from_s3, bandwidth)`.
     pub fn simulated_latency_ms(&self, config: &SimulatedS3Config) -> f64 {
-        let rtt_part = (self.gets as f64) * config.rtt_ms;
-        let bw_part = if config.bandwidth_bytes_per_sec > 0.0 {
-            ((self.bytes_from_s3 as f64) / config.bandwidth_bytes_per_sec) * 1000.0
-        } else {
-            0.0
-        };
-        rtt_part + bw_part
+        if self.wave_latency_ms > 0.0 || self.wave_latency_ms.is_nan() {
+            return self.wave_latency_ms;
+        }
+        if self.gets == 0 && self.bytes_from_s3 == 0 {
+            return 0.0;
+        }
+        if config.rtt_ms.is_nan() {
+            return f64::NAN;
+        }
+        if config.rtt_ms.is_infinite() {
+            return if config.rtt_ms.is_sign_positive() {
+                f64::INFINITY
+            } else {
+                0.0
+            };
+        }
+        let rtt = config.rtt_ms.max(0.0);
+        let c = config.max_concurrent_gets.max(1) as u64;
+        let rounds = self.gets.div_ceil(c);
+        (rounds as f64) * rtt
+            + transfer_ms(self.bytes_from_s3 as f64, config.bandwidth_bytes_per_sec)
     }
 
     /// Computes simulated latency as a [`Duration`].
     pub fn simulated_latency(&self, config: &SimulatedS3Config) -> Duration {
-        let ms = self.simulated_latency_ms(config);
-        if ms.is_nan() || ms <= 0.0 {
-            Duration::ZERO
-        } else if !ms.is_finite() {
-            Duration::MAX
-        } else {
-            Duration::try_from_secs_f64(ms / 1000.0).unwrap_or(Duration::MAX)
-        }
+        ms_to_duration(self.simulated_latency_ms(config))
     }
 }
 
@@ -482,10 +603,11 @@ impl LruBlockCache {
 struct S3State {
     cache: LruBlockCache,
     counters: IoCounters,
+    wave_get_lens: Vec<Vec<u64>>,
 }
 
-/// [`RangeReader`] simulator modelling Cetra's exact 1 MiB `ReadCache` block
-/// rounding, consecutive-run coalescing, LRU eviction, and S3 latency/cost.
+/// [`RangeReader`] simulator modelling Cetra's 1 MiB `ReadCache` block rounding + consecutive-run
+/// coalescing or Direct HTTP Range GET coalescing, with wave-aware concurrent latency accounting.
 pub struct SimulatedS3Reader {
     backing: Arc<dyn RangeReader>,
     config: SimulatedS3Config,
@@ -507,15 +629,20 @@ impl fmt::Debug for SimulatedS3Reader {
 }
 
 impl SimulatedS3Reader {
-    /// Wraps `backing` with an exact 1 MiB `ReadCache` and S3 telemetry.
+    /// Wraps `backing` with the configured S3 cache/coalescing mode and telemetry.
     pub fn new(backing: Arc<dyn RangeReader>, config: SimulatedS3Config) -> Self {
+        let cache_cap = match config.mode {
+            SimulatedS3Mode::ReadCache1MiB => config.cache_capacity_blocks,
+            SimulatedS3Mode::Direct { .. } => 0,
+        };
         Self {
             backing,
             config,
             remote_hint: false,
             state: Mutex::new(S3State {
-                cache: LruBlockCache::new(config.cache_capacity_blocks),
+                cache: LruBlockCache::new(cache_cap),
                 counters: IoCounters::default(),
+                wave_get_lens: Vec::new(),
             }),
         }
     }
@@ -539,19 +666,20 @@ impl SimulatedS3Reader {
             .counters
     }
 
-    /// Resets all [`IoCounters`] to zero without clearing the block cache.
+    /// Resets all [`IoCounters`] and recorded waves to zero without clearing the block cache.
     pub fn reset_counters(&self) {
         let mut guard = self.state.lock().unwrap_or_else(|p| p.into_inner());
         guard.counters = IoCounters::default();
+        guard.wave_get_lens.clear();
     }
 
-    /// Evicts every cached 1 MiB block (e.g. cold-cache or GDPR eviction simulation).
+    /// Evicts every cached 1 MiB block (no-op in [`SimulatedS3Mode::Direct`]).
     pub fn evict_all(&self) {
         let mut guard = self.state.lock().unwrap_or_else(|p| p.into_inner());
         guard.cache.clear();
     }
 
-    /// Number of 1 MiB blocks currently resident in the LRU cache.
+    /// Number of 1 MiB blocks currently resident in the LRU cache (`0` in Direct mode).
     pub fn cached_blocks(&self) -> usize {
         self.state
             .lock()
@@ -560,19 +688,196 @@ impl SimulatedS3Reader {
             .len()
     }
 
-    /// Returns the simulated latency in milliseconds for the current [`IoCounters`].
+    /// Returns the accumulated wave-aware simulated latency (ms) under this reader's config.
     pub fn simulated_latency_ms(&self) -> f64 {
-        self.counters().simulated_latency_ms(&self.config)
+        self.counters().wave_latency_ms
     }
 
-    /// Returns the simulated latency as a [`Duration`] for the current [`IoCounters`].
+    /// Re-evaluates every recorded wave under `config`, returning total simulated latency (ms).
+    pub fn simulated_latency_ms_for(&self, config: &SimulatedS3Config) -> f64 {
+        let guard = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .wave_get_lens
+            .iter()
+            .map(|w| simulate_wave_latency_ms(w, config))
+            .sum()
+    }
+
+    /// Returns the accumulated wave-aware simulated latency as a [`Duration`].
     pub fn simulated_latency(&self) -> Duration {
-        self.counters().simulated_latency(&self.config)
+        ms_to_duration(self.simulated_latency_ms())
     }
 
     /// Returns the reader's [`SimulatedS3Config`].
     pub fn config(&self) -> &SimulatedS3Config {
         &self.config
+    }
+
+    /// Executes `ranges` in ONE concurrent simulated wave without gap-coalescing in
+    /// [`SimulatedS3Mode::Direct`] (modeling concurrent async single-range GETs from Vortex/Lance),
+    /// or delegates to [`RangeReader::read_ranges`] in [`SimulatedS3Mode::ReadCache1MiB`]
+    /// (modeling single-flight block coalescing across concurrent misses).
+    pub fn read_ranges_uncoalesced(
+        &self,
+        ranges: &[Range<u64>],
+    ) -> Result<Vec<Bytes>, StatamError> {
+        match self.config.mode {
+            SimulatedS3Mode::ReadCache1MiB => self.read_ranges(ranges),
+            SimulatedS3Mode::Direct { .. } => {
+                let size = self.backing.file_len();
+                let mut requested_bytes: u64 = 0;
+                for range in ranges {
+                    validate_range(range, size)?;
+                    requested_bytes = requested_bytes.saturating_add(range.end - range.start);
+                }
+                if ranges.is_empty() {
+                    return Ok(Vec::new());
+                }
+
+                let mut non_empty_indices = Vec::with_capacity(ranges.len());
+                let mut non_empty_ranges = Vec::with_capacity(ranges.len());
+                for (i, r) in ranges.iter().enumerate() {
+                    if r.start < r.end {
+                        non_empty_indices.push(i);
+                        non_empty_ranges.push(r.clone());
+                    }
+                }
+
+                if non_empty_ranges.is_empty() {
+                    let mut guard = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                    guard.counters.waves = guard.counters.waves.saturating_add(1);
+                    return Ok(vec![Bytes::new(); ranges.len()]);
+                }
+
+                let parts = self.backing.read_ranges(&non_empty_ranges)?;
+                if parts.len() != non_empty_ranges.len() {
+                    return Err(StatamError::Corrupt {
+                        reason: "backing reader returned wrong range count",
+                    });
+                }
+
+                let mut out = vec![Bytes::new(); ranges.len()];
+                let mut get_lens = Vec::with_capacity(non_empty_ranges.len());
+                let mut fetched_bytes: u64 = 0;
+                for ((orig_idx, r), part) in non_empty_indices
+                    .into_iter()
+                    .zip(non_empty_ranges.iter())
+                    .zip(parts)
+                {
+                    let expected = r.end - r.start;
+                    if part.len() as u64 != expected {
+                        return Err(StatamError::Corrupt {
+                            reason: "short read from backing store",
+                        });
+                    }
+                    get_lens.push(expected);
+                    fetched_bytes = fetched_bytes.saturating_add(expected);
+                    out[orig_idx] = part;
+                }
+
+                let wave_ms = simulate_wave_latency_ms(&get_lens, &self.config);
+                let mut guard = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                guard.counters.waves = guard.counters.waves.saturating_add(1);
+                guard.counters.bytes_requested = guard
+                    .counters
+                    .bytes_requested
+                    .saturating_add(requested_bytes);
+                guard.counters.gets = guard.counters.gets.saturating_add(get_lens.len() as u64);
+                guard.counters.bytes_from_s3 =
+                    guard.counters.bytes_from_s3.saturating_add(fetched_bytes);
+                guard.counters.wave_latency_ms += wave_ms;
+                guard.wave_get_lens.push(get_lens);
+
+                Ok(out)
+            }
+        }
+    }
+
+    fn read_ranges_direct(
+        &self,
+        ranges: &[Range<u64>],
+        coalesce_gap_bytes: u64,
+        requested_bytes: u64,
+    ) -> Result<Vec<Bytes>, StatamError> {
+        let mut order: Vec<usize> = (0..ranges.len())
+            .filter(|&i| ranges[i].start < ranges[i].end)
+            .collect();
+        if order.is_empty() {
+            let mut guard = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            guard.counters.waves = guard.counters.waves.saturating_add(1);
+            return Ok(vec![Bytes::new(); ranges.len()]);
+        }
+
+        order.sort_by_key(|&i| (ranges[i].start, ranges[i].end));
+
+        let mut spans: Vec<(Range<u64>, Vec<usize>)> = Vec::new();
+        for idx in order {
+            let r = &ranges[idx];
+            if let Some((last_span, members)) = spans.last_mut()
+                && r.start <= last_span.end.saturating_add(coalesce_gap_bytes)
+            {
+                last_span.end = last_span.end.max(r.end);
+                members.push(idx);
+            } else {
+                spans.push((r.clone(), vec![idx]));
+            }
+        }
+
+        let span_ranges: Vec<Range<u64>> = spans.iter().map(|(s, _)| s.clone()).collect();
+        let parts = self.backing.read_ranges(&span_ranges)?;
+        if parts.len() != spans.len() {
+            return Err(StatamError::Corrupt {
+                reason: "backing reader returned wrong range count",
+            });
+        }
+
+        let mut out = vec![Bytes::new(); ranges.len()];
+        let mut get_lens = Vec::with_capacity(spans.len());
+        let mut fetched_bytes: u64 = 0;
+
+        for ((span, members), part) in spans.into_iter().zip(parts) {
+            let expected = span.end - span.start;
+            if part.len() as u64 != expected {
+                return Err(StatamError::Corrupt {
+                    reason: "short read from backing store",
+                });
+            }
+            get_lens.push(expected);
+            fetched_bytes = fetched_bytes.saturating_add(expected);
+            for idx in members {
+                let r = &ranges[idx];
+                let rel_start = usize::try_from(r.start - span.start).map_err(|_| {
+                    StatamError::BoundsExceeded {
+                        reason: "direct range slice start overflows usize",
+                    }
+                })?;
+                let rel_end = usize::try_from(r.end - span.start).map_err(|_| {
+                    StatamError::BoundsExceeded {
+                        reason: "direct range slice end overflows usize",
+                    }
+                })?;
+                if rel_start > rel_end || rel_end > part.len() {
+                    return Err(StatamError::Corrupt {
+                        reason: "direct range slice out of bounds",
+                    });
+                }
+                out[idx] = part.slice(rel_start..rel_end);
+            }
+        }
+
+        let wave_ms = simulate_wave_latency_ms(&get_lens, &self.config);
+        let mut guard = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        guard.counters.waves = guard.counters.waves.saturating_add(1);
+        guard.counters.bytes_requested = guard
+            .counters
+            .bytes_requested
+            .saturating_add(requested_bytes);
+        guard.counters.gets = guard.counters.gets.saturating_add(get_lens.len() as u64);
+        guard.counters.bytes_from_s3 = guard.counters.bytes_from_s3.saturating_add(fetched_bytes);
+        guard.counters.wave_latency_ms += wave_ms;
+        guard.wave_get_lens.push(get_lens);
+
+        Ok(out)
     }
 }
 
@@ -602,6 +907,10 @@ impl RangeReader for SimulatedS3Reader {
 
         if ranges.is_empty() {
             return Ok(Vec::new());
+        }
+
+        if let SimulatedS3Mode::Direct { coalesce_gap_bytes } = self.config.mode {
+            return self.read_ranges_direct(ranges, coalesce_gap_bytes, requested_bytes);
         }
 
         let mut indexes: Vec<u64> = ranges
@@ -661,9 +970,12 @@ impl RangeReader for SimulatedS3Reader {
 
             let mut fetched: Vec<(u64, Bytes)> = Vec::with_capacity(missing.len());
             let mut fetched_bytes: u64 = 0;
+            let mut run_lens: Vec<u64> = Vec::with_capacity(runs.len());
 
             for (&(first, last), part) in runs.iter().zip(parts.iter()) {
-                fetched_bytes = fetched_bytes.saturating_add(part.len() as u64);
+                let part_len = part.len() as u64;
+                fetched_bytes = fetched_bytes.saturating_add(part_len);
+                run_lens.push(part_len);
                 for index in first..=last {
                     let expected = block_len(size, index).ok_or(StatamError::Corrupt {
                         reason: "read cache block lies past file end",
@@ -679,6 +991,7 @@ impl RangeReader for SimulatedS3Reader {
                 }
             }
 
+            let wave_ms = simulate_wave_latency_ms(&run_lens, &self.config);
             let mut guard = self.state.lock().unwrap_or_else(|p| p.into_inner());
             guard.counters.cache_misses = guard
                 .counters
@@ -687,6 +1000,8 @@ impl RangeReader for SimulatedS3Reader {
             guard.counters.gets = guard.counters.gets.saturating_add(runs.len() as u64);
             guard.counters.bytes_from_s3 =
                 guard.counters.bytes_from_s3.saturating_add(fetched_bytes);
+            guard.counters.wave_latency_ms += wave_ms;
+            guard.wave_get_lens.push(run_lens);
             for (idx, data) in fetched {
                 guard.cache.insert(idx, data.clone());
                 blocks.insert(idx, data);
@@ -826,6 +1141,7 @@ mod tests {
             cache_capacity_blocks: 3,
             rtt_ms: 25.0,
             bandwidth_bytes_per_sec: 100.0 * 1024.0 * 1024.0,
+            ..SimulatedS3Config::default()
         };
         let s3 = SimulatedS3Reader::from_bytes(data.clone(), cfg);
         assert_eq!(s3.file_len(), total_len as u64);
@@ -1166,5 +1482,166 @@ mod tests {
                 reason: "short read on straddling tail prefix"
             })
         ));
+    }
+
+    #[test]
+    fn pass19_wave_aware_simulator_direct_mode_uncoalesced_and_clamping() {
+        let mib = S3_CACHE_BLOCK_BYTES;
+
+        // 1. Calibrated wan_garage() spot-checks + with_direct_mode().
+        let garage = SimulatedS3Config::wan_garage();
+        assert_eq!(garage.mode, SimulatedS3Mode::ReadCache1MiB);
+        assert_eq!(garage.cache_capacity_blocks, 256);
+        assert_eq!(garage.rtt_ms, 59.0);
+        assert_eq!(garage.bandwidth_bytes_per_sec, 75.0 * 1024.0 * 1024.0);
+        assert_eq!(garage.max_concurrent_gets, 16);
+        assert_eq!(
+            garage.per_stream_bandwidth_bytes_per_sec,
+            30.0 * 1024.0 * 1024.0
+        );
+        let garage_direct = garage.with_direct_mode(64 * 1024);
+        assert_eq!(
+            garage_direct.mode,
+            SimulatedS3Mode::Direct {
+                coalesce_gap_bytes: 64 * 1024
+            }
+        );
+
+        // 2. 10x 1 MiB parallel GETs in 1 wave MUST be faster than 1x 11 MiB single-stream GET!
+        let ten_1mib = vec![mib; 10];
+        let one_11mib = [11 * mib];
+        let par_ms = simulate_wave_latency_ms(&ten_1mib, &garage);
+        let single_ms = simulate_wave_latency_ms(&one_11mib, &garage);
+        // 10x 1 MiB: parallel stream = 59 + 1/30*1000 = 92.33 ms, agg floor = 59 + 10/75*1000 = 192.33 ms
+        // 1x 11 MiB: single stream = 59 + 11/30*1000 = 425.67 ms
+        assert!(
+            par_ms < single_ms,
+            "expected 10x1MiB parallel ({par_ms:.2} ms) < 1x11MiB single-stream ({single_ms:.2} ms)"
+        );
+        assert!((par_ms - (59.0 + (10.0 / 75.0) * 1000.0)).abs() < 1e-6);
+        assert!((single_ms - (59.0 + (11.0 / 30.0) * 1000.0)).abs() < 1e-6);
+
+        // 3. > max_concurrent_gets multi-round batching (20x 64 KiB across 16 slots -> 2 rounds).
+        let twenty_small = vec![64 * 1024u64; 20];
+        let two_round_ms = simulate_wave_latency_ms(&twenty_small, &garage);
+        let one_small_ms = simulate_wave_latency_ms(&[64 * 1024u64], &garage);
+        assert!(
+            (two_round_ms - 2.0 * one_small_ms).abs() < 1e-6,
+            "20 equal GETs across 16 slots must take exactly 2 rounds: got {two_round_ms} vs {}",
+            2.0 * one_small_ms
+        );
+        assert_eq!(simulate_wave_latency_ms(&[], &garage), 0.0);
+
+        // 4. Direct { coalesce_gap_bytes } mode: exact ranges, gap <= 64 KiB merges, > 64 KiB splits,
+        //    overlapping/duplicate ranges, evict_all/cached_blocks=0, and simulated_latency_ms_for().
+        let data = make_pattern_bytes(512 * 1024);
+        let direct_s3 = SimulatedS3Reader::from_bytes(data.clone(), garage_direct);
+        let ranges = [
+            10_000..12_000u64,   // merges with next (gap 20 KiB <= 64 KiB)
+            32_000..40_000u64,   // merges with overlap below
+            35_000..42_000u64,   // overlaps previous -> span [10_000..42_000) = 32 KiB
+            200_000..204_000u64, // gap 158 KiB > 64 KiB -> separate 4 KiB GET
+            50_000..50_000u64,   // empty -> 0 GETs
+        ];
+        let got = direct_s3.read_ranges(&ranges).unwrap();
+        assert_eq!(got.len(), ranges.len());
+        for (r, p) in ranges.iter().zip(got.iter()) {
+            assert_eq!(p.as_ref(), &data[r.start as usize..r.end as usize]);
+        }
+        let c = direct_s3.counters();
+        assert_eq!(c.waves, 1);
+        assert_eq!(c.gets, 2);
+        assert_eq!(c.bytes_from_s3, 32_000 + 4_000);
+        assert_eq!(c.bytes_requested, 2_000 + 8_000 + 7_000 + 4_000);
+        assert_eq!(direct_s3.cached_blocks(), 0);
+        direct_s3.evict_all();
+        assert_eq!(direct_s3.cached_blocks(), 0);
+        let expected_direct_ms = simulate_wave_latency_ms(&[32_000, 4_000], &garage_direct);
+        assert!((direct_s3.simulated_latency_ms() - expected_direct_ms).abs() < 1e-9);
+
+        // Re-evaluate recorded wave under default config (25 ms RTT, 100 MiB/s agg, 40 MiB/s stream).
+        let default_cfg = SimulatedS3Config::default();
+        let reeval_ms = direct_s3.simulated_latency_ms_for(&default_cfg);
+        let expected_reeval = simulate_wave_latency_ms(&[32_000, 4_000], &default_cfg);
+        assert!((reeval_ms - expected_reeval).abs() < 1e-9);
+        assert!(reeval_ms < expected_direct_ms);
+
+        // 5. read_ranges_uncoalesced(): Direct mode does NOT gap-coalesce (3 non-empty ranges within
+        //    1 KiB -> 3 GETs in 1 wave); ReadCache1MiB delegates to read_ranges (1 GET for same block).
+        direct_s3.reset_counters();
+        assert_eq!(direct_s3.simulated_latency_ms_for(&default_cfg), 0.0);
+        let nearby = [100..200u64, 300..500u64, 600..900u64, 1000..1000u64];
+        let uncoalesced = direct_s3.read_ranges_uncoalesced(&nearby).unwrap();
+        for (r, p) in nearby.iter().zip(uncoalesced.iter()) {
+            assert_eq!(p.as_ref(), &data[r.start as usize..r.end as usize]);
+        }
+        let cu = direct_s3.counters();
+        assert_eq!(cu.waves, 1);
+        assert_eq!(cu.gets, 3);
+        assert_eq!(cu.bytes_from_s3, 100 + 200 + 300);
+
+        let rc_s3 = SimulatedS3Reader::from_bytes(data.clone(), garage);
+        let rc_out = rc_s3.read_ranges_uncoalesced(&nearby).unwrap();
+        for (r, p) in nearby.iter().zip(rc_out.iter()) {
+            assert_eq!(p.as_ref(), &data[r.start as usize..r.end as usize]);
+        }
+        assert_eq!(rc_s3.counters().waves, 1);
+        assert_eq!(rc_s3.counters().gets, 1);
+
+        // 6. NaN / -1.0 / +Inf / -Inf / u64::MAX clamping & O(1) IoCounters fallback.
+        let nan_cfg = SimulatedS3Config {
+            rtt_ms: f64::NAN,
+            ..default_cfg
+        };
+        assert!(simulate_wave_latency_ms(&[1024], &nan_cfg).is_nan());
+        let neg_rtt_cfg = SimulatedS3Config {
+            rtt_ms: -1.0,
+            bandwidth_bytes_per_sec: f64::INFINITY,
+            per_stream_bandwidth_bytes_per_sec: f64::NAN,
+            max_concurrent_gets: 0,
+            ..default_cfg
+        };
+        assert_eq!(simulate_wave_latency_ms(&[1024, 2048], &neg_rtt_cfg), 0.0);
+        let pos_inf_cfg = SimulatedS3Config {
+            rtt_ms: f64::INFINITY,
+            ..default_cfg
+        };
+        assert_eq!(
+            simulate_wave_latency_ms(&[1024], &pos_inf_cfg),
+            f64::INFINITY
+        );
+        let neg_inf_cfg = SimulatedS3Config {
+            rtt_ms: f64::NEG_INFINITY,
+            ..default_cfg
+        };
+        assert_eq!(simulate_wave_latency_ms(&[1024], &neg_inf_cfg), 0.0);
+
+        // Stateless O(1) fallback on manually constructed IoCounters with u64::MAX GETs & extreme RTT.
+        let manual = IoCounters {
+            gets: 33,
+            bytes_from_s3: 100 * 1024 * 1024,
+            ..IoCounters::default()
+        };
+        // 33 GETs across 16 concurrent slots -> ceil(33/16) = 3 rounds -> 3*25 + 1000 = 1075 ms
+        assert!((manual.simulated_latency_ms(&default_cfg) - 1075.0).abs() < 1e-9);
+        assert!(manual.simulated_latency_ms(&nan_cfg).is_nan());
+        assert_eq!(manual.simulated_latency(&nan_cfg), Duration::ZERO);
+        assert_eq!(manual.simulated_latency(&pos_inf_cfg), Duration::MAX);
+        assert_eq!(manual.simulated_latency(&neg_inf_cfg), Duration::ZERO);
+        assert_eq!(manual.simulated_latency(&neg_rtt_cfg), Duration::ZERO);
+
+        let max_gets = IoCounters {
+            gets: u64::MAX,
+            bytes_from_s3: u64::MAX,
+            ..IoCounters::default()
+        };
+        assert_eq!(
+            max_gets.simulated_latency(&SimulatedS3Config {
+                rtt_ms: 1e308,
+                ..default_cfg
+            }),
+            Duration::MAX
+        );
+        assert!(max_gets.simulated_latency_ms(&default_cfg).is_finite());
     }
 }

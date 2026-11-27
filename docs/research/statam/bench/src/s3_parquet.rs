@@ -65,7 +65,8 @@ impl Read for SimS3Read {
             return Ok(0);
         }
         if self.buf_pos >= self.buf.len() {
-            let wanted_end = if self.inner.mode() != RealS3Mode::Direct {
+            let wanted_end =
+                if !matches!(self.inner.mode(), RealS3Mode::Direct | RealS3Mode::SimDirect) {
                 let block_end = ((self.pos / S3_CACHE_BLOCK_BYTES) + 1) * S3_CACHE_BLOCK_BYTES;
                 self.pos
                     .saturating_add(dst.len() as u64)

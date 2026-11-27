@@ -614,6 +614,167 @@ pub(crate) fn search_pack_rows_flat_masked_with_threads(
     )
 }
 
+/// Zero-duplication cross-mini-block exact row-level substring search over multiple
+/// [`FlatPayloadRefs`] slices in a single `.stpk` pack read wave.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn search_pack_rows_flat_multi_masked_with_threads(
+    pack: &ChunkPackReader,
+    mb_refs: &[&FlatPayloadRefs],
+    mb_masks: &[&Bitmap],
+    pack_idx: u16,
+    needle: &[u8],
+    case_insensitive: bool,
+    read_threads: usize,
+    retain: Option<([u8; 16], &RetainedPackChunks)>,
+) -> Result<Vec<Bitmap>, StatamError> {
+    if mb_refs.len() != mb_masks.len() {
+        return Err(StatamError::Corrupt {
+            reason: "multi-mb payload search refs/masks length mismatch",
+        });
+    }
+    if mb_refs.is_empty() {
+        return Ok(Vec::new());
+    }
+    if mb_refs.len() == 1 {
+        let bm = search_pack_rows_flat_masked_with_threads(
+            pack,
+            mb_refs[0],
+            mb_masks[0],
+            pack_idx,
+            needle,
+            case_insensitive,
+            read_threads,
+            retain,
+        )?;
+        return Ok(vec![bm]);
+    }
+
+    let mut offsets = Vec::with_capacity(mb_refs.len() + 1);
+    let mut total_rows = 0usize;
+    offsets.push(0);
+    for refs in mb_refs {
+        total_rows = total_rows
+            .checked_add(refs.len())
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "multi-mb payload search row count overflow",
+            })?;
+        offsets.push(total_rows);
+    }
+
+    let mut combined_mask = Bitmap::new_zeroed(total_rows);
+    for (m, mask) in mb_masks.iter().enumerate() {
+        let base = offsets[m];
+        let mb_len = mb_refs[m].len();
+        for r in mask.iter_ones() {
+            if r >= mb_len {
+                break;
+            }
+            let _ = combined_mask.set(base + r, true);
+        }
+    }
+
+    let view = MultiMbFlatPayloadRefs {
+        mbs: mb_refs,
+        offsets,
+    };
+    let combined = search_pack_rows_impl(
+        pack,
+        &view,
+        Some(&combined_mask),
+        pack_idx,
+        needle,
+        case_insensitive,
+        read_threads,
+        retain,
+    )?;
+
+    let mut out: Vec<Bitmap> = mb_refs
+        .iter()
+        .map(|refs| Bitmap::new_zeroed(refs.len()))
+        .collect();
+    for global_row in combined.iter_ones() {
+        let (m, local_row) = view.locate(global_row);
+        let _ = out[m].set(local_row, true);
+    }
+    Ok(out)
+}
+
+struct MultiMbFlatPayloadRefs<'a> {
+    mbs: &'a [&'a FlatPayloadRefs],
+    offsets: Vec<usize>,
+}
+
+impl MultiMbFlatPayloadRefs<'_> {
+    #[inline]
+    fn locate(&self, row: usize) -> (usize, usize) {
+        let mb_pos = self.offsets.partition_point(|&off| off <= row) - 1;
+        (mb_pos, row - self.offsets[mb_pos])
+    }
+}
+
+impl PayloadRefSource for MultiMbFlatPayloadRefs<'_> {
+    #[inline]
+    fn row_count(&self) -> usize {
+        self.offsets.last().copied().unwrap_or(0)
+    }
+
+    #[inline]
+    fn is_null(&self, row: usize) -> bool {
+        let (m, r) = self.locate(row);
+        self.mbs[m].row_kind(r) == FLAT_REF_NULL
+    }
+
+    #[inline]
+    fn inline_bytes(&self, row: usize) -> Option<&[u8]> {
+        let (m, r) = self.locate(row);
+        (self.mbs[m].row_kind(r) == FLAT_REF_INLINE).then(|| self.mbs[m].inline_bytes(r))
+    }
+
+    #[inline]
+    fn for_each_chunk(
+        &self,
+        row: usize,
+        f: &mut impl FnMut(u16, u32) -> Result<(), StatamError>,
+    ) -> Result<(), StatamError> {
+        let (m, r) = self.locate(row);
+        (&self.mbs[m]).for_each_chunk(r, f)
+    }
+
+    #[inline]
+    fn any_chunk(&self, row: usize, f: impl FnMut(u16, u32) -> bool) -> bool {
+        let (m, r) = self.locate(row);
+        (&self.mbs[m]).any_chunk(r, f)
+    }
+
+    #[inline]
+    fn for_each_adjacent_pair_in_pack(
+        &self,
+        row: usize,
+        pack_idx: u16,
+        f: &mut impl FnMut(u32, u32),
+    ) {
+        let (m, r) = self.locate(row);
+        (&self.mbs[m]).for_each_adjacent_pair_in_pack(r, pack_idx, f);
+    }
+
+    #[inline]
+    fn any_adjacent_pair_in_pack(
+        &self,
+        row: usize,
+        pack_idx: u16,
+        f: impl FnMut(u32, u32) -> bool,
+    ) -> bool {
+        let (m, r) = self.locate(row);
+        (&self.mbs[m]).any_adjacent_pair_in_pack(r, pack_idx, f)
+    }
+
+    #[inline]
+    fn seq_key(&self, row: usize) -> Option<SeqKey<'_>> {
+        let (m, r) = self.locate(row);
+        (&self.mbs[m]).seq_key(r)
+    }
+}
+
 #[derive(PartialEq, Eq, Hash)]
 enum SeqKey<'a> {
     Interleaved(&'a [(u16, u32)]),

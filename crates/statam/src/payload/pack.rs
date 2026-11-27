@@ -98,6 +98,10 @@ const HIGH_TRIGRAM_MAX_BLOOM_DENSITY: f64 = 0.12;
 const ADAPTIVE_PROSE_FRAME_RAW_BYTES: usize = 64 * 1024;
 /// Minimum compression savings required for binary blob frames before falling back to `Codec::None`.
 const BLOB_MIN_SAVINGS_PCT: u8 = 12;
+/// Maximum gap (`192 KiB`) between `.stpk` frames coalesced into one remote range read.
+const REMOTE_PACK_COALESCE_MAX_GAP: u64 = 192 * 1024;
+/// Maximum total span (`4 MiB`) of a single coalesced remote `.stpk` range read.
+const REMOTE_PACK_COALESCE_MAX_SPAN: u64 = 4 * 1024 * 1024;
 /// 1 MiB `ReadCache` boundary guard threshold: pad if `< 8 KiB` left in current 1 MiB block.
 const BOUNDARY_GUARD_THRESHOLD: usize = 8_192;
 /// 1 MiB `ReadCache` boundary guard max frame size (`< 32 KiB`).
@@ -1898,6 +1902,7 @@ pub struct ChunkPackReader {
     reader: Arc<dyn RangeReader>,
     toc: PackToc,
     data_end: u64,
+    retained_tail_start: Option<u64>,
     inline_dict_framed: Option<Bytes>,
     inline_trigram: Option<Bytes>,
     inline_edge_table: Option<Bytes>,
@@ -2139,6 +2144,7 @@ impl ChunkPackReader {
             chunks.push(loc);
         }
 
+        let retained_tail_start = retain_tail.then_some(tail_start);
         let reader: Arc<dyn RangeReader> = if retain_tail {
             Arc::new(crate::io::TailCachedReader::new(reader, tail_start, tail)?)
         } else {
@@ -2154,6 +2160,7 @@ impl ChunkPackReader {
                 frames_contiguous,
             },
             data_end,
+            retained_tail_start,
             inline_dict_framed,
             inline_trigram,
             inline_edge_table,
@@ -2250,6 +2257,88 @@ impl ChunkPackReader {
         }
     }
 
+    fn read_ranges_remote_coalesced(
+        &self,
+        ranges: &[Range<u64>],
+    ) -> Result<Vec<Bytes>, StatamError> {
+        for r in ranges {
+            if r.start > r.end {
+                return Err(StatamError::Corrupt {
+                    reason: "inverted pack read range",
+                });
+            }
+        }
+        let mut order: Vec<usize> = (0..ranges.len())
+            .filter(|&i| ranges[i].start < ranges[i].end)
+            .collect();
+        if order.is_empty() {
+            return Ok(vec![Bytes::new(); ranges.len()]);
+        }
+        order.sort_by_key(|&i| (ranges[i].start, ranges[i].end));
+
+        let mut spans: Vec<(Range<u64>, Vec<usize>)> = Vec::new();
+        for idx in order {
+            let r = &ranges[idx];
+            let can_merge = if let Some((last_span, _)) = spans.last() {
+                let crosses_tail = self
+                    .retained_tail_start
+                    .is_some_and(|ts| last_span.end <= ts && r.start >= ts);
+                let merged_end = last_span.end.max(r.end);
+                !crosses_tail
+                    && r.start <= last_span.end.saturating_add(REMOTE_PACK_COALESCE_MAX_GAP)
+                    && merged_end.saturating_sub(last_span.start) <= REMOTE_PACK_COALESCE_MAX_SPAN
+            } else {
+                false
+            };
+            if can_merge {
+                if let Some((last_span, members)) = spans.last_mut() {
+                    last_span.end = last_span.end.max(r.end);
+                    members.push(idx);
+                }
+            } else {
+                spans.push((r.clone(), vec![idx]));
+            }
+        }
+
+        let span_ranges: Vec<Range<u64>> = spans.iter().map(|(s, _)| s.clone()).collect();
+        let fetched_spans = self.reader.read_ranges(&span_ranges)?;
+        if fetched_spans.len() != spans.len() {
+            return Err(StatamError::Corrupt {
+                reason: "read_ranges returned wrong coalesced span count",
+            });
+        }
+
+        let mut out = vec![Bytes::new(); ranges.len()];
+        for ((span, members), span_bytes) in spans.into_iter().zip(fetched_spans) {
+            let expected = span.end - span.start;
+            if span_bytes.len() as u64 != expected {
+                return Err(StatamError::Corrupt {
+                    reason: "short read on coalesced pack frame span",
+                });
+            }
+            for idx in members {
+                let r = &ranges[idx];
+                let rel_start = usize::try_from(r.start - span.start).map_err(|_| {
+                    StatamError::BoundsExceeded {
+                        reason: "coalesced pack range start overflows usize",
+                    }
+                })?;
+                let rel_end = usize::try_from(r.end - span.start).map_err(|_| {
+                    StatamError::BoundsExceeded {
+                        reason: "coalesced pack range end overflows usize",
+                    }
+                })?;
+                if rel_start > rel_end || rel_end > span_bytes.len() {
+                    return Err(StatamError::Corrupt {
+                        reason: "coalesced pack slice out of bounds",
+                    });
+                }
+                out[idx] = span_bytes.slice(rel_start..rel_end);
+            }
+        }
+        Ok(out)
+    }
+
     fn fetch_frames_and_dict(
         &self,
         ranges: &[Range<u64>],
@@ -2257,13 +2346,23 @@ impl ChunkPackReader {
         dict: Option<Arc<PackDecoderDict>>,
         has_trailing_dict: bool,
     ) -> Result<(Vec<Bytes>, Option<Arc<PackDecoderDict>>), StatamError> {
-        let mut fetched = self.reader.read_ranges(ranges)?;
         let expected_total = expected_frames + usize::from(has_trailing_dict);
-        if fetched.len() != expected_total {
+        if ranges.len() != expected_total {
             return Err(StatamError::Corrupt {
-                reason: "read_ranges returned wrong frame count",
+                reason: "read_ranges input range count mismatch",
             });
         }
+        let mut fetched = if !self.reader.is_remote() || ranges.len() <= 1 {
+            let parts = self.reader.read_ranges(ranges)?;
+            if parts.len() != expected_total {
+                return Err(StatamError::Corrupt {
+                    reason: "read_ranges returned wrong frame count",
+                });
+            }
+            parts
+        } else {
+            self.read_ranges_remote_coalesced(ranges)?
+        };
         let dict = if has_trailing_dict {
             let Some(dict_framed) = fetched.pop() else {
                 return Err(StatamError::Corrupt {
@@ -5350,5 +5449,272 @@ mod tests {
                 assert_eq!(got.get(&cid).unwrap(), &expected[cid as usize]);
             }
         }
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn pass19_remote_frame_coalescing_gap_cap_tail_boundary_dict_short_read_and_local_passthrough()
+    {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct RecordingPackReader {
+            data: Bytes,
+            remote: bool,
+            short_next: AtomicBool,
+            calls: Mutex<Vec<Vec<Range<u64>>>>,
+        }
+        impl RecordingPackReader {
+            fn new(data: Vec<u8>, remote: bool) -> Self {
+                Self {
+                    data: Bytes::from(data),
+                    remote,
+                    short_next: AtomicBool::new(false),
+                    calls: Mutex::new(Vec::new()),
+                }
+            }
+            fn take_calls(&self) -> Vec<Vec<Range<u64>>> {
+                std::mem::take(&mut *self.calls.lock().unwrap())
+            }
+        }
+        impl RangeReader for RecordingPackReader {
+            fn file_len(&self) -> u64 {
+                self.data.len() as u64
+            }
+            fn is_remote(&self) -> bool {
+                self.remote
+            }
+            fn read_range(&self, range: Range<u64>) -> Result<Bytes, StatamError> {
+                self.calls.lock().unwrap().push(vec![range.clone()]);
+                Ok(self.data.slice(range.start as usize..range.end as usize))
+            }
+            fn read_ranges(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>, StatamError> {
+                self.calls.lock().unwrap().push(ranges.to_vec());
+                let short = self.short_next.swap(false, Ordering::SeqCst);
+                Ok(ranges
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        let end = if short && i == 0 && r.end > r.start {
+                            r.end - 1
+                        } else {
+                            r.end
+                        };
+                        self.data.slice(r.start as usize..end as usize)
+                    })
+                    .collect())
+            }
+        }
+
+        // Build a ~5.2 MiB uncompressed `.stpk` so we can exercise exact 192 KiB gap, 4 MiB cap,
+        // > 4 MiB single frame, tail-boundary guard, short-read error, and non-remote passthrough.
+        let mut pb = ChunkPackBuilder::new(
+            [0x19u8; 16],
+            PackWriteOptions {
+                codec: Codec::None,
+                zstd_level: 1,
+                target_frame_raw_bytes: 256 * 1024,
+                enable_trigram_skip: false,
+                compress_toc_lz4: false,
+                write_threads: 1,
+                emit_hash_table: false,
+            },
+        );
+        for i in 0..21u32 {
+            let mut chunk = vec![((i * 37) & 0xFF) as u8; 256 * 1024];
+            chunk[0..4].copy_from_slice(&i.to_le_bytes());
+            pb.intern_chunk(&chunk).unwrap();
+        }
+        let mut pack_bytes = Vec::new();
+        pb.finish(&mut pack_bytes).unwrap();
+        assert!(pack_bytes.len() > 5 * 1024 * 1024);
+
+        // Open remote with 256 KiB tail hint so `retained_tail_start = Some(file_len - 256 KiB)`.
+        let rec_remote = Arc::new(RecordingPackReader::new(pack_bytes.clone(), true));
+        let remote_pack =
+            ChunkPackReader::open_with_tail_hint(rec_remote.clone(), Some(256 * 1024)).unwrap();
+        let tail_start = remote_pack
+            .retained_tail_start
+            .expect("remote pack must retain tail_start");
+        rec_remote.take_calls();
+
+        // 1. Gap <= 192 KiB merges; gap > 192 KiB splits.
+        let gap = REMOTE_PACK_COALESCE_MAX_GAP;
+        let r_a = 1_000..5_000u64;
+        let r_b = (5_000 + gap)..(5_000 + gap + 4_000); // exact 192 KiB gap -> merges with r_a
+        let r_c = (r_b.end + gap + 1)..(r_b.end + gap + 1 + 4_000); // 192 KiB + 1 -> splits
+        let out = remote_pack
+            .read_ranges_remote_coalesced(&[r_c.clone(), r_a.clone(), r_b.clone()])
+            .unwrap();
+        assert_eq!(
+            out[0].as_ref(),
+            &pack_bytes[r_c.start as usize..r_c.end as usize]
+        );
+        assert_eq!(
+            out[1].as_ref(),
+            &pack_bytes[r_a.start as usize..r_a.end as usize]
+        );
+        assert_eq!(
+            out[2].as_ref(),
+            &pack_bytes[r_b.start as usize..r_b.end as usize]
+        );
+        assert_eq!(
+            rec_remote.take_calls(),
+            vec![vec![r_a.start..r_b.end, r_c]],
+            "gap <= 192 KiB must merge and gap > 192 KiB must split"
+        );
+
+        // 2. 4 MiB max span cap splits consecutive small ranges once merged span exceeds 4 MiB.
+        let mut cap_ranges = Vec::new();
+        let mut off = 1_000u64;
+        for _ in 0..30 {
+            cap_ranges.push(off..(off + 32 * 1024));
+            off += 32 * 1024 + 128 * 1024; // 160 KiB stride (128 KiB gap <= 192 KiB), 30 * 160 KiB > 4 MiB
+        }
+        let cap_out = remote_pack
+            .read_ranges_remote_coalesced(&cap_ranges)
+            .unwrap();
+        for (r, got) in cap_ranges.iter().zip(cap_out.iter()) {
+            assert_eq!(got.as_ref(), &pack_bytes[r.start as usize..r.end as usize]);
+        }
+        let cap_calls = rec_remote.take_calls();
+        assert_eq!(cap_calls.len(), 1);
+        assert!(
+            cap_calls[0].len() >= 2,
+            "expected > 4 MiB total span to split across multiple coalesced spans"
+        );
+        for span in &cap_calls[0] {
+            assert!(
+                span.end - span.start <= REMOTE_PACK_COALESCE_MAX_SPAN,
+                "coalesced span {} exceeded 4 MiB cap",
+                span.end - span.start
+            );
+        }
+
+        // 3. Single frame > 4 MiB passes through cleanly as its own span (not dropped/truncated).
+        let huge = 64..(64 + REMOTE_PACK_COALESCE_MAX_SPAN + 64 * 1024);
+        let tiny = (huge.end + 1024)..(huge.end + 2048);
+        let huge_out = remote_pack
+            .read_ranges_remote_coalesced(&[huge.clone(), tiny.clone()])
+            .unwrap();
+        assert_eq!(huge_out[0].len() as u64, huge.end - huge.start);
+        assert_eq!(
+            huge_out[1].as_ref(),
+            &pack_bytes[tiny.start as usize..tiny.end as usize]
+        );
+        assert_eq!(
+            rec_remote.take_calls(),
+            vec![vec![huge, tiny]],
+            "> 4 MiB single frame must pass through as its own span"
+        );
+
+        // 4. Tail-boundary guard: pre-tail range within 192 KiB of an in-tail range MUST NOT merge
+        //    across `retained_tail_start`, so the in-tail range stays a 0-I/O TailCachedReader hit!
+        let pre_tail = (tail_start - 16 * 1024)..(tail_start - 8 * 1024);
+        let in_tail = (tail_start + 1024)..(tail_start + 5 * 1024);
+        assert!(in_tail.start - pre_tail.end <= REMOTE_PACK_COALESCE_MAX_GAP);
+        let tail_out = remote_pack
+            .read_ranges_remote_coalesced(&[pre_tail.clone(), in_tail.clone()])
+            .unwrap();
+        assert_eq!(
+            tail_out[0].as_ref(),
+            &pack_bytes[pre_tail.start as usize..pre_tail.end as usize]
+        );
+        assert_eq!(
+            tail_out[1].as_ref(),
+            &pack_bytes[in_tail.start as usize..in_tail.end as usize]
+        );
+        assert_eq!(
+            rec_remote.take_calls(),
+            vec![vec![pre_tail]],
+            "tail-boundary guard must NOT merge pre-tail + in-tail ranges; in-tail must stay 0-GET hit"
+        );
+
+        // 5. Short-read on coalesced span returns Err(StatamError::Corrupt).
+        rec_remote.short_next.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            remote_pack.read_ranges_remote_coalesced(&[r_a.clone(), r_b.clone()]),
+            Err(StatamError::Corrupt {
+                reason: "short read on coalesced pack frame span"
+            })
+        ));
+        rec_remote.take_calls();
+
+        // 6. Non-remote (!is_remote()) passes ranges straight through unmodified (0 coalescing).
+        let rec_local = Arc::new(RecordingPackReader::new(pack_bytes.clone(), false));
+        let local_pack =
+            ChunkPackReader::open_with_tail_hint(rec_local.clone(), Some(256 * 1024)).unwrap();
+        assert!(local_pack.retained_tail_start.is_none());
+        rec_local.take_calls();
+        let (local_out, _) = local_pack
+            .fetch_frames_and_dict(&[r_a.clone(), r_b.clone()], 2, None, false)
+            .unwrap();
+        assert_eq!(local_out.len(), 2);
+        assert_eq!(
+            rec_local.take_calls(),
+            vec![vec![r_a, r_b]],
+            "non-remote pack reader must pass ranges through unmodified"
+        );
+
+        // 7. Trailing `dict_range` scattering on a real Zstd-dict pack under remote coalescing.
+        let mut dict_pb = ChunkPackBuilder::new_with_dict(
+            [0xD9u8; 16],
+            PackWriteOptions {
+                codec: Codec::Zstd,
+                zstd_level: 1,
+                target_frame_raw_bytes: 64 * 1024,
+                enable_trigram_skip: true,
+                compress_toc_lz4: true,
+                write_threads: 1,
+                emit_hash_table: false,
+            },
+        );
+        let mut dict_expected = Vec::new();
+        for i in 0..1_200u32 {
+            let chunk = format!(
+                "{{\"role\":\"assistant\",\"model\":\"gpt-4o\",\"idx\":\"{i:05}\",\"body\":\"{}\"}}",
+                "remote_coalesced_dict_test_payload_segment_".repeat(52)
+            )
+            .into_bytes();
+            let cid = dict_pb.intern_chunk(&chunk).unwrap();
+            assert_eq!(cid, i);
+            dict_expected.push(chunk);
+        }
+        let mut dict_pack_bytes = Vec::new();
+        dict_pb.finish(&mut dict_pack_bytes).unwrap();
+
+        let rec_dict = Arc::new(RecordingPackReader::new(dict_pack_bytes, true));
+        // Small tail hint forces Zstd dict to sit outside inline tail so `has_trailing_dict == true`.
+        let dict_pack = ChunkPackReader::open_with_tail_hint(rec_dict.clone(), Some(256)).unwrap();
+        assert!(dict_pack.inline_dict_framed.is_none());
+        let dict_cids: Vec<u32> = dict_pack
+            .toc()
+            .frames
+            .iter()
+            .filter(|f| (f.flags & PACK_FRAME_FLAG_USES_DICT) != 0)
+            .take(3)
+            .map(|f| f.first_chunk_id)
+            .collect();
+        assert!(dict_cids.len() >= 2);
+        rec_dict.take_calls();
+        let got_dict_chunks = dict_pack.read_chunks(&dict_cids).unwrap();
+        assert!(dict_pack.dict_cache.get().is_some());
+        for &cid in &dict_cids {
+            assert_eq!(
+                got_dict_chunks.get(&cid).unwrap().as_slice(),
+                dict_expected[cid as usize].as_slice()
+            );
+        }
+        let dict_calls = rec_dict.take_calls();
+        assert_eq!(
+            dict_calls.len(),
+            1,
+            "cold remote dict + frames must execute in 1 coalesced wave"
+        );
+        assert!(
+            dict_calls[0].len() < dict_cids.len() + 1,
+            "nearby remote frames + trailing dict should coalesce into fewer spans: got {} spans for {} ranges",
+            dict_calls[0].len(),
+            dict_cids.len() + 1
+        );
     }
 }

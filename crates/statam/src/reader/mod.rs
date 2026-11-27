@@ -55,8 +55,9 @@ const IO_WAVE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum cumulative uncompressed Phase-1 block bytes decoded in a single filtered wave (`128 MiB`).
 const P1_WAVE_MAX_RAW_BYTES: u64 = 128 * 1024 * 1024;
 /// Maximum candidate Phase-2 `.statam` bytes (blocks + L0 payload + uncached non-inline lazy
-/// dicts) folded into Wave 1 on remote readers to eliminate the Phase-2 round-trip.
-const REMOTE_SINGLE_WAVE_P2_MAX_BYTES: u64 = 512 * 1024;
+/// dicts) folded into Wave 1 on remote readers (when `!has_payload_sub`) to eliminate the
+/// Phase-2 round-trip (`1 MiB`).
+const REMOTE_SINGLE_WAVE_P2_MAX_BYTES: u64 = 1024 * 1024;
 /// Minimum total uncompressed block bytes required before spawning reader worker threads
 /// (48 KiB), avoiding OS thread-spawn overhead on sub-millisecond narrow queries.
 /// Tasks touching `LocalityGroup::ExternalPayload` are exempt from this threshold.
@@ -2039,11 +2040,12 @@ impl StatamReader {
                 wave_p1_bytes = wave_p1_bytes.saturating_add(item.p1_bytes);
             }
 
-            // Remote single-wave folding: when candidate Phase-2 bytes (blocks + L0 payload +
-            // deduped uncached non-inline lazy dicts) fit within 512 KiB and combined wave <= 64 MiB,
-            // fold Phase 2 into Wave 1 to eliminate the second S3 round-trip.
+            // Remote single-wave folding: when `!has_payload_sub` and candidate Phase-2 bytes
+            // (blocks + L0 payload + deduped uncached non-inline lazy dicts) fit within 1 MiB
+            // and combined wave <= 64 MiB, fold Phase 2 into Wave 1 to eliminate the second S3
+            // round-trip.
             let mut p2_folded_into_p1 = false;
-            if self.reader.is_remote() {
+            if self.reader.is_remote() && !has_payload_sub {
                 let mut cand_p2_ranges = Vec::new();
                 let mut cand_p2_block_bytes = 0u64;
                 let mut cand_p2_dicts = Vec::new();
@@ -2612,9 +2614,10 @@ impl StatamReader {
             })
             .collect();
 
-        // Remote single-wave folding: fold small candidate Phase-2 ranges + dicts into Wave 1.
+        // Remote single-wave folding: fold small candidate Phase-2 ranges + dicts into Wave 1
+        // when `!has_payload_sub`.
         let mut p2_folded_into_p1 = false;
-        if self.reader.is_remote() {
+        if self.reader.is_remote() && !has_payload_sub {
             let cand = self.collect_p2_candidate_ranges_and_dicts(
                 rg_idx,
                 surviving_mbs,
