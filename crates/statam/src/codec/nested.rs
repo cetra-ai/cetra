@@ -35,7 +35,7 @@ use crate::format::{
     BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_HAS_NULLS, BlockEntry, Codec, Encoding,
     KNOWN_BLOCK_FLAGS, MAX_SHREDDED_KEYS,
 };
-use crate::simd::bitpack::{min_bits_u32, pack_u32, packed_bytes_len, unpack_u32};
+use crate::simd::bitpack::{min_bits_u32, pack_u32, packed_bytes_len, unpack_u32, unpack_u32_at};
 use crate::{MAX_BLOCK_RAW_BYTES, MAX_DICT_BYTES, StatamError};
 
 /// Minimum fraction of rows (`1 / 20` = 5%) required to promote a `MapUtf8` key.
@@ -1900,6 +1900,222 @@ fn decode_shredded_residual_with_count_budgeted(
     )?)
 }
 
+struct ParsedShreddedResidualLazy<'a> {
+    row_nulls: Option<Bitmap>,
+    offsets: Vec<u32>,
+    entry_count: usize,
+    num_keys: usize,
+    key_offsets: Vec<u32>,
+    keys_blob: &'a [u8],
+    kcode_bw: u8,
+    kcode_packed: &'a [u8],
+    val_nulls: Option<Bitmap>,
+    val_src: &'a [u8],
+}
+
+fn parse_shredded_residual_parts_lazy<'a>(
+    raw_body: &'a [u8],
+    row_count: usize,
+    block_flags: u8,
+    budget: &mut usize,
+) -> Result<ParsedShreddedResidualLazy<'a>, StatamError> {
+    let (row_nulls, rest) = read_optional_nulls(raw_body, row_count, block_flags)?;
+    if row_nulls.is_some() {
+        debit_budget(
+            budget,
+            row_count.div_ceil(8),
+            "shredded residual allocations exceed MAX_BLOCK_RAW_BYTES",
+        )?;
+    }
+    let counts_bytes = row_count
+        .checked_mul(4)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "shredded residual row_count overflow",
+        })?;
+    let offsets_bytes = row_count
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "shredded residual offsets overflow",
+        })?;
+    debit_budget(
+        budget,
+        counts_bytes
+            .checked_add(offsets_bytes)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "shredded residual allocation overflow",
+            })?,
+        "shredded residual allocations exceed MAX_BLOCK_RAW_BYTES",
+    )?;
+    let (counts, mut rest) = read_packed_counts(rest, row_count)?;
+    let (offsets, entry_count) = counts_to_offsets(&counts)?;
+
+    if entry_count == 0 {
+        if !rest.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in empty shredded residual",
+            });
+        }
+        return Ok(ParsedShreddedResidualLazy {
+            row_nulls,
+            offsets,
+            entry_count: 0,
+            num_keys: 0,
+            key_offsets: Vec::new(),
+            keys_blob: &[],
+            kcode_bw: 0,
+            kcode_packed: &[],
+            val_nulls: None,
+            val_src: &[],
+        });
+    }
+
+    if rest.len() < 5 {
+        return Err(StatamError::Corrupt {
+            reason: "truncated shredded residual key dict header",
+        });
+    }
+    let num_keys = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+    if num_keys == 0 || num_keys > entry_count {
+        return Err(StatamError::Corrupt {
+            reason: "invalid shredded residual num_keys",
+        });
+    }
+    let klen_bw = rest[4];
+    if klen_bw > 32 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid shredded residual key length bit_width",
+        });
+    }
+    rest = &rest[5..];
+    let klen_packed = packed_bytes_len(num_keys, klen_bw)?;
+    let keys_len_end = klen_packed.checked_add(4).ok_or(StatamError::Corrupt {
+        reason: "shredded residual key length offset overflow",
+    })?;
+    if rest.len() < keys_len_end {
+        return Err(StatamError::Corrupt {
+            reason: "truncated shredded residual key lengths",
+        });
+    }
+    let keys_raw_bytes = u32::from_le_bytes([
+        rest[klen_packed],
+        rest[klen_packed + 1],
+        rest[klen_packed + 2],
+        rest[klen_packed + 3],
+    ]) as usize;
+    let kcode_bw_off = keys_len_end
+        .checked_add(keys_raw_bytes)
+        .ok_or(StatamError::Corrupt {
+            reason: "shredded residual keys offset overflow",
+        })?;
+    let kcode_body_off = kcode_bw_off.checked_add(1).ok_or(StatamError::Corrupt {
+        reason: "shredded residual key code offset overflow",
+    })?;
+    if keys_raw_bytes > MAX_BLOCK_RAW_BYTES || rest.len() < kcode_body_off {
+        return Err(StatamError::Corrupt {
+            reason: "truncated or oversized shredded residual keys",
+        });
+    }
+    let kcode_bw = rest[kcode_bw_off];
+    if kcode_bw > 32 {
+        return Err(StatamError::Corrupt {
+            reason: "invalid shredded residual key code bit_width",
+        });
+    }
+    let kcode_packed_len = packed_bytes_len(entry_count, kcode_bw)?;
+    let val_nulls_off =
+        kcode_body_off
+            .checked_add(kcode_packed_len)
+            .ok_or(StatamError::Corrupt {
+                reason: "shredded residual key code length overflow",
+            })?;
+    let val_nulls_min_end = val_nulls_off.checked_add(1).ok_or(StatamError::Corrupt {
+        reason: "shredded residual val_nulls offset overflow",
+    })?;
+    if rest.len() < val_nulls_min_end {
+        return Err(StatamError::Corrupt {
+            reason: "truncated shredded residual key codes",
+        });
+    }
+
+    // Preserve exact amplification-bomb budget check BEFORE allocating.
+    let key_offsets_bytes = num_keys
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "shredded key_offsets size overflow",
+        })?;
+    let key_codes_bytes = entry_count
+        .checked_mul(4)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "shredded key_codes size overflow",
+        })?;
+    let val_offsets_bytes = entry_count
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "shredded value offsets size overflow",
+        })?;
+    let combined = key_offsets_bytes
+        .checked_add(keys_raw_bytes)
+        .and_then(|n| n.checked_add(key_codes_bytes))
+        .and_then(|n| n.checked_add(val_offsets_bytes))
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "shredded residual allocations overflow",
+        })?;
+    debit_budget(
+        budget,
+        combined,
+        "shredded residual allocations exceed MAX_BLOCK_RAW_BYTES",
+    )?;
+
+    let mut key_offsets = Vec::with_capacity(num_keys + 1);
+    key_offsets.push(0u32);
+    unpack_u32(&rest[..klen_packed], num_keys, klen_bw, &mut key_offsets)?;
+
+    let keys_blob = &rest[keys_len_end..kcode_bw_off];
+
+    let mut running = 0usize;
+    for off_slot in &mut key_offsets[1..] {
+        running = running
+            .checked_add(*off_slot as usize)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "shredded key offset overflow",
+            })?;
+        *off_slot = u32::try_from(running).map_err(|_| StatamError::BoundsExceeded {
+            reason: "shredded key offset exceeds u32::MAX",
+        })?;
+    }
+    if running != keys_raw_bytes {
+        return Err(StatamError::Corrupt {
+            reason: "shredded key lengths do not match blob length",
+        });
+    }
+
+    let kcode_packed = &rest[kcode_body_off..val_nulls_off];
+    let (val_nulls, val_src) = read_flag_bitmap(&rest[val_nulls_off..], entry_count)?;
+    if val_nulls.is_some() {
+        debit_budget(
+            budget,
+            entry_count.div_ceil(8),
+            "shredded residual allocations exceed MAX_BLOCK_RAW_BYTES",
+        )?;
+    }
+
+    Ok(ParsedShreddedResidualLazy {
+        row_nulls,
+        offsets,
+        entry_count,
+        num_keys,
+        key_offsets,
+        keys_blob,
+        kcode_bw,
+        kcode_packed,
+        val_nulls,
+        val_src,
+    })
+}
+
 fn decode_shredded_residual_with_count_selected(
     raw_body: &[u8],
     row_count: usize,
@@ -1910,21 +2126,12 @@ fn decode_shredded_residual_with_count_selected(
         return Ok(FlatColumn::empty(&DataType::MapUtf8));
     }
     let mut budget = MAX_BLOCK_RAW_BYTES;
-    let parsed = parse_shredded_residual_parts(raw_body, row_count, block_flags, &mut budget)?;
+    let parsed = parse_shredded_residual_parts_lazy(raw_body, row_count, block_flags, &mut budget)?;
     if parsed.entry_count == 0 {
         return Ok(FlatColumn::try_new(
             FlatData::MapUtf8(Box::new(empty_map_with_rows(row_count)?)),
             parsed.row_nulls,
         )?);
-    }
-
-    // Validate key dictionary UTF-8 boundaries without cloning keys_blob.
-    let keys_str = std::str::from_utf8(parsed.keys_blob)
-        .map_err(|_| StatamError::Column(cetra_column::ColumnError::InvalidUtf8))?;
-    for &o in &parsed.key_offsets {
-        if !keys_str.is_char_boundary(o as usize) {
-            return Err(StatamError::Column(cetra_column::ColumnError::InvalidUtf8));
-        }
     }
 
     if parsed.val_src.len() < 5 {
@@ -1986,7 +2193,13 @@ fn decode_shredded_residual_with_count_selected(
                 });
             }
             let off_raw = &val_body[..off_bytes];
-            validate_plain_offsets_raw(off_raw, data_len)?;
+            if read_u32_le_at(off_raw, 0) != 0
+                || read_u32_le_at(off_raw, parsed.entry_count) != data_len
+            {
+                return Err(StatamError::Corrupt {
+                    reason: "shredded residual plain value offset endpoints invalid",
+                });
+            }
             ValSource::Plain {
                 off_raw,
                 data: &val_body[off_bytes..],
@@ -1999,14 +2212,41 @@ fn decode_shredded_residual_with_count_selected(
         }
     };
 
+    let mut selected_entries = 0usize;
+    for row in mask.iter_ones() {
+        if row >= row_count {
+            break;
+        }
+        selected_entries = selected_entries
+            .saturating_add((parsed.offsets[row + 1] - parsed.offsets[row]) as usize);
+    }
+    // Use bulk SIMD unpack when selecting >= 1/64 of entries (e.g., filtered scans like
+    // `NS_filter_map`, where `decode_shredded_residual_block_selected` enters below 1/16 rows);
+    // keep per-entry lazy `unpack_u32_at` for sparse point lookups (`W4`: 1/4096 rows).
+    let bulk_key_codes: Option<Vec<u32>> =
+        if selected_entries > 0 && selected_entries.saturating_mul(64) >= parsed.entry_count {
+            let mut codes = Vec::with_capacity(parsed.entry_count);
+            unpack_u32(
+                parsed.kcode_packed,
+                parsed.entry_count,
+                parsed.kcode_bw,
+                &mut codes,
+            )?;
+            Some(codes)
+        } else {
+            None
+        };
+
     let mut out_offsets = Vec::with_capacity(row_count + 1);
     out_offsets.push(0u32);
-    let mut out_key_offsets = vec![0u32];
+    let mut out_key_offsets = Vec::with_capacity(selected_entries.saturating_add(1));
+    out_key_offsets.push(0u32);
     let mut out_key_bytes = Vec::new();
-    let mut out_val_offsets = vec![0u32];
+    let mut out_val_offsets = Vec::with_capacity(selected_entries.saturating_add(1));
+    out_val_offsets.push(0u32);
     let mut out_val_bytes = Vec::new();
     let mut out_val_pos = 0usize;
-    let mut out_val_valid = Vec::new();
+    let mut out_val_valid = Vec::with_capacity(selected_entries);
 
     for row in mask.iter_ones() {
         if row >= row_count {
@@ -2019,7 +2259,20 @@ fn decode_shredded_residual_with_count_selected(
         let rs = parsed.offsets[row] as usize;
         let re = parsed.offsets[row + 1] as usize;
         for idx in rs..re {
-            let kc = parsed.key_codes[idx] as usize;
+            let kc = match &bulk_key_codes {
+                Some(codes) => codes[idx] as usize,
+                None => unpack_u32_at(
+                    parsed.kcode_packed,
+                    parsed.entry_count,
+                    parsed.kcode_bw,
+                    idx,
+                )? as usize,
+            };
+            if kc >= parsed.num_keys {
+                return Err(StatamError::Corrupt {
+                    reason: "shredded residual key code out of bounds",
+                });
+            }
             let ks = parsed.key_offsets[kc] as usize;
             let ke = parsed.key_offsets[kc + 1] as usize;
             let klen = ke - ks;
@@ -2038,6 +2291,11 @@ fn decode_shredded_residual_with_count_selected(
                 ValSource::Plain { off_raw, data } => {
                     let vs = read_u32_le_at(off_raw, idx);
                     let ve = read_u32_le_at(off_raw, idx + 1);
+                    if vs > ve || ve > data.len() {
+                        return Err(StatamError::Corrupt {
+                            reason: "shredded residual plain value offset out of bounds",
+                        });
+                    }
                     let vlen = ve - vs;
                     if out_val_pos.saturating_add(vlen) > MAX_BLOCK_RAW_BYTES {
                         return Err(StatamError::BoundsExceeded {
@@ -5504,5 +5762,299 @@ mod tests {
                 "unshred_map_selected mismatch on row {r}"
             );
         }
+    }
+
+    #[test]
+    fn pass23_lazy_shredded_residual_selected_parity_and_corrupt() {
+        // 1. Parity vs full decode on a large multi-thousand-key ShreddedMap (2,500 distinct keys,
+        //    256 rows, nulls, empty maps, row nulls) for BOTH `Fsst` and `Plain` value encodings.
+        let num_rows = 256usize;
+        let num_distinct_keys = 2_500usize;
+        let key_names: Vec<String> = (0..num_distinct_keys)
+            .map(|k| format!("dyn.attr.key_{k:04}"))
+            .collect();
+
+        let mut offsets: Vec<u32> = Vec::with_capacity(num_rows + 1);
+        offsets.push(0);
+        let mut keys_vec: Vec<String> = Vec::new();
+        let mut vals_vec: Vec<String> = Vec::new();
+        let mut val_valid: Vec<bool> = Vec::new();
+        let mut row_valid: Vec<bool> = Vec::with_capacity(num_rows);
+
+        for r in 0..num_rows {
+            if r % 37 == 5 {
+                // Null map row
+                row_valid.push(false);
+                offsets.push(keys_vec.len() as u32);
+                continue;
+            }
+            row_valid.push(true);
+            if r % 29 == 3 {
+                // Empty non-null map row
+                offsets.push(keys_vec.len() as u32);
+                continue;
+            }
+            for j in 0..12 {
+                let k_idx = (r * 13 + j * 197) % num_distinct_keys;
+                keys_vec.push(key_names[k_idx].clone());
+                if (r + j) % 11 == 0 {
+                    vals_vec.push(String::new());
+                    val_valid.push(false);
+                } else {
+                    vals_vec.push(format!(
+                        "https://service-{:02}.example.com/v1/items/{r}/{j}/payload_value",
+                        k_idx % 32
+                    ));
+                    val_valid.push(true);
+                }
+            }
+            offsets.push(keys_vec.len() as u32);
+        }
+
+        let map_data = MapData::try_new(
+            offsets.clone(),
+            Utf8Data::try_from_slices(keys_vec.iter().map(String::as_str)).unwrap(),
+            Utf8Data::try_from_slices(vals_vec.iter().map(String::as_str)).unwrap(),
+            Some(Bitmap::from_bools(&val_valid)),
+        )
+        .unwrap();
+        let col = FlatColumn::try_new(
+            FlatData::MapUtf8(Box::new(map_data)),
+            Some(Bitmap::from_bools(&row_valid)),
+        )
+        .unwrap();
+
+        // Build FSST-encoded residual via L1Compact encoder.
+        let enc_fsst = encode_shredded_residual_block(&col, WriteProfile::L1Compact).unwrap();
+        assert_eq!(enc_fsst.encoding, Encoding::ShreddedMap);
+        let entry_fsst = BlockEntry {
+            offset: 0,
+            stored_len: enc_fsst.raw_body.len() as u32,
+            raw_len: enc_fsst.raw_body.len() as u32,
+            first_row: 0,
+            row_count: num_rows as u16,
+            null_count: enc_fsst.null_count,
+            encoding: enc_fsst.encoding,
+            codec: Codec::None,
+            block_flags: enc_fsst.block_flags,
+            min_inline_len: enc_fsst.min_inline_len,
+            max_inline_len: enc_fsst.max_inline_len,
+            reserved: [0; 3],
+            min_inline: enc_fsst.min_inline,
+            max_inline: enc_fsst.max_inline,
+        };
+
+        // Also build an identical ShreddedMap residual whose values use `Encoding::Plain`.
+        let plain_body = {
+            let mut raw = Vec::new();
+            write_optional_nulls(col.nulls(), &mut raw);
+            let counts: Vec<u32> = (0..num_rows).map(|r| offsets[r + 1] - offsets[r]).collect();
+            let cnt_bw = min_bits_u32(&counts);
+            raw.push(cnt_bw);
+            pack_u32(&counts, cnt_bw, &mut raw).unwrap();
+
+            let mut key_map: HashMap<&str, u32> = HashMap::new();
+            let mut unique_keys: Vec<&str> = Vec::new();
+            let mut key_codes: Vec<u32> = Vec::with_capacity(keys_vec.len());
+            for k in &keys_vec {
+                if let Some(&c) = key_map.get(k.as_str()) {
+                    key_codes.push(c);
+                } else {
+                    let c = unique_keys.len() as u32;
+                    key_map.insert(k.as_str(), c);
+                    unique_keys.push(k.as_str());
+                    key_codes.push(c);
+                }
+            }
+            let key_lens: Vec<u32> = unique_keys.iter().map(|k| k.len() as u32).collect();
+            let klen_bw = min_bits_u32(&key_lens);
+            let kcode_bw = min_bits_u32(&key_codes);
+            raw.extend_from_slice(&(unique_keys.len() as u32).to_le_bytes());
+            raw.push(klen_bw);
+            pack_u32(&key_lens, klen_bw, &mut raw).unwrap();
+            let keys_raw_bytes: usize = unique_keys.iter().map(|k| k.len()).sum();
+            raw.extend_from_slice(&(keys_raw_bytes as u32).to_le_bytes());
+            for k in &unique_keys {
+                raw.extend_from_slice(k.as_bytes());
+            }
+            raw.push(kcode_bw);
+            pack_u32(&key_codes, kcode_bw, &mut raw).unwrap();
+            raw.push(1);
+            raw.extend_from_slice(&Bitmap::from_bools(&val_valid).to_bytes());
+            let vals_utf8 = Utf8Data::try_from_slices(vals_vec.iter().map(String::as_str)).unwrap();
+            let plain_vals = encode_plain_utf8(&vals_utf8);
+            raw.push(Encoding::Plain as u8);
+            raw.extend_from_slice(&(plain_vals.len() as u32).to_le_bytes());
+            raw.extend_from_slice(&plain_vals);
+            raw
+        };
+        let entry_plain = BlockEntry {
+            stored_len: plain_body.len() as u32,
+            raw_len: plain_body.len() as u32,
+            ..entry_fsst
+        };
+
+        let full_fsst = decode_shredded_residual_block(&enc_fsst.raw_body, &entry_fsst).unwrap();
+        let full_plain = decode_shredded_residual_block(&plain_body, &entry_plain).unwrap();
+        assert!(full_fsst.semantic_eq(&col));
+        assert!(full_plain.semantic_eq(&col));
+
+        // Sparse masks (< 1/8 entries -> per-entry `unpack_u32_at`) plus a dense mask
+        // (50% rows -> bulk SIMD `unpack_u32` path used by filtered scans like `NS_filter_map`).
+        let dense_rows: Vec<usize> = (0..num_rows).filter(|r| r % 2 == 0).collect();
+        let active_sets: &[&[usize]] = &[
+            &[0],
+            &[3], // empty non-null map row
+            &[5], // null map row
+            &[0, 3, 5, 42, 127, 255],
+            &dense_rows,
+        ];
+        for &rows in active_sets {
+            let mut mask = Bitmap::new_zeroed(num_rows);
+            for &r in rows {
+                let _ = mask.set(r, true);
+            }
+            let sel_fsst =
+                decode_shredded_residual_block_selected(&enc_fsst.raw_body, &entry_fsst, &mask)
+                    .unwrap();
+            let sel_plain =
+                decode_shredded_residual_block_selected(&plain_body, &entry_plain, &mask).unwrap();
+            // Also call `decode_shredded_residual_with_count_selected` directly so dense masks
+            // (`>= 1/64` entries) exercise the bulk SIMD `unpack_u32` branch directly.
+            let sel_fsst_direct = decode_shredded_residual_with_count_selected(
+                &enc_fsst.raw_body,
+                num_rows,
+                entry_fsst.block_flags,
+                &mask,
+            )
+            .unwrap();
+            let sel_plain_direct = decode_shredded_residual_with_count_selected(
+                &plain_body,
+                num_rows,
+                entry_plain.block_flags,
+                &mask,
+            )
+            .unwrap();
+            for &r in rows {
+                let expected = Column::Flat(col.clone()).get_scalar(r).unwrap();
+                assert_eq!(
+                    Column::Flat(sel_fsst.clone()).get_scalar(r).unwrap(),
+                    expected,
+                    "FSST lazy selected mismatch on row {r}"
+                );
+                assert_eq!(
+                    Column::Flat(sel_plain.clone()).get_scalar(r).unwrap(),
+                    expected,
+                    "Plain lazy selected mismatch on row {r}"
+                );
+                assert_eq!(
+                    Column::Flat(sel_fsst_direct.clone()).get_scalar(r).unwrap(),
+                    expected,
+                    "FSST direct selected mismatch on row {r}"
+                );
+                assert_eq!(
+                    Column::Flat(sel_plain_direct.clone())
+                        .get_scalar(r)
+                        .unwrap(),
+                    expected,
+                    "Plain direct selected mismatch on row {r}"
+                );
+            }
+        }
+
+        // Helper to build a minimal 32-row ShreddedMap residual (row 7 has 1 entry, others empty)
+        // with customizable key bytes, key code, and plain value offsets.
+        let build_custom_plain_residual =
+            |key_bytes: &[u8], key_code: u32, kcode_bw: u8, val_offs: [u32; 2], val_data: &[u8]| {
+                let mut raw = Vec::new();
+                let mut counts = vec![0u32; 32];
+                counts[7] = 1;
+                let cnt_bw = min_bits_u32(&counts);
+                raw.push(cnt_bw);
+                pack_u32(&counts, cnt_bw, &mut raw).unwrap();
+                raw.extend_from_slice(&1u32.to_le_bytes()); // num_keys = 1
+                let klen = key_bytes.len() as u32;
+                let klen_bw = min_bits_u32(&[klen]);
+                raw.push(klen_bw);
+                pack_u32(&[klen], klen_bw, &mut raw).unwrap();
+                raw.extend_from_slice(&klen.to_le_bytes());
+                raw.extend_from_slice(key_bytes);
+                raw.push(kcode_bw);
+                pack_u32(&[key_code], kcode_bw, &mut raw).unwrap();
+                raw.push(0); // val_nulls = None
+                let mut plain_vals = Vec::new();
+                plain_vals.extend_from_slice(&val_offs[0].to_le_bytes());
+                plain_vals.extend_from_slice(&val_offs[1].to_le_bytes());
+                plain_vals.extend_from_slice(val_data);
+                raw.push(Encoding::Plain as u8);
+                raw.extend_from_slice(&(plain_vals.len() as u32).to_le_bytes());
+                raw.extend_from_slice(&plain_vals);
+                raw
+            };
+        let mut mask_row7 = Bitmap::new_zeroed(32);
+        let _ = mask_row7.set(7, true);
+
+        // 2a. OOB active key_code (key_code = 1 >= num_keys = 1) -> Corrupt.
+        let bad_kc = build_custom_plain_residual(b"ok", 1, 2, [0, 2], b"hi");
+        assert!(matches!(
+            decode_shredded_residual_with_count_selected(&bad_kc, 32, 0, &mask_row7),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // 2b. Invalid UTF-8 in active key -> Column(InvalidUtf8).
+        let bad_utf8 = build_custom_plain_residual(&[0xff, 0xfe], 0, 0, [0, 2], b"hi");
+        assert!(matches!(
+            decode_shredded_residual_with_count_selected(&bad_utf8, 32, 0, &mask_row7),
+            Err(StatamError::Column(cetra_column::ColumnError::InvalidUtf8))
+        ));
+
+        // 2c. Invalid active plain value offsets: vs > ve -> Corrupt.
+        let bad_off_inv = build_custom_plain_residual(b"ok", 0, 0, [2, 1], b"hi");
+        assert!(matches!(
+            decode_shredded_residual_with_count_selected(&bad_off_inv, 32, 0, &mask_row7),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // 2d. Invalid active plain value offsets: ve > data.len() -> Corrupt.
+        let bad_off_oob = build_custom_plain_residual(b"ok", 0, 0, [0, 99], b"hi");
+        assert!(matches!(
+            decode_shredded_residual_with_count_selected(&bad_off_oob, 32, 0, &mask_row7),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // 2d-ii. Invalid plain value offset endpoints rejected even on zero-active-row mask.
+        let zero_mask = Bitmap::new_zeroed(32);
+        let bad_off_start = build_custom_plain_residual(b"ok", 0, 0, [1, 2], b"hi");
+        let bad_off_end = build_custom_plain_residual(b"ok", 0, 0, [0, 1], b"hi");
+        assert!(matches!(
+            decode_shredded_residual_with_count_selected(&bad_off_start, 32, 0, &zero_mask),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            decode_shredded_residual_with_count_selected(&bad_off_end, 32, 0, &zero_mask),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // 2e. 30-byte amplification bomb rejected immediately on selected path.
+        let mut bomb = Vec::new();
+        let entry_count = 16_000_000u32;
+        let cnt_bw = min_bits_u32(&[entry_count]);
+        bomb.push(cnt_bw);
+        pack_u32(&[entry_count], cnt_bw, &mut bomb).unwrap();
+        bomb.extend_from_slice(&1u32.to_le_bytes());
+        bomb.push(0);
+        bomb.extend_from_slice(&0u32.to_le_bytes());
+        bomb.push(0);
+        bomb.push(0);
+        bomb.push(Encoding::Fsst as u8);
+        bomb.extend_from_slice(&2u32.to_le_bytes());
+        bomb.extend_from_slice(&[0u8, 0u8]);
+        assert!(bomb.len() <= 30);
+        let mut mask_one = Bitmap::new_zeroed(1);
+        let _ = mask_one.set(0, true);
+        assert!(matches!(
+            decode_shredded_residual_with_count_selected(&bomb, 1, 0, &mask_one),
+            Err(StatamError::BoundsExceeded { .. } | StatamError::Corrupt { .. })
+        ));
     }
 }

@@ -6654,7 +6654,7 @@ fn pass13_fix_m1_duplicate_lazy_index_entry_uses_matching_inline_slice() {
 #[test]
 fn pass13_fix_m3_take_rows_large_l0_payload_splits_waves() {
     // M3 regression: `take_rows` on an L0-heavy RG exceeding `MAX_BATCH_DECODED_BYTES` (256 MiB)
-    // must measure L0 local payload bytes and split cleanly via `partition_payload_waves` instead
+    // must measure L0 local payload bytes and split cleanly via `split_payload_waves_multi` instead
     // of taking the external-only fast path and failing with `BoundsExceeded`.
     let schema = Schema::try_new_arc(vec![
         Field::new("id", DataType::I64, false),
@@ -7147,7 +7147,7 @@ fn pass13_fix_n2_take_rows_cdc_dedup_over_128_mib_splits_waves() {
     // N2 regression: a CDC-deduplicated RG where 150 rows share the same 1 MiB chunk has
     // ~1 MiB unique physical bytes (<= 128 MiB) but 150 MiB logical column bytes (> 128 MiB).
     // `take_rows` must detect `max_mb_col_decoded_bytes > 128 MiB` and split cleanly via
-    // `partition_payload_waves` instead of failing with `BoundsExceeded` on the fast path.
+    // `split_payload_waves_multi` instead of failing with `BoundsExceeded` on the fast path.
     let schema = Schema::try_new_arc(vec![
         Field::new("id", DataType::I64, false),
         Field::new("input", DataType::Utf8, true),
@@ -9965,4 +9965,671 @@ fn pass22_fused_phase2_and_direct_take_payload_parity() {
         "l0_fused_phase2",
     );
     assert_eq!(l0_scan_rows, 16);
+}
+
+#[test]
+fn pass23_hash_free_wave_plan_parity_and_multiwave_fallback() {
+    // 1. Build an L1Compact file with:
+    //    - `id` (I64), `tag` (Utf8), `attrs_shred` (shredded MapUtf8),
+    //    - 4 ExternalPayload columns: `p_big` (>= 1 MiB across 32 rows), `p_small1`, `p_small2`, `p_inline_mix`
+    //      (exercising SingleWave fast path, `col_decoded` inline+chunk tracking, LPT Stage 1,
+    //       and smart parallel Stage B for both `< threads` large-col sharding and `>= 4` small Stage B).
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("tag", DataType::Utf8, false),
+        Field::new("attrs_shred", DataType::MapUtf8, true),
+        Field::new("p_big", DataType::Utf8, true),
+        Field::new("p_small1", DataType::Utf8, true),
+        Field::new("p_small2", DataType::Binary, true),
+        Field::new("p_inline_mix", DataType::Utf8, true),
+    ])
+    .unwrap();
+
+    let n = 256usize;
+    let non_null_rows = 240usize;
+    let ids: Vec<i64> = (0..n as i64).collect();
+    let tags: Vec<String> = (0..n).map(|i| format!("tag_{}", i % 4)).collect();
+
+    let mut map_offs = vec![0u32];
+    let mut map_keys = Vec::new();
+    let mut map_vals = Vec::new();
+    let mut attrs_nulls = Bitmap::new_ones(n);
+    for i in 0..n {
+        if i == non_null_rows - 1 {
+            // Nullable shredded map row.
+            let _ = attrs_nulls.set(i, false);
+            map_offs.push(map_keys.len() as u32);
+            continue;
+        }
+        map_keys.push("env".to_owned());
+        map_vals.push(if i % 2 == 0 { "prod" } else { "dev" }.to_owned());
+        if i == 0 {
+            // Duplicate promoted key `"env"` forces `residual_count > 0`, ensuring Phase 1
+            // decodes & caches `DecodedPhase1::Col` at `cidx = 2` so Stage B exercises
+            // `decoded_p1.remove(&cidx)` -> `cached_p1: Some(_)` -> `materialize_cached_p1_col`.
+            map_keys.push("env".to_owned());
+            map_vals.push("prod".to_owned());
+        }
+        map_keys.push("svc".to_owned());
+        map_vals.push(format!("svc_{}", i % 5));
+        map_keys.push(format!("rare_{i}"));
+        map_vals.push(format!("rval_{i}"));
+        map_offs.push(map_keys.len() as u32);
+    }
+    let attrs_col = FlatColumn::try_new(
+        FlatData::MapUtf8(Box::new(
+            MapData::try_new(
+                map_offs,
+                Utf8Data::try_from_slices(map_keys.iter().map(String::as_str)).unwrap(),
+                Utf8Data::try_from_slices(map_vals.iter().map(String::as_str)).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )),
+        Some(attrs_nulls),
+    )
+    .unwrap();
+
+    let mut p_big_vals: Vec<String> = Vec::with_capacity(n);
+    let mut p_small1_vals: Vec<String> = Vec::with_capacity(n);
+    let mut p_small2_vals: Vec<Vec<u8>> = Vec::with_capacity(n);
+    let mut p_mix_vals: Vec<String> = Vec::with_capacity(n);
+    let mut p_nulls = Bitmap::new_ones(n);
+    for i in 0..n {
+        if i >= non_null_rows {
+            let _ = p_nulls.set(i, false);
+            p_big_vals.push(String::new());
+            p_small1_vals.push(String::new());
+            p_small2_vals.push(Vec::new());
+            p_mix_vals.push(String::new());
+        } else {
+            // ~12 KiB per row -> 128 rows = ~1.5 MiB >= PARALLEL_RECONSTRUCT_MIN_BYTES (1 MiB).
+            p_big_vals.push(format!("BIG_{i:03}_") + &"B".repeat(12 * 1024));
+            // Mix ~240 B inline payloads (<= INLINE_PAYLOAD_THRESHOLD = 256 B) + ~2 KiB chunked
+            // payloads so `PayloadRefs` raw_len exceeds `MIN_PARALLEL_WORK_BYTES` (48 KiB) while
+            // Stage B small cols exceed `64 KiB` (genuinely exercising both parallel paths).
+            if i % 3 == 0 {
+                p_small1_vals.push(format!("INLINE_S1_{i:03}_") + &"s".repeat(226));
+            } else {
+                p_small1_vals.push(format!("SMALL1_{i:03}_") + &"S".repeat(2 * 1024));
+            }
+            if i % 3 == 1 {
+                p_small2_vals.push(vec![(i as u8).wrapping_mul(13); 240]);
+            } else {
+                p_small2_vals.push(vec![(i as u8).wrapping_mul(13); 2 * 1024]);
+            }
+            if i % 2 == 0 {
+                p_mix_vals.push(format!("inline_row_{i:03}_") + &"m".repeat(225));
+            } else {
+                p_mix_vals.push(format!("CHUNK_MIX_{i:03}_") + &"M".repeat(2 * 1024));
+            }
+        }
+    }
+
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(tags.iter().map(String::as_str)).unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+            Column::Flat(attrs_col),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(p_big_vals.iter().map(String::as_str)).unwrap(),
+                    ),
+                    Some(p_nulls.clone()),
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(p_small1_vals.iter().map(String::as_str))
+                            .unwrap(),
+                    ),
+                    Some(p_nulls.clone()),
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Binary(
+                        BinaryData::try_from_slices(p_small2_vals.iter().map(Vec::as_slice))
+                            .unwrap(),
+                    ),
+                    Some(p_nulls.clone()),
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(p_mix_vals.iter().map(String::as_str)).unwrap(),
+                    ),
+                    Some(p_nulls),
+                )
+                .unwrap(),
+            ),
+        ],
+        n,
+    )
+    .unwrap();
+
+    let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+    opts.row_group_size = n;
+    opts.mini_block_size = n;
+    opts.payload_cols = vec![
+        "p_big".to_owned(),
+        "p_small1".to_owned(),
+        "p_small2".to_owned(),
+        "p_inline_mix".to_owned(),
+    ];
+    let pack_id = [0x23u8; 16];
+    let mut pb = ChunkPackBuilder::new(pack_id, test_pack_opts());
+    opts.pack_id = Some(pack_id);
+    let mut file_bytes = Vec::new();
+    {
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut file_bytes),
+            Arc::clone(&schema),
+            opts,
+            Some(&mut pb),
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+    }
+    let mut pack_bytes = Vec::new();
+    pb.finish(&mut pack_bytes).unwrap();
+    let mut resolver = InMemoryPackResolver::new();
+    resolver.insert_bytes(pack_id, pack_bytes).unwrap();
+    let reader = StatamReader::open(
+        Arc::new(SliceReader::new(file_bytes)),
+        Some(Arc::new(resolver)),
+    )
+    .unwrap();
+
+    // Confirm total PayloadRefs raw_len across the 4 payload cols exceeds MIN_PARALLEL_WORK_BYTES
+    // so `ensure_rg_payload_refs_decoded(..., 8)` genuinely enters `parallel_map_in_order`.
+    let proj_pcols = [3usize, 4, 5, 6];
+    let total_l1_refs_raw: usize = proj_pcols
+        .iter()
+        .map(|&cidx| reader.meta().rg_blocks(cidx, 0)[0].raw_len as usize)
+        .sum();
+    assert!(
+        total_l1_refs_raw >= MIN_PARALLEL_WORK_BYTES,
+        "expected PayloadRefs raw_len ({total_l1_refs_raw}) >= MIN_PARALLEL_WORK_BYTES ({MIN_PARALLEL_WORK_BYTES})"
+    );
+    // Confirm `attrs_shred` was shredded and `"env"` has `residual_count > 0`.
+    let env_sub = reader.find_shredded_subcol(2, "env");
+    assert!(
+        matches!(env_sub, Some((_, rc)) if rc > 0),
+        "expected shredded `env` key with residual_count > 0, got {env_sub:?}"
+    );
+
+    let read_blk = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
+        Ok(Cow::Owned(reader.read_block_body(blk)?))
+    };
+    for &sparse in &[false, true] {
+        let mut mask = if sparse {
+            let mut bm = Bitmap::new_zeroed(n);
+            for r in [0usize, 1, 2, 3, non_null_rows] {
+                let _ = bm.set(r, true);
+            }
+            bm
+        } else {
+            Bitmap::new_ones(n)
+        };
+        let mut active_mbs = vec![(0usize, mask.clone(), HashMap::new())];
+        reader
+            .ensure_rg_payload_refs_decoded(0, &mut active_mbs, &proj_pcols, &read_blk, 8)
+            .unwrap();
+        let (expected_ext, expected_l0) =
+            StatamReader::collect_chunk_refs_for_mbs(&active_mbs, &proj_pcols);
+        assert!(expected_l0.is_empty());
+
+        let plan = reader
+            .plan_payload_waves(&active_mbs, &proj_pcols, None)
+            .unwrap();
+        let PayloadWavePlan::SingleWave {
+            by_pack,
+            col_decoded,
+        } = plan
+        else {
+            panic!("expected SingleWave on < 128 MiB payload set (sparse={sparse})");
+        };
+        let expected_by_pack: Vec<(u16, Vec<u32>)> = expected_ext
+            .into_iter()
+            .map(|(p, s)| (p, s.into_iter().collect()))
+            .collect();
+        assert_eq!(
+            by_pack, expected_by_pack,
+            "by_pack mismatch (sparse={sparse})"
+        );
+        // Verify exact col_decoded for p_inline_mix (both inline and chunked rows included!).
+        let expected_mix_bytes: usize = mask
+            .iter_ones()
+            .filter(|&r| r < non_null_rows)
+            .map(|r| p_mix_vals[r].len())
+            .sum();
+        assert_eq!(col_decoded[3], expected_mix_bytes);
+
+        // Verify fallback to MultiWave when `max_fast_path_packs`, `max_bitset_ids`, or
+        // `max_total_bitset_bytes` cap is exceeded!
+        for (max_packs, max_ids, max_bytes) in [(0, 1024, 1024), (1024, 0, 1024), (1024, 1024, 0)] {
+            let capped = reader
+                .plan_payload_waves_with_caps(
+                    &active_mbs,
+                    &proj_pcols,
+                    None,
+                    max_packs,
+                    max_ids,
+                    max_bytes,
+                )
+                .unwrap();
+            assert!(
+                matches!(capped, PayloadWavePlan::MultiWave(ref w) if w.len() == 1),
+                "expected MultiWave fallback for caps ({max_packs}, {max_ids}, {max_bytes})"
+            );
+        }
+
+        // Empty active mask -> MultiWave(empty).
+        mask = Bitmap::new_zeroed(n);
+        let empty_mbs = vec![(0usize, mask, HashMap::new())];
+        assert!(matches!(
+            reader.plan_payload_waves(&empty_mbs, &proj_pcols, None).unwrap(),
+            PayloadWavePlan::MultiWave(ref w) if w.is_empty()
+        ));
+    }
+
+    // Synthetic inline > 128 MiB multi-wave fallback and > MAX_ROW_PAYLOAD_BYTES rejection.
+    {
+        let chunk_sz = 32 * 1024 * 1024usize; // 32 MiB inline per row (< MAX_ROW_PAYLOAD_BYTES = 64 MiB)
+        let big_inline = vec![b'a'; chunk_sz];
+        let mut p1 = HashMap::new();
+        // 5 rows * 32 MiB = 160 MiB > 128 MiB -> must fall back to MultiWave (2 waves: 4 rows + 1 row).
+        p1.insert(
+            3usize,
+            DecodedPhase1::SelectedPayloadRefs(
+                (0..5)
+                    .map(|r| (r, PayloadRefRow::Inline(big_inline.clone())))
+                    .collect(),
+            ),
+        );
+        let active_mbs = vec![(0usize, Bitmap::new_ones(5), p1)];
+        let plan = reader.plan_payload_waves(&active_mbs, &[3], None).unwrap();
+        let PayloadWavePlan::MultiWave(waves) = plan else {
+            panic!("expected MultiWave when cumulative inline bytes exceed 128 MiB");
+        };
+        assert_eq!(waves.len(), 2);
+
+        // Single inline row > MAX_ROW_PAYLOAD_BYTES -> BoundsExceeded on BOTH fast path and multi-wave.
+        let mut p1_over = HashMap::new();
+        p1_over.insert(
+            3usize,
+            DecodedPhase1::SelectedPayloadRefs(vec![(
+                0,
+                PayloadRefRow::Inline(vec![b'z'; crate::format::MAX_ROW_PAYLOAD_BYTES + 1]),
+            )]),
+        );
+        let over_mbs = vec![(0usize, Bitmap::new_ones(1), p1_over)];
+        assert!(matches!(
+            reader.plan_payload_waves(&over_mbs, &[3], None),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+        assert!(matches!(
+            reader.split_payload_waves_multi(&over_mbs, &[3], None),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+    }
+
+    // 2. Verify 1T vs 8T parity across all Stage 1 / Stage B combinations:
+    //    (a) 1 large >= 1 MiB payload col + 1 small payload col (< threads -> preserves sharding)
+    //    (b) All 7 cols (4 payload cols + shredded map, small_stage_b_bytes >> 64 KiB -> parallel Stage B)
+    //    (c) Duplicate proj_indices + P1-cached shredded map via `env` (res_count > 0) AND non-shredded `rare_0`
+    let assert_scan_1t_vs_8t = |r: &StatamReader, req: &ScanRequest, label: &str| {
+        let mut r1 = req.clone();
+        r1.read_threads = 1;
+        let mut r8 = req.clone();
+        r8.read_threads = 8;
+        let b1 = r.scan(&r1).unwrap();
+        let b8 = r.scan(&r8).unwrap();
+        let ps = match &req.projection {
+            Some(idxs) => Arc::new(r.meta.schema().project(idxs).unwrap()),
+            None => Arc::clone(r.meta.schema()),
+        };
+        let c1 = concat_scanned_batches(&ps, &b1);
+        let c8 = concat_scanned_batches(&ps, &b8);
+        assert_eq!(c1.num_rows(), c8.num_rows(), "{label}: row count mismatch");
+        for ci in 0..ps.len() {
+            assert_eq!(
+                c1.column(ci).unwrap().materialize(None).unwrap(),
+                c8.column(ci).unwrap().materialize(None).unwrap(),
+                "{label}: col {ci} mismatch"
+            );
+        }
+    };
+
+    assert_scan_1t_vs_8t(
+        &reader,
+        &ScanRequest {
+            projection: Some(vec![0, 3, 6]),
+            predicates: vec![Predicate::new(
+                "id",
+                ZonePred::Between(ZoneValue::I64(0), ZoneValue::I64(127)),
+            )],
+            ..ScanRequest::default()
+        },
+        "stage_b_large_col_sharding",
+    );
+    assert_scan_1t_vs_8t(
+        &reader,
+        &ScanRequest {
+            projection: None,
+            predicates: vec![Predicate::new(
+                "id",
+                ZonePred::Between(ZoneValue::I64(0), ZoneValue::I64((n - 1) as i64)),
+            )],
+            ..ScanRequest::default()
+        },
+        "stage_b_all_cols_parallel",
+    );
+    assert_scan_1t_vs_8t(
+        &reader,
+        &ScanRequest {
+            projection: Some(vec![0, 2, 3, 2, 3, 4, 6, 4]),
+            predicates: vec![Predicate::map_key(
+                "attrs_shred",
+                "env",
+                ZonePred::Eq(ZoneValue::Bytes(b"prod".to_vec())),
+            )],
+            ..ScanRequest::default()
+        },
+        "stage_b_dup_proj_and_cached_shredded_map",
+    );
+    assert_scan_1t_vs_8t(
+        &reader,
+        &ScanRequest {
+            projection: Some(vec![0, 2, 3, 2, 4, 5, 6]),
+            predicates: vec![Predicate::map_key(
+                "attrs_shred",
+                "rare_0",
+                ZonePred::Eq(ZoneValue::Bytes(b"rval_0".to_vec())),
+            )],
+            ..ScanRequest::default()
+        },
+        "stage_b_cached_shredded_map_non_shredded_key",
+    );
+
+    // 3. Wave-wide parallel `PayloadRefs` decode in `take_rows`: multi-RG L0Fast + multi-MB + ConstNull MB!
+    let mut l0_opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L0Fast);
+    l0_opts.row_group_size = 64; // 4 RGs * 4 MBs (16 rows/MB) = 16 MBs, last MB (240..256) all-null -> ConstNull!
+    l0_opts.mini_block_size = 16;
+    l0_opts.payload_cols = vec![
+        "p_big".to_owned(),
+        "p_small1".to_owned(),
+        "p_small2".to_owned(),
+        "p_inline_mix".to_owned(),
+    ];
+    let mut l0_bytes = Vec::new();
+    {
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut l0_bytes),
+            Arc::clone(&schema),
+            l0_opts,
+            None,
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+    }
+    let l0_reader = StatamReader::open(Arc::new(SliceReader::new(l0_bytes)), None).unwrap();
+    assert_eq!(l0_reader.meta().rg_dir.len(), 4);
+    assert_eq!(
+        l0_reader.meta().rg_blocks(3, 3)[3].encoding,
+        Encoding::ConstNull,
+        "expected last MB in RG 3 to be ConstNull"
+    );
+
+    // Pick 1+ row from every single MB across all 4 RGs (including the ConstNull last MB) so
+    // wave-wide `ref_work_bytes >= MIN_PARALLEL_WORK_BYTES` genuinely enters `parallel_map_in_order`.
+    let take_idxs: Vec<u64> = (0..16u64).map(|mb| mb * 16 + (mb % 3)).collect();
+    let mut take_refs_raw = 0usize;
+    for rg in 0..4usize {
+        for mb in 0..4usize {
+            for &cidx in &proj_pcols {
+                let blk = &l0_reader.meta().rg_blocks(cidx, rg)[mb];
+                if blk.encoding != Encoding::ConstNull {
+                    take_refs_raw += blk.raw_len as usize;
+                }
+            }
+        }
+    }
+    assert!(
+        take_refs_raw >= MIN_PARALLEL_WORK_BYTES,
+        "expected wave-wide take_rows PayloadRefs raw_len ({take_refs_raw}) >= MIN_PARALLEL_WORK_BYTES ({MIN_PARALLEL_WORK_BYTES})"
+    );
+    let t1 = l0_reader.take_rows(&take_idxs, None, 1).unwrap();
+    let t8 = l0_reader.take_rows(&take_idxs, None, 8).unwrap();
+    let tc1 = concat_scanned_batches(&schema, &t1);
+    let tc8 = concat_scanned_batches(&schema, &t8);
+    assert_eq!(tc1.num_rows(), take_idxs.len());
+    assert_eq!(tc8.num_rows(), take_idxs.len());
+    for ci in 0..schema.len() {
+        assert_eq!(
+            tc1.column(ci).unwrap().materialize(None).unwrap(),
+            tc8.column(ci).unwrap().materialize(None).unwrap(),
+            "wave-wide take_rows col {ci} mismatch"
+        );
+    }
+
+    // Also verify L0 bitset cap fallback in `plan_payload_waves_with_caps`.
+    let rg0 = &l0_reader.meta().rg_dir[0];
+    let l0_buf = l0_reader
+        .reader
+        .read_range(rg0.l0_payload_offset..rg0.l0_payload_offset + u64::from(rg0.l0_payload_len))
+        .unwrap();
+    let l0_parsed = ParsedL0Payload::parse(&l0_buf).unwrap();
+    let l0_read_blk = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
+        Ok(Cow::Owned(l0_reader.read_block_body(blk)?))
+    };
+    let mut l0_mbs = vec![(0usize, Bitmap::new_ones(16), HashMap::new())];
+    l0_reader
+        .ensure_rg_payload_refs_decoded(0, &mut l0_mbs, &proj_pcols, &l0_read_blk, 8)
+        .unwrap();
+    let l0_single = l0_reader
+        .plan_payload_waves(&l0_mbs, &proj_pcols, Some(&l0_parsed))
+        .unwrap();
+    assert!(matches!(
+        l0_single,
+        PayloadWavePlan::SingleWave { ref by_pack, .. }
+            if by_pack.last().map(|(p, _)| *p) == Some(crate::writer::L0_LOCAL_PACK_IDX)
+    ));
+    let l0_capped = l0_reader
+        .plan_payload_waves_with_caps(&l0_mbs, &proj_pcols, Some(&l0_parsed), 1024, 1024, 0)
+        .unwrap();
+    assert!(matches!(l0_capped, PayloadWavePlan::MultiWave(ref w) if w.len() == 1));
+}
+
+#[test]
+fn pass23_single_pred_projected_always_matches_parity() {
+    // Build a CB_Q24-shaped 2-RG file:
+    //  - RG 0: 8 mini-blocks (256 rows/MB = 2,048 rows), where even MBs have ALL non-empty URLs
+    //    (`zone_map_always_matches(url != "") == true`) and odd MBs include some `""` rows
+    //    (`zone_map_always_matches == false`), sized > 48 KiB raw so `mb_workers > 1` on 8T.
+    //  - RG 1: 4 mini-blocks (256 rows/MB = 1,024 rows) where ALL MBs have non-empty URLs
+    //    (all surviving MBs have `always_matches == true` -> `plan.phase1_phys_cols` empty -> no preload).
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("url", DataType::Utf8, false),
+    ])
+    .unwrap();
+
+    let mb_rows = 256usize;
+    let rg0_mbs = 8usize;
+    let rg1_mbs = 4usize;
+
+    let make_rg_batch = |rg_idx: usize, num_mbs: usize, all_non_empty: bool| {
+        let total = num_mbs * mb_rows;
+        let mut ids = Vec::with_capacity(total);
+        let mut urls = Vec::with_capacity(total);
+        for m in 0..num_mbs {
+            for r in 0..mb_rows {
+                let gid = (rg_idx * 100_000 + m * mb_rows + r) as i64;
+                ids.push(gid);
+                if !all_non_empty && (m % 2 == 1) && (r % 16 == 0) {
+                    urls.push(String::new());
+                } else {
+                    urls.push(format!(
+                        "https://example-{rg_idx}-{m}.test/path/segment/{r:04}/query?alpha=beta&gamma=delta"
+                    ));
+                }
+            }
+        }
+        Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(urls.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            total,
+        )
+        .unwrap()
+    };
+
+    let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+    opts.row_group_size = rg0_mbs * mb_rows;
+    opts.mini_block_size = mb_rows;
+    let mut file_bytes = Vec::new();
+    {
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut file_bytes),
+            Arc::clone(&schema),
+            opts,
+            None,
+        )
+        .unwrap();
+        w.write_batch(&make_rg_batch(0, rg0_mbs, false)).unwrap();
+        w.write_batch(&make_rg_batch(1, rg1_mbs, true)).unwrap();
+        w.finish().unwrap();
+    }
+
+    let local_reader =
+        StatamReader::open(Arc::new(SliceReader::new(file_bytes.clone())), None).unwrap();
+    assert_eq!(local_reader.meta().rg_dir.len(), 2);
+
+    // Confirm RG 0 actually has mixed `zone_map_always_matches` MBs and RG 1 has all `true`.
+    let ne_empty = ZonePred::Ne(ZoneValue::Bytes(Vec::new()));
+    let rg0_always: Vec<bool> = local_reader
+        .meta()
+        .rg_blocks(1, 0)
+        .iter()
+        .map(|b| crate::codec::zone_map_always_matches(b, &DataType::Utf8, &ne_empty))
+        .collect();
+    assert!(
+        rg0_always.iter().any(|&v| v) && rg0_always.iter().any(|&v| !v),
+        "expected mixed always_matches in RG 0, got {rg0_always:?}"
+    );
+    let rg1_always: Vec<bool> = local_reader
+        .meta()
+        .rg_blocks(1, 1)
+        .iter()
+        .map(|b| crate::codec::zone_map_always_matches(b, &DataType::Utf8, &ne_empty))
+        .collect();
+    assert!(
+        rg1_always.iter().all(|&v| v),
+        "expected all always_matches in RG 1, got {rg1_always:?}"
+    );
+
+    let no_cache_cfg = SimulatedS3Config {
+        cache_capacity_blocks: 0,
+        ..SimulatedS3Config::default()
+    };
+    let s3_remote =
+        Arc::new(SimulatedS3Reader::from_bytes(file_bytes, no_cache_cfg).with_remote_hint(true));
+    let remote_reader = StatamReader::open(s3_remote.clone(), None).unwrap();
+
+    // Expected matching rows: RG 0 has 4 even MBs (all 256) + 4 odd MBs (256 - 16 = 240 each) = 1984;
+    // RG 1 has 4 MBs (all 256) = 1024; total = 3008.
+    for (proj, limit, expected_rows) in [
+        (vec![1usize], None, 3_008usize),
+        (vec![0, 1], None, 3_008usize),
+        (vec![1], Some(10), 10usize),
+        (vec![1], Some(1_500), 1_500usize),
+    ] {
+        let proj_schema = Arc::new(schema.project(&proj).unwrap());
+        let base_req = ScanRequest {
+            projection: Some(proj.clone()),
+            predicates: vec![Predicate::new("url", ne_empty.clone())],
+            limit,
+            ..ScanRequest::default()
+        };
+
+        let mut req1 = base_req.clone();
+        req1.read_threads = 1;
+        let mut req8 = base_req.clone();
+        req8.read_threads = 8;
+
+        let loc1 = concat_scanned_batches(&proj_schema, &local_reader.scan(&req1).unwrap());
+        let loc8 = concat_scanned_batches(&proj_schema, &local_reader.scan(&req8).unwrap());
+
+        s3_remote.reset_counters();
+        let rem1 = concat_scanned_batches(&proj_schema, &remote_reader.scan(&req1).unwrap());
+        let c1 = s3_remote.counters();
+
+        s3_remote.reset_counters();
+        let rem8 = concat_scanned_batches(&proj_schema, &remote_reader.scan(&req8).unwrap());
+        let c8 = s3_remote.counters();
+
+        assert_eq!(loc1.num_rows(), expected_rows);
+        assert_eq!(loc8.num_rows(), expected_rows);
+        assert_eq!(rem1.num_rows(), expected_rows);
+        assert_eq!(rem8.num_rows(), expected_rows);
+        assert_eq!(
+            c1.gets, c8.gets,
+            "remote S3 GET count must be invariant across 1T/8T (proj={proj:?}, limit={limit:?})"
+        );
+        assert_eq!(
+            c1.bytes_from_s3, c8.bytes_from_s3,
+            "remote S3 bytes_from_s3 must be invariant across 1T/8T (proj={proj:?}, limit={limit:?})"
+        );
+        assert_eq!(
+            c1.bytes_requested, c8.bytes_requested,
+            "remote S3 bytes_requested must be invariant across 1T/8T (proj={proj:?}, limit={limit:?})"
+        );
+        for ci in 0..proj_schema.len() {
+            let expected_col = loc1.column(ci).unwrap().materialize(None).unwrap();
+            assert_eq!(
+                loc8.column(ci).unwrap().materialize(None).unwrap(),
+                expected_col,
+                "local 8T mismatch (proj={proj:?}, limit={limit:?}, col={ci})"
+            );
+            assert_eq!(
+                rem1.column(ci).unwrap().materialize(None).unwrap(),
+                expected_col,
+                "remote 1T mismatch (proj={proj:?}, limit={limit:?}, col={ci})"
+            );
+            assert_eq!(
+                rem8.column(ci).unwrap().materialize(None).unwrap(),
+                expected_col,
+                "remote 8T mismatch (proj={proj:?}, limit={limit:?}, col={ci})"
+            );
+        }
+    }
 }

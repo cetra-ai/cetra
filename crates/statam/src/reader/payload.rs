@@ -39,6 +39,98 @@ pub(super) const PHASE2_PAYLOAD_WAVE_TARGET_BYTES: usize = MAX_BATCH_DECODED_BYT
 /// Minimum reconstructed payload column bytes required before parallelizing byte copy (`1 MiB`).
 const PARALLEL_RECONSTRUCT_MIN_BYTES: usize = 1024 * 1024;
 
+/// Maximum number of external `.stpk` packs allowed on the dense hash-free single-wave fast path.
+const MAX_FAST_PATH_PACKS: usize = 1024;
+/// Maximum chunk or frame ID count allowed for a single pack bitset (`<= 256 KiB` per bitset).
+const MAX_BITSET_IDS: usize = 2 * 1024 * 1024;
+/// Hard cumulative memory cap across all allocated bitsets (`ext_slots` + `l0_slot`) on the fast path.
+const MAX_TOTAL_BITSET_BYTES: usize = 2 * 1024 * 1024;
+
+/// Output of hash-free single-pass payload wave planning.
+pub(super) enum PayloadWavePlan {
+    SingleWave {
+        /// Ascending `pack_idx` (`0..pack_ids.len()`, then `L0_LOCAL_PACK_IDX`),
+        /// each with sorted unique `chunk_id`s (exact `BTreeMap<u16, BTreeSet<u32>>` order).
+        by_pack: Vec<(u16, Vec<u32>)>,
+        /// Total decoded payload bytes per projected payload column (indexed by `proj_payload_cols`),
+        /// including both chunked and inline rows. Used by Stage B scheduling.
+        col_decoded: Vec<usize>,
+    },
+    MultiWave(Vec<Vec<(usize, Bitmap)>>),
+}
+
+struct PackBitsetSlot {
+    chunk_bits: Vec<u64>,
+    frame_bits: Vec<u64>,
+    unique_cids: Vec<u32>,
+}
+
+impl PackBitsetSlot {
+    fn try_new(
+        num_chunks: usize,
+        num_frames: usize,
+        total_bitset_bytes: &mut usize,
+        max_bitset_ids: usize,
+        max_total_bitset_bytes: usize,
+    ) -> Option<Self> {
+        if num_chunks > max_bitset_ids || num_frames > max_bitset_ids {
+            return None;
+        }
+        let chunk_words = num_chunks.div_ceil(64);
+        let frame_words = num_frames.div_ceil(64);
+        let slot_bytes = chunk_words
+            .checked_add(frame_words)?
+            .checked_mul(size_of::<u64>())?;
+        let next_total = total_bitset_bytes.checked_add(slot_bytes)?;
+        if next_total > max_total_bitset_bytes {
+            return None;
+        }
+        *total_bitset_bytes = next_total;
+        Some(Self {
+            chunk_bits: vec![0u64; chunk_words],
+            frame_bits: vec![0u64; frame_words],
+            unique_cids: Vec::new(),
+        })
+    }
+
+    #[inline]
+    fn mark_chunk(&mut self, cid: u32) -> Result<bool, StatamError> {
+        let idx = cid as usize;
+        let word = self
+            .chunk_bits
+            .get_mut(idx >> 6)
+            .ok_or(StatamError::Corrupt {
+                reason: "chunk_id out of bounds",
+            })?;
+        let bit = 1u64 << (idx & 63);
+        if (*word & bit) == 0 {
+            *word |= bit;
+            self.unique_cids.push(cid);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    #[inline]
+    fn mark_frame(&mut self, fid: u32) -> Result<bool, StatamError> {
+        let idx = fid as usize;
+        let word = self
+            .frame_bits
+            .get_mut(idx >> 6)
+            .ok_or(StatamError::Corrupt {
+                reason: "frame_id out of bounds",
+            })?;
+        let bit = 1u64 << (idx & 63);
+        if (*word & bit) == 0 {
+            *word |= bit;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
 enum PackChunkStore {
     Dense {
         min_cid: u32,
@@ -259,112 +351,124 @@ impl StatamReader {
         proj_payload_cols.sort_unstable();
         proj_payload_cols.dedup();
 
-        // Decode all projected ExternalPayload `PayloadRefs` mini-blocks once.
+        // Decode all projected ExternalPayload `PayloadRefs` mini-blocks once (in parallel when worthwhile).
         self.ensure_rg_payload_refs_decoded(
             rg_idx,
             &mut active_mbs,
             &proj_payload_cols,
             read_block,
+            read_threads,
         )?;
 
-        // Partition active rows across `active_mbs` into sequential waves of <= 128 MiB so
-        // 1-RG large-blob tables (e.g. `blobs_2k` 368 MiB) scan safely within `MAX_BATCH_DECODED_BYTES`
-        // while still rejecting any single row exceeding `MAX_ROW_PAYLOAD_BYTES` or `MAX_BATCH_DECODED_BYTES`.
-        let waves = self.partition_payload_waves(&active_mbs, &proj_payload_cols, l0_local)?;
+        // Plan payload waves in a single hash-free pass when all active rows fit within 128 MiB,
+        // falling back to row-by-row multi-wave splitting on > 128 MiB tables or bitset cap hits.
         let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
-        if waves.len() <= 1 {
-            if active_mbs.len() == 1
-                && threads > 1
-                && !in_parallel_scope()
-                && !proj_indices.is_empty()
-            {
-                let (mb_idx, mask, decoded_p1) = active_mbs.pop().ok_or(StatamError::Corrupt {
-                    reason: "missing single active mini-block",
-                })?;
-                let batch = self.resolve_and_materialize_single_mb_fused(
-                    rg_idx,
-                    mb_idx,
-                    &mask,
-                    decoded_p1,
-                    plan,
-                    proj_indices,
-                    &proj_payload_cols,
-                    proj_schema,
-                    map_keys_by_col,
+        match self.plan_payload_waves(&active_mbs, &proj_payload_cols, l0_local)? {
+            PayloadWavePlan::SingleWave {
+                by_pack,
+                col_decoded,
+            } => {
+                if active_mbs.len() == 1
+                    && threads > 1
+                    && !in_parallel_scope()
+                    && !proj_indices.is_empty()
+                {
+                    let (mb_idx, mask, decoded_p1) =
+                        active_mbs.pop().ok_or(StatamError::Corrupt {
+                            reason: "missing single active mini-block",
+                        })?;
+                    let batch = self.resolve_and_materialize_single_mb_fused(
+                        rg_idx,
+                        mb_idx,
+                        &mask,
+                        decoded_p1,
+                        plan,
+                        proj_indices,
+                        &proj_payload_cols,
+                        by_pack,
+                        &col_decoded,
+                        proj_schema,
+                        map_keys_by_col,
+                        l0_local,
+                        pre_resolved,
+                        read_block,
+                        threads,
+                    )?;
+                    return Ok(vec![batch]);
+                }
+                let resolved = self.resolve_rg_payload_chunks_from_by_pack(
+                    by_pack,
                     l0_local,
                     pre_resolved,
-                    read_block,
-                    threads,
+                    read_threads,
                 )?;
-                return Ok(vec![batch]);
+                self.materialize_phase2_mbs(
+                    rg_idx,
+                    active_mbs,
+                    plan,
+                    proj_indices,
+                    proj_schema,
+                    map_keys_by_col,
+                    &resolved,
+                    read_block,
+                    read_threads,
+                )
             }
-            let resolved = self.resolve_rg_payload_chunks(
-                rg_idx,
-                &mut active_mbs,
-                proj_indices,
-                l0_local,
-                pre_resolved,
-                read_block,
-                read_threads,
-            )?;
-            return self.materialize_phase2_mbs(
-                rg_idx,
-                active_mbs,
-                plan,
-                proj_indices,
-                proj_schema,
-                map_keys_by_col,
-                &resolved,
-                read_block,
-                read_threads,
-            );
-        }
-
-        let mut last_wave_for_pos = vec![0usize; active_mbs.len()];
-        for (wave_idx, wave) in waves.iter().enumerate() {
-            for &(pos, _) in wave {
-                last_wave_for_pos[pos] = wave_idx;
-            }
-        }
-        let mut active_slots: Vec<Option<ActiveMiniBlock>> =
-            active_mbs.into_iter().map(Some).collect();
-        let mut out_batches = Vec::with_capacity(waves.len());
-
-        for (wave_idx, wave) in waves.into_iter().enumerate() {
-            let mut wave_mbs = Vec::with_capacity(wave.len());
-            for (pos, sub_mask) in wave {
-                if last_wave_for_pos[pos] == wave_idx {
-                    if let Some((mb_idx, _, decoded_p1)) = active_slots[pos].take() {
-                        wave_mbs.push((mb_idx, sub_mask, decoded_p1));
-                    }
-                } else if let Some((mb_idx, _, decoded_p1)) = active_slots[pos].as_ref() {
-                    wave_mbs.push((*mb_idx, sub_mask, clone_decoded_p1_for_wave(decoded_p1)));
+            PayloadWavePlan::MultiWave(waves) => {
+                if waves.is_empty() {
+                    return Ok(Vec::new());
                 }
-            }
-            let resolved = self.resolve_rg_payload_chunks(
-                rg_idx,
-                &mut wave_mbs,
-                proj_indices,
-                l0_local,
-                pre_resolved,
-                read_block,
-                read_threads,
-            )?;
-            let mut wave_batches = self.materialize_phase2_mbs(
-                rg_idx,
-                wave_mbs,
-                plan,
-                proj_indices,
-                proj_schema,
-                map_keys_by_col,
-                &resolved,
-                read_block,
-                read_threads,
-            )?;
-            out_batches.append(&mut wave_batches);
-        }
+                let mut last_wave_for_pos = vec![0usize; active_mbs.len()];
+                for (wave_idx, wave) in waves.iter().enumerate() {
+                    for &(pos, _) in wave {
+                        last_wave_for_pos[pos] = wave_idx;
+                    }
+                }
+                let mut active_slots: Vec<Option<ActiveMiniBlock>> =
+                    active_mbs.into_iter().map(Some).collect();
+                let mut out_batches = Vec::with_capacity(waves.len());
 
-        Ok(out_batches)
+                for (wave_idx, wave) in waves.into_iter().enumerate() {
+                    let mut wave_mbs = Vec::with_capacity(wave.len());
+                    for (pos, sub_mask) in wave {
+                        if last_wave_for_pos[pos] == wave_idx {
+                            if let Some((mb_idx, _, decoded_p1)) = active_slots[pos].take() {
+                                wave_mbs.push((mb_idx, sub_mask, decoded_p1));
+                            }
+                        } else if let Some((mb_idx, _, decoded_p1)) = active_slots[pos].as_ref() {
+                            wave_mbs.push((
+                                *mb_idx,
+                                sub_mask,
+                                clone_decoded_p1_for_wave(decoded_p1),
+                            ));
+                        }
+                    }
+                    let resolved = self.resolve_rg_payload_chunks(
+                        rg_idx,
+                        &mut wave_mbs,
+                        proj_indices,
+                        l0_local,
+                        pre_resolved,
+                        read_block,
+                        read_threads,
+                    )?;
+                    let mut wave_batches = self.materialize_phase2_mbs(
+                        rg_idx,
+                        wave_mbs,
+                        plan,
+                        proj_indices,
+                        proj_schema,
+                        map_keys_by_col,
+                        &resolved,
+                        read_block,
+                        read_threads,
+                    )?;
+                    out_batches.append(&mut wave_batches);
+                }
+
+                Ok(out_batches)
+            }
+        }
     }
 
     pub(super) fn ensure_rg_payload_refs_decoded<'a>(
@@ -373,8 +477,12 @@ impl StatamReader {
         active_mbs: &mut [ActiveMiniBlock],
         proj_payload_cols: &[usize],
         read_block: &BlockReader<'a>,
+        read_threads: usize,
     ) -> Result<(), StatamError> {
-        for (mb_idx, mask, decoded_p1) in active_mbs.iter_mut() {
+        // (active_pos, mb_idx, cidx, is_sparse, raw_len)
+        let mut tasks: Vec<(usize, usize, usize, bool, usize)> = Vec::new();
+        let mut work_bytes = 0usize;
+        for (active_pos, (mb_idx, mask, decoded_p1)) in active_mbs.iter_mut().enumerate() {
             let mb_row_count = self.meta.rg_blocks(0, rg_idx)[*mb_idx].row_count as usize;
             let is_sparse = !mask.all_ones() && mask.count_ones().saturating_mul(8) < mb_row_count;
             for &cidx in proj_payload_cols {
@@ -391,32 +499,512 @@ impl StatamReader {
                             )));
                         }
                     } else {
-                        let raw = read_block(blk)?;
-                        if is_sparse {
-                            let selected = decode_payload_refs_selected(
-                                &raw,
-                                mb_row_count,
-                                mask,
-                                MAX_BATCH_DECODED_BYTES,
-                            )?;
-                            e.insert(DecodedPhase1::SelectedPayloadRefs(selected));
-                        } else {
-                            let refs = decode_payload_refs_flat(
-                                &raw,
-                                mb_row_count,
-                                MAX_BATCH_DECODED_BYTES,
-                            )?;
-                            e.insert(DecodedPhase1::FlatPayloadRefs(refs));
-                        }
+                        let raw_len = blk.raw_len as usize;
+                        work_bytes = work_bytes.saturating_add(raw_len);
+                        tasks.push((active_pos, *mb_idx, cidx, is_sparse, raw_len));
                     }
                 }
+            }
+        }
+        if tasks.is_empty() {
+            return Ok(());
+        }
+
+        let workers = effective_read_threads(work_bytes, read_threads);
+        if tasks.len() >= 2 && workers > 1 && !in_parallel_scope() {
+            // LPT scheduling: decode the largest `PayloadRefs` blocks first.
+            tasks.sort_unstable_by_key(|a| std::cmp::Reverse(a.4));
+            let decoded = parallel_map_in_order(
+                tasks,
+                workers,
+                |(active_pos, mb_idx, cidx, is_sparse, _)| {
+                    let mask = &active_mbs[active_pos].1;
+                    let mb_row_count = self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
+                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    let raw = read_block(blk)?;
+                    let item = if is_sparse {
+                        let selected = decode_payload_refs_selected(
+                            &raw,
+                            mb_row_count,
+                            mask,
+                            MAX_BATCH_DECODED_BYTES,
+                        )?;
+                        DecodedPhase1::SelectedPayloadRefs(selected)
+                    } else {
+                        let refs =
+                            decode_payload_refs_flat(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
+                        DecodedPhase1::FlatPayloadRefs(refs)
+                    };
+                    Ok((active_pos, cidx, item))
+                },
+            )?;
+            for (active_pos, cidx, item) in decoded {
+                active_mbs[active_pos].2.insert(cidx, item);
+            }
+        } else {
+            for (active_pos, mb_idx, cidx, is_sparse, _) in tasks {
+                let mb_row_count = self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
+                let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                let raw = read_block(blk)?;
+                let item = if is_sparse {
+                    let mask = &active_mbs[active_pos].1;
+                    let selected = decode_payload_refs_selected(
+                        &raw,
+                        mb_row_count,
+                        mask,
+                        MAX_BATCH_DECODED_BYTES,
+                    )?;
+                    DecodedPhase1::SelectedPayloadRefs(selected)
+                } else {
+                    let refs =
+                        decode_payload_refs_flat(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
+                    DecodedPhase1::FlatPayloadRefs(refs)
+                };
+                active_mbs[active_pos].2.insert(cidx, item);
             }
         }
         Ok(())
     }
 
+    pub(super) fn plan_payload_waves(
+        &self,
+        active_mbs: &[ActiveMiniBlock],
+        proj_payload_cols: &[usize],
+        l0_local: Option<&ParsedL0Payload<'_>>,
+    ) -> Result<PayloadWavePlan, StatamError> {
+        self.plan_payload_waves_with_caps(
+            active_mbs,
+            proj_payload_cols,
+            l0_local,
+            MAX_FAST_PATH_PACKS,
+            MAX_BITSET_IDS,
+            MAX_TOTAL_BITSET_BYTES,
+        )
+    }
+
+    pub(super) fn plan_payload_waves_with_caps(
+        &self,
+        active_mbs: &[ActiveMiniBlock],
+        proj_payload_cols: &[usize],
+        l0_local: Option<&ParsedL0Payload<'_>>,
+        max_fast_path_packs: usize,
+        max_bitset_ids: usize,
+        max_total_bitset_bytes: usize,
+    ) -> Result<PayloadWavePlan, StatamError> {
+        let num_packs = self.meta.schema_meta.pack_ids.len();
+        if num_packs > max_fast_path_packs {
+            return Ok(PayloadWavePlan::MultiWave(self.split_payload_waves_multi(
+                active_mbs,
+                proj_payload_cols,
+                l0_local,
+            )?));
+        }
+
+        let num_pcols = proj_payload_cols.len();
+        let mut pack_cache: Vec<Option<Arc<ChunkPackReader>>> = vec![None; num_packs];
+        let mut ext_slots: Vec<Option<PackBitsetSlot>> = (0..num_packs).map(|_| None).collect();
+        let mut l0_slot: Option<PackBitsetSlot> = None;
+        let mut total_bitset_bytes = 0usize;
+        let mut total_chunk_bytes = 0usize;
+        let mut total_frame_bytes = 0usize;
+        let mut col_decoded = vec![0usize; num_pcols];
+        let mut sel_cursors = vec![0usize; num_pcols];
+        let mut has_active_rows = false;
+        let mut fallback_multi = false;
+
+        'outer: for (_, mask, decoded_p1) in active_mbs {
+            sel_cursors.fill(0);
+            for r in mask.iter_ones() {
+                has_active_rows = true;
+                for (col_pos, &cidx) in proj_payload_cols.iter().enumerate() {
+                    let mut col_row_len = 0usize;
+                    match decoded_p1.get(&cidx) {
+                        Some(DecodedPhase1::FlatPayloadRefs(refs)) => match refs.row_kind(r) {
+                            FLAT_REF_NULL => continue,
+                            FLAT_REF_INLINE => {
+                                let inline_len = refs.inline_bytes(r).len();
+                                if inline_len > MAX_ROW_PAYLOAD_BYTES {
+                                    return Err(StatamError::BoundsExceeded {
+                                        reason: "reconstructed row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                                    });
+                                }
+                                match col_decoded[col_pos].checked_add(inline_len) {
+                                    Some(next) if next <= PHASE2_PAYLOAD_WAVE_TARGET_BYTES => {
+                                        col_decoded[col_pos] = next;
+                                    }
+                                    _ => {
+                                        fallback_multi = true;
+                                        break 'outer;
+                                    }
+                                }
+                                continue;
+                            }
+                            FLAT_REF_CHUNKS => {
+                                let (ps, cs) = refs.chunk_refs(r);
+                                for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                                    let (clen, fid, flen, slot) = if pidx == L0_LOCAL_PACK_IDX {
+                                        let l0 = l0_local.ok_or(StatamError::Corrupt {
+                                            reason: "missing L0 local payload region",
+                                        })?;
+                                        let loc = l0.chunks.get(cid as usize).ok_or(
+                                            StatamError::Corrupt {
+                                                reason: "L0 chunk_id out of bounds",
+                                            },
+                                        )?;
+                                        let &(_, _, f_raw) = l0
+                                            .frames
+                                            .get(loc.frame_id as usize)
+                                            .ok_or(StatamError::Corrupt {
+                                            reason: "L0 frame_id out of bounds",
+                                        })?;
+                                        col_row_len = col_row_len
+                                            .checked_add(loc.raw_len as usize)
+                                            .ok_or(StatamError::BoundsExceeded {
+                                                reason: "row payload byte size overflow",
+                                            })?;
+                                        if col_row_len > MAX_ROW_PAYLOAD_BYTES {
+                                            return Err(StatamError::BoundsExceeded {
+                                                reason: "reconstructed row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                                            });
+                                        }
+                                        let slot = match l0_slot.as_mut() {
+                                            Some(s) => s,
+                                            None => {
+                                                let Some(new_slot) = PackBitsetSlot::try_new(
+                                                    l0.chunks.len(),
+                                                    l0.frames.len(),
+                                                    &mut total_bitset_bytes,
+                                                    max_bitset_ids,
+                                                    max_total_bitset_bytes,
+                                                ) else {
+                                                    fallback_multi = true;
+                                                    break 'outer;
+                                                };
+                                                l0_slot.insert(new_slot)
+                                            }
+                                        };
+                                        (loc.raw_len as usize, loc.frame_id, f_raw as usize, slot)
+                                    } else {
+                                        let p_usize = pidx as usize;
+                                        if p_usize >= num_packs {
+                                            return Err(StatamError::Corrupt {
+                                                reason: "payload ref pack_idx out of bounds",
+                                            });
+                                        }
+                                        let pack = match pack_cache[p_usize].as_ref() {
+                                            Some(p) => p,
+                                            None => {
+                                                let pack_id =
+                                                    self.meta.schema_meta.pack_ids[p_usize];
+                                                let resolved = self.resolve_pack(pack_id)?;
+                                                pack_cache[p_usize].insert(resolved)
+                                            }
+                                        };
+                                        let toc = pack.toc();
+                                        let loc = toc.chunks.get(cid as usize).ok_or(
+                                            StatamError::Corrupt {
+                                                reason: "chunk_id out of bounds",
+                                            },
+                                        )?;
+                                        let f_entry = toc.frames.get(loc.frame_id as usize).ok_or(
+                                            StatamError::Corrupt {
+                                                reason: "frame_id out of bounds",
+                                            },
+                                        )?;
+                                        col_row_len = col_row_len
+                                            .checked_add(loc.raw_len as usize)
+                                            .ok_or(StatamError::BoundsExceeded {
+                                                reason: "row payload byte size overflow",
+                                            })?;
+                                        if col_row_len > MAX_ROW_PAYLOAD_BYTES {
+                                            return Err(StatamError::BoundsExceeded {
+                                                reason: "reconstructed row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                                            });
+                                        }
+                                        let slot = match ext_slots[p_usize].as_mut() {
+                                            Some(s) => s,
+                                            None => {
+                                                let Some(new_slot) = PackBitsetSlot::try_new(
+                                                    toc.chunks.len(),
+                                                    toc.frames.len(),
+                                                    &mut total_bitset_bytes,
+                                                    max_bitset_ids,
+                                                    max_total_bitset_bytes,
+                                                ) else {
+                                                    fallback_multi = true;
+                                                    break 'outer;
+                                                };
+                                                ext_slots[p_usize].insert(new_slot)
+                                            }
+                                        };
+                                        (
+                                            loc.raw_len as usize,
+                                            loc.frame_id,
+                                            f_entry.raw_len as usize,
+                                            slot,
+                                        )
+                                    };
+                                    if slot.mark_chunk(cid)? {
+                                        match total_chunk_bytes.checked_add(clen) {
+                                            Some(next)
+                                                if next <= PHASE2_PAYLOAD_WAVE_TARGET_BYTES =>
+                                            {
+                                                total_chunk_bytes = next;
+                                            }
+                                            _ => {
+                                                fallback_multi = true;
+                                                break 'outer;
+                                            }
+                                        }
+                                    }
+                                    if slot.mark_frame(fid)? {
+                                        match total_frame_bytes.checked_add(flen) {
+                                            Some(next)
+                                                if next <= PHASE2_PAYLOAD_WAVE_TARGET_BYTES =>
+                                            {
+                                                total_frame_bytes = next;
+                                            }
+                                            _ => {
+                                                fallback_multi = true;
+                                                break 'outer;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => continue,
+                        },
+                        Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
+                            let cur = &mut sel_cursors[col_pos];
+                            while *cur < selected.len() && selected[*cur].0 < r {
+                                *cur += 1;
+                            }
+                            if *cur < selected.len() && selected[*cur].0 == r {
+                                match &selected[*cur].1 {
+                                    PayloadRefRow::Null => continue,
+                                    PayloadRefRow::Inline(b) => {
+                                        let inline_len = b.len();
+                                        if inline_len > MAX_ROW_PAYLOAD_BYTES {
+                                            return Err(StatamError::BoundsExceeded {
+                                                reason: "reconstructed row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                                            });
+                                        }
+                                        match col_decoded[col_pos].checked_add(inline_len) {
+                                            Some(next)
+                                                if next <= PHASE2_PAYLOAD_WAVE_TARGET_BYTES =>
+                                            {
+                                                col_decoded[col_pos] = next;
+                                            }
+                                            _ => {
+                                                fallback_multi = true;
+                                                break 'outer;
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                    PayloadRefRow::Chunks(chunks) => {
+                                        for &(pidx, cid) in chunks {
+                                            let (clen, fid, flen, slot) = if pidx
+                                                == L0_LOCAL_PACK_IDX
+                                            {
+                                                let l0 = l0_local.ok_or(StatamError::Corrupt {
+                                                    reason: "missing L0 local payload region",
+                                                })?;
+                                                let loc = l0.chunks.get(cid as usize).ok_or(
+                                                    StatamError::Corrupt {
+                                                        reason: "L0 chunk_id out of bounds",
+                                                    },
+                                                )?;
+                                                let &(_, _, f_raw) = l0
+                                                    .frames
+                                                    .get(loc.frame_id as usize)
+                                                    .ok_or(StatamError::Corrupt {
+                                                        reason: "L0 frame_id out of bounds",
+                                                    })?;
+                                                col_row_len = col_row_len
+                                                    .checked_add(loc.raw_len as usize)
+                                                    .ok_or(StatamError::BoundsExceeded {
+                                                        reason: "row payload byte size overflow",
+                                                    })?;
+                                                if col_row_len > MAX_ROW_PAYLOAD_BYTES {
+                                                    return Err(StatamError::BoundsExceeded {
+                                                        reason: "reconstructed row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                                                    });
+                                                }
+                                                let slot = match l0_slot.as_mut() {
+                                                    Some(s) => s,
+                                                    None => {
+                                                        let Some(new_slot) =
+                                                            PackBitsetSlot::try_new(
+                                                                l0.chunks.len(),
+                                                                l0.frames.len(),
+                                                                &mut total_bitset_bytes,
+                                                                max_bitset_ids,
+                                                                max_total_bitset_bytes,
+                                                            )
+                                                        else {
+                                                            fallback_multi = true;
+                                                            break 'outer;
+                                                        };
+                                                        l0_slot.insert(new_slot)
+                                                    }
+                                                };
+                                                (
+                                                    loc.raw_len as usize,
+                                                    loc.frame_id,
+                                                    f_raw as usize,
+                                                    slot,
+                                                )
+                                            } else {
+                                                let p_usize = pidx as usize;
+                                                if p_usize >= num_packs {
+                                                    return Err(StatamError::Corrupt {
+                                                        reason: "payload ref pack_idx out of bounds",
+                                                    });
+                                                }
+                                                let pack = match pack_cache[p_usize].as_ref() {
+                                                    Some(p) => p,
+                                                    None => {
+                                                        let pack_id =
+                                                            self.meta.schema_meta.pack_ids[p_usize];
+                                                        let resolved =
+                                                            self.resolve_pack(pack_id)?;
+                                                        pack_cache[p_usize].insert(resolved)
+                                                    }
+                                                };
+                                                let toc = pack.toc();
+                                                let loc = toc.chunks.get(cid as usize).ok_or(
+                                                    StatamError::Corrupt {
+                                                        reason: "chunk_id out of bounds",
+                                                    },
+                                                )?;
+                                                let f_entry = toc
+                                                    .frames
+                                                    .get(loc.frame_id as usize)
+                                                    .ok_or(StatamError::Corrupt {
+                                                        reason: "frame_id out of bounds",
+                                                    })?;
+                                                col_row_len = col_row_len
+                                                    .checked_add(loc.raw_len as usize)
+                                                    .ok_or(StatamError::BoundsExceeded {
+                                                        reason: "row payload byte size overflow",
+                                                    })?;
+                                                if col_row_len > MAX_ROW_PAYLOAD_BYTES {
+                                                    return Err(StatamError::BoundsExceeded {
+                                                        reason: "reconstructed row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                                                    });
+                                                }
+                                                let slot = match ext_slots[p_usize].as_mut() {
+                                                    Some(s) => s,
+                                                    None => {
+                                                        let Some(new_slot) =
+                                                            PackBitsetSlot::try_new(
+                                                                toc.chunks.len(),
+                                                                toc.frames.len(),
+                                                                &mut total_bitset_bytes,
+                                                                max_bitset_ids,
+                                                                max_total_bitset_bytes,
+                                                            )
+                                                        else {
+                                                            fallback_multi = true;
+                                                            break 'outer;
+                                                        };
+                                                        ext_slots[p_usize].insert(new_slot)
+                                                    }
+                                                };
+                                                (
+                                                    loc.raw_len as usize,
+                                                    loc.frame_id,
+                                                    f_entry.raw_len as usize,
+                                                    slot,
+                                                )
+                                            };
+                                            if slot.mark_chunk(cid)? {
+                                                match total_chunk_bytes.checked_add(clen) {
+                                                    Some(next)
+                                                        if next
+                                                            <= PHASE2_PAYLOAD_WAVE_TARGET_BYTES =>
+                                                    {
+                                                        total_chunk_bytes = next;
+                                                    }
+                                                    _ => {
+                                                        fallback_multi = true;
+                                                        break 'outer;
+                                                    }
+                                                }
+                                            }
+                                            if slot.mark_frame(fid)? {
+                                                match total_frame_bytes.checked_add(flen) {
+                                                    Some(next)
+                                                        if next
+                                                            <= PHASE2_PAYLOAD_WAVE_TARGET_BYTES =>
+                                                    {
+                                                        total_frame_bytes = next;
+                                                    }
+                                                    _ => {
+                                                        fallback_multi = true;
+                                                        break 'outer;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                continue;
+                            }
+                        }
+                        _ => continue,
+                    }
+
+                    match col_decoded[col_pos].checked_add(col_row_len) {
+                        Some(next) if next <= PHASE2_PAYLOAD_WAVE_TARGET_BYTES => {
+                            col_decoded[col_pos] = next;
+                        }
+                        _ => {
+                            fallback_multi = true;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+
+        if fallback_multi {
+            return Ok(PayloadWavePlan::MultiWave(self.split_payload_waves_multi(
+                active_mbs,
+                proj_payload_cols,
+                l0_local,
+            )?));
+        }
+        if !has_active_rows {
+            return Ok(PayloadWavePlan::MultiWave(Vec::new()));
+        }
+
+        let mut by_pack: Vec<(u16, Vec<u32>)> = Vec::new();
+        for (p_usize, slot_opt) in ext_slots.into_iter().enumerate() {
+            if let Some(mut slot) = slot_opt
+                && !slot.unique_cids.is_empty()
+            {
+                slot.unique_cids.sort_unstable();
+                by_pack.push((p_usize as u16, slot.unique_cids));
+            }
+        }
+        if let Some(mut slot) = l0_slot
+            && !slot.unique_cids.is_empty()
+        {
+            slot.unique_cids.sort_unstable();
+            by_pack.push((L0_LOCAL_PACK_IDX, slot.unique_cids));
+        }
+
+        Ok(PayloadWavePlan::SingleWave {
+            by_pack,
+            col_decoded,
+        })
+    }
+
     #[allow(clippy::type_complexity)]
-    pub(super) fn partition_payload_waves(
+    pub(super) fn split_payload_waves_multi(
         &self,
         active_mbs: &[ActiveMiniBlock],
         proj_payload_cols: &[usize],
@@ -433,7 +1021,12 @@ impl StatamReader {
                 let loc = l0.chunks.get(cid as usize).ok_or(StatamError::Corrupt {
                     reason: "L0 chunk_id out of bounds",
                 })?;
-                let (_, _, f_raw) = l0.frames[loc.frame_id as usize];
+                let &(_, _, f_raw) =
+                    l0.frames
+                        .get(loc.frame_id as usize)
+                        .ok_or(StatamError::Corrupt {
+                            reason: "L0 frame_id out of bounds",
+                        })?;
                 Ok((loc.raw_len as usize, loc.frame_id, f_raw as usize))
             } else {
                 let pack = match pack_cache.entry(pidx) {
@@ -453,7 +1046,13 @@ impl StatamReader {
                 let loc = toc.chunks.get(cid as usize).ok_or(StatamError::Corrupt {
                     reason: "chunk_id out of bounds",
                 })?;
-                let f_raw = toc.frames[loc.frame_id as usize].raw_len as usize;
+                let f_raw = toc
+                    .frames
+                    .get(loc.frame_id as usize)
+                    .ok_or(StatamError::Corrupt {
+                        reason: "frame_id out of bounds",
+                    })?
+                    .raw_len as usize;
                 Ok((loc.raw_len as usize, loc.frame_id, f_raw))
             }
         };
@@ -468,6 +1067,7 @@ impl StatamReader {
         let mut wave_col_decoded = vec![0usize; num_pcols];
 
         let mut row_col_bytes = vec![0usize; num_pcols];
+        let mut sel_cursors = vec![0usize; num_pcols];
         let mut row_chunks: Vec<(u16, u32, usize, u32, usize)> = Vec::new();
         let mut row_unique_chunks: HashSet<(u16, u32)> = HashSet::new();
         let mut row_unique_frames: HashSet<(u16, u32)> = HashSet::new();
@@ -476,6 +1076,7 @@ impl StatamReader {
 
         for (pos, (_, mask, decoded_p1)) in active_mbs.iter().enumerate() {
             let mb_row_count = mask.len();
+            sel_cursors.fill(0);
             for r in mask.iter_ones() {
                 row_col_bytes.fill(0);
                 row_chunks.clear();
@@ -490,6 +1091,11 @@ impl StatamReader {
                         Some(DecodedPhase1::FlatPayloadRefs(refs)) => match refs.row_kind(r) {
                             FLAT_REF_INLINE => {
                                 col_row_len = refs.inline_bytes(r).len();
+                                if col_row_len > MAX_ROW_PAYLOAD_BYTES {
+                                    return Err(StatamError::BoundsExceeded {
+                                        reason: "reconstructed row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                                    });
+                                }
                             }
                             FLAT_REF_CHUNKS => {
                                 let (ps, cs) = refs.chunk_refs(r);
@@ -535,11 +1141,20 @@ impl StatamReader {
                             _ => {}
                         },
                         Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
-                            if let Ok(idx) = selected.binary_search_by_key(&r, |&(row, _)| row) {
-                                match &selected[idx].1 {
+                            let cur = &mut sel_cursors[col_pos];
+                            while *cur < selected.len() && selected[*cur].0 < r {
+                                *cur += 1;
+                            }
+                            if *cur < selected.len() && selected[*cur].0 == r {
+                                match &selected[*cur].1 {
                                     PayloadRefRow::Null => {}
                                     PayloadRefRow::Inline(b) => {
                                         col_row_len = b.len();
+                                        if col_row_len > MAX_ROW_PAYLOAD_BYTES {
+                                            return Err(StatamError::BoundsExceeded {
+                                                reason: "reconstructed row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                                            });
+                                        }
                                     }
                                     PayloadRefRow::Chunks(chunks) => {
                                         for &(pidx, cid) in chunks {
@@ -667,6 +1282,8 @@ impl StatamReader {
         plan: &RgIoPlan,
         proj_indices: &[usize],
         proj_payload_cols: &[usize],
+        by_pack: Vec<(u16, Vec<u32>)>,
+        col_decoded: &[usize],
         proj_schema: &Arc<Schema>,
         map_keys_by_col: &HashMap<usize, Vec<String>>,
         l0_local: Option<&ParsedL0Payload<'_>>,
@@ -699,6 +1316,11 @@ impl StatamReader {
             },
         }
 
+        struct Stage1TaskItem {
+            work_len: usize,
+            task: Stage1Task,
+        }
+
         enum Stage1Out {
             PackChunks(u16, Vec<(u32, Bytes)>),
             L0Chunks(Vec<(u32, Bytes)>),
@@ -706,56 +1328,43 @@ impl StatamReader {
             IndepCol(usize, Column),
         }
 
-        // 1. Collect all referenced payload chunks deterministically by pack_idx.
-        let mut by_pack: BTreeMap<u16, BTreeSet<u32>> = BTreeMap::new();
-        for &cidx in proj_payload_cols {
-            match decoded_p1.get(&cidx) {
-                Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
-                    for r in mask.iter_ones() {
-                        if refs.row_kind(r) == FLAT_REF_CHUNKS {
-                            let (ps, cs) = refs.chunk_refs(r);
-                            for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
-                                by_pack.entry(pidx).or_default().insert(cid);
-                            }
-                        }
-                    }
-                }
-                Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
-                    for (r, row) in selected {
-                        if !mask.get(*r) {
-                            continue;
-                        }
-                        if let PayloadRefRow::Chunks(chunks) = row {
-                            for &(pidx, cid) in chunks {
-                                by_pack.entry(pidx).or_default().insert(cid);
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
+        enum StageBTask {
+            PayloadCol {
+                cidx: usize,
+                est_bytes: usize,
+            },
+            ShreddedMap {
+                cidx: usize,
+                cached_p1: Option<DecodedPhase1>,
+                est_bytes: usize,
+            },
         }
 
         let mut prepared_packs: Vec<PreparedExternalPack> = Vec::new();
         let mut pre_resolved_by_pack: Vec<(u16, Vec<(u32, Bytes)>)> = Vec::new();
         let mut pending_ext_fetches: Vec<(u16, Arc<ChunkPackReader>, Vec<u32>)> = Vec::new();
-        let mut stage1_tasks: Vec<Stage1Task> = Vec::new();
+        let mut stage1_tasks: Vec<Stage1TaskItem> = Vec::new();
         let mut stage1_work_bytes = 0usize;
         let mut total_chunk_bytes = 0usize;
         let mut total_frame_bytes = 0usize;
 
-        // First validate cumulative chunk/frame budgets across all packs (L0 + external) before
-        // issuing any external pack frame I/O.
-        for (pidx, cids_set) in by_pack {
-            let cids: Vec<u32> = cids_set.into_iter().collect();
+        // 1. Validate cumulative chunk/frame budgets across all packs (L0 + external) in
+        //    deterministic ascending `pack_idx` order before issuing any external pack frame I/O.
+        for (pidx, cids) in by_pack {
+            if cids.is_empty() {
+                continue;
+            }
             if pidx == L0_LOCAL_PACK_IDX {
                 let l0 = l0_local.ok_or(StatamError::Corrupt {
                     reason: "missing L0 local payload region",
                 })?;
                 l0.check_chunks_budget(&cids, &mut total_chunk_bytes, &mut total_frame_bytes)?;
-                stage1_work_bytes =
-                    stage1_work_bytes.saturating_add(l0.compressed_frame_bytes_for_chunks(&cids));
-                stage1_tasks.push(Stage1Task::L0Chunks { cids });
+                let work_len = l0.compressed_frame_bytes_for_chunks(&cids);
+                stage1_work_bytes = stage1_work_bytes.saturating_add(work_len);
+                stage1_tasks.push(Stage1TaskItem {
+                    work_len,
+                    task: Stage1Task::L0Chunks { cids },
+                });
             } else {
                 let pack_id = *self.meta.schema_meta.pack_ids.get(pidx as usize).ok_or(
                     StatamError::Corrupt {
@@ -795,14 +1404,20 @@ impl StatamReader {
             let pack_slot = prepared_packs.len();
             for ((fid, fcids), raw) in frame_groups.into_iter().zip(frame_bytes_list) {
                 let entry = &pack.toc().frames[fid as usize];
-                if entry.codec != Codec::None {
-                    stage1_work_bytes = stage1_work_bytes.saturating_add(entry.raw_len as usize);
-                }
-                stage1_tasks.push(Stage1Task::PackFrame {
-                    pack_slot,
-                    fid,
-                    raw,
-                    cids: fcids,
+                let work_len = if entry.codec == Codec::None {
+                    0
+                } else {
+                    entry.raw_len as usize
+                };
+                stage1_work_bytes = stage1_work_bytes.saturating_add(work_len);
+                stage1_tasks.push(Stage1TaskItem {
+                    work_len,
+                    task: Stage1Task::PackFrame {
+                        pack_slot,
+                        fid,
+                        raw,
+                        cids: fcids,
+                    },
                 });
             }
             prepared_packs.push(PreparedExternalPack {
@@ -847,13 +1462,16 @@ impl StatamReader {
             }
         }
         for sub_pidx in uncached_subs {
-            stage1_work_bytes = stage1_work_bytes
-                .saturating_add(self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx].raw_len as usize);
-            stage1_tasks.push(Stage1Task::ShreddedSub { sub_pidx });
+            let work_len = self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx].raw_len as usize;
+            stage1_work_bytes = stage1_work_bytes.saturating_add(work_len);
+            stage1_tasks.push(Stage1TaskItem {
+                work_len,
+                task: Stage1Task::ShreddedSub { sub_pidx },
+            });
         }
 
         // 3. Pre-populate cached FileDicts on main thread and enqueue deduplicated independent
-        //    non-payload columns (including unshredded MapUtf8; shredded MapUtf8 waits for Stage 2).
+        //    non-payload columns (including unshredded MapUtf8; shredded MapUtf8 waits for Stage B).
         let mut seen_indep: HashSet<usize> = HashSet::new();
         for &cidx in proj_indices {
             let cd = &self.meta.col_dir[cidx];
@@ -877,23 +1495,33 @@ impl StatamReader {
             } else {
                 None
             };
-            stage1_work_bytes = stage1_work_bytes.saturating_add(blk.raw_len as usize);
-            stage1_tasks.push(Stage1Task::IndepCol { cidx, dict });
+            let work_len = blk.raw_len as usize;
+            stage1_work_bytes = stage1_work_bytes.saturating_add(work_len);
+            stage1_tasks.push(Stage1TaskItem {
+                work_len,
+                task: Stage1Task::IndepCol { cidx, dict },
+            });
         }
 
-        // 4. Execute Stage 1 in ONE bounded scope with a single reusable PackFrameDecompressor per worker.
-        stage1_work_bytes = stage1_work_bytes.saturating_add(total_chunk_bytes / 4);
+        // 4. LPT-schedule Stage 1 so the largest blocks/frames start first at t=0, spawning
+        //    workers only when `stage1_tasks.len() >= 2 && stage1_workers > 1`.
+        stage1_tasks.sort_unstable_by_key(|a| std::cmp::Reverse(a.work_len));
         let stage1_workers = if stage1_tasks.len() >= 16 {
             threads
         } else {
             effective_read_threads(stage1_work_bytes, threads)
         };
+        let effective_stage1_workers = if stage1_tasks.len() >= 2 && stage1_workers > 1 {
+            stage1_workers
+        } else {
+            1
+        };
         let empty_subs: HashMap<usize, ShreddedSubCol> = HashMap::new();
         let stage1_outputs = parallel_map_in_order_with_init(
             stage1_tasks,
-            stage1_workers,
+            effective_stage1_workers,
             || Ok(PackFrameDecompressor::new()),
-            |dict_decomp, task| match task {
+            |dict_decomp, item| match item.task {
                 Stage1Task::PackFrame {
                     pack_slot,
                     fid,
@@ -957,8 +1585,185 @@ impl StatamReader {
         }
         let resolved_chunks = ResolvedChunks::from_pack_entries(chunk_groups);
 
-        // 5. Stage 2: Assemble projected columns in order (including shredded maps and parallel
-        //    payload reconstruction using full `threads`, handling duplicate `proj_indices`).
+        // 5. Smart Parallel Stage B: reconstruct `ExternalPayload` cols and shredded `MapUtf8` cols.
+        //    Extract any P1-cached shredded maps BEFORE spawning Stage B so `&decoded_p1` borrows cleanly.
+        let mut seen_stage_b: HashSet<usize> = HashSet::new();
+        let mut large_payload_cols: Vec<(usize, usize)> = Vec::new();
+        let mut small_stage_b: Vec<StageBTask> = Vec::new();
+        for &cidx in proj_indices {
+            let cd = &self.meta.col_dir[cidx];
+            if cd.locality_group == LocalityGroup::ExternalPayload {
+                if !seen_stage_b.insert(cidx) {
+                    continue;
+                }
+                let est_bytes = proj_payload_cols
+                    .binary_search(&cidx)
+                    .ok()
+                    .and_then(|pos| col_decoded.get(pos).copied())
+                    .unwrap_or(0);
+                if est_bytes >= PARALLEL_RECONSTRUCT_MIN_BYTES {
+                    large_payload_cols.push((cidx, est_bytes));
+                } else {
+                    small_stage_b.push(StageBTask::PayloadCol { cidx, est_bytes });
+                }
+            } else if fields[cidx].data_type == DataType::MapUtf8
+                && self
+                    .meta
+                    .schema_meta
+                    .shredded_maps
+                    .iter()
+                    .any(|s| s.logical_col_idx as usize == cidx)
+            {
+                if !seen_stage_b.insert(cidx) {
+                    continue;
+                }
+                let cached_p1 = decoded_p1.remove(&cidx);
+                let est_bytes = self.meta.rg_blocks(cidx, rg_idx)[mb_idx].raw_len as usize;
+                small_stage_b.push(StageBTask::ShreddedMap {
+                    cidx,
+                    cached_p1,
+                    est_bytes,
+                });
+            }
+        }
+
+        if large_payload_cols.len() + small_stage_b.len() >= threads {
+            for (cidx, est_bytes) in large_payload_cols.drain(..) {
+                small_stage_b.push(StageBTask::PayloadCol { cidx, est_bytes });
+            }
+        }
+
+        let mut stage_b_cols: HashMap<usize, Column> =
+            HashMap::with_capacity(large_payload_cols.len() + small_stage_b.len());
+
+        // Large payload columns (< `threads` total Stage B cols) run on the caller thread outside
+        // any parallel scope so they keep full `threads`-way intra-column `build_reconstruct_shards`.
+        for (cidx, _) in large_payload_cols {
+            let dt = &fields[cidx].data_type;
+            let col = match decoded_p1.get(&cidx) {
+                Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
+                    reconstruct_payload_column_selected(
+                        mb_row_count,
+                        selected,
+                        mask,
+                        &resolved_chunks,
+                        dt,
+                        threads,
+                    )?
+                }
+                Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
+                    reconstruct_payload_column_from_flat(refs, mask, &resolved_chunks, dt, threads)?
+                }
+                _ => {
+                    return Err(StatamError::Corrupt {
+                        reason: "missing pre-decoded payload refs in fused Phase 2",
+                    });
+                }
+            };
+            stage_b_cols.insert(cidx, col);
+        }
+
+        let small_stage_b_bytes: usize = small_stage_b
+            .iter()
+            .map(|t| match t {
+                StageBTask::PayloadCol { est_bytes, .. }
+                | StageBTask::ShreddedMap { est_bytes, .. } => *est_bytes,
+            })
+            .fold(0usize, usize::saturating_add);
+        let run_stage_b_task =
+            |task: StageBTask, recon_threads: usize| -> Result<(usize, Column), StatamError> {
+                match task {
+                    StageBTask::PayloadCol { cidx, .. } => {
+                        let dt = &fields[cidx].data_type;
+                        let col = match decoded_p1.get(&cidx) {
+                            Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
+                                reconstruct_payload_column_selected(
+                                    mb_row_count,
+                                    selected,
+                                    mask,
+                                    &resolved_chunks,
+                                    dt,
+                                    recon_threads,
+                                )?
+                            }
+                            Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
+                                reconstruct_payload_column_from_flat(
+                                    refs,
+                                    mask,
+                                    &resolved_chunks,
+                                    dt,
+                                    recon_threads,
+                                )?
+                            }
+                            _ => {
+                                return Err(StatamError::Corrupt {
+                                    reason: "missing pre-decoded payload refs in fused Phase 2",
+                                });
+                            }
+                        };
+                        Ok((cidx, col))
+                    }
+                    StageBTask::ShreddedMap {
+                        cidx, cached_p1, ..
+                    } => {
+                        let col = if let Some(cached) = cached_p1 {
+                            self.materialize_cached_p1_col(
+                                mb_row_count,
+                                cidx,
+                                &fields[cidx].data_type,
+                                mask,
+                                cached,
+                                plan,
+                                mb_idx,
+                                map_keys_by_col,
+                                &decoded_subs,
+                            )?
+                        } else {
+                            self.decode_uncached_p2_non_payload_col(
+                                rg_idx,
+                                mb_idx,
+                                mb_row_count,
+                                cidx,
+                                mask,
+                                plan,
+                                map_keys_by_col,
+                                &decoded_subs,
+                                None,
+                                read_block,
+                            )?
+                        };
+                        Ok((cidx, col))
+                    }
+                }
+            };
+
+        if small_stage_b.len() >= 2 && small_stage_b_bytes >= 64 * 1024 {
+            small_stage_b.sort_unstable_by(|a, b| {
+                let ea = match a {
+                    StageBTask::PayloadCol { est_bytes, .. }
+                    | StageBTask::ShreddedMap { est_bytes, .. } => *est_bytes,
+                };
+                let eb = match b {
+                    StageBTask::PayloadCol { est_bytes, .. }
+                    | StageBTask::ShreddedMap { est_bytes, .. } => *est_bytes,
+                };
+                eb.cmp(&ea)
+            });
+            let stage_b_workers = threads.min(small_stage_b.len());
+            let decoded_b = parallel_map_in_order(small_stage_b, stage_b_workers, |task| {
+                run_stage_b_task(task, 1)
+            })?;
+            for (cidx, col) in decoded_b {
+                stage_b_cols.insert(cidx, col);
+            }
+        } else {
+            for task in small_stage_b {
+                let (cidx, col) = run_stage_b_task(task, threads)?;
+                stage_b_cols.insert(cidx, col);
+            }
+        }
+
+        // 6. Assemble projected columns in `proj_indices` order, handling duplicates via `remaining_uses`.
         let mut remaining_uses: HashMap<usize, usize> = HashMap::with_capacity(proj_indices.len());
         for &cidx in proj_indices {
             *remaining_uses.entry(cidx).or_insert(0) += 1;
@@ -974,53 +1779,16 @@ impl StatamReader {
                 }
                 None => true,
             };
-            let dt = &fields[cidx].data_type;
-            let cd = &self.meta.col_dir[cidx];
-            if cd.locality_group == LocalityGroup::ExternalPayload {
-                if let Some(col) = stage2_cached_cols.get(&cidx) {
-                    if is_last {
-                        let owned =
-                            stage2_cached_cols
-                                .remove(&cidx)
-                                .ok_or(StatamError::Corrupt {
-                                    reason: "missing cached payload column",
-                                })?;
-                        out_cols.push(owned);
-                    } else {
-                        out_cols.push(col.clone());
-                    }
-                    continue;
+
+            if let Some(col) = stage_b_cols.get(&cidx) {
+                if is_last {
+                    let owned = stage_b_cols.remove(&cidx).ok_or(StatamError::Corrupt {
+                        reason: "missing Stage B column",
+                    })?;
+                    out_cols.push(owned);
+                } else {
+                    out_cols.push(col.clone());
                 }
-                let col = match decoded_p1.get(&cidx) {
-                    Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
-                        reconstruct_payload_column_selected(
-                            mb_row_count,
-                            selected,
-                            mask,
-                            &resolved_chunks,
-                            dt,
-                            threads,
-                        )?
-                    }
-                    Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
-                        reconstruct_payload_column_from_flat(
-                            refs,
-                            mask,
-                            &resolved_chunks,
-                            dt,
-                            threads,
-                        )?
-                    }
-                    _ => {
-                        return Err(StatamError::Corrupt {
-                            reason: "missing pre-decoded payload refs in fused Phase 2",
-                        });
-                    }
-                };
-                if !is_last {
-                    stage2_cached_cols.insert(cidx, col.clone());
-                }
-                out_cols.push(col);
                 continue;
             }
 
@@ -1050,6 +1818,7 @@ impl StatamReader {
                 continue;
             }
 
+            let dt = &fields[cidx].data_type;
             if let Some(cached) = decoded_p1.remove(&cidx) {
                 let col = self.materialize_cached_p1_col(
                     mb_row_count,
@@ -1100,61 +1869,15 @@ impl StatamReader {
         )?)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn resolve_rg_payload_chunks<'a>(
+    pub(super) fn resolve_rg_payload_chunks_from_by_pack(
         &self,
-        rg_idx: usize,
-        active_mbs: &mut [(usize, Bitmap, HashMap<usize, DecodedPhase1>)],
-        proj_indices: &[usize],
+        by_pack: Vec<(u16, Vec<u32>)>,
         l0_local: Option<&ParsedL0Payload<'_>>,
         pre_resolved: &HashMap<([u8; 16], u32), Bytes>,
-        read_block: &BlockReader<'a>,
         read_threads: usize,
     ) -> Result<ResolvedChunks, StatamError> {
-        let mut proj_payload_cols: Vec<usize> = proj_indices
-            .iter()
-            .copied()
-            .filter(|&cidx| {
-                self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload
-            })
-            .collect();
-        if proj_payload_cols.is_empty() {
+        if by_pack.is_empty() {
             return Ok(ResolvedChunks::empty());
-        }
-        proj_payload_cols.sort_unstable();
-        proj_payload_cols.dedup();
-
-        self.ensure_rg_payload_refs_decoded(rg_idx, active_mbs, &proj_payload_cols, read_block)?;
-
-        let mut by_pack: BTreeMap<u16, BTreeSet<u32>> = BTreeMap::new();
-        for (_, mask, decoded_p1) in active_mbs.iter() {
-            for &cidx in &proj_payload_cols {
-                match decoded_p1.get(&cidx) {
-                    Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
-                        for r in mask.iter_ones() {
-                            if refs.row_kind(r) == FLAT_REF_CHUNKS {
-                                let (ps, cs) = refs.chunk_refs(r);
-                                for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
-                                    by_pack.entry(pidx).or_default().insert(cid);
-                                }
-                            }
-                        }
-                    }
-                    Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
-                        for (r, row) in selected {
-                            if !mask.get(*r) {
-                                continue;
-                            }
-                            if let PayloadRefRow::Chunks(chunks) = row {
-                                for &(pidx, cid) in chunks {
-                                    by_pack.entry(pidx).or_default().insert(cid);
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
         }
 
         // Pre-validate cumulative unique chunk bytes AND unique frame bytes across ALL packs
@@ -1167,8 +1890,10 @@ impl StatamReader {
         let mut total_chunk_bytes = 0usize;
         let mut total_frame_bytes = 0usize;
         let mut entries_by_pack: Vec<(u16, Vec<(u32, Bytes)>)> = Vec::new();
-        for (pidx, cids_set) in by_pack {
-            let cids: Vec<u32> = cids_set.into_iter().collect();
+        for (pidx, cids) in by_pack {
+            if cids.is_empty() {
+                continue;
+            }
             if pidx == L0_LOCAL_PACK_IDX {
                 let l0 = l0_local.ok_or(StatamError::Corrupt {
                     reason: "missing L0 local payload region",
@@ -1222,6 +1947,81 @@ impl StatamReader {
             }
         }
         Ok(ResolvedChunks::from_pack_entries(entries_by_pack))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn resolve_rg_payload_chunks<'a>(
+        &self,
+        rg_idx: usize,
+        active_mbs: &mut [(usize, Bitmap, HashMap<usize, DecodedPhase1>)],
+        proj_indices: &[usize],
+        l0_local: Option<&ParsedL0Payload<'_>>,
+        pre_resolved: &HashMap<([u8; 16], u32), Bytes>,
+        read_block: &BlockReader<'a>,
+        read_threads: usize,
+    ) -> Result<ResolvedChunks, StatamError> {
+        let mut proj_payload_cols: Vec<usize> = proj_indices
+            .iter()
+            .copied()
+            .filter(|&cidx| {
+                self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload
+            })
+            .collect();
+        if proj_payload_cols.is_empty() {
+            return Ok(ResolvedChunks::empty());
+        }
+        proj_payload_cols.sort_unstable();
+        proj_payload_cols.dedup();
+
+        self.ensure_rg_payload_refs_decoded(
+            rg_idx,
+            active_mbs,
+            &proj_payload_cols,
+            read_block,
+            read_threads,
+        )?;
+
+        let mut by_pack: BTreeMap<u16, BTreeSet<u32>> = BTreeMap::new();
+        for (_, mask, decoded_p1) in active_mbs.iter() {
+            for &cidx in &proj_payload_cols {
+                match decoded_p1.get(&cidx) {
+                    Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
+                        for r in mask.iter_ones() {
+                            if refs.row_kind(r) == FLAT_REF_CHUNKS {
+                                let (ps, cs) = refs.chunk_refs(r);
+                                for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                                    by_pack.entry(pidx).or_default().insert(cid);
+                                }
+                            }
+                        }
+                    }
+                    Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
+                        for (r, row) in selected {
+                            if !mask.get(*r) {
+                                continue;
+                            }
+                            if let PayloadRefRow::Chunks(chunks) = row {
+                                for &(pidx, cid) in chunks {
+                                    by_pack.entry(pidx).or_default().insert(cid);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let by_pack_vec: Vec<(u16, Vec<u32>)> = by_pack
+            .into_iter()
+            .map(|(pidx, cids_set)| (pidx, cids_set.into_iter().collect()))
+            .collect();
+        self.resolve_rg_payload_chunks_from_by_pack(
+            by_pack_vec,
+            l0_local,
+            pre_resolved,
+            read_threads,
+        )
     }
 
     /// Collects all unique `(pack_idx, chunk_id)` references for `active_mbs` across

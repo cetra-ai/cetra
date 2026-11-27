@@ -100,6 +100,27 @@ impl StatamReader {
             effective_read_threads(work_bytes, threads)
         };
         if mb_workers > 1 && surviving_mbs.len() >= 2 && limit_remaining.is_none() {
+            let fields = self.meta.schema_meta.schema.fields();
+            let preload_always_matched_col = if !self.reader.is_remote()
+                && preds.len() == 1
+                && preds[0].1.map_key.is_none()
+                && lookups.is_empty()
+                && subs.is_empty()
+                && time_col_idx.is_none()
+            {
+                let cidx = preds[0].0;
+                if plan.phase1_phys_cols.contains(&cidx)
+                    && proj_indices.contains(&cidx)
+                    && self.meta.col_dir[cidx].locality_group != LocalityGroup::ExternalPayload
+                    && fields[cidx].data_type != DataType::MapUtf8
+                {
+                    Some(cidx)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let inner_threads = if surviving_mbs.len() >= mb_workers {
                 1
             } else {
@@ -121,6 +142,7 @@ impl StatamReader {
                     read_block,
                     inner_threads,
                     retained,
+                    preload_always_matched_col,
                 )?;
                 Ok((mb_idx, mask, decoded_p1))
             })?;
@@ -151,6 +173,7 @@ impl StatamReader {
                 read_block,
                 read_threads,
                 retained,
+                None,
             )?;
             let hits = mask.count_ones();
             if hits > 0 {
@@ -220,6 +243,7 @@ impl StatamReader {
                     subs,
                     dict_sub_bitmaps,
                     read_block,
+                    None,
                 )?;
                 Ok((mb_idx, mask, decoded_p1))
             })?;
@@ -241,6 +265,7 @@ impl StatamReader {
                     subs,
                     dict_sub_bitmaps,
                     read_block,
+                    None,
                 )?;
                 if mask.count_ones() > 0 {
                     out.push((mb_idx, mask, decoded_p1));
@@ -394,6 +419,7 @@ impl StatamReader {
         read_block: &BlockReader<'a>,
         read_threads: usize,
         retained: &RetainedPackChunks,
+        preload_always_matched_col: Option<usize>,
     ) -> Result<(Bitmap, HashMap<usize, DecodedPhase1>), StatamError> {
         let (mut mask, mut decoded_p1) = self.eval_phase1_mb_narrow(
             rg_idx,
@@ -406,6 +432,7 @@ impl StatamReader {
             subs,
             dict_sub_bitmaps,
             read_block,
+            preload_always_matched_col,
         )?;
         if mask.all_zeros() {
             return Ok((mask, decoded_p1));
@@ -527,6 +554,7 @@ impl StatamReader {
         subs: &[(usize, &SubstringQuery)],
         dict_sub_bitmaps: &[Option<Bitmap>],
         read_block: &BlockReader<'a>,
+        preload_always_matched_col: Option<usize>,
     ) -> Result<(Bitmap, HashMap<usize, DecodedPhase1>), StatamError> {
         let fields = self.meta.schema_meta.schema.fields();
         let mb_row_count = self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
@@ -699,6 +727,15 @@ impl StatamReader {
                     if mask.all_zeros() {
                         return Ok((mask, decoded_p1));
                     }
+                } else if preload_always_matched_col == Some(cidx) {
+                    self.ensure_p1_col(
+                        cidx,
+                        rg_idx,
+                        mb_idx,
+                        mb_row_count,
+                        read_block,
+                        &mut decoded_p1,
+                    )?;
                 }
             }
         }

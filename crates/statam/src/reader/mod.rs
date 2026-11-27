@@ -28,11 +28,15 @@ use crate::codec::{ZonePred, decode_mini_block};
 use crate::format::{
     BLOCK_FRAME_HEADER_LEN, BlockEntry, CHECKSUM_ALG_CRC32C, COL_FLAG_HAS_FILE_DICT,
     COL_FLAG_HAS_TRIGRAM_INDEX, Encoding, FILE_HEADER_LEN, FileHeader, LocalityGroup,
-    MAX_BLOCK_RAW_BYTES, RowGroupEntry, read_framed_block_checked_cow,
+    MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, RowGroupEntry, read_framed_block_checked_cow,
 };
 use crate::io::RangeReader;
+use crate::parallel::{in_parallel_scope, parallel_map_in_order};
 use crate::payload::pack::ChunkPackReader;
 use crate::payload::search::RetainedPackChunks;
+use crate::payload::{
+    FlatPayloadRefs, PayloadRefRow, decode_payload_refs_flat, decode_payload_refs_selected,
+};
 use crate::simd::bloom::{BloomIndex, statam_bloom_hash};
 use crate::simd::trigram::TrigramBloom;
 use crate::writer::{concat_column_refs, estimate_column_bytes};
@@ -42,6 +46,8 @@ use eval::{Utf8Matcher, is_always_false_pred, is_supported_id_lookup_type};
 use eval::{eval_utf8_block_substring_raw, eval_utf8_substring};
 use materialize::mask_from_indices;
 pub use meta::StatamFileMeta;
+#[cfg(test)]
+use payload::PayloadWavePlan;
 pub(crate) use payload::StreamingL0Payload;
 use payload::{PHASE2_PAYLOAD_WAVE_TARGET_BYTES, ParsedL0Payload, ResolvedChunks};
 use plan::{ActiveMiniBlock, DecodedPhase1, RgIoPlan, TouchedMbRows, find_time_column};
@@ -1300,13 +1306,144 @@ impl StatamReader {
                 continue;
             }
 
-            // Decode PayloadRefs for every touched RG in this wave (0 I/O: all blocks are in `block_cache`).
+            // Stage all touched RGs and decode PayloadRefs across the entire wave in ONE parallel
+            // scope (0 I/O: all blocks are already in `block_cache`).
+            struct StagedTakeRg {
+                rg_idx: usize,
+                mb_rows: Vec<(usize, Vec<usize>)>,
+                plan: RgIoPlan,
+                need_l0_payload: bool,
+                l0_end: u64,
+                active_mbs: Vec<ActiveMiniBlock>,
+            }
+
+            let mut stage: Vec<StagedTakeRg> = Vec::with_capacity(wave.len());
+            // (rg_pos, mb_pos, rg_idx, mb_idx, cidx, is_sparse, raw_len)
+            let mut ref_tasks: Vec<(usize, usize, usize, usize, usize, bool, usize)> = Vec::new();
+            let mut ref_work_bytes = 0usize;
+
+            for item in wave {
+                let rg_pos = stage.len();
+                let mut active_mbs: Vec<ActiveMiniBlock> = Vec::with_capacity(item.mb_rows.len());
+                for (mb_pos, (mb_idx, local_indices)) in item.mb_rows.iter().enumerate() {
+                    let mb_row_count =
+                        self.meta.rg_blocks(0, item.rg_idx)[*mb_idx].row_count as usize;
+                    let mask = mask_from_indices(mb_row_count, local_indices);
+                    let is_sparse =
+                        !mask.all_ones() && mask.count_ones().saturating_mul(8) < mb_row_count;
+                    let mut decoded_p1: HashMap<usize, DecodedPhase1> =
+                        HashMap::with_capacity(proj_payload_cols.len());
+                    for &cidx in &proj_payload_cols {
+                        let blk = &self.meta.rg_blocks(cidx, item.rg_idx)[*mb_idx];
+                        if blk.encoding == Encoding::ConstNull {
+                            if is_sparse {
+                                let selected =
+                                    mask.iter_ones().map(|r| (r, PayloadRefRow::Null)).collect();
+                                decoded_p1
+                                    .insert(cidx, DecodedPhase1::SelectedPayloadRefs(selected));
+                            } else {
+                                decoded_p1.insert(
+                                    cidx,
+                                    DecodedPhase1::FlatPayloadRefs(FlatPayloadRefs::all_null(
+                                        mb_row_count,
+                                    )),
+                                );
+                            }
+                        } else {
+                            let raw_len = blk.raw_len as usize;
+                            ref_work_bytes = ref_work_bytes.saturating_add(raw_len);
+                            ref_tasks.push((
+                                rg_pos,
+                                mb_pos,
+                                item.rg_idx,
+                                *mb_idx,
+                                cidx,
+                                is_sparse,
+                                raw_len,
+                            ));
+                        }
+                    }
+                    active_mbs.push((*mb_idx, mask, decoded_p1));
+                }
+                stage.push(StagedTakeRg {
+                    rg_idx: item.rg_idx,
+                    mb_rows: item.mb_rows,
+                    plan: item.plan,
+                    need_l0_payload: item.need_l0_payload,
+                    l0_end: item.l0_end,
+                    active_mbs,
+                });
+            }
+
+            if !ref_tasks.is_empty() {
+                let ref_workers = effective_read_threads(ref_work_bytes, read_threads);
+                if ref_tasks.len() >= 2 && ref_workers > 1 && !in_parallel_scope() {
+                    ref_tasks.sort_unstable_by_key(|a| std::cmp::Reverse(a.6));
+                    let decoded_refs = parallel_map_in_order(
+                        ref_tasks,
+                        ref_workers,
+                        |(rg_pos, mb_pos, rg_idx, mb_idx, cidx, is_sparse, _)| {
+                            let mask = &stage[rg_pos].active_mbs[mb_pos].1;
+                            let mb_row_count =
+                                self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
+                            let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                            let raw = read_block(blk)?;
+                            let item = if is_sparse {
+                                let selected = decode_payload_refs_selected(
+                                    &raw,
+                                    mb_row_count,
+                                    mask,
+                                    MAX_BATCH_DECODED_BYTES,
+                                )?;
+                                DecodedPhase1::SelectedPayloadRefs(selected)
+                            } else {
+                                let refs = decode_payload_refs_flat(
+                                    &raw,
+                                    mb_row_count,
+                                    MAX_BATCH_DECODED_BYTES,
+                                )?;
+                                DecodedPhase1::FlatPayloadRefs(refs)
+                            };
+                            Ok((rg_pos, mb_pos, cidx, item))
+                        },
+                    )?;
+                    for (rg_pos, mb_pos, cidx, item) in decoded_refs {
+                        stage[rg_pos].active_mbs[mb_pos].2.insert(cidx, item);
+                    }
+                } else {
+                    for (rg_pos, mb_pos, rg_idx, mb_idx, cidx, is_sparse, _) in ref_tasks {
+                        let mb_row_count =
+                            self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
+                        let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                        let raw = read_block(blk)?;
+                        let item = if is_sparse {
+                            let mask = &stage[rg_pos].active_mbs[mb_pos].1;
+                            let selected = decode_payload_refs_selected(
+                                &raw,
+                                mb_row_count,
+                                mask,
+                                MAX_BATCH_DECODED_BYTES,
+                            )?;
+                            DecodedPhase1::SelectedPayloadRefs(selected)
+                        } else {
+                            let refs = decode_payload_refs_flat(
+                                &raw,
+                                mb_row_count,
+                                MAX_BATCH_DECODED_BYTES,
+                            )?;
+                            DecodedPhase1::FlatPayloadRefs(refs)
+                        };
+                        stage[rg_pos].active_mbs[mb_pos].2.insert(cidx, item);
+                    }
+                }
+            }
+
             struct PreparedTakeRg<'a> {
                 rg_idx: usize,
                 mb_rows: Vec<(usize, Vec<usize>)>,
                 plan: RgIoPlan,
                 l0_parsed: Option<ParsedL0Payload<'a>>,
-                active_mbs: Vec<(usize, Bitmap, HashMap<usize, DecodedPhase1>)>,
+                active_mbs: Vec<ActiveMiniBlock>,
                 ext_by_pack: BTreeMap<u16, BTreeSet<u32>>,
                 l0_cids: BTreeSet<u32>,
                 l0_chunk_bytes: usize,
@@ -1314,12 +1451,12 @@ impl StatamReader {
                 max_mb_col_decoded_bytes: usize,
             }
 
-            let mut prepared: Vec<PreparedTakeRg<'_>> = Vec::with_capacity(wave.len());
+            let mut prepared: Vec<PreparedTakeRg<'_>> = Vec::with_capacity(stage.len());
             let mut merged_ext_by_pack: BTreeMap<u16, BTreeSet<u32>> = BTreeMap::new();
             let mut total_l0_chunk_bytes = 0usize;
             let mut total_l0_frame_bytes = 0usize;
             let mut max_wave_col_decoded_bytes = 0usize;
-            for item in wave {
+            for item in stage {
                 let rg = &self.meta.rg_dir[item.rg_idx];
                 let l0_parsed = if item.need_l0_payload {
                     block_cache
@@ -1329,24 +1466,8 @@ impl StatamReader {
                 } else {
                     None
                 };
-                let mut active_mbs: Vec<(usize, Bitmap, HashMap<usize, DecodedPhase1>)> = item
-                    .mb_rows
-                    .iter()
-                    .map(|(mb_idx, local_indices)| {
-                        let mb_row_count =
-                            self.meta.rg_blocks(0, item.rg_idx)[*mb_idx].row_count as usize;
-                        let mask = mask_from_indices(mb_row_count, local_indices);
-                        (*mb_idx, mask, HashMap::new())
-                    })
-                    .collect();
-                self.ensure_rg_payload_refs_decoded(
-                    item.rg_idx,
-                    &mut active_mbs,
-                    &proj_payload_cols,
-                    &read_block,
-                )?;
                 let (ext_by_pack, l0_cids) =
-                    Self::collect_chunk_refs_for_mbs(&active_mbs, &proj_payload_cols);
+                    Self::collect_chunk_refs_for_mbs(&item.active_mbs, &proj_payload_cols);
                 for (&pidx, cids) in &ext_by_pack {
                     merged_ext_by_pack.entry(pidx).or_default().extend(cids);
                 }
@@ -1359,7 +1480,7 @@ impl StatamReader {
                     l0.measure_chunks_bytes(&l0_cids)?
                 };
                 let max_mb_col_decoded_bytes = self.max_mb_col_decoded_bytes(
-                    &active_mbs,
+                    &item.active_mbs,
                     &proj_payload_cols,
                     l0_parsed.as_ref(),
                 )?;
@@ -1372,7 +1493,7 @@ impl StatamReader {
                     mb_rows: item.mb_rows,
                     plan: item.plan,
                     l0_parsed,
-                    active_mbs,
+                    active_mbs: item.active_mbs,
                     ext_by_pack,
                     l0_cids,
                     l0_chunk_bytes,
@@ -1449,7 +1570,7 @@ impl StatamReader {
             } else {
                 // Wave-bounded fallback (> 128 MiB of external and/or L0 blobs): partition RGs
                 // into <= 128 MiB payload sub-waves, splitting any > 128 MiB single RG via
-                // `partition_payload_waves`.
+                // `split_payload_waves_multi`.
                 let empty_pre = HashMap::new();
                 let mut sub_rgs: Vec<PreparedTakeRg<'_>> = Vec::new();
                 let mut sub_ext: BTreeMap<u16, BTreeSet<u32>> = BTreeMap::new();
@@ -1495,7 +1616,7 @@ impl StatamReader {
                             &mut sub_l0_f,
                             &mut out_batches,
                         )?;
-                        let pwaves = self.partition_payload_waves(
+                        let pwaves = self.split_payload_waves_multi(
                             &prep.active_mbs,
                             &proj_payload_cols,
                             prep.l0_parsed.as_ref(),
