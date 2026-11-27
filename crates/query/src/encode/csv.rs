@@ -14,7 +14,7 @@ use crate::fn_time::format_date_days;
 
 use super::size::CappedBuffer;
 use super::{
-    BufferedSink, for_each_active_row, write_cell_json_to_csv_sink, write_hex_to_string,
+    BufferedSink, for_each_active_row, write_cell_json_to_csv_sink, write_hex_to_sink,
     write_interval, write_timestamp_ns_fixed9,
 };
 
@@ -223,9 +223,7 @@ fn write_csv_cell(
         DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16 => {
             let b = read_bytes(col, phys_row)
                 .ok_or_else(|| QueryError::internal("missing binary cell"))?;
-            scratch.clear();
-            write_hex_to_string(b, scratch);
-            write_csv_field_sink(scratch, true, out)
+            write_hex_to_sink(b, out)
         }
         DataType::List(_) | DataType::MapUtf8 | DataType::Events | DataType::Links => {
             write_cell_json_to_csv_sink(col, phys_row, out, |text, sink| {
@@ -451,5 +449,36 @@ mod tests {
         let mut roomy_res = roomy.register("csv_roomy", false);
         let ok_bytes = encode_csv_chunk(&med_batch, 0..1, 1024, Some(&mut roomy_res)).unwrap();
         assert_eq!(roomy_res.size(), ok_bytes.len());
+    }
+
+    #[test]
+    fn csv_chunk_streams_binary_hex_within_budget() {
+        let schema = Schema::try_new_arc(vec![Field::new("b", DataType::Binary, false)]).unwrap();
+        let raw = vec![0xab_u8; 600]; // 1200 hex chars (> 512-byte chunk buffer)
+        let col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Binary(
+                    cetra_column::BinaryData::try_from_slices([raw.as_slice()]).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+        );
+        let batch = Batch::try_new_all(schema, vec![col], 1).unwrap();
+
+        // Tight reservation rejects with TooLarge and rolls back.
+        let tight = GlobalPool::standalone(512);
+        let mut tight_res = tight.register("csv_bin_tight", false);
+        let err = encode_csv_chunk(&batch, 0..1, 4096, Some(&mut tight_res)).unwrap_err();
+        assert!(matches!(err, QueryError::TooLarge));
+        assert_eq!(tight_res.size(), 0);
+
+        // Exact output matches lowercase hex + CRLF and reconciles reservation.
+        let roomy = GlobalPool::standalone(2048);
+        let mut roomy_res = roomy.register("csv_bin_roomy", false);
+        let bytes = encode_csv_chunk(&batch, 0..1, 4096, Some(&mut roomy_res)).unwrap();
+        assert_eq!(roomy_res.size(), bytes.len());
+        let expected = format!("{}\r\n", "ab".repeat(600));
+        assert_eq!(String::from_utf8(bytes).unwrap(), expected);
     }
 }

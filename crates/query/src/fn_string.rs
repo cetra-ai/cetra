@@ -9,13 +9,15 @@ use regex::{Regex, RegexBuilder};
 
 use crate::error::QueryError;
 use crate::eval::{
-    active_count, check_cancel, checked_varlen_bytes, is_active, pool_size, read_bytes, read_i64,
-    read_str, reconcile_output, rollback_to, try_reserve,
+    check_cancel, checked_varlen_bytes, is_active, pool_size, read_bytes, read_i64, read_str,
+    reconcile_output, rollback_to, try_reserve,
 };
 use crate::ir::{EvalContext, ScalarFn};
 
 const CANCEL_CHECK_MASK: usize = 1023;
-const REGEX_SIZE_LIMIT: usize = 10 * 1024 * 1024;
+const REGEX_SIZE_LIMIT: usize = 256 * 1024;
+const REGEX_DFA_SIZE_LIMIT: usize = 128 * 1024;
+pub(crate) const REGEX_ESTIMATED_BYTES: usize = 384 * 1024;
 const MAX_CONCAT_BYTES: usize = i32::MAX as usize;
 
 fn bitmap_mem_bytes(len: usize) -> usize {
@@ -121,13 +123,13 @@ pub(crate) enum LikeMatcher {
 }
 
 impl LikeMatcher {
-    pub(crate) fn estimated_bytes(&self, pattern_len: usize) -> usize {
+    pub(crate) fn estimated_bytes(&self) -> usize {
         let extra = match self {
             Self::Any | Self::Empty => 0,
             Self::Exact { lit, ci_regex } => {
                 lit.len()
                     + if ci_regex.is_some() {
-                        lit.len().saturating_mul(16).max(512)
+                        REGEX_ESTIMATED_BYTES
                     } else {
                         0
                     }
@@ -135,7 +137,7 @@ impl LikeMatcher {
             Self::Prefix { prefix, ci_regex } => {
                 prefix.len()
                     + if ci_regex.is_some() {
-                        prefix.len().saturating_mul(16).max(512)
+                        REGEX_ESTIMATED_BYTES
                     } else {
                         0
                     }
@@ -143,7 +145,7 @@ impl LikeMatcher {
             Self::Suffix { suffix, ci_regex } => {
                 suffix.len()
                     + if ci_regex.is_some() {
-                        suffix.len().saturating_mul(16).max(512)
+                        REGEX_ESTIMATED_BYTES
                     } else {
                         0
                     }
@@ -151,12 +153,12 @@ impl LikeMatcher {
             Self::Contains { mid, ci_regex } => {
                 mid.len()
                     + if ci_regex.is_some() {
-                        mid.len().saturating_mul(16).max(512)
+                        REGEX_ESTIMATED_BYTES
                     } else {
                         0
                     }
             }
-            Self::Regex(_) => pattern_len.saturating_mul(16).max(1024),
+            Self::Regex(_) => REGEX_ESTIMATED_BYTES,
         };
         size_of::<Self>() + extra
     }
@@ -330,7 +332,7 @@ fn compile_like_regex(tokens: &[LikeToken], case_insensitive: bool) -> Result<Re
         .case_insensitive(case_insensitive)
         .dot_matches_new_line(true)
         .size_limit(REGEX_SIZE_LIMIT)
-        .dfa_size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
         .build()
         .map_err(|_| QueryError::failed("invalid or oversized LIKE pattern"))
 }
@@ -1217,34 +1219,6 @@ fn eval_concat(
     )?))
 }
 
-fn longest_active_str(
-    col: &Column,
-    len: usize,
-    active: Option<&Bitmap>,
-    ctx: &EvalContext,
-    pool: &mut Option<&mut Reservation>,
-    before: usize,
-) -> Result<usize, QueryError> {
-    if let Column::Const { value, .. } = col {
-        return Ok(match value {
-            ScalarValue::Utf8(s) => s.len(),
-            _ => 0,
-        });
-    }
-    let mut max_len = 0usize;
-    for row in 0..len {
-        if (row & CANCEL_CHECK_MASK) == 0 {
-            check_cancel(ctx, pool, before)?;
-        }
-        if is_active(active, row)
-            && let Some(s) = read_str(col, row)
-        {
-            max_len = max_len.max(s.len());
-        }
-    }
-    Ok(max_len)
-}
-
 fn eval_concat_ws(
     args: &[&Column],
     len: usize,
@@ -1268,15 +1242,7 @@ fn eval_concat_ws(
         return Ok(null_const(DataType::Utf8, len));
     }
 
-    let n_active = active_count(active, len);
-    let longest_sep = longest_active_str(sep_col, len, active, ctx, pool, before)?;
-    let amp_bytes = longest_sep
-        .checked_mul(args.len().saturating_sub(2))
-        .and_then(|v| v.checked_mul(n_active))
-        .ok_or(QueryError::TooLarge)?;
-
     let mut total_bytes = 0usize;
-    let mut payload_bytes = 0usize;
     for row in 0..len {
         if (row & CANCEL_CHECK_MASK) == 0 {
             check_cancel(ctx, pool, before)?;
@@ -1287,7 +1253,6 @@ fn eval_concat_ws(
         let Some(sep) = read_str(sep_col, row) else {
             continue;
         };
-        payload_bytes = payload_bytes.saturating_add(sep.len());
         let mut first = true;
         for &col in val_cols {
             if let Some(s) = read_str(col, row) {
@@ -1296,18 +1261,11 @@ fn eval_concat_ws(
                 }
                 first = false;
                 total_bytes = add_concat_bytes(total_bytes, s.len())?;
-                payload_bytes = payload_bytes.saturating_add(s.len());
             }
         }
     }
 
-    let reserved_data = total_bytes.max(payload_bytes.saturating_add(amp_bytes));
-    let est = (len + 1)
-        .checked_mul(4)
-        .and_then(|o| o.checked_add(reserved_data))
-        .and_then(|o| o.checked_add(bitmap_mem_bytes(len)))
-        .ok_or(QueryError::TooLarge)?;
-    try_reserve(pool, est)?;
+    try_reserve(pool, checked_varlen_bytes(len, total_bytes, true)?)?;
 
     let mut offsets = Vec::with_capacity(len + 1);
     offsets.push(0u32);
@@ -1468,7 +1426,7 @@ fn compile_regex(pat: &str, flags: &str) -> Result<Regex, QueryError> {
         .multi_line(multi_line)
         .dot_matches_new_line(dot_matches_new_line)
         .size_limit(REGEX_SIZE_LIMIT)
-        .dfa_size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
         .build()
         .map_err(|_| QueryError::failed("invalid or oversized regex pattern"))
 }
@@ -2610,18 +2568,42 @@ mod tests {
         assert!(matches!(err_concat, QueryError::TooLarge));
         assert_eq!(res.size(), before);
 
-        // Amplification guard on concat_ws with tight pool even when value args are mostly null
+        // Exact reservation on concat_ws: mostly-null args with large unused separator succeed,
+        // while actual non-null separator amplification returns TooLarge and rolls back.
         let sep_big = const_str(&"-".repeat(50), 2);
         let n1 = Column::try_new_const(ScalarValue::Null(DataType::Utf8), 2).unwrap();
-        let err_ws = eval_string_fn(
+        let mostly_null_ws = eval_string_fn(
             ScalarFn::ConcatWs,
             &[
-                sep_big,
+                sep_big.clone(),
                 const_str("a", 2),
                 n1.clone(),
                 n1.clone(),
                 n1.clone(),
                 n1,
+            ],
+            2,
+            None,
+            &ctx(),
+            Some(&mut res),
+        )
+        .unwrap();
+        assert_eq!(
+            str_vec(&mostly_null_ws),
+            vec![Some("a".into()), Some("a".into())]
+        );
+        assert_eq!(res.size(), before + mostly_null_ws.memory_bytes());
+        res.shrink(mostly_null_ws.memory_bytes());
+        assert_eq!(res.size(), before);
+
+        let err_ws = eval_string_fn(
+            ScalarFn::ConcatWs,
+            &[
+                sep_big,
+                const_str("a", 2),
+                const_str("b", 2),
+                const_str("c", 2),
+                const_str("d", 2),
             ],
             2,
             None,

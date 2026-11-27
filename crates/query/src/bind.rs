@@ -918,14 +918,14 @@ fn bind_arith_binary(
         _ => {}
     }
 
-    let common = coerce_numeric_pair(&ldt, &rdt, pos)?;
-    let left = coerce_expr(l, &common, pos)?;
-    let right = coerce_expr(r, &common, pos)?;
+    let (left_target, right_target, result_type) = coerce_arith_types(bin_op, &ldt, &rdt, pos)?;
+    let left = coerce_expr(l, &left_target, pos)?;
+    let right = coerce_expr(r, &right_target, pos)?;
     Ok(Expr::Binary {
         left: Box::new(left),
         op: bin_op,
         right: Box::new(right),
-        data_type: common,
+        data_type: result_type,
     })
 }
 
@@ -2364,14 +2364,44 @@ pub(crate) fn coerce_common_many(
     Ok(cur)
 }
 
+fn clamp_decimal_preserving_int(raw_prec: i16, raw_scale: i16) -> (u8, i8, bool) {
+    let max_p = i16::from(MAX_DECIMAL_PRECISION);
+    if raw_prec <= max_p {
+        let precision = raw_prec.clamp(1, max_p) as u8;
+        let scale = raw_scale.clamp(-(i16::from(precision)), i16::from(precision)) as i8;
+        (precision, scale, false)
+    } else {
+        let int_digits = raw_prec - raw_scale;
+        let scale = if raw_scale > 0 {
+            (max_p - int_digits).clamp(0, max_p) as i8
+        } else {
+            raw_scale.clamp(-max_p, max_p) as i8
+        };
+        (MAX_DECIMAL_PRECISION, scale, true)
+    }
+}
+
+fn clamp_decimal_mul_div(raw_prec: i16, raw_scale: i16) -> (u8, i8) {
+    let max_p = i16::from(MAX_DECIMAL_PRECISION);
+    if raw_prec <= max_p {
+        let precision = raw_prec.clamp(1, max_p) as u8;
+        let scale = raw_scale.clamp(-(i16::from(precision)), i16::from(precision)) as i8;
+        (precision, scale)
+    } else {
+        let int_digits = raw_prec - raw_scale;
+        let scale = if raw_scale > 0 {
+            (max_p - int_digits).max(raw_scale.min(6)).clamp(0, max_p) as i8
+        } else {
+            raw_scale.clamp(-max_p, max_p) as i8
+        };
+        (MAX_DECIMAL_PRECISION, scale)
+    }
+}
+
 fn decimal_pair_spec(p1: u8, s1: i8, p2: u8, s2: i8) -> (u8, i8, bool) {
     let int_digits = (i16::from(p1) - i16::from(s1)).max(i16::from(p2) - i16::from(s2));
     let scale = i16::from(s1).max(i16::from(s2));
-    let raw_prec = int_digits + scale;
-    let clamped = raw_prec > i16::from(MAX_DECIMAL_PRECISION);
-    let precision = raw_prec.clamp(1, i16::from(MAX_DECIMAL_PRECISION)) as u8;
-    let scale = scale.clamp(-(i16::from(precision)), i16::from(precision)) as i8;
-    (precision, scale, clamped)
+    clamp_decimal_preserving_int(int_digits + scale, scale)
 }
 
 fn decimal_comparison_overflows(a: &DataType, b: &DataType) -> bool {
@@ -2509,35 +2539,107 @@ fn coerce_common_types(
     }
 }
 
-fn coerce_numeric_pair(
+fn decimal_arith_types(
+    op: BinaryOp,
+    p1: u8,
+    s1: i8,
+    p2: u8,
+    s2: i8,
+) -> (DataType, DataType, DataType) {
+    let ip1 = i16::from(p1);
+    let is1 = i16::from(s1);
+    let ip2 = i16::from(p2);
+    let is2 = i16::from(s2);
+    let left_orig = DataType::Decimal128 {
+        precision: p1,
+        scale: s1,
+    };
+    let right_orig = DataType::Decimal128 {
+        precision: p2,
+        scale: s2,
+    };
+    match op {
+        BinaryOp::Add | BinaryOp::Sub => {
+            let int_digits = (ip1 - is1).max(ip2 - is2) + 1;
+            let raw_scale = is1.max(is2);
+            let (p, s, _) = clamp_decimal_preserving_int(int_digits + raw_scale, raw_scale);
+            let res = DataType::Decimal128 {
+                precision: p,
+                scale: s,
+            };
+            (res.clone(), res.clone(), res)
+        }
+        BinaryOp::Mod => {
+            let int_digits = (ip1 - is1).max(ip2 - is2);
+            let raw_scale = is1.max(is2);
+            let (p, s, _) = clamp_decimal_preserving_int(int_digits + raw_scale, raw_scale);
+            let res = DataType::Decimal128 {
+                precision: p,
+                scale: s,
+            };
+            (res.clone(), res.clone(), res)
+        }
+        BinaryOp::Mul => {
+            let raw_prec = ip1 + ip2 + 1;
+            let raw_scale = is1 + is2;
+            let (p, s) = clamp_decimal_mul_div(raw_prec, raw_scale);
+            let res = DataType::Decimal128 {
+                precision: p,
+                scale: s,
+            };
+            (left_orig, right_orig, res)
+        }
+        BinaryOp::Div => {
+            let raw_scale = 6_i16.max(is1 + ip2 + 1);
+            let int_digits = ((ip1 - is1) + is2).max(0);
+            let (p, s) = clamp_decimal_mul_div(int_digits + raw_scale, raw_scale);
+            let res = DataType::Decimal128 {
+                precision: p,
+                scale: s,
+            };
+            (left_orig, right_orig, res)
+        }
+        _ => {
+            let (p, s, _) = decimal_pair_spec(p1, s1, p2, s2);
+            let res = DataType::Decimal128 {
+                precision: p,
+                scale: s,
+            };
+            (res.clone(), res.clone(), res)
+        }
+    }
+}
+
+fn coerce_arith_types(
+    op: BinaryOp,
     a: &DataType,
     b: &DataType,
     pos: Option<Position>,
-) -> Result<DataType, InvalidQuery> {
+) -> Result<(DataType, DataType, DataType), InvalidQuery> {
     match (a, b) {
-        (DataType::Null, DataType::Null) => Ok(DataType::I64),
+        (DataType::Null, DataType::Null) => Ok((DataType::I64, DataType::I64, DataType::I64)),
         (DataType::Null, t) | (t, DataType::Null)
             if matches!(
                 t,
                 DataType::I64 | DataType::F64 | DataType::Decimal128 { .. }
             ) =>
         {
-            Ok(t.clone())
+            Ok((t.clone(), t.clone(), t.clone()))
         }
-        (DataType::I64, DataType::I64) => Ok(DataType::I64),
+        (DataType::I64, DataType::I64) => Ok((DataType::I64, DataType::I64, DataType::I64)),
         (DataType::F64, DataType::F64)
         | (DataType::I64, DataType::F64)
-        | (DataType::F64, DataType::I64) => Ok(DataType::F64),
-        (DataType::Decimal128 { precision, scale }, DataType::I64)
-        | (DataType::I64, DataType::Decimal128 { precision, scale }) => {
-            let (p, s, _) = decimal_pair_spec(*precision, *scale, 19, 0);
-            Ok(DataType::Decimal128 {
-                precision: p,
-                scale: s,
-            })
-        }
+        | (DataType::F64, DataType::I64) => Ok((DataType::F64, DataType::F64, DataType::F64)),
         (DataType::Decimal128 { .. }, DataType::F64)
-        | (DataType::F64, DataType::Decimal128 { .. }) => Ok(DataType::F64),
+        | (DataType::F64, DataType::Decimal128 { .. }) => {
+            Ok((DataType::F64, DataType::F64, DataType::F64))
+        }
+        (DataType::Decimal128 { precision, scale }, DataType::I64) => {
+            Ok(decimal_arith_types(op, *precision, *scale, 19, 0))
+        }
+        (DataType::I64, DataType::Decimal128 { precision, scale }) => {
+            Ok(decimal_arith_types(op, 19, 0, *precision, *scale))
+        }
         (
             DataType::Decimal128 {
                 precision: p1,
@@ -2547,13 +2649,7 @@ fn coerce_numeric_pair(
                 precision: p2,
                 scale: s2,
             },
-        ) => {
-            let (p, s, _) = decimal_pair_spec(*p1, *s1, *p2, *s2);
-            Ok(DataType::Decimal128 {
-                precision: p,
-                scale: s,
-            })
-        }
+        ) => Ok(decimal_arith_types(op, *p1, *s1, *p2, *s2)),
         _ => Err(InvalidQuery::new(
             format!(
                 "arithmetic requires numeric operands, got `{}` and `{}`",
@@ -3029,7 +3125,7 @@ mod tests {
             (
                 "dec + 1",
                 DataType::Decimal128 {
-                    precision: 23,
+                    precision: 24,
                     scale: 4,
                 },
             ),
@@ -3433,7 +3529,7 @@ mod tests {
         assert_eq!(
             sum_dec.data_type(),
             DataType::Decimal128 {
-                precision: 12,
+                precision: 13,
                 scale: 4,
             }
         );
@@ -3442,7 +3538,7 @@ mod tests {
         assert_eq!(
             sum_i64.data_type(),
             DataType::Decimal128 {
-                precision: 21,
+                precision: 22,
                 scale: 2,
             }
         );
@@ -3658,6 +3754,227 @@ mod tests {
                 .get_scalar(0)
                 .unwrap(),
             ScalarValue::I64(0)
+        );
+    }
+
+    #[test]
+    fn decimal_arith_coercion_and_negative_scale_clamping() {
+        // Clamping preserves integer digits for positive scale and never raises negative scale to 0.
+        assert_eq!(clamp_decimal_preserving_int(39, 20), (38, 19, true));
+        assert_eq!(clamp_decimal_preserving_int(42, 4), (38, 0, true));
+        assert_eq!(clamp_decimal_preserving_int(41, -2), (38, -2, true));
+        assert_eq!(clamp_decimal_preserving_int(50, -45), (38, -38, true));
+        assert_eq!(clamp_decimal_mul_div(87, 49), (38, 6));
+        assert_eq!(clamp_decimal_mul_div(50, 3), (38, 3));
+        assert_eq!(clamp_decimal_mul_div(77, -5), (38, -5));
+
+        let schema = Schema::try_new_arc(vec![
+            Field::new(
+                "d10_2",
+                DataType::Decimal128 {
+                    precision: 10,
+                    scale: 2,
+                },
+                false,
+            ),
+            Field::new(
+                "d12_4",
+                DataType::Decimal128 {
+                    precision: 12,
+                    scale: 4,
+                },
+                false,
+            ),
+            Field::new(
+                "d38_18",
+                DataType::Decimal128 {
+                    precision: 38,
+                    scale: 18,
+                },
+                false,
+            ),
+            Field::new("i", DataType::I64, false),
+        ])
+        .unwrap();
+
+        // Add/Sub/Mod cast operands to result type.
+        let sub = parse_and_bind("d10_2 - d12_4", &schema).unwrap();
+        assert_eq!(
+            sub.data_type(),
+            DataType::Decimal128 {
+                precision: 13,
+                scale: 4,
+            }
+        );
+        let rem = parse_and_bind("d10_2 % d12_4", &schema).unwrap();
+        assert_eq!(
+            rem.data_type(),
+            DataType::Decimal128 {
+                precision: 12,
+                scale: 4,
+            }
+        );
+
+        // Mul keeps original Decimal128 operand scales and computes widened result scale.
+        let mul = parse_and_bind("d10_2 * d12_4", &schema).unwrap();
+        let Expr::Binary { left, right, .. } = &mul else {
+            panic!("expected Binary");
+        };
+        assert_eq!(
+            left.data_type(),
+            DataType::Decimal128 {
+                precision: 10,
+                scale: 2,
+            }
+        );
+        assert_eq!(
+            right.data_type(),
+            DataType::Decimal128 {
+                precision: 12,
+                scale: 4,
+            }
+        );
+        assert_eq!(
+            mul.data_type(),
+            DataType::Decimal128 {
+                precision: 23,
+                scale: 6,
+            }
+        );
+
+        // Mul with I64 coerces I64 -> Decimal128(19, 0) and keeps decimal operand untouched.
+        let mul_i64 = parse_and_bind("d38_18 * i", &schema).unwrap();
+        let Expr::Binary { left, right, .. } = &mul_i64 else {
+            panic!("expected Binary");
+        };
+        assert_eq!(
+            left.data_type(),
+            DataType::Decimal128 {
+                precision: 38,
+                scale: 18,
+            }
+        );
+        assert_eq!(
+            right.data_type(),
+            DataType::Decimal128 {
+                precision: 19,
+                scale: 0,
+            }
+        );
+        assert_eq!(
+            mul_i64.data_type(),
+            DataType::Decimal128 {
+                precision: 38,
+                scale: 6,
+            }
+        );
+
+        // Div keeps original operand scales and widens result scale (at least 6).
+        let div = parse_and_bind("d10_2 / d12_4", &schema).unwrap();
+        let Expr::Binary { left, right, .. } = &div else {
+            panic!("expected Binary");
+        };
+        assert_eq!(
+            left.data_type(),
+            DataType::Decimal128 {
+                precision: 10,
+                scale: 2,
+            }
+        );
+        assert_eq!(
+            right.data_type(),
+            DataType::Decimal128 {
+                precision: 12,
+                scale: 4,
+            }
+        );
+        // raw_scale = max(6, 2 + 12 + 1) = 15, int_digits = (10 - 2) + 4 = 12, raw_prec = 27.
+        assert_eq!(
+            div.data_type(),
+            DataType::Decimal128 {
+                precision: 27,
+                scale: 15,
+            }
+        );
+
+        // End-to-end bind + eval for Mul and Div with mismatched operand scales.
+        let batch = cetra_column::Batch::try_new_all(
+            std::sync::Arc::clone(&schema),
+            vec![
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(
+                        cetra_column::FlatData::Decimal128 {
+                            values: vec![150], // 1.50
+                            precision: 10,
+                            scale: 2,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(
+                        cetra_column::FlatData::Decimal128 {
+                            values: vec![20_000], // 2.0000
+                            precision: 12,
+                            scale: 4,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(
+                        cetra_column::FlatData::Decimal128 {
+                            values: vec![500_000_000_000_000_000], // 0.5
+                            precision: 38,
+                            scale: 18,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(cetra_column::FlatData::I64(vec![4]), None)
+                        .unwrap(),
+                ),
+            ],
+            1,
+        )
+        .unwrap();
+        let ctx = crate::EvalContext::new(0, cetra_column::CancelToken::new());
+        assert_eq!(
+            crate::eval_expr(&mul, &batch, &ctx, None)
+                .unwrap()
+                .get_scalar(0)
+                .unwrap(),
+            ScalarValue::Decimal128 {
+                value: 3_000_000, // 3.000000
+                precision: 23,
+                scale: 6,
+            }
+        );
+        assert_eq!(
+            crate::eval_expr(&mul_i64, &batch, &ctx, None)
+                .unwrap()
+                .get_scalar(0)
+                .unwrap(),
+            ScalarValue::Decimal128 {
+                value: 2_000_000, // 2.000000
+                precision: 38,
+                scale: 6,
+            }
+        );
+        assert_eq!(
+            crate::eval_expr(&div, &batch, &ctx, None)
+                .unwrap()
+                .get_scalar(0)
+                .unwrap(),
+            ScalarValue::Decimal128 {
+                value: 750_000_000_000_000, // 0.750000000000000
+                precision: 27,
+                scale: 15,
+            }
         );
     }
 }

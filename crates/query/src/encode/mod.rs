@@ -330,11 +330,10 @@ pub(crate) fn write_json_str(s: &str, out: &mut BufferedSink<'_, '_>) -> Result<
     out.push_byte(b'"')
 }
 
-pub(crate) fn write_json_hex(
+pub(crate) fn write_hex_to_sink(
     bytes: &[u8],
     out: &mut BufferedSink<'_, '_>,
 ) -> Result<(), QueryError> {
-    out.push_byte(b'"')?;
     let mut chunk = [0u8; 512];
     for piece in bytes.chunks(chunk.len() / 2) {
         let mut pos = 0usize;
@@ -345,15 +344,16 @@ pub(crate) fn write_json_hex(
         }
         out.push_bytes(&chunk[..pos])?;
     }
-    out.push_byte(b'"')
+    Ok(())
 }
 
-pub(crate) fn write_hex_to_string(bytes: &[u8], out: &mut String) {
-    out.reserve(bytes.len() * 2);
-    for &b in bytes {
-        out.push(HEX_LOWER[(b >> 4) as usize] as char);
-        out.push(HEX_LOWER[(b & 0x0f) as usize] as char);
-    }
+pub(crate) fn write_json_hex(
+    bytes: &[u8],
+    out: &mut BufferedSink<'_, '_>,
+) -> Result<(), QueryError> {
+    out.push_byte(b'"')?;
+    write_hex_to_sink(bytes, out)?;
+    out.push_byte(b'"')
 }
 
 pub(crate) fn write_json_f64(v: f64, out: &mut BufferedSink<'_, '_>) -> Result<(), QueryError> {

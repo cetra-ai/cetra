@@ -845,6 +845,14 @@ fn eval_date_trunc(
     if len == 0
         || active.is_some_and(Bitmap::all_zeros)
         || matches!(ts_col.data_type(), DataType::Null)
+        || matches!(unit_col.data_type(), DataType::Null)
+        || matches!(
+            unit_col,
+            Column::Const {
+                value: ScalarValue::Null(_),
+                ..
+            }
+        )
     {
         return Ok(Column::Const {
             value: ScalarValue::Null(DataType::TimestampNs { utc }),
@@ -856,11 +864,7 @@ fn eval_date_trunc(
         Column::Const {
             value: ScalarValue::Utf8(s),
             ..
-        } => Some(Some(s.as_str())),
-        Column::Const {
-            value: ScalarValue::Null(_),
-            ..
-        } => Some(None),
+        } => Some(s.as_str()),
         _ => None,
     };
     let mut cached_const_unit: Option<TruncUnit> = None;
@@ -880,7 +884,7 @@ fn eval_date_trunc(
             continue;
         };
         let unit = match const_unit_str {
-            Some(Some(s)) => match cached_const_unit {
+            Some(s) => match cached_const_unit {
                 Some(u) => u,
                 None => {
                     let parsed = TruncUnit::parse(s)?;
@@ -888,7 +892,6 @@ fn eval_date_trunc(
                     parsed
                 }
             },
-            Some(None) => return Err(QueryError::failed("date_trunc unit cannot be null")),
             None => {
                 let Some(s) = read_str(unit_col, row) else {
                     continue;
@@ -2099,5 +2102,99 @@ mod tests {
         .unwrap();
         assert!(null_bin.is_null(0));
         assert!(null_bin.is_null(1));
+    }
+
+    #[test]
+    fn date_trunc_null_unit_returns_null_timestamp() {
+        let ts_ns = parse_timestamp_ns("2026-06-15T14:35:22Z", true).unwrap();
+        let ts_utc = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![ts_ns, ts_ns],
+                    utc: true,
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let ts_local = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![ts_ns, ts_ns],
+                    utc: false,
+                },
+                None,
+            )
+            .unwrap(),
+        );
+
+        // Const typed NULL(Utf8) unit with non-null timestamp -> NULL TimestampNs preserving utc.
+        let null_utf8_unit = Column::try_new_const(ScalarValue::Null(DataType::Utf8), 2).unwrap();
+        let out_utc = eval_time_fn(
+            ScalarFn::DateTrunc,
+            &[null_utf8_unit.clone(), ts_utc.clone()],
+            2,
+            None,
+            &ctx_at(0),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out_utc.data_type(), DataType::TimestampNs { utc: true });
+        assert!(out_utc.is_null(0));
+        assert!(out_utc.is_null(1));
+
+        let out_local = eval_time_fn(
+            ScalarFn::DateTrunc,
+            &[null_utf8_unit, ts_local],
+            2,
+            None,
+            &ctx_at(0),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out_local.data_type(), DataType::TimestampNs { utc: false });
+        assert!(out_local.is_null(0));
+        assert!(out_local.is_null(1));
+
+        // Untyped DataType::Null unit column -> NULL TimestampNs preserving utc.
+        let untyped_null = Column::try_new_const(ScalarValue::Null(DataType::Null), 2).unwrap();
+        let out_untyped = eval_time_fn(
+            ScalarFn::DateTrunc,
+            &[untyped_null, ts_utc.clone()],
+            2,
+            None,
+            &ctx_at(0),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out_untyped.data_type(), DataType::TimestampNs { utc: true });
+        assert!(out_untyped.is_null(0));
+        assert!(out_untyped.is_null(1));
+
+        // Flat mixed unit column: NULL row produces NULL while valid row truncates normally.
+        let mixed_unit = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(["hour", ""]).unwrap()),
+                Some(Bitmap::from_bools(&[true, false])),
+            )
+            .unwrap(),
+        );
+        let out_mixed = eval_time_fn(
+            ScalarFn::DateTrunc,
+            &[mixed_unit, ts_utc],
+            2,
+            None,
+            &ctx_at(0),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            out_mixed.get_scalar(0).unwrap(),
+            ScalarValue::TimestampNs {
+                value: parse_timestamp_ns("2026-06-15T14:00:00Z", true).unwrap(),
+                utc: true,
+            }
+        );
+        assert!(out_mixed.is_null(1));
     }
 }

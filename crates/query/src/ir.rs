@@ -14,7 +14,7 @@ use serde_json_path::JsonPath;
 
 use crate::error::QueryError;
 use crate::eval::{LiteralSet, f64_canonical_bits};
-use crate::fn_string::LikeMatcher;
+use crate::fn_string::{LikeMatcher, REGEX_ESTIMATED_BYTES};
 
 /// Binary operators in [`Expr`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1492,8 +1492,7 @@ impl EvalCache {
         }
 
         let compiled = Arc::new(compile()?);
-        let entry_bytes =
-            size_of::<LikeCacheKey>() + pattern.len() + compiled.estimated_bytes(pattern.len());
+        let entry_bytes = size_of::<LikeCacheKey>() + pattern.len() + compiled.estimated_bytes();
 
         let mut map = self.like.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(hit) = map.get(&lookup as &dyn LikeKey) {
@@ -1534,7 +1533,7 @@ impl EvalCache {
             + pat.len()
             + flags.len()
             + size_of::<Regex>()
-            + pat.len().saturating_mul(16).max(512);
+            + REGEX_ESTIMATED_BYTES;
 
         let mut map = self.regex.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(hit) = map.get(&lookup as &dyn RegexKey) {
@@ -1851,5 +1850,40 @@ mod tests {
         let mut new_refs = BTreeSet::new();
         remapped.referenced_columns(&mut new_refs);
         assert_eq!(new_refs.into_iter().collect::<Vec<_>>(), vec![10, 20]);
+    }
+
+    #[test]
+    fn eval_cache_charges_regex_budget_for_regex_and_ilike_entries() {
+        let cache = EvalCache::default();
+        for i in 0..32usize {
+            let pat = format!("pat_{i}");
+            let _ = cache
+                .get_or_insert_regex(&pat, "", || {
+                    Regex::new(&pat).map_err(|_| QueryError::failed("bad regex"))
+                })
+                .unwrap();
+        }
+        let (_, regex_entries, _, _, total_bytes) = cache.stats();
+        assert!(regex_entries > 0);
+        assert!(
+            regex_entries <= MAX_CACHE_BYTES / REGEX_ESTIMATED_BYTES,
+            "regex cache admitted {regex_entries} entries"
+        );
+        assert!(total_bytes <= MAX_CACHE_BYTES);
+
+        let ilike_cache = EvalCache::default();
+        for i in 0..32usize {
+            let pat = format!("%needle_{i}%");
+            let _ = ilike_cache
+                .get_or_insert_like(&pat, None, true, || LikeMatcher::compile(&pat, None, true))
+                .unwrap();
+        }
+        let (like_entries, _, _, _, ilike_bytes) = ilike_cache.stats();
+        assert!(like_entries > 0);
+        assert!(
+            like_entries <= MAX_CACHE_BYTES / REGEX_ESTIMATED_BYTES,
+            "ILIKE cache admitted {like_entries} entries"
+        );
+        assert!(ilike_bytes <= MAX_CACHE_BYTES);
     }
 }

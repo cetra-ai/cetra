@@ -39,7 +39,7 @@ static FUZZ_SQL_ENV: OnceLock<Option<FuzzSqlEnv>> = OnceLock::new();
 struct FuzzScratchDir(std::path::PathBuf);
 
 impl FuzzScratchDir {
-    fn new() -> Result<Self, crate::error::QueryError> {
+    fn lazy() -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
@@ -49,15 +49,17 @@ impl FuzzScratchDir {
             "cetra-query-fuzz-{}-{nanos}-{seq}",
             std::process::id()
         ));
-        std::fs::create_dir_all(&path)
-            .map_err(|e| crate::error::QueryError::internal(e.to_string()))?;
-        Ok(Self(path))
+        Self(path)
     }
 }
 
 impl Drop for FuzzScratchDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        if let Err(err) = std::fs::remove_dir_all(&self.0)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            let _ = err.kind();
+        }
     }
 }
 
@@ -65,8 +67,6 @@ struct FuzzSqlEnv {
     catalog: SqlCatalog,
     sources: SqlSources,
     workers: Arc<WorkerPool>,
-    spill: Arc<SpillManager>,
-    _spill_dir: FuzzScratchDir,
 }
 
 /// Exercises Filter DSL parsing & compilation, SQL expression parsing & binding, vectorized
@@ -532,16 +532,22 @@ pub fn fuzz_sql(data: &[u8]) {
     };
     let _ = columns_from_schema(plan.schema());
 
-    // Guard against exponential multi-way cartesian products timing out libFuzzer.
-    if count_joins(&plan) > 4 {
+    // Guard against exponential multi-way cartesian products, unions, or unnests timing out libFuzzer.
+    let (joins, peak_rows) = plan_fuzz_cost(&plan);
+    if joins > 4 || peak_rows > 4_096 {
         return;
     }
 
+    let spill_dir = FuzzScratchDir::lazy();
+    let spill = Arc::new(SpillManager::with_fixed_cap(
+        spill_dir.0.clone(),
+        1024 * 1024,
+    ));
     let pool = GlobalPool::standalone(FUZZ_SQL_POOL_LIMIT);
     let ctx = ExecContext {
         pool: Arc::clone(&pool),
         eval: EvalContext::new(FUZZ_NOW_NS, CancelToken::new()),
-        spill: Arc::clone(&env.spill),
+        spill: Arc::clone(&spill),
         workers: Arc::clone(&env.workers),
         batch_size: 16,
         target_partitions: 2,
@@ -592,24 +598,147 @@ pub fn fuzz_sql(data: &[u8]) {
         chunk_res.free();
     }
     assert_eq!(pool.reserved(), 0, "fuzz_sql leaked pool reservation");
-    assert_eq!(env.spill.spilled_bytes(), 0, "fuzz_sql leaked spill bytes");
+    assert_eq!(spill.spilled_bytes(), 0, "fuzz_sql leaked spill bytes");
 }
 
-fn count_joins(plan: &LogicalPlan) -> usize {
-    match plan {
-        LogicalPlan::Scan { .. } | LogicalPlan::Values { .. } | LogicalPlan::EmptyRow { .. } => 0,
-        LogicalPlan::Filter { input, .. }
-        | LogicalPlan::Project { input, .. }
-        | LogicalPlan::Aggregate { input, .. }
-        | LogicalPlan::Window { input, .. }
-        | LogicalPlan::Sort { input, .. }
-        | LogicalPlan::Limit { input, .. }
-        | LogicalPlan::TopK { input, .. }
-        | LogicalPlan::Distinct { input }
-        | LogicalPlan::Unnest { input, .. }
-        | LogicalPlan::Explain { inner: input, .. } => count_joins(input),
-        LogicalPlan::Join { left, right, .. } => 1 + count_joins(left) + count_joins(right),
-        LogicalPlan::Union { inputs, .. } => inputs.iter().map(count_joins).sum(),
+struct PlanCost {
+    joins: usize,
+    out_rows: usize,
+    peak_rows: usize,
+}
+
+fn plan_fuzz_cost(root: &LogicalPlan) -> (usize, usize) {
+    enum Frame<'a> {
+        Visit(&'a LogicalPlan),
+        Combine(&'a LogicalPlan),
+    }
+
+    let mut stack = vec![Frame::Visit(root)];
+    let mut results: Vec<PlanCost> = Vec::new();
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Visit(node) => match node {
+                LogicalPlan::Scan { .. } => {
+                    results.push(PlanCost {
+                        joins: 0,
+                        out_rows: 2,
+                        peak_rows: 2,
+                    });
+                }
+                LogicalPlan::Values { rows, .. } => {
+                    let n = rows.len();
+                    results.push(PlanCost {
+                        joins: 0,
+                        out_rows: n,
+                        peak_rows: n,
+                    });
+                }
+                LogicalPlan::EmptyRow { .. } => {
+                    results.push(PlanCost {
+                        joins: 0,
+                        out_rows: 1,
+                        peak_rows: 1,
+                    });
+                }
+                LogicalPlan::Filter { input, .. }
+                | LogicalPlan::Project { input, .. }
+                | LogicalPlan::Aggregate { input, .. }
+                | LogicalPlan::Window { input, .. }
+                | LogicalPlan::Sort { input, .. }
+                | LogicalPlan::Limit { input, .. }
+                | LogicalPlan::TopK { input, .. }
+                | LogicalPlan::Distinct { input }
+                | LogicalPlan::Unnest { input, .. }
+                | LogicalPlan::Explain { inner: input, .. } => {
+                    stack.push(Frame::Combine(node));
+                    stack.push(Frame::Visit(input));
+                }
+                LogicalPlan::Join { left, right, .. } => {
+                    stack.push(Frame::Combine(node));
+                    stack.push(Frame::Visit(right));
+                    stack.push(Frame::Visit(left));
+                }
+                LogicalPlan::Union { inputs, .. } => {
+                    stack.push(Frame::Combine(node));
+                    for input in inputs.iter().rev() {
+                        stack.push(Frame::Visit(input));
+                    }
+                }
+            },
+            Frame::Combine(node) => match node {
+                LogicalPlan::Scan { .. }
+                | LogicalPlan::Values { .. }
+                | LogicalPlan::EmptyRow { .. }
+                | LogicalPlan::Filter { .. }
+                | LogicalPlan::Project { .. }
+                | LogicalPlan::Aggregate { .. }
+                | LogicalPlan::Window { .. }
+                | LogicalPlan::Sort { .. }
+                | LogicalPlan::Distinct { .. } => {}
+                LogicalPlan::Explain { .. } => {
+                    if let Some(child) = results.last_mut() {
+                        child.out_rows = 2;
+                        child.peak_rows = child.peak_rows.max(2);
+                    }
+                }
+                LogicalPlan::Limit { fetch, .. } => {
+                    if let (Some(child), Some(f)) = (results.last_mut(), fetch) {
+                        child.out_rows = child.out_rows.min(*f);
+                    }
+                }
+                LogicalPlan::TopK { limit, .. } => {
+                    if let Some(child) = results.last_mut() {
+                        child.out_rows = child.out_rows.min(*limit);
+                    }
+                }
+                LogicalPlan::Unnest { .. } => {
+                    if let Some(child) = results.last_mut() {
+                        child.out_rows = child.out_rows.saturating_mul(16);
+                        child.peak_rows = child.peak_rows.max(child.out_rows);
+                    }
+                }
+                LogicalPlan::Join { .. } => {
+                    if let (Some(r), Some(l)) = (results.pop(), results.pop()) {
+                        let joins = 1usize.saturating_add(l.joins).saturating_add(r.joins);
+                        let out_rows = l
+                            .out_rows
+                            .saturating_mul(r.out_rows)
+                            .max(l.out_rows)
+                            .max(r.out_rows);
+                        let peak_rows = l.peak_rows.max(r.peak_rows).max(out_rows);
+                        results.push(PlanCost {
+                            joins,
+                            out_rows,
+                            peak_rows,
+                        });
+                    }
+                }
+                LogicalPlan::Union { inputs, .. } => {
+                    let count = inputs.len();
+                    let mut joins = 0usize;
+                    let mut out_rows = 0usize;
+                    let mut peak_rows = 0usize;
+                    let start = results.len().saturating_sub(count);
+                    for child in results.drain(start..) {
+                        joins = joins.saturating_add(child.joins);
+                        out_rows = out_rows.saturating_add(child.out_rows);
+                        peak_rows = peak_rows.max(child.peak_rows);
+                    }
+                    peak_rows = peak_rows.max(out_rows);
+                    results.push(PlanCost {
+                        joins,
+                        out_rows,
+                        peak_rows,
+                    });
+                }
+            },
+        }
+    }
+
+    match results.pop() {
+        Some(cost) => (cost.joins, cost.peak_rows),
+        None => (0, 0),
     }
 }
 
@@ -661,19 +790,12 @@ fn try_build_fuzz_sql_env() -> Result<FuzzSqlEnv, crate::error::QueryError> {
     catalog.register_batch_source("dataset_items", Arc::clone(&ds_src))?;
     sources.register("dataset_items", ds_src);
 
-    let spill_dir = FuzzScratchDir::new()?;
-    let spill = Arc::new(SpillManager::with_fixed_cap(
-        spill_dir.0.clone(),
-        1024 * 1024,
-    ));
     let workers = Arc::new(WorkerPool::new(1)?);
 
     Ok(FuzzSqlEnv {
         catalog,
         sources,
         workers,
-        spill,
-        _spill_dir: spill_dir,
     })
 }
 
@@ -941,11 +1063,16 @@ pub(crate) mod tests {
     #[test]
     fn valid_sql_seeds_execute() {
         let env = try_build_fuzz_sql_env().expect("fuzz sql env");
+        let spill_dir = FuzzScratchDir::lazy();
+        let spill = Arc::new(SpillManager::with_fixed_cap(
+            spill_dir.0.clone(),
+            1024 * 1024,
+        ));
         let pool = GlobalPool::standalone(FUZZ_SQL_POOL_LIMIT);
         let ctx = ExecContext {
             pool,
             eval: EvalContext::new(FUZZ_NOW_NS, CancelToken::new()),
-            spill: Arc::clone(&env.spill),
+            spill,
             workers: Arc::clone(&env.workers),
             batch_size: 16,
             target_partitions: 2,
@@ -966,7 +1093,88 @@ pub(crate) mod tests {
             execute_plan_json(&plan, &env.sources, &ctx, 16, 256 * 1024)
                 .unwrap_or_else(|e| panic!("{name} execute_plan_json failed: {e}"));
             assert_eq!(ctx.pool.reserved(), 0, "{name} leaked reservation");
+            assert_eq!(ctx.spill.spilled_bytes(), 0, "{name} leaked spill bytes");
         }
+    }
+
+    #[test]
+    fn plan_fuzz_cost_and_lazy_scratch_dir() {
+        let empty_schema = Schema::try_new_arc(vec![]).unwrap();
+        let empty = LogicalPlan::EmptyRow {
+            schema: Arc::clone(&empty_schema),
+        };
+
+        // Repeated Unnest multiplies by 16 per level and Limit preserves peak_rows.
+        let mut unnested = empty.clone();
+        for _ in 0..4 {
+            unnested = LogicalPlan::Unnest {
+                input: Box::new(unnested),
+                columns: vec![],
+                preserve_nulls: false,
+                schema: Arc::clone(&empty_schema),
+            };
+        }
+        let limited = LogicalPlan::Limit {
+            input: Box::new(unnested),
+            skip: 0,
+            fetch: Some(1),
+        };
+        let (joins, peak_rows) = plan_fuzz_cost(&limited);
+        assert_eq!(joins, 0);
+        assert_eq!(peak_rows, 16usize.pow(4));
+        assert!(peak_rows > 4_096);
+
+        // TopK also preserves peak_rows from a large Union.
+        let big_union = LogicalPlan::Union {
+            inputs: vec![empty; 5_000],
+            all: true,
+            schema: Arc::clone(&empty_schema),
+        };
+        let topk = LogicalPlan::TopK {
+            input: Box::new(big_union),
+            keys: vec![],
+            limit: 5,
+            offset: 0,
+        };
+        let (u_joins, u_peak) = plan_fuzz_cost(&topk);
+        assert_eq!(u_joins, 0);
+        assert_eq!(u_peak, 5_000);
+
+        // Join counts joins and computes max(l*r, l, r).
+        let zero_vals = LogicalPlan::Values {
+            schema: Arc::clone(&empty_schema),
+            rows: vec![],
+        };
+        let ten_vals = LogicalPlan::Values {
+            schema: Arc::clone(&empty_schema),
+            rows: vec![vec![]; 10],
+        };
+        let join = LogicalPlan::Join {
+            left: Box::new(zero_vals),
+            right: Box::new(ten_vals),
+            kind: crate::sql::LogicalJoinKind::Right,
+            left_keys: vec![],
+            right_keys: vec![],
+            null_equals_null: false,
+            residual: None,
+            schema: Arc::clone(&empty_schema),
+        };
+        assert_eq!(plan_fuzz_cost(&join), (1, 10));
+
+        // FuzzScratchDir::lazy does not create dir eagerly, drops cleanly when absent,
+        // and removes dir on drop when created.
+        let unused = FuzzScratchDir::lazy();
+        let unused_path = unused.0.clone();
+        assert!(!unused_path.exists());
+        drop(unused);
+        assert!(!unused_path.exists());
+
+        let used = FuzzScratchDir::lazy();
+        let used_path = used.0.clone();
+        std::fs::create_dir_all(&used_path).unwrap();
+        assert!(used_path.exists());
+        drop(used);
+        assert!(!used_path.exists());
     }
 
     #[test]
