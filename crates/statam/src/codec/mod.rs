@@ -10,6 +10,7 @@ pub mod zonemap;
 
 use std::fmt;
 
+use bytes::Bytes;
 use cetra_column::{
     BinaryData, Bitmap, Column, DataType, FlatColumn, FlatData, RleColumn, ScalarValue, Utf8Data,
 };
@@ -594,6 +595,87 @@ pub fn decode_mini_block_selected(
         }
     }
     decode_mini_block(raw_body, entry, dt, file_dict)
+}
+
+/// Decodes one mini-block from owned zero-copy `raw_body: Bytes`, parallelizing sub-chunked
+/// `Fsst` (`Utf8` / `Binary`) decode across `threads` when eligible and outside a parallel scope.
+pub(crate) fn decode_mini_block_selected_parallel_bytes(
+    raw_body: Bytes,
+    entry: &BlockEntry,
+    dt: &DataType,
+    file_dict: Option<&FileDict>,
+    mask: &Bitmap,
+    threads: usize,
+) -> Result<Column, StatamError> {
+    validate_block_entry_flags(entry)?;
+    dt.validate(MAX_NESTING_DEPTH)?;
+    let row_count = entry.row_count as usize;
+    if mask.len() != row_count {
+        return Err(StatamError::Corrupt {
+            reason: "selection mask length mismatch",
+        });
+    }
+    if threads > 1
+        && !crate::parallel::in_parallel_scope()
+        && row_count > 0
+        && entry.encoding == Encoding::Fsst
+        && (entry.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0
+        && matches!(dt, DataType::Utf8 | DataType::Binary)
+        && (mask.all_ones() || mask.count_ones() >= 1024)
+    {
+        let (nulls, after_nulls) = read_optional_nulls(&raw_body, row_count, entry.block_flags)?;
+        let nulls_prefix_len = raw_body.len() - after_nulls.len();
+        let (data, out_nulls) = if mask.all_ones() {
+            let data = match dt {
+                DataType::Utf8 => FlatData::Utf8(fsst::decode_fsst_utf8_subchunked_parallel(
+                    raw_body,
+                    nulls_prefix_len,
+                    row_count,
+                    crate::MAX_BLOCK_RAW_BYTES,
+                    threads,
+                )?),
+                DataType::Binary => FlatData::Binary(fsst::decode_fsst_binary_subchunked_parallel(
+                    raw_body,
+                    nulls_prefix_len,
+                    row_count,
+                    crate::MAX_BLOCK_RAW_BYTES,
+                    threads,
+                )?),
+                _ => unreachable!(),
+            };
+            (data, nulls)
+        } else {
+            match dt {
+                DataType::Utf8 => {
+                    let (u, n) = fsst::decode_fsst_utf8_selected_subchunked_parallel(
+                        raw_body,
+                        nulls_prefix_len,
+                        row_count,
+                        mask,
+                        nulls.as_ref(),
+                        crate::MAX_BLOCK_RAW_BYTES,
+                        threads,
+                    )?;
+                    (FlatData::Utf8(u), n)
+                }
+                DataType::Binary => {
+                    let (b, n) = fsst::decode_fsst_binary_selected_subchunked_parallel(
+                        raw_body,
+                        nulls_prefix_len,
+                        row_count,
+                        mask,
+                        nulls.as_ref(),
+                        crate::MAX_BLOCK_RAW_BYTES,
+                        threads,
+                    )?;
+                    (FlatData::Binary(b), n)
+                }
+                _ => unreachable!(),
+            }
+        };
+        return Ok(Column::Flat(FlatColumn::try_new(data, out_nulls)?));
+    }
+    decode_mini_block_selected(&raw_body, entry, dt, file_dict, mask)
 }
 
 /// Decodes only `indices` of one mini-block into a compact `indices.len()`-row [`Column`].

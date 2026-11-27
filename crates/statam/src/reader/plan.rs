@@ -12,8 +12,8 @@ use crate::StatamError;
 use crate::codec::nested::ShreddedSubCol;
 use crate::codec::{ZonePred, ZoneValue, zone_map_always_matches, zone_map_may_match};
 use crate::format::{
-    BLOCK_FLAG_MIN_MAX_VALID, BLOCK_FRAME_HEADER_LEN, BlockEntry, Encoding, MAX_BLOCK_RAW_BYTES,
-    read_framed_block_checked_cow,
+    BLOCK_FLAG_MIN_MAX_VALID, BLOCK_FRAME_HEADER_LEN, BlockEntry, Codec, Encoding,
+    MAX_BLOCK_RAW_BYTES, read_framed_block_checked_cow,
 };
 use crate::io::RangeReader;
 use crate::payload::search::extract_ilike_trigram_hashes;
@@ -112,6 +112,72 @@ impl BlockCacheReader {
                 read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
             }
         }
+    }
+
+    pub(super) fn read_block_bytes(&self, blk: &BlockEntry) -> Result<Bytes, StatamError> {
+        if blk.stored_len == 0 {
+            if blk.raw_len != 0 {
+                return Err(StatamError::Corrupt {
+                    reason: "zero stored_len with non-zero raw_len",
+                });
+            }
+            return Ok(Bytes::new());
+        }
+        if blk.codec == Codec::None {
+            return match self {
+                Self::Map {
+                    primary,
+                    fallback,
+                    missing_reason,
+                    overflow_reason,
+                } => {
+                    let end = blk
+                        .offset
+                        .checked_add(BLOCK_FRAME_HEADER_LEN as u64 + u64::from(blk.stored_len))
+                        .ok_or(StatamError::BoundsExceeded {
+                            reason: overflow_reason,
+                        })?;
+                    let key = (blk.offset, end);
+                    let frame = primary
+                        .get(&key)
+                        .or_else(|| fallback.as_ref().and_then(|fb| fb.get(&key)))
+                        .ok_or(StatamError::Corrupt {
+                            reason: missing_reason,
+                        })?;
+                    let _ = read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)?;
+                    Ok(frame.slice(BLOCK_FRAME_HEADER_LEN..frame.len()))
+                }
+                Self::Slice { base_offset, bytes } => {
+                    let rel = blk
+                        .offset
+                        .checked_sub(*base_offset)
+                        .and_then(|v| usize::try_from(v).ok())
+                        .ok_or(StatamError::Corrupt {
+                            reason: "block offset before Point RG range",
+                        })?;
+                    let total = BLOCK_FRAME_HEADER_LEN
+                        .checked_add(blk.stored_len as usize)
+                        .ok_or(StatamError::BoundsExceeded {
+                            reason: "block total length overflow",
+                        })?;
+                    let end = rel.checked_add(total).ok_or(StatamError::BoundsExceeded {
+                        reason: "block end offset overflow",
+                    })?;
+                    let payload_start = rel.checked_add(BLOCK_FRAME_HEADER_LEN).ok_or(
+                        StatamError::BoundsExceeded {
+                            reason: "block payload start overflow",
+                        },
+                    )?;
+                    let frame = bytes.get(rel..end).ok_or(StatamError::Corrupt {
+                        reason: "block slice out of Point RG range",
+                    })?;
+                    let _ = read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)?;
+                    Ok(bytes.slice(payload_start..end))
+                }
+            };
+        }
+        let cow = self.read_block(blk)?;
+        Ok(Bytes::from(cow.into_owned()))
     }
 }
 

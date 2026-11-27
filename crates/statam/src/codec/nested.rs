@@ -35,6 +35,8 @@ use crate::format::{
     BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_HAS_NULLS, BlockEntry, Codec, Encoding,
     KNOWN_BLOCK_FLAGS, MAX_SHREDDED_KEYS,
 };
+#[cfg(not(miri))]
+use crate::format::{MAX_DECOMPRESS_RATIO, MAX_DECOMPRESS_SLACK};
 use crate::simd::bitpack::{min_bits_u32, pack_u32, packed_bytes_len, unpack_u32, unpack_u32_at};
 use crate::{MAX_BLOCK_RAW_BYTES, MAX_DICT_BYTES, StatamError};
 
@@ -1535,7 +1537,43 @@ fn encode_shredded_residual_block_with_zm(
         raw.extend_from_slice(&val_bytes);
     }
 
-    let preferred_codec = preferred_block_codec(profile, raw.len(), true);
+    let preferred_codec = if profile == WriteProfile::L1Compact && raw.len() >= 128 * 1024 {
+        #[cfg(not(miri))]
+        {
+            let ratio_ok = |stored_len: usize| -> bool {
+                (raw.len() as u64)
+                    <= (stored_len as u64)
+                        .saturating_mul(MAX_DECOMPRESS_RATIO)
+                        .saturating_add(MAX_DECOMPRESS_SLACK)
+            };
+            let lz4_len = lz4_flex::block::compress(&raw).len();
+            let lz4_ok = lz4_len.saturating_add(16) < raw.len() && ratio_ok(lz4_len);
+            if lz4_ok {
+                let zstd_len = probe_shredded_residual_zstd_len(&raw)?;
+                let effective_zstd_len =
+                    if zstd_len.saturating_add(16) < raw.len() && ratio_ok(zstd_len) {
+                        zstd_len
+                    } else {
+                        raw.len()
+                    };
+                if (lz4_len as u64).saturating_mul(100)
+                    <= (effective_zstd_len as u64).saturating_mul(112)
+                {
+                    Codec::Lz4
+                } else {
+                    Codec::Zstd
+                }
+            } else {
+                Codec::Zstd
+            }
+        }
+        #[cfg(miri)]
+        {
+            preferred_block_codec(profile, raw.len(), true)
+        }
+    } else {
+        preferred_block_codec(profile, raw.len(), true)
+    };
 
     Ok(EncodedMiniBlock {
         encoding: Encoding::ShreddedMap,
@@ -1547,6 +1585,31 @@ fn encode_shredded_residual_block_with_zm(
         max_inline: [0u8; 16],
         raw_body: raw,
         preferred_codec,
+    })
+}
+
+#[cfg(not(miri))]
+fn probe_shredded_residual_zstd_len(raw: &[u8]) -> Result<usize, StatamError> {
+    use std::cell::RefCell;
+    thread_local! {
+        static RESIDUAL_ZSTD_COMP: RefCell<Option<zstd::bulk::Compressor<'static>>> =
+            const { RefCell::new(None) };
+    }
+    RESIDUAL_ZSTD_COMP.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        if guard.is_none() {
+            let comp = zstd::bulk::Compressor::new(3).map_err(|_| StatamError::Corrupt {
+                reason: "shredded residual zstd compressor init failed",
+            })?;
+            *guard = Some(comp);
+        }
+        let comp = guard.as_mut().ok_or(StatamError::Corrupt {
+            reason: "shredded residual zstd compressor missing",
+        })?;
+        let compressed = comp.compress(raw).map_err(|_| StatamError::Corrupt {
+            reason: "shredded residual zstd compression failed",
+        })?;
+        Ok(compressed.len())
     })
 }
 

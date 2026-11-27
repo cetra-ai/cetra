@@ -11066,3 +11066,487 @@ fn pass24_fused_take_rg_and_lpt_pack_frames_parity() {
         }
     }
 }
+
+#[test]
+fn pass25_widerow_subchunked_fsst_and_stage1_shredded_residual_parity() {
+    use cetra_column::MapData;
+
+    // ── Part A: WideRow `Utf8` (`input_preview`) >= 64 KiB & > 512 rows sets
+    //    `BLOCK_FLAG_FSST_SUBCHUNKED` + `Codec::None`, and exercises parallel sub-chunked
+    //    FSST decode in `materialize_phase2_mb_with_meta` (including duplicate `proj_indices`).
+    {
+        let n = 4_096usize; // 8 sub-chunks of 512 rows
+        let schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("input_preview", DataType::Utf8, true),
+            Field::new("small_preview", DataType::Utf8, false),
+        ])
+        .unwrap();
+
+        let words = [
+            "assistant",
+            "observability",
+            "latency",
+            "checkout",
+            "compaction",
+            "evaluator",
+            "telemetry",
+            "retrieval",
+            "embedding",
+            "scheduler",
+            "streaming",
+            "predicate",
+            "partition",
+            "histogram",
+            "dashboard",
+            "tokenizer",
+        ];
+        let mut rng_a = 0xfeed_face_cafe_0001u64;
+        let ids: Vec<i64> = (0..n as i64).collect();
+        let mut previews = Vec::with_capacity(n);
+        let mut preview_valid = Vec::with_capacity(n);
+        let mut smalls = Vec::with_capacity(n);
+        for i in 0..n {
+            if i % 23 == 0 {
+                previews.push(String::new());
+                preview_valid.push(false);
+            } else {
+                let mut body = String::with_capacity(280);
+                for _ in 0..22 {
+                    rng_a = rng_a
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    let w = words[((rng_a >> 56) as usize) % words.len()];
+                    body.push_str(w);
+                    body.push('_');
+                    body.push_str(&format!("{:02x} ", ((rng_a >> 48) & 0xFF) as u8));
+                }
+                previews.push(format!(
+                    "{{\"role\":\"user\",\"turn\":{i},\"model\":\"claude-3-5-sonnet\",\"prompt\":\"{body}req_{i:06}\"}}"
+                ));
+                preview_valid.push(true);
+            }
+            smalls.push(format!("s{i}"));
+        }
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(previews.iter().map(String::as_str)).unwrap(),
+                        ),
+                        Some(Bitmap::from_bools(&preview_valid)),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(smalls.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n,
+        )
+        .unwrap();
+
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts.row_group_size = n;
+        opts.mini_block_size = n;
+        let mut file_bytes = Vec::new();
+        {
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut file_bytes),
+                Arc::clone(&schema),
+                opts,
+                None,
+            )
+            .unwrap();
+            w.write_batch(&batch).unwrap();
+            w.finish().unwrap();
+        }
+
+        let reader = StatamReader::open(Arc::new(SliceReader::new(file_bytes)), None).unwrap();
+        assert_eq!(
+            reader.meta().col_dir[1].locality_group,
+            LocalityGroup::WideRow,
+            "input_preview must be in WideRow locality group"
+        );
+        let blk = &reader.meta().rg_blocks(1, 0)[0];
+        assert_eq!(blk.encoding, Encoding::Fsst);
+        assert_ne!(
+            blk.block_flags & crate::format::BLOCK_FLAG_FSST_SUBCHUNKED,
+            0,
+            "large WideRow Utf8 > 512 rows must set BLOCK_FLAG_FSST_SUBCHUNKED"
+        );
+        assert_eq!(blk.codec, Codec::None);
+        assert!(
+            blk.raw_len >= 128 * 1024,
+            "expected raw_len >= 128 KiB to trigger parallel FSST path, got {}",
+            blk.raw_len
+        );
+
+        // Unfiltered scan, filtered scan (> 1024 rows -> parallel selected FSST), point lookup,
+        // duplicate projections, and take_rows parity across 1T and 8T.
+        let dup_proj = vec![0usize, 1, 1, 2];
+        let dup_schema = Arc::new(schema.project(&dup_proj).unwrap());
+        for (label, req, out_schema) in [
+            (
+                "full_scan",
+                ScanRequest {
+                    read_threads: 1,
+                    ..ScanRequest::default()
+                },
+                Arc::clone(&schema),
+            ),
+            (
+                "filtered_dense_scan",
+                ScanRequest {
+                    predicates: vec![Predicate::new(
+                        "id",
+                        ZonePred::Between(ZoneValue::I64(100), ZoneValue::I64(2_200)),
+                    )],
+                    read_threads: 1,
+                    ..ScanRequest::default()
+                },
+                Arc::clone(&schema),
+            ),
+            (
+                "point_lookup_scan",
+                ScanRequest {
+                    predicates: vec![Predicate::new("id", ZonePred::Eq(ZoneValue::I64(1_337)))],
+                    read_threads: 1,
+                    ..ScanRequest::default()
+                },
+                Arc::clone(&schema),
+            ),
+            (
+                "dup_proj_scan",
+                ScanRequest {
+                    projection: Some(dup_proj),
+                    read_threads: 1,
+                    ..ScanRequest::default()
+                },
+                Arc::clone(&dup_schema),
+            ),
+        ] {
+            let mut req8 = req.clone();
+            req8.read_threads = 8;
+            let b1 = concat_scanned_batches(&out_schema, &reader.scan(&req).unwrap());
+            let b8 = concat_scanned_batches(&out_schema, &reader.scan(&req8).unwrap());
+            assert_eq!(b1.num_rows(), b8.num_rows(), "{label} num_rows");
+            for ci in 0..out_schema.len() {
+                assert_eq!(
+                    b1.column(ci).unwrap().materialize(None).unwrap(),
+                    b8.column(ci).unwrap().materialize(None).unwrap(),
+                    "{label} col {ci} 1T vs 8T mismatch"
+                );
+            }
+        }
+
+        // Verify exact row values on full scan and take_rows.
+        let full8 = concat_scanned_batches(
+            &schema,
+            &reader
+                .scan(&ScanRequest {
+                    read_threads: 8,
+                    ..ScanRequest::default()
+                })
+                .unwrap(),
+        );
+        assert_eq!(
+            full8.column(1).unwrap().materialize(None).unwrap(),
+            batch.column(1).unwrap().materialize(None).unwrap()
+        );
+
+        let take_idxs = [0u64, 23, 511, 512, 1024, 1536, 2559];
+        let t1 = concat_scanned_batches(&schema, &reader.take_rows(&take_idxs, None, 1).unwrap());
+        let t8 = concat_scanned_batches(&schema, &reader.take_rows(&take_idxs, None, 8).unwrap());
+        for ci in 0..schema.len() {
+            assert_eq!(
+                t1.column(ci).unwrap().materialize(None).unwrap(),
+                t8.column(ci).unwrap().materialize(None).unwrap(),
+                "take_rows col {ci} mismatch"
+            );
+        }
+    }
+
+    // ── Part B: Stage-1 `ShreddedResidual` in both `resolve_and_materialize_single_mb_fused`
+    //    and `resolve_and_materialize_take_rg_fused`, covering `ConstNull`, `Const` with
+    //    `residual_count > 0`, `skip_residual`, duplicate projections, and adaptive LZ4 on
+    //    large high-entropy residuals (>= 128 KiB).
+    let build_map_col = |rows: &[Option<Vec<(&str, &str)>>]| -> Column {
+        let mut offs = Vec::with_capacity(rows.len() + 1);
+        offs.push(0u32);
+        let mut keys: Vec<&str> = Vec::new();
+        let mut vals: Vec<&str> = Vec::new();
+        let mut valid_bits = Vec::with_capacity(rows.len());
+        let mut any_null = false;
+        for row in rows {
+            match row {
+                Some(entries) => {
+                    valid_bits.push(true);
+                    for &(k, v) in entries {
+                        keys.push(k);
+                        vals.push(v);
+                    }
+                }
+                None => {
+                    any_null = true;
+                    valid_bits.push(false);
+                }
+            }
+            offs.push(keys.len() as u32);
+        }
+        let map = MapData::try_new(
+            offs,
+            Utf8Data::try_from_slices(keys).unwrap(),
+            Utf8Data::try_from_slices(vals).unwrap(),
+            None,
+        )
+        .unwrap();
+        let nulls = any_null.then(|| Bitmap::from_bools(&valid_bits));
+        Column::Flat(FlatColumn::try_new(FlatData::MapUtf8(Box::new(map)), nulls).unwrap())
+    };
+
+    let n = 128usize; // 2 mini-blocks of 64 rows in multi-MB mode; 1 mini-block of 128 in single-MB mode
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("attrs_large_res", DataType::MapUtf8, true),
+        Field::new("attrs_const_null", DataType::MapUtf8, true),
+        Field::new("attrs_const_with_res", DataType::MapUtf8, true),
+        Field::new("attrs_fast", DataType::MapUtf8, false),
+        Field::new("payload", DataType::Utf8, true),
+    ])
+    .unwrap();
+
+    // Deterministic high-entropy hex strings so large residual >= 128 KiB exercises the adaptive LZ4 probe.
+    let mut rng = 0xdead_beef_cafe_babe_u64;
+    let mut next_rand_str = |len: usize| -> String {
+        let mut s = String::with_capacity(len);
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for _ in 0..len {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            s.push(HEX[((rng >> 60) & 0xF) as usize] as char);
+        }
+        s
+    };
+
+    let mut owned_strings: Vec<String> = Vec::new();
+    for i in 0..n {
+        owned_strings.push(format!("rare_key_{i:04}"));
+        // ~1.4 KiB semi-compressible value per row -> > 160 KiB residual block
+        owned_strings.push(format!(
+            "prefix_ctx_{:02}_{}_tail_marker_{i:04}",
+            i % 4,
+            next_rand_str(1_300)
+        ));
+    }
+
+    let mut large_rows: Vec<Option<Vec<(&str, &str)>>> = Vec::with_capacity(n);
+    let mut const_null_rows: Vec<Option<Vec<(&str, &str)>>> = Vec::with_capacity(n);
+    let mut const_with_res_rows: Vec<Option<Vec<(&str, &str)>>> = Vec::with_capacity(n);
+    let mut fast_rows: Vec<Option<Vec<(&str, &str)>>> = Vec::with_capacity(n);
+    let mut payloads: Vec<String> = Vec::with_capacity(n);
+
+    for i in 0..n {
+        if i % 31 == 0 {
+            large_rows.push(None);
+        } else {
+            let rk = owned_strings[i * 2].as_str();
+            let rv = owned_strings[i * 2 + 1].as_str();
+            large_rows.push(Some(vec![("env", "prod"), (rk, rv)]));
+        }
+
+        // MB 0 (0..64): all-null (`ConstNull`, `stored_len == 0`); MB 1 (64..128): promoted + residual.
+        if i < 64 {
+            const_null_rows.push(None);
+        } else {
+            const_null_rows.push(Some(vec![("k_hot", "v1"), ("k_rare", "r1")]));
+        }
+
+        // MB 0 (0..64): ONLY promoted key -> empty residual (`Encoding::Const`, `stored_len == 0`).
+        // MB 1 (64..128): duplicate promoted key -> spills to residual so `residual_count > 0`!
+        if i < 64 {
+            const_with_res_rows.push(Some(vec![("dup_key", "single")]));
+        } else if i == 64 {
+            const_with_res_rows.push(Some(vec![("dup_key", "a"), ("dup_key", "b")]));
+        } else {
+            const_with_res_rows.push(Some(vec![("dup_key", "single")]));
+        }
+
+        // All non-null, only promoted keys, zero residual -> triggers `skip_residual` fast path!
+        fast_rows.push(Some(vec![("svc", "billing"), ("tier", "gold")]));
+
+        payloads.push(format!(
+            "{{\"row\":{i},\"body\":\"{}\"}}",
+            "external_payload_chunk_text_".repeat(80)
+        ));
+    }
+
+    let ids: Vec<i64> = (0..n as i64).collect();
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            build_map_col(&large_rows),
+            build_map_col(&const_null_rows),
+            build_map_col(&const_with_res_rows),
+            build_map_col(&fast_rows),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(payloads.iter().map(String::as_str)).unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        n,
+    )
+    .unwrap();
+
+    for (mode, mb_size) in [("single_mb_fused", n), ("multi_mb_fused", 64usize)] {
+        let pack_id = if mb_size == n {
+            [0x25u8; 16]
+        } else {
+            [0x26u8; 16]
+        };
+        let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+        opts.row_group_size = n;
+        opts.mini_block_size = mb_size;
+        opts.payload_cols = vec!["payload".to_owned()];
+        opts.pack_id = Some(pack_id);
+        let mut pb = ChunkPackBuilder::new(pack_id, test_pack_opts());
+        let mut file_bytes = Vec::new();
+        {
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut file_bytes),
+                Arc::clone(&schema),
+                opts,
+                Some(&mut pb),
+            )
+            .unwrap();
+            w.write_batch(&batch).unwrap();
+            w.finish().unwrap();
+        }
+        let mut pack_bytes = Vec::new();
+        pb.finish(&mut pack_bytes).unwrap();
+
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert_bytes(pack_id, pack_bytes).unwrap();
+        let reader = StatamReader::open(
+            Arc::new(SliceReader::new(file_bytes)),
+            Some(Arc::new(resolver)),
+        )
+        .unwrap();
+
+        assert!(
+            reader.find_shredded_subcol(1, "env").is_some(),
+            "{mode}: attrs_large_res must be shredded"
+        );
+        assert!(
+            reader.find_shredded_subcol(3, "dup_key").is_some(),
+            "{mode}: attrs_const_with_res must be shredded"
+        );
+        assert!(
+            reader.find_shredded_subcol(4, "svc").is_some(),
+            "{mode}: attrs_fast must be shredded"
+        );
+        if mb_size == 64 {
+            assert_eq!(
+                reader.meta().rg_blocks(2, 0)[0].encoding,
+                Encoding::ConstNull,
+                "MB 0 of attrs_const_null must be ConstNull (stored_len == 0)"
+            );
+            assert_eq!(
+                reader.meta().rg_blocks(3, 0)[0].encoding,
+                Encoding::Const,
+                "MB 0 of attrs_const_with_res must be Const (stored_len == 0) despite residual_count > 0"
+            );
+        }
+
+        // 1. Full scan (exercises `resolve_and_materialize_single_mb_fused` when `mb_size == n`)
+        //    + duplicate projections + `map_keys` (`skip_residual = true` on `attrs_fast`).
+        let dup_proj = vec![0usize, 1, 1, 2, 3, 4, 4, 5, 5];
+        let dup_schema = Arc::new(schema.project(&dup_proj).unwrap());
+        let map_keys_fast = vec![("attrs_fast".to_owned(), "svc".to_owned())];
+
+        for (label, req, out_schema) in [
+            (
+                "full_scan",
+                ScanRequest {
+                    read_threads: 1,
+                    ..ScanRequest::default()
+                },
+                Arc::clone(&schema),
+            ),
+            (
+                "dup_proj_with_skip_residual",
+                ScanRequest {
+                    projection: Some(dup_proj.clone()),
+                    map_keys: map_keys_fast.clone(),
+                    read_threads: 1,
+                    ..ScanRequest::default()
+                },
+                Arc::clone(&dup_schema),
+            ),
+            (
+                "sparse_point_scan",
+                ScanRequest {
+                    predicates: vec![Predicate::new("id", ZonePred::Eq(ZoneValue::I64(64)))],
+                    read_threads: 1,
+                    ..ScanRequest::default()
+                },
+                Arc::clone(&schema),
+            ),
+        ] {
+            let mut req8 = req.clone();
+            req8.read_threads = 8;
+            let b1 = concat_scanned_batches(&out_schema, &reader.scan(&req).unwrap());
+            let b8 = concat_scanned_batches(&out_schema, &reader.scan(&req8).unwrap());
+            assert_eq!(b1.num_rows(), b8.num_rows(), "{mode}/{label} rows");
+            for ci in 0..out_schema.len() {
+                let c1 = b1.column(ci).unwrap().materialize(None).unwrap();
+                let c8 = b8.column(ci).unwrap().materialize(None).unwrap();
+                assert_eq!(c1, c8, "{mode}/{label} col {ci} 1T vs 8T mismatch");
+            }
+        }
+
+        // 2. Fused `take_rows` (both normal & duplicate `proj_indices`) across MB 0 and MB 1.
+        let take_rows_list = [0u64, 1, 31, 63, 64, 65, 93, 127];
+        for (label, proj_opt, out_schema) in [
+            ("take_all", None, Arc::clone(&schema)),
+            (
+                "take_dup_proj",
+                Some(dup_proj.as_slice()),
+                Arc::clone(&dup_schema),
+            ),
+        ] {
+            let t1 = concat_scanned_batches(
+                &out_schema,
+                &reader.take_rows(&take_rows_list, proj_opt, 1).unwrap(),
+            );
+            let t8 = concat_scanned_batches(
+                &out_schema,
+                &reader.take_rows(&take_rows_list, proj_opt, 8).unwrap(),
+            );
+            assert_eq!(t1.num_rows(), take_rows_list.len(), "{mode}/{label} rows");
+            for ci in 0..out_schema.len() {
+                assert_eq!(
+                    t1.column(ci).unwrap().materialize(None).unwrap(),
+                    t8.column(ci).unwrap().materialize(None).unwrap(),
+                    "{mode}/{label} col {ci} 1T vs 8T mismatch"
+                );
+            }
+        }
+    }
+}

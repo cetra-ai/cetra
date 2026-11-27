@@ -12,9 +12,14 @@ use crate::codec::nested::{
     ShreddedSubCol, decode_shredded_residual_block_selected, decode_shredded_subcol_selected,
     decode_single_map_key, unshred_map_selected,
 };
-use crate::codec::{decode_mini_block_selected, decode_mini_block_take};
-use crate::format::{COL_FLAG_HAS_FILE_DICT, Encoding, LocalityGroup, MAX_BATCH_DECODED_BYTES};
-use crate::parallel::{MAX_PARALLEL_THREADS, parallel_map_in_order_static};
+use crate::codec::{
+    decode_mini_block_selected, decode_mini_block_selected_parallel_bytes, decode_mini_block_take,
+};
+use crate::format::{
+    BLOCK_FLAG_FSST_SUBCHUNKED, COL_FLAG_HAS_FILE_DICT, Encoding, LocalityGroup,
+    MAX_BATCH_DECODED_BYTES,
+};
+use crate::parallel::{MAX_PARALLEL_THREADS, in_parallel_scope, parallel_map_in_order_static};
 use crate::payload::{decode_payload_refs_flat, decode_payload_refs_selected};
 
 use super::eval::filter_residual_to_keys;
@@ -452,8 +457,12 @@ fn materialize_phase2_mb_with_meta(
             }
         }
 
+        let can_parallel_fsst =
+            !in_parallel_scope() && (mask.all_ones() || mask.count_ones() >= 1024);
         let mut slots: Vec<Option<Column>> = vec![None; proj_indices.len()];
-        let mut parallel_tasks: Vec<(usize, usize, Option<Arc<FileDict>>)> = Vec::new();
+        let mut regular_tasks: Vec<(usize, usize, Option<Arc<FileDict>>)> = Vec::new();
+        let mut large_fsst_tasks: Vec<(usize, Vec<usize>)> = Vec::new();
+        let mut large_fsst_pos: HashMap<usize, usize> = HashMap::new();
         for (pos, &cidx) in proj_indices.iter().enumerate() {
             let dt = &fields[cidx].data_type;
             let cd = &meta.col_dir[cidx];
@@ -474,20 +483,36 @@ fn materialize_phase2_mb_with_meta(
                     &decoded_subs,
                 )?);
             } else {
-                parallel_tasks.push((pos, cidx, pre_dicts.get(&cidx).map(Arc::clone)));
+                let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                if can_parallel_fsst
+                    && blk.encoding == Encoding::Fsst
+                    && (blk.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0
+                    && matches!(dt, DataType::Utf8 | DataType::Binary)
+                    && blk.raw_len >= 128 * 1024
+                {
+                    if let Some(&idx) = large_fsst_pos.get(&cidx) {
+                        large_fsst_tasks[idx].1.push(pos);
+                    } else {
+                        let idx = large_fsst_tasks.len();
+                        large_fsst_pos.insert(cidx, idx);
+                        large_fsst_tasks.push((cidx, vec![pos]));
+                    }
+                } else {
+                    regular_tasks.push((pos, cidx, pre_dicts.get(&cidx).map(Arc::clone)));
+                }
             }
         }
 
-        let task_work_bytes: usize = parallel_tasks
+        let task_work_bytes: usize = regular_tasks
             .iter()
             .map(|&(_, cidx, _)| meta.rg_blocks(cidx, rg_idx)[mb_idx].raw_len as usize)
             .fold(0usize, usize::saturating_add);
-        let task_workers = if parallel_tasks.len() >= 16 {
+        let task_workers = if regular_tasks.len() >= 16 {
             threads
         } else {
             effective_read_threads(task_work_bytes, threads)
         };
-        if parallel_tasks.len() >= 4 && task_workers > 1 {
+        if regular_tasks.len() >= 4 && task_workers > 1 {
             let meta_arc = Arc::clone(meta);
             let plan_arc = Arc::clone(plan);
             let map_keys_arc = Arc::clone(map_keys_by_col);
@@ -495,7 +520,7 @@ fn materialize_phase2_mb_with_meta(
             let mask_arc = Arc::new(mask.clone());
             let block_reader = read_block.clone();
             let decoded_cols = parallel_map_in_order_static(
-                parallel_tasks,
+                regular_tasks,
                 task_workers,
                 move |(pos, cidx, dict)| {
                     let col = decode_uncached_p2_non_payload_col_with_meta(
@@ -518,7 +543,7 @@ fn materialize_phase2_mb_with_meta(
                 slots[pos] = Some(col);
             }
         } else {
-            for (pos, cidx, dict) in parallel_tasks {
+            for (pos, cidx, dict) in regular_tasks {
                 slots[pos] = Some(decode_uncached_p2_non_payload_col_with_meta(
                     meta,
                     rg_idx,
@@ -532,6 +557,22 @@ fn materialize_phase2_mb_with_meta(
                     dict.as_deref(),
                     read_block,
                 )?);
+            }
+        }
+
+        // Large sub-chunked FSST columns run at top level (outside `in_parallel_scope()`) so
+        // they fan out across all `threads` workers per column via zero-copy `Bytes`.
+        for (cidx, positions) in large_fsst_tasks {
+            let dt = &fields[cidx].data_type;
+            let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
+            let raw_bytes = read_block.read_block_bytes(blk)?;
+            let col =
+                decode_mini_block_selected_parallel_bytes(raw_bytes, blk, dt, None, mask, threads)?;
+            if let Some((&last_pos, rest)) = positions.split_last() {
+                for &pos in rest {
+                    slots[pos] = Some(col.clone());
+                }
+                slots[last_pos] = Some(col);
             }
         }
 

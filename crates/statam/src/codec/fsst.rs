@@ -9,11 +9,15 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::BuildHasherDefault;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use bytes::Bytes;
 use cetra_column::{BinaryData, Bitmap, Utf8Data};
 
 use crate::codec::WriteProfile;
 use crate::format::{Codec, MAX_DECOMPRESS_RATIO, MAX_DECOMPRESS_SLACK, check_decompress_bounds};
+use crate::parallel::{in_parallel_scope, parallel_map_in_order_static_with_ctx};
 use crate::simd::bitpack::{min_bits_u32, pack_u32, packed_bytes_len, unpack_u32};
 use crate::{MAX_BLOCK_RAW_BYTES, StatamError};
 
@@ -31,7 +35,7 @@ pub const FSST_MAX_SYM_LEN: usize = 8;
 pub const FSST_SUBCHUNK_ROWS: u16 = 512;
 
 /// Minimum row count (`> 512`) required to trigger sub-chunked FSST encoding.
-const FSST_SUBCHUNK_MIN_ROWS: usize = 512;
+pub(crate) const FSST_SUBCHUNK_MIN_ROWS: usize = 512;
 
 /// Minimum FSST-coded payload byte length (`>= 16 KiB`) required to trigger sub-chunked encoding.
 const FSST_SUBCHUNK_MIN_CODED_BYTES: usize = 16 * 1024;
@@ -707,7 +711,7 @@ pub fn encode_fsst_body(values: &[&[u8]]) -> Result<Option<Vec<u8>>, StatamError
 /// Encodes `values` (without leading row null bitmap) using FSST, switching to
 /// `512`-row adaptive `LZ4`/`Zstd`/`None` sub-chunks (`bool == true`) when
 /// `values.len() > 512`, `coded_bytes.len() >= 16_384`, and (for `L1Compact`)
-/// sub-chunked output is within `+10%` of whole-block Zstd.
+/// sub-chunked output passes the bounded whole-block Zstd overhead guard.
 ///
 /// The existing `>= 1.15x` FSST gain threshold is checked BEFORE sub-chunk
 /// compression so strings that do not benefit from FSST still fall back to `Plain`.
@@ -718,10 +722,15 @@ pub(crate) fn encode_fsst_body_adaptive(
     encode_fsst_body_impl(values, Some(profile))
 }
 
-fn encode_fsst_body_impl(
-    values: &[&[u8]],
-    subchunk_profile: Option<WriteProfile>,
-) -> Result<Option<(Vec<u8>, bool)>, StatamError> {
+struct EncodedFsstRows {
+    table: FsstTable,
+    row_lens: Vec<u32>,
+    len_bw: u8,
+    single_chunk_len: usize,
+    coded_bytes: Vec<u8>,
+}
+
+fn train_and_encode_fsst_rows(values: &[&[u8]]) -> Result<Option<EncodedFsstRows>, StatamError> {
     if values.is_empty() {
         return Ok(None);
     }
@@ -778,19 +787,36 @@ fn encode_fsst_body_impl(
         return Ok(None);
     }
 
+    Ok(Some(EncodedFsstRows {
+        table,
+        row_lens,
+        len_bw,
+        single_chunk_len,
+        coded_bytes,
+    }))
+}
+
+fn encode_fsst_body_impl(
+    values: &[&[u8]],
+    subchunk_profile: Option<WriteProfile>,
+) -> Result<Option<(Vec<u8>, bool)>, StatamError> {
+    let Some(enc) = train_and_encode_fsst_rows(values)? else {
+        return Ok(None);
+    };
+
     if let Some(profile) = subchunk_profile
         && values.len() > FSST_SUBCHUNK_MIN_ROWS
-        && coded_bytes.len() >= FSST_SUBCHUNK_MIN_CODED_BYTES
+        && enc.coded_bytes.len() >= FSST_SUBCHUNK_MIN_CODED_BYTES
     {
         let subchunk_rows = usize::from(FSST_SUBCHUNK_ROWS);
         let num_chunks = values.len().div_ceil(subchunk_rows);
         if let Ok(num_chunks_u16) = u16::try_from(num_chunks) {
             let (out, is_subchunked) = encode_fsst_subchunked(
-                &table,
-                &row_lens,
-                len_bw,
-                single_chunk_len,
-                &coded_bytes,
+                &enc.table,
+                &enc.row_lens,
+                enc.len_bw,
+                enc.single_chunk_len,
+                &enc.coded_bytes,
                 FSST_SUBCHUNK_ROWS,
                 num_chunks_u16,
                 profile,
@@ -799,29 +825,42 @@ fn encode_fsst_body_impl(
         }
     }
 
-    let mut out = Vec::with_capacity(single_chunk_len);
-    table.write_header(&mut out);
-    out.push(len_bw);
-    pack_u32(&row_lens, len_bw, &mut out)?;
-    out.extend_from_slice(&coded_bytes);
+    let mut out = Vec::with_capacity(enc.single_chunk_len);
+    enc.table.write_header(&mut out);
+    out.push(enc.len_bw);
+    pack_u32(&enc.row_lens, enc.len_bw, &mut out)?;
+    out.extend_from_slice(&enc.coded_bytes);
 
     Ok(Some((out, false)))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn encode_fsst_subchunked(
-    table: &FsstTable,
-    row_lens: &[u32],
-    len_bw: u8,
-    single_chunk_len: usize,
-    coded_bytes: &[u8],
-    subchunk_rows: u16,
-    num_chunks: u16,
+/// Encodes `values` (without leading row null bitmap) strictly as sub-chunked FSST for
+/// `WideRow` `L1Compact` columns, skipping whole-block single-chunk FSST construction and Zstd.
+///
+/// Returns `Ok(None)` if `values.len() <= FSST_SUBCHUNK_MIN_ROWS`, FSST achieves `< 1.15x`
+/// gain, `coded_bytes.len() < FSST_SUBCHUNK_MIN_CODED_BYTES`, or (outside Miri) the
+/// sub-chunked output plus `nulls_prefix_len` exceeds `115%` of `plain_with_nulls_for_guard`
+/// compressed with Zstd(3).
+pub(crate) fn encode_fsst_subchunked_only(
+    values: &[&[u8]],
     profile: WriteProfile,
-) -> Result<(Vec<u8>, bool), StatamError> {
-    let subchunk_rows_usize = usize::from(subchunk_rows);
-    let num_chunks_usize = usize::from(num_chunks);
-    let row_count = row_lens.len();
+    plain_with_nulls_for_guard: &[u8],
+    nulls_prefix_len: usize,
+) -> Result<Option<Vec<u8>>, StatamError> {
+    if values.len() <= FSST_SUBCHUNK_MIN_ROWS {
+        return Ok(None);
+    }
+    let Some(enc) = train_and_encode_fsst_rows(values)? else {
+        return Ok(None);
+    };
+    if enc.coded_bytes.len() < FSST_SUBCHUNK_MIN_CODED_BYTES {
+        return Ok(None);
+    }
+    let subchunk_rows_usize = usize::from(FSST_SUBCHUNK_ROWS);
+    let num_chunks = values.len().div_ceil(subchunk_rows_usize);
+    let Ok(num_chunks_u16) = u16::try_from(num_chunks) else {
+        return Ok(None);
+    };
 
     #[cfg(not(miri))]
     let mut zstd_comp = if profile == WriteProfile::L1Compact {
@@ -834,12 +873,89 @@ fn encode_fsst_subchunked(
         None
     };
 
+    let sub = compress_fsst_subchunks(
+        &enc.table,
+        &enc.row_lens,
+        &enc.coded_bytes,
+        FSST_SUBCHUNK_ROWS,
+        num_chunks_u16,
+        profile,
+        #[cfg(not(miri))]
+        &mut zstd_comp,
+    )?;
+
+    #[cfg(not(miri))]
+    if let Some(comp) = zstd_comp.as_mut() {
+        let plain_len = plain_with_nulls_for_guard.len();
+        let effective_plain_zstd_len = if plain_len == 0 {
+            0
+        } else {
+            let plain_zstd =
+                comp.compress(plain_with_nulls_for_guard)
+                    .map_err(|_| StatamError::Corrupt {
+                        reason: "fsst plain guard zstd compression failed",
+                    })?;
+            let pz_len = plain_zstd.len();
+            let ratio_ok = (plain_len as u64)
+                <= (pz_len as u64)
+                    .saturating_mul(MAX_DECOMPRESS_RATIO)
+                    .saturating_add(MAX_DECOMPRESS_SLACK);
+            if pz_len.saturating_add(16) < plain_len && ratio_ok {
+                pz_len
+            } else {
+                plain_len
+            }
+        };
+        let subchunked_total_with_nulls = sub.total_out.saturating_add(nulls_prefix_len);
+        if (subchunked_total_with_nulls as u64).saturating_mul(100)
+            > (effective_plain_zstd_len as u64).saturating_mul(115)
+        {
+            return Ok(None);
+        }
+    }
+    #[cfg(miri)]
+    let _ = (plain_with_nulls_for_guard, nulls_prefix_len);
+
+    Ok(Some(assemble_fsst_subchunked(
+        &enc.table,
+        FSST_SUBCHUNK_ROWS,
+        num_chunks_u16,
+        sub,
+    )))
+}
+
+struct CompressedSubchunks {
+    entries: Vec<(Codec, u32, u32)>,
+    payloads: Vec<u8>,
+    total_out: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compress_fsst_subchunks(
+    table: &FsstTable,
+    row_lens: &[u32],
+    coded_bytes: &[u8],
+    subchunk_rows: u16,
+    num_chunks: u16,
+    profile: WriteProfile,
+    #[cfg(not(miri))] zstd_comp: &mut Option<zstd::bulk::Compressor<'static>>,
+) -> Result<CompressedSubchunks, StatamError> {
+    let subchunk_rows_usize = usize::from(subchunk_rows);
+    let num_chunks_usize = usize::from(num_chunks);
+    let row_count = row_lens.len();
+
     let mut entries: Vec<(Codec, u32, u32)> = Vec::with_capacity(num_chunks_usize);
     let mut payloads: Vec<u8> = Vec::with_capacity(coded_bytes.len());
     let mut sub_raw: Vec<u8> =
         Vec::with_capacity(coded_bytes.len() / num_chunks_usize.max(1) + 512);
     let mut coded_pos = 0usize;
     let mut total_sub_raw = 0usize;
+
+    let zstd_max_pct: u64 = if profile == WriteProfile::L1Compact {
+        96
+    } else {
+        88
+    };
 
     for chunk_idx in 0..num_chunks_usize {
         let row_start = chunk_idx * subchunk_rows_usize;
@@ -903,7 +1019,8 @@ fn encode_fsst_subchunked(
 
         let zstd_ok = zstd_buf.as_ref().is_some_and(|zb| {
             ratio_ok(zb.len())
-                && (zb.len() as u64).saturating_mul(100) <= (raw_len as u64).saturating_mul(88)
+                && (zb.len() as u64).saturating_mul(100)
+                    <= (raw_len as u64).saturating_mul(zstd_max_pct)
         });
 
         let use_lz4 = lz4_ok
@@ -940,6 +1057,65 @@ fn encode_fsst_subchunked(
         });
     }
 
+    Ok(CompressedSubchunks {
+        entries,
+        payloads,
+        total_out,
+    })
+}
+
+fn assemble_fsst_subchunked(
+    table: &FsstTable,
+    subchunk_rows: u16,
+    num_chunks: u16,
+    sub: CompressedSubchunks,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(sub.total_out);
+    table.write_header(&mut out);
+    out.extend_from_slice(&subchunk_rows.to_le_bytes());
+    out.extend_from_slice(&num_chunks.to_le_bytes());
+    for (codec, raw_len, stored_end) in sub.entries {
+        out.push(codec as u8);
+        out.extend_from_slice(&raw_len.to_le_bytes());
+        out.extend_from_slice(&stored_end.to_le_bytes());
+    }
+    out.extend_from_slice(&sub.payloads);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_fsst_subchunked(
+    table: &FsstTable,
+    row_lens: &[u32],
+    len_bw: u8,
+    single_chunk_len: usize,
+    coded_bytes: &[u8],
+    subchunk_rows: u16,
+    num_chunks: u16,
+    profile: WriteProfile,
+) -> Result<(Vec<u8>, bool), StatamError> {
+    #[cfg(not(miri))]
+    let mut zstd_comp = if profile == WriteProfile::L1Compact {
+        Some(
+            zstd::bulk::Compressor::new(3).map_err(|_| StatamError::Corrupt {
+                reason: "fsst subchunk zstd compressor init failed",
+            })?,
+        )
+    } else {
+        None
+    };
+
+    let sub = compress_fsst_subchunks(
+        table,
+        row_lens,
+        coded_bytes,
+        subchunk_rows,
+        num_chunks,
+        profile,
+        #[cfg(not(miri))]
+        &mut zstd_comp,
+    )?;
+
     #[cfg(not(miri))]
     if let Some(comp) = zstd_comp.as_mut() {
         let mut single_out = Vec::with_capacity(single_chunk_len);
@@ -953,24 +1129,22 @@ fn encode_fsst_subchunked(
                 reason: "fsst whole-block zstd compression failed",
             })?
             .len();
-        if (total_out as u64).saturating_mul(100) > (whole_zstd_len as u64).saturating_mul(110) {
+        let within_pct = (sub.total_out as u64).saturating_mul(100)
+            <= (whole_zstd_len as u64).saturating_mul(115);
+        let within_small_cap = (sub.total_out as u64).saturating_mul(100)
+            <= (whole_zstd_len as u64).saturating_mul(130)
+            && sub.total_out <= whole_zstd_len.saturating_add(8 * 1024);
+        if !within_pct && !within_small_cap {
             return Ok((single_out, false));
         }
     }
     #[cfg(miri)]
     let _ = (len_bw, single_chunk_len);
 
-    let mut out = Vec::with_capacity(total_out);
-    table.write_header(&mut out);
-    out.extend_from_slice(&subchunk_rows.to_le_bytes());
-    out.extend_from_slice(&num_chunks.to_le_bytes());
-    for (codec, raw_len, stored_end) in entries {
-        out.push(codec as u8);
-        out.extend_from_slice(&raw_len.to_le_bytes());
-        out.extend_from_slice(&stored_end.to_le_bytes());
-    }
-    out.extend_from_slice(&payloads);
-    Ok((out, true))
+    Ok((
+        assemble_fsst_subchunked(table, subchunk_rows, num_chunks, sub),
+        true,
+    ))
 }
 
 /// Decoded `(offsets, raw_bytes, optional_null_bitmap)` returned by [`FsstBlockView::decode_selected`].
@@ -2068,6 +2242,433 @@ impl<'a> FsstSubchunkedView<'a> {
         Ok((out_offsets, out_bytes, Some(out_nulls)))
     }
 
+    /// Decodes all rows across sub-chunks in parallel on the persistent `WorkerPool`,
+    /// sharing an atomic `decoded_total` DoS budget across workers.
+    pub(crate) fn decode_all_parallel_bytes(
+        body: Bytes,
+        payload_base: usize,
+        row_count: usize,
+        max_total_bytes: usize,
+        threads: usize,
+    ) -> Result<(Vec<u32>, Vec<u8>), StatamError> {
+        const CHARGE_GRANULARITY: usize = 64 * 1024;
+
+        struct AllSubchunkTask {
+            meta: SubchunkMeta,
+            chunk_rows: usize,
+        }
+
+        struct ParallelSubchunkCtx {
+            body: Bytes,
+            payload_start: usize,
+            table: Arc<FsstDecodeTable>,
+            max_bytes: usize,
+            decoded_total: AtomicUsize,
+        }
+
+        let max_bytes = max_total_bytes.min(MAX_BLOCK_RAW_BYTES);
+        let (table, subchunk_rows, chunks, payload_start) = {
+            let src = body.get(payload_base..).ok_or(StatamError::Corrupt {
+                reason: "fsst payload base out of bounds",
+            })?;
+            let view = FsstSubchunkedView::parse(src, row_count)?;
+            let sum_raw: usize = view.chunks.iter().map(|c| c.raw_len as usize).sum();
+            if row_count == 0
+                || threads <= 1
+                || in_parallel_scope()
+                || view.chunks.len() < 4
+                || sum_raw < 128 * 1024
+            {
+                return view.decode_all_with_limit(max_bytes);
+            }
+            let payload_rel =
+                src.len()
+                    .checked_sub(view.payload.len())
+                    .ok_or(StatamError::Corrupt {
+                        reason: "fsst payload relative offset underflow",
+                    })?;
+            let payload_start =
+                payload_base
+                    .checked_add(payload_rel)
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "fsst payload start offset overflow",
+                    })?;
+            (view.table, view.subchunk_rows, view.chunks, payload_start)
+        };
+
+        let mut tasks = Vec::with_capacity(chunks.len());
+        for (chunk_idx, meta) in chunks.into_iter().enumerate() {
+            let chunk_start = chunk_idx * subchunk_rows;
+            let chunk_end = (chunk_start + subchunk_rows).min(row_count);
+            tasks.push(AllSubchunkTask {
+                meta,
+                chunk_rows: chunk_end - chunk_start,
+            });
+        }
+
+        let ctx = ParallelSubchunkCtx {
+            body,
+            payload_start,
+            table: Arc::new(table),
+            max_bytes,
+            decoded_total: AtomicUsize::new(0),
+        };
+
+        let chunk_outputs: Vec<(Vec<u32>, Vec<u8>)> =
+            parallel_map_in_order_static_with_ctx(ctx, tasks, threads, |ctx, worker| {
+                worker.run_with_init(
+                    || Ok((SubchunkDecompressor::new(), Vec::new())),
+                    |(decomp, chunk_offsets), task| {
+                        let payload =
+                            ctx.body
+                                .get(ctx.payload_start..)
+                                .ok_or(StatamError::Corrupt {
+                                    reason: "fsst parallel payload out of bounds",
+                                })?;
+                        let raw_chunk = decomp.decompress(task.meta, payload)?;
+                        let coded =
+                            parse_subchunk_offsets(raw_chunk, task.chunk_rows, chunk_offsets)?;
+                        let initial_cap = ((task.meta.raw_len as usize).saturating_mul(2) + 64)
+                            .min(ctx.max_bytes)
+                            + FSST_DECODE_SLACK;
+                        let mut chunk_bytes = vec![0u8; initial_cap];
+                        let mut row_lens = Vec::with_capacity(task.chunk_rows);
+                        let mut pos = 0usize;
+                        let mut charged = 0usize;
+
+                        for local_row in 0..task.chunk_rows {
+                            let row_start = pos;
+                            let start = chunk_offsets[local_row] as usize;
+                            let end = chunk_offsets[local_row + 1] as usize;
+                            ctx.table.decode_row_fast(
+                                &coded[start..end],
+                                &mut chunk_bytes,
+                                &mut pos,
+                                ctx.max_bytes,
+                                true,
+                            )?;
+                            if pos > ctx.max_bytes {
+                                return Err(StatamError::BoundsExceeded {
+                                    reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                                });
+                            }
+                            let uncharged = pos.saturating_sub(charged);
+                            if uncharged >= CHARGE_GRANULARITY {
+                                let prev = ctx.decoded_total.fetch_add(uncharged, Ordering::AcqRel);
+                                charged = pos;
+                                if prev.saturating_add(uncharged) > ctx.max_bytes {
+                                    return Err(StatamError::BoundsExceeded {
+                                        reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                                    });
+                                }
+                            }
+                            let rlen = u32::try_from(pos - row_start).map_err(|_| {
+                                StatamError::BoundsExceeded {
+                                    reason: "fsst decoded size exceeds u32::MAX",
+                                }
+                            })?;
+                            row_lens.push(rlen);
+                        }
+
+                        let rem = pos.saturating_sub(charged);
+                        if rem > 0 {
+                            let prev = ctx.decoded_total.fetch_add(rem, Ordering::AcqRel);
+                            if prev.saturating_add(rem) > ctx.max_bytes {
+                                return Err(StatamError::BoundsExceeded {
+                                    reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                                });
+                            }
+                        }
+                        chunk_bytes.truncate(pos);
+                        Ok((row_lens, chunk_bytes))
+                    },
+                )
+            })?;
+
+        let mut total_bytes = 0usize;
+        for (_, chunk_bytes) in &chunk_outputs {
+            total_bytes =
+                total_bytes
+                    .checked_add(chunk_bytes.len())
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                    })?;
+            if total_bytes > max_bytes {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                });
+            }
+        }
+        let _ = u32::try_from(total_bytes).map_err(|_| StatamError::BoundsExceeded {
+            reason: "fsst decoded size exceeds u32::MAX",
+        })?;
+
+        let mut out_offsets = Vec::with_capacity(row_count + 1);
+        out_offsets.push(0u32);
+        let mut out_bytes = Vec::with_capacity(total_bytes);
+        let mut cur_off = 0u32;
+        for (row_lens, chunk_bytes) in chunk_outputs {
+            out_bytes.extend_from_slice(&chunk_bytes);
+            for rlen in row_lens {
+                cur_off = cur_off
+                    .checked_add(rlen)
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "fsst decoded size exceeds u32::MAX",
+                    })?;
+                out_offsets.push(cur_off);
+            }
+        }
+        Ok((out_offsets, out_bytes))
+    }
+
+    /// Decodes only `mask`-selected non-null rows across touched sub-chunks in parallel on the
+    /// persistent `WorkerPool`, sharing an atomic `decoded_total` DoS budget across workers.
+    pub(crate) fn decode_selected_parallel_bytes(
+        body: Bytes,
+        payload_base: usize,
+        row_count: usize,
+        mask: &Bitmap,
+        nulls: Option<&Bitmap>,
+        max_total_bytes: usize,
+        threads: usize,
+    ) -> Result<FsstSelectedRows, StatamError> {
+        const CHARGE_GRANULARITY: usize = 64 * 1024;
+
+        struct SelectedSubchunkTask {
+            chunk_start: usize,
+            meta: SubchunkMeta,
+            chunk_rows: usize,
+            active_non_null_local_rows: Vec<u16>,
+        }
+
+        struct ParallelSubchunkCtx {
+            body: Bytes,
+            payload_start: usize,
+            table: Arc<FsstDecodeTable>,
+            max_bytes: usize,
+            decoded_total: AtomicUsize,
+        }
+
+        let max_bytes = max_total_bytes.min(MAX_BLOCK_RAW_BYTES);
+        if mask.len() != row_count {
+            return Err(StatamError::Corrupt {
+                reason: "selection mask length mismatch",
+            });
+        }
+        if nulls.is_some_and(|bm| bm.len() != row_count) {
+            return Err(StatamError::Corrupt {
+                reason: "null bitmap length mismatch",
+            });
+        }
+
+        let (table, tasks, payload_start) = {
+            let src = body.get(payload_base..).ok_or(StatamError::Corrupt {
+                reason: "fsst payload base out of bounds",
+            })?;
+            let view = FsstSubchunkedView::parse(src, row_count)?;
+            if row_count == 0 || threads <= 1 || in_parallel_scope() {
+                return view.decode_selected_with_limit(mask, nulls, max_bytes);
+            }
+            if mask.count_ones() == 0 {
+                return Ok((
+                    vec![0u32; row_count + 1],
+                    Vec::new(),
+                    Some(Bitmap::new_zeroed(row_count)),
+                ));
+            }
+
+            let mut tasks: Vec<SelectedSubchunkTask> = Vec::new();
+            let mut touched_raw_bytes = 0usize;
+            let mut iter = mask.iter_ones().take_while(|&r| r < row_count).peekable();
+            while let Some(&first_row) = iter.peek() {
+                let chunk_idx = first_row / view.subchunk_rows;
+                let chunk_start = chunk_idx * view.subchunk_rows;
+                let chunk_end = (chunk_start + view.subchunk_rows).min(row_count);
+                let mut active_non_null_local_rows: Vec<u16> = Vec::new();
+                while let Some(&r) = iter.peek() {
+                    if r >= chunk_end {
+                        break;
+                    }
+                    let _ = iter.next();
+                    if nulls.is_none_or(|bm| bm.get(r)) {
+                        debug_assert!(r - chunk_start <= usize::from(u16::MAX));
+                        active_non_null_local_rows.push((r - chunk_start) as u16);
+                    }
+                }
+                if !active_non_null_local_rows.is_empty() {
+                    let meta = view.chunks[chunk_idx];
+                    touched_raw_bytes = touched_raw_bytes.saturating_add(meta.raw_len as usize);
+                    tasks.push(SelectedSubchunkTask {
+                        chunk_start,
+                        meta,
+                        chunk_rows: chunk_end - chunk_start,
+                        active_non_null_local_rows,
+                    });
+                }
+            }
+            if tasks.is_empty() {
+                return Ok((
+                    vec![0u32; row_count + 1],
+                    Vec::new(),
+                    Some(Bitmap::new_zeroed(row_count)),
+                ));
+            }
+            if tasks.len() < 4 || touched_raw_bytes < 128 * 1024 {
+                return view.decode_selected_with_limit(mask, nulls, max_bytes);
+            }
+            let payload_rel =
+                src.len()
+                    .checked_sub(view.payload.len())
+                    .ok_or(StatamError::Corrupt {
+                        reason: "fsst payload relative offset underflow",
+                    })?;
+            let payload_start =
+                payload_base
+                    .checked_add(payload_rel)
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "fsst payload start offset overflow",
+                    })?;
+            (view.table, tasks, payload_start)
+        };
+
+        struct SelectedSubchunkOut {
+            chunk_start: usize,
+            active_locals: Vec<u16>,
+            row_lens: Vec<u32>,
+            chunk_bytes: Vec<u8>,
+        }
+
+        let ctx = ParallelSubchunkCtx {
+            body,
+            payload_start,
+            table: Arc::new(table),
+            max_bytes,
+            decoded_total: AtomicUsize::new(0),
+        };
+
+        let chunk_outputs: Vec<SelectedSubchunkOut> =
+            parallel_map_in_order_static_with_ctx(ctx, tasks, threads, |ctx, worker| {
+                worker.run_with_init(
+                    || Ok((SubchunkDecompressor::new(), Vec::new())),
+                    |(decomp, chunk_offsets), task| {
+                        let payload =
+                            ctx.body
+                                .get(ctx.payload_start..)
+                                .ok_or(StatamError::Corrupt {
+                                    reason: "fsst parallel payload out of bounds",
+                                })?;
+                        let raw_chunk = decomp.decompress(task.meta, payload)?;
+                        let coded =
+                            parse_subchunk_offsets(raw_chunk, task.chunk_rows, chunk_offsets)?;
+                        let initial_cap = ((task.meta.raw_len as usize).saturating_mul(2) + 64)
+                            .min(ctx.max_bytes)
+                            + FSST_DECODE_SLACK;
+                        let mut chunk_bytes = vec![0u8; initial_cap];
+                        let mut row_lens =
+                            Vec::with_capacity(task.active_non_null_local_rows.len());
+                        let mut pos = 0usize;
+                        let mut charged = 0usize;
+
+                        for &local_u16 in &task.active_non_null_local_rows {
+                            let local = usize::from(local_u16);
+                            let row_start = pos;
+                            let start = chunk_offsets[local] as usize;
+                            let end = chunk_offsets[local + 1] as usize;
+                            ctx.table.decode_row_fast(
+                                &coded[start..end],
+                                &mut chunk_bytes,
+                                &mut pos,
+                                ctx.max_bytes,
+                                true,
+                            )?;
+                            if pos > ctx.max_bytes {
+                                return Err(StatamError::BoundsExceeded {
+                                    reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                                });
+                            }
+                            let uncharged = pos.saturating_sub(charged);
+                            if uncharged >= CHARGE_GRANULARITY {
+                                let prev = ctx.decoded_total.fetch_add(uncharged, Ordering::AcqRel);
+                                charged = pos;
+                                if prev.saturating_add(uncharged) > ctx.max_bytes {
+                                    return Err(StatamError::BoundsExceeded {
+                                        reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                                    });
+                                }
+                            }
+                            let rlen = u32::try_from(pos - row_start).map_err(|_| {
+                                StatamError::BoundsExceeded {
+                                    reason: "fsst decoded size exceeds u32::MAX",
+                                }
+                            })?;
+                            row_lens.push(rlen);
+                        }
+
+                        let rem = pos.saturating_sub(charged);
+                        if rem > 0 {
+                            let prev = ctx.decoded_total.fetch_add(rem, Ordering::AcqRel);
+                            if prev.saturating_add(rem) > ctx.max_bytes {
+                                return Err(StatamError::BoundsExceeded {
+                                    reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                                });
+                            }
+                        }
+                        chunk_bytes.truncate(pos);
+                        Ok(SelectedSubchunkOut {
+                            chunk_start: task.chunk_start,
+                            active_locals: task.active_non_null_local_rows,
+                            row_lens,
+                            chunk_bytes,
+                        })
+                    },
+                )
+            })?;
+
+        let mut total_bytes = 0usize;
+        for out in &chunk_outputs {
+            total_bytes = total_bytes.checked_add(out.chunk_bytes.len()).ok_or(
+                StatamError::BoundsExceeded {
+                    reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                },
+            )?;
+            if total_bytes > max_bytes {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                });
+            }
+        }
+        let _ = u32::try_from(total_bytes).map_err(|_| StatamError::BoundsExceeded {
+            reason: "fsst decoded size exceeds u32::MAX",
+        })?;
+
+        let mut out_offsets = Vec::with_capacity(row_count + 1);
+        out_offsets.push(0u32);
+        let mut out_bytes = Vec::with_capacity(total_bytes);
+        let mut out_nulls = Bitmap::new_zeroed(row_count);
+        let mut cur_off = 0u32;
+
+        for out in chunk_outputs {
+            out_bytes.extend_from_slice(&out.chunk_bytes);
+            for (local_u16, rlen) in out.active_locals.into_iter().zip(out.row_lens) {
+                let row = out.chunk_start + usize::from(local_u16);
+                if out_offsets.len() <= row {
+                    out_offsets.resize(row + 1, cur_off);
+                }
+                cur_off = cur_off
+                    .checked_add(rlen)
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "fsst decoded size exceeds u32::MAX",
+                    })?;
+                out_offsets.push(cur_off);
+                let _ = out_nulls.set(row, true);
+            }
+        }
+        if out_offsets.len() < row_count + 1 {
+            out_offsets.resize(row_count + 1, cur_off);
+        }
+        Ok((out_offsets, out_bytes, Some(out_nulls)))
+    }
+
     /// Decodes only `indices` into compact `indices.len()`-row `(offsets, bytes, nulls)`,
     /// decompressing ONLY touched sub-chunks (at most once each).
     pub(crate) fn decode_take(
@@ -2536,6 +3137,90 @@ pub(crate) fn decode_fsst_binary_subchunked(
     let view = FsstSubchunkedView::parse(src, row_count)?;
     let (offsets, bytes) = view.decode_all_with_limit(max_total_bytes)?;
     Ok(BinaryData::try_new(offsets, bytes)?)
+}
+
+/// Decodes a sub-chunked (`BLOCK_FLAG_FSST_SUBCHUNKED`) FSST block body into [`Utf8Data`]
+/// in parallel across sub-chunks when large enough and outside a parallel scope.
+pub(crate) fn decode_fsst_utf8_subchunked_parallel(
+    body: Bytes,
+    payload_base: usize,
+    row_count: usize,
+    max_total_bytes: usize,
+    threads: usize,
+) -> Result<Utf8Data, StatamError> {
+    let (offsets, bytes) = FsstSubchunkedView::decode_all_parallel_bytes(
+        body,
+        payload_base,
+        row_count,
+        max_total_bytes,
+        threads,
+    )?;
+    Ok(Utf8Data::try_new(offsets, bytes)?)
+}
+
+/// Decodes a sub-chunked (`BLOCK_FLAG_FSST_SUBCHUNKED`) FSST block body into [`BinaryData`]
+/// in parallel across sub-chunks when large enough and outside a parallel scope.
+pub(crate) fn decode_fsst_binary_subchunked_parallel(
+    body: Bytes,
+    payload_base: usize,
+    row_count: usize,
+    max_total_bytes: usize,
+    threads: usize,
+) -> Result<BinaryData, StatamError> {
+    let (offsets, bytes) = FsstSubchunkedView::decode_all_parallel_bytes(
+        body,
+        payload_base,
+        row_count,
+        max_total_bytes,
+        threads,
+    )?;
+    Ok(BinaryData::try_new(offsets, bytes)?)
+}
+
+/// Decodes only `mask`-selected rows of a sub-chunked FSST block body into `(Utf8Data, nulls)`
+/// in parallel across touched sub-chunks when large enough and outside a parallel scope.
+pub(crate) fn decode_fsst_utf8_selected_subchunked_parallel(
+    body: Bytes,
+    payload_base: usize,
+    row_count: usize,
+    mask: &Bitmap,
+    nulls: Option<&Bitmap>,
+    max_total_bytes: usize,
+    threads: usize,
+) -> Result<(Utf8Data, Option<Bitmap>), StatamError> {
+    let (offsets, bytes, out_nulls) = FsstSubchunkedView::decode_selected_parallel_bytes(
+        body,
+        payload_base,
+        row_count,
+        mask,
+        nulls,
+        max_total_bytes,
+        threads,
+    )?;
+    Ok((Utf8Data::try_new(offsets, bytes)?, out_nulls))
+}
+
+/// Decodes only `mask`-selected rows of a sub-chunked FSST block body into `(BinaryData, nulls)`
+/// in parallel across touched sub-chunks when large enough and outside a parallel scope.
+pub(crate) fn decode_fsst_binary_selected_subchunked_parallel(
+    body: Bytes,
+    payload_base: usize,
+    row_count: usize,
+    mask: &Bitmap,
+    nulls: Option<&Bitmap>,
+    max_total_bytes: usize,
+    threads: usize,
+) -> Result<(BinaryData, Option<Bitmap>), StatamError> {
+    let (offsets, bytes, out_nulls) = FsstSubchunkedView::decode_selected_parallel_bytes(
+        body,
+        payload_base,
+        row_count,
+        mask,
+        nulls,
+        max_total_bytes,
+        threads,
+    )?;
+    Ok((BinaryData::try_new(offsets, bytes)?, out_nulls))
 }
 
 /// Decodes only `mask`-selected rows of an FSST-encoded block body into `(Utf8Data, nulls)`.
@@ -3806,5 +4491,311 @@ mod tests {
             .unwrap();
         assert_eq!(fb_pos, 5);
         assert_eq!(fb_buf, b"aaaaa");
+    }
+
+    #[test]
+    fn pass25_subchunked_fsst_parallel_decode_parity_all_selected_and_errors() {
+        // 6 sub-chunks of 512 rows = 3,072 rows, structured JSON with varied words (~320 B/row)
+        // so FSST compresses well while `sum_raw >= 128 KiB`, genuinely exercising WorkerPool fan-out.
+        let row_count = usize::from(FSST_SUBCHUNK_ROWS) * 6;
+        let words = [
+            "latency",
+            "throughput",
+            "checkpoint",
+            "compaction",
+            "telemetry",
+            "retrieval",
+            "embedding",
+            "tokenizer",
+            "scheduler",
+            "allocator",
+            "histogram",
+            "partition",
+            "evaluator",
+            "streaming",
+            "predicate",
+            "dashboard",
+        ];
+        let mut owned = Vec::with_capacity(row_count);
+        let mut valid_bits = Vec::with_capacity(row_count);
+        let mut rng = 0x1234_5678_9abc_def0u64;
+        for i in 0..row_count {
+            // Make chunk #2 (rows 1024..1536) completely null plus scattered nulls elsewhere.
+            let in_null_chunk = (1024..1536).contains(&i);
+            if in_null_chunk || i % 17 == 0 {
+                owned.push(String::new());
+                valid_bits.push(false);
+            } else {
+                let mut detail = String::with_capacity(240);
+                for j in 0..18 {
+                    rng = rng
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    let w = words[((rng >> 56) as usize + j) % words.len()];
+                    detail.push_str(w);
+                    detail.push('_');
+                    detail.push_str(&format!("{:02x} ", ((rng >> 48) & 0xFF) as u8));
+                }
+                owned.push(format!(
+                    "{{\"role\":\"assistant\",\"trace\":\"0196a3f0-{:04x}-{:04x}\",\"service\":\"chat-gateway\",\"preview\":\"{detail}item_{i:06}\"}}",
+                    i / 64,
+                    i % 64,
+                ));
+                valid_bits.push(true);
+            }
+        }
+        let refs: Vec<&[u8]> = owned.iter().map(String::as_bytes).collect();
+        let nulls = Bitmap::from_bools(&valid_bits);
+
+        let (sub_body, is_subchunked) = encode_fsst_body_adaptive(&refs, WriteProfile::L1Compact)
+            .unwrap()
+            .expect("structured JSON previews must compress with FSST");
+        assert!(is_subchunked, "expected sub-chunked FSST body");
+
+        let view = FsstSubchunkedView::parse(&sub_body, row_count).unwrap();
+        let sum_raw: usize = view.chunks.iter().map(|c| c.raw_len as usize).sum();
+        assert!(view.chunks.len() >= 4, "expected >= 4 sub-chunks");
+        assert!(
+            sum_raw >= 128 * 1024,
+            "expected sum_raw >= 128 KiB to exercise parallel path, got {sum_raw}"
+        );
+
+        // Prepend a non-zero dummy header prefix (simulating leading null bitmap) to test `payload_base`.
+        let payload_base = row_count.div_ceil(8);
+        let mut framed = vec![0xA5u8; payload_base];
+        framed.extend_from_slice(&sub_body);
+        let framed_bytes = Bytes::from(framed);
+
+        // 1. decode_all parity across 1T / 2T / 8T (Utf8 & Binary).
+        let ref_all_u =
+            decode_fsst_utf8_subchunked(&sub_body, row_count, MAX_BLOCK_RAW_BYTES).unwrap();
+        let ref_all_b =
+            decode_fsst_binary_subchunked(&sub_body, row_count, MAX_BLOCK_RAW_BYTES).unwrap();
+        let total_decoded_bytes = ref_all_u.bytes().len();
+        assert!(total_decoded_bytes > 256 * 1024);
+
+        for threads in [1usize, 2, 8] {
+            let par_u = decode_fsst_utf8_subchunked_parallel(
+                framed_bytes.clone(),
+                payload_base,
+                row_count,
+                MAX_BLOCK_RAW_BYTES,
+                threads,
+            )
+            .unwrap();
+            let par_b = decode_fsst_binary_subchunked_parallel(
+                framed_bytes.clone(),
+                payload_base,
+                row_count,
+                MAX_BLOCK_RAW_BYTES,
+                threads,
+            )
+            .unwrap();
+            assert_eq!(par_u, ref_all_u, "all Utf8 mismatch at {threads}T");
+            assert_eq!(par_b, ref_all_b, "all Binary mismatch at {threads}T");
+        }
+
+        // 2. decode_selected parity across dense, multi-chunk partial, sparse, empty, and all-null masks.
+        let all_mask = Bitmap::new_ones(row_count);
+        let empty_mask = Bitmap::new_zeroed(row_count);
+
+        let mut dense_partial_mask = Bitmap::new_zeroed(row_count);
+        for r in (0..row_count).step_by(2) {
+            let _ = dense_partial_mask.set(r, true);
+        }
+
+        let mut sparse_mask = Bitmap::new_zeroed(row_count);
+        for r in [0usize, 5, 513, 1025, 2500] {
+            let _ = sparse_mask.set(r, true);
+        }
+
+        let mut only_null_chunk_mask = Bitmap::new_zeroed(row_count);
+        for r in 1024..1536 {
+            let _ = only_null_chunk_mask.set(r, true);
+        }
+
+        for (label, mask, row_nulls) in [
+            ("all_ones_with_nulls", &all_mask, Some(&nulls)),
+            ("all_ones_no_nulls", &all_mask, None),
+            (
+                "dense_partial_with_nulls",
+                &dense_partial_mask,
+                Some(&nulls),
+            ),
+            ("dense_partial_no_nulls", &dense_partial_mask, None),
+            ("sparse_with_nulls", &sparse_mask, Some(&nulls)),
+            ("empty_mask", &empty_mask, Some(&nulls)),
+            ("all_selected_are_null", &only_null_chunk_mask, Some(&nulls)),
+        ] {
+            let (ref_u, ref_u_nulls) = decode_fsst_utf8_selected_with_flag(
+                &sub_body,
+                row_count,
+                mask,
+                row_nulls,
+                true,
+                MAX_BLOCK_RAW_BYTES,
+            )
+            .unwrap();
+            let (ref_b, ref_b_nulls) = decode_fsst_binary_selected_with_flag(
+                &sub_body,
+                row_count,
+                mask,
+                row_nulls,
+                true,
+                MAX_BLOCK_RAW_BYTES,
+            )
+            .unwrap();
+            for threads in [1usize, 2, 8] {
+                let (par_u, par_u_nulls) = decode_fsst_utf8_selected_subchunked_parallel(
+                    framed_bytes.clone(),
+                    payload_base,
+                    row_count,
+                    mask,
+                    row_nulls,
+                    MAX_BLOCK_RAW_BYTES,
+                    threads,
+                )
+                .unwrap();
+                let (par_b, par_b_nulls) = decode_fsst_binary_selected_subchunked_parallel(
+                    framed_bytes.clone(),
+                    payload_base,
+                    row_count,
+                    mask,
+                    row_nulls,
+                    MAX_BLOCK_RAW_BYTES,
+                    threads,
+                )
+                .unwrap();
+                assert_eq!(par_u, ref_u, "{label} Utf8 mismatch at {threads}T");
+                assert_eq!(
+                    par_u_nulls, ref_u_nulls,
+                    "{label} Utf8 nulls mismatch at {threads}T"
+                );
+                assert_eq!(par_b, ref_b, "{label} Binary mismatch at {threads}T");
+                assert_eq!(
+                    par_b_nulls, ref_b_nulls,
+                    "{label} Binary nulls mismatch at {threads}T"
+                );
+            }
+        }
+
+        // 3. Error validation: OOB payload_base, mismatched mask/nulls lengths.
+        assert!(matches!(
+            FsstSubchunkedView::decode_all_parallel_bytes(
+                framed_bytes.clone(),
+                framed_bytes.len() + 1,
+                row_count,
+                MAX_BLOCK_RAW_BYTES,
+                8,
+            ),
+            Err(StatamError::Corrupt {
+                reason: "fsst payload base out of bounds",
+            })
+        ));
+        let bad_mask = Bitmap::new_ones(row_count - 1);
+        assert!(matches!(
+            FsstSubchunkedView::decode_selected_parallel_bytes(
+                framed_bytes.clone(),
+                payload_base,
+                row_count,
+                &bad_mask,
+                None,
+                MAX_BLOCK_RAW_BYTES,
+                8,
+            ),
+            Err(StatamError::Corrupt {
+                reason: "selection mask length mismatch",
+            })
+        ));
+        let bad_nulls = Bitmap::new_ones(row_count + 1);
+        assert!(matches!(
+            FsstSubchunkedView::decode_selected_parallel_bytes(
+                framed_bytes.clone(),
+                payload_base,
+                row_count,
+                &all_mask,
+                Some(&bad_nulls),
+                MAX_BLOCK_RAW_BYTES,
+                8,
+            ),
+            Err(StatamError::Corrupt {
+                reason: "null bitmap length mismatch",
+            })
+        ));
+
+        // 4. Shared AtomicUsize max_bytes boundary & bomb rejection at 8T.
+        let (exact_offs, exact_bytes) = FsstSubchunkedView::decode_all_parallel_bytes(
+            framed_bytes.clone(),
+            payload_base,
+            row_count,
+            total_decoded_bytes,
+            8,
+        )
+        .unwrap();
+        assert_eq!(exact_offs.len(), row_count + 1);
+        assert_eq!(exact_bytes.len(), total_decoded_bytes);
+
+        for tight_limit in [total_decoded_bytes - 1, total_decoded_bytes / 2] {
+            assert!(
+                matches!(
+                    FsstSubchunkedView::decode_all_parallel_bytes(
+                        framed_bytes.clone(),
+                        payload_base,
+                        row_count,
+                        tight_limit,
+                        8,
+                    ),
+                    Err(StatamError::BoundsExceeded {
+                        reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                    })
+                ),
+                "expected BoundsExceeded for decode_all at limit={tight_limit}"
+            );
+            assert!(
+                matches!(
+                    FsstSubchunkedView::decode_selected_parallel_bytes(
+                        framed_bytes.clone(),
+                        payload_base,
+                        row_count,
+                        &all_mask,
+                        Some(&nulls),
+                        tight_limit,
+                        8,
+                    ),
+                    Err(StatamError::BoundsExceeded {
+                        reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                    })
+                ),
+                "expected BoundsExceeded for decode_selected at limit={tight_limit}"
+            );
+        }
+
+        // 5. Corrupt subchunk payload rejected cleanly at 1T and 8T.
+        let mut corrupt_framed = framed_bytes.to_vec();
+        let payload_rel = sub_body.len() - view.payload.len();
+        let c3 = view.chunks[3];
+        let corrupt_pos = payload_base + payload_rel + c3.stored_start as usize;
+        // Corrupt every byte in chunk 3's stored payload so LZ4/Zstd/None decode fails deterministically.
+        for b in &mut corrupt_framed
+            [corrupt_pos..corrupt_pos + (c3.stored_end - c3.stored_start) as usize]
+        {
+            *b ^= 0xFF;
+        }
+        let corrupt_bytes = Bytes::from(corrupt_framed);
+        for threads in [1usize, 8] {
+            assert!(
+                matches!(
+                    FsstSubchunkedView::decode_all_parallel_bytes(
+                        corrupt_bytes.clone(),
+                        payload_base,
+                        row_count,
+                        MAX_BLOCK_RAW_BYTES,
+                        threads,
+                    ),
+                    Err(StatamError::Corrupt { .. } | StatamError::BoundsExceeded { .. })
+                ),
+                "expected error on corrupt subchunk at {threads}T"
+            );
+        }
     }
 }

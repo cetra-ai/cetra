@@ -1339,6 +1339,9 @@ impl StatamReader {
             ShreddedSub {
                 sub_pidx: usize,
             },
+            ShreddedResidual {
+                cidx: usize,
+            },
             IndepCol {
                 cidx: usize,
                 dict: Option<Arc<FileDict>>,
@@ -1354,6 +1357,7 @@ impl StatamReader {
             PackChunks(u16, Vec<(u32, Bytes)>),
             L0Chunks(Vec<(u32, Bytes)>),
             ShreddedSub(usize, ShreddedSubCol),
+            ShreddedResidual(usize, FlatColumn),
             IndepCol(usize, Column),
         }
 
@@ -1380,6 +1384,7 @@ impl StatamReader {
             ShreddedMap {
                 cidx: usize,
                 cached_p1: Option<DecodedPhase1>,
+                pre_residual: Option<FlatColumn>,
                 est_bytes: usize,
             },
         }
@@ -1432,7 +1437,10 @@ impl StatamReader {
                     Ok((cidx, col))
                 }
                 StageBTask::ShreddedMap {
-                    cidx, cached_p1, ..
+                    cidx,
+                    cached_p1,
+                    pre_residual,
+                    ..
                 } => {
                     let col = if let Some(cached) = cached_p1 {
                         materialize_cached_p1_col_with_meta(
@@ -1444,6 +1452,36 @@ impl StatamReader {
                             cached,
                             plan,
                             mb_idx,
+                            map_keys_by_col,
+                            decoded_subs,
+                        )?
+                    } else if let Some(sm) = meta
+                        .schema_meta
+                        .shredded_maps
+                        .iter()
+                        .find(|s| s.logical_col_idx as usize == cidx)
+                    {
+                        let skip_residual = plan.phase2_map_fast_path.contains(&(mb_idx, cidx));
+                        let residual_flat = if skip_residual {
+                            None
+                        } else if let Some(pre) = pre_residual {
+                            Some(pre)
+                        } else {
+                            let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                            let raw = if blk.stored_len > 0 {
+                                block_reader.read_block(blk)?
+                            } else {
+                                Cow::Borrowed(&[][..])
+                            };
+                            Some(decode_shredded_residual_block_selected(&raw, blk, mask)?)
+                        };
+                        build_shredded_map_col_with_meta(
+                            mb_row_count,
+                            cidx,
+                            sm,
+                            skip_residual,
+                            residual_flat.as_ref(),
+                            mask,
                             map_keys_by_col,
                             decoded_subs,
                         )?
@@ -1599,8 +1637,9 @@ impl StatamReader {
         }
 
         // 3. Pre-populate cached FileDicts on main thread and enqueue deduplicated independent
-        //    non-payload columns (including unshredded MapUtf8; shredded MapUtf8 waits for Stage B).
+        //    non-payload columns plus non-skipped shredded MapUtf8 residuals (whose merge runs in Stage B).
         let mut seen_indep: HashSet<usize> = HashSet::new();
+        let mut seen_shredded_res: HashSet<usize> = HashSet::new();
         for &cidx in proj_indices {
             let cd = &self.meta.col_dir[cidx];
             if cd.locality_group == LocalityGroup::ExternalPayload || decoded_p1.contains_key(&cidx)
@@ -1614,7 +1653,22 @@ impl StatamReader {
                     .shredded_maps
                     .iter()
                     .any(|s| s.logical_col_idx as usize == cidx);
-            if is_shredded_map || !seen_indep.insert(cidx) {
+            if is_shredded_map {
+                if seen_shredded_res.insert(cidx) {
+                    let skip_residual = plan.phase2_map_fast_path.contains(&(mb_idx, cidx));
+                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    if !skip_residual && blk.stored_len > 0 {
+                        let work_len = blk.raw_len as usize;
+                        stage1_work_bytes = stage1_work_bytes.saturating_add(work_len);
+                        stage1_tasks.push(Stage1TaskItem {
+                            work_len,
+                            task: Stage1Task::ShreddedResidual { cidx },
+                        });
+                    }
+                }
+                continue;
+            }
+            if !seen_indep.insert(cidx) {
                 continue;
             }
             let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
@@ -1695,6 +1749,13 @@ impl StatamReader {
                                 decode_shredded_subcol_selected(&raw, ctx.mb_row_count, &ctx.mask)?;
                             Ok(Stage1Out::ShreddedSub(sub_pidx, sub))
                         }
+                        Stage1Task::ShreddedResidual { cidx } => {
+                            let blk = &ctx.meta.rg_blocks(cidx, ctx.rg_idx)[ctx.mb_idx];
+                            let raw = ctx.block_reader.read_block(blk)?;
+                            let res =
+                                decode_shredded_residual_block_selected(&raw, blk, &ctx.mask)?;
+                            Ok(Stage1Out::ShreddedResidual(cidx, res))
+                        }
                         Stage1Task::IndepCol { cidx, dict } => {
                             let col = decode_uncached_p2_non_payload_col_with_meta(
                                 &ctx.meta,
@@ -1718,12 +1779,16 @@ impl StatamReader {
 
         let mut chunk_groups = pre_resolved_by_pack;
         let mut stage1_cols: HashMap<usize, Column> = HashMap::new();
+        let mut decoded_residuals: HashMap<usize, FlatColumn> = HashMap::new();
         for out in stage1_outputs {
             match out {
                 Stage1Out::PackChunks(pidx, pairs) => chunk_groups.push((pidx, pairs)),
                 Stage1Out::L0Chunks(pairs) => chunk_groups.push((L0_LOCAL_PACK_IDX, pairs)),
                 Stage1Out::ShreddedSub(sub_pidx, sub) => {
                     decoded_subs.insert(sub_pidx, sub);
+                }
+                Stage1Out::ShreddedResidual(cidx, res) => {
+                    decoded_residuals.insert(cidx, res);
                 }
                 Stage1Out::IndepCol(cidx, col) => {
                     stage1_cols.insert(cidx, col);
@@ -1774,10 +1839,12 @@ impl StatamReader {
                     continue;
                 }
                 let cached_p1 = decoded_p1.remove(&cidx);
+                let pre_residual = decoded_residuals.remove(&cidx);
                 let est_bytes = self.meta.rg_blocks(cidx, rg_idx)[mb_idx].raw_len as usize;
                 small_stage_b.push(StageBTask::ShreddedMap {
                     cidx,
                     cached_p1,
+                    pre_residual,
                     est_bytes,
                 });
             }
@@ -2048,6 +2115,12 @@ impl StatamReader {
                 mb_row_count: usize,
                 mask: Arc<Bitmap>,
             },
+            ShreddedResidual {
+                mb_pos: usize,
+                cidx: usize,
+                blk: BlockEntry,
+                mask: Arc<Bitmap>,
+            },
             NonPayloadCol {
                 mb_pos: usize,
                 cidx: usize,
@@ -2066,6 +2139,7 @@ impl StatamReader {
         enum TakeStage1Out {
             PackChunks(u16, Vec<(u32, Bytes)>),
             ShreddedSub(usize, usize, ShreddedSubCol),
+            ShreddedResidual(usize, usize, FlatColumn),
             NonPayloadCol(usize, usize, Column),
         }
 
@@ -2083,6 +2157,7 @@ impl StatamReader {
             payload_p1: HashMap<usize, DecodedPhase1>,
             mb_cols: HashMap<usize, Column>,
             mb_subs: HashMap<usize, ShreddedSubCol>,
+            mb_residuals: HashMap<usize, FlatColumn>,
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -2238,8 +2313,10 @@ impl StatamReader {
                         reason: "missing take_rows u32 indices",
                     })?;
                     let skip_residual = plan.phase2_map_fast_path.contains(&(job.mb_idx, cidx));
-                    let residual_flat = if skip_residual {
+                    let residual_flat: Option<Cow<'_, FlatColumn>> = if skip_residual {
                         None
+                    } else if let Some(pre) = job.mb_residuals.get(&cidx) {
+                        Some(Cow::Borrowed(pre))
                     } else {
                         let blk = &meta.rg_blocks(cidx, rg_idx)[job.mb_idx];
                         let raw = if blk.stored_len > 0 {
@@ -2247,14 +2324,16 @@ impl StatamReader {
                         } else {
                             Cow::Borrowed(&[][..])
                         };
-                        Some(decode_shredded_residual_block_selected(&raw, blk, mask)?)
+                        Some(Cow::Owned(decode_shredded_residual_block_selected(
+                            &raw, blk, mask,
+                        )?))
                     };
                     let full_col = build_shredded_map_col_with_meta(
                         job.mb_row_count,
                         cidx,
                         sm,
                         skip_residual,
-                        residual_flat.as_ref(),
+                        residual_flat.as_deref(),
                         mask,
                         empty_map_keys,
                         &job.mb_subs,
@@ -2344,6 +2423,7 @@ impl StatamReader {
         let pre_dicts = self.preload_proj_dicts(proj_indices);
 
         let mut shredded_map_cols: HashSet<usize> = HashSet::new();
+        let mut shredded_map_cols_order: Vec<usize> = Vec::new();
         let mut needed_sub_pidxs: Vec<usize> = Vec::new();
         let mut non_payload_cols: Vec<usize> = Vec::new();
         let mut seen_non_payload: HashSet<usize> = HashSet::new();
@@ -2360,6 +2440,7 @@ impl StatamReader {
                     .find(|s| s.logical_col_idx as usize == cidx)
             {
                 if shredded_map_cols.insert(cidx) {
+                    shredded_map_cols_order.push(cidx);
                     for ke in &sm.keys {
                         let sub_pidx = ke.sub_col_idx as usize;
                         if !needed_sub_pidxs.contains(&sub_pidx) {
@@ -2413,6 +2494,23 @@ impl StatamReader {
                         },
                     });
                 }
+                for &cidx in &shredded_map_cols_order {
+                    let skip_residual = plan.phase2_map_fast_path.contains(&(mb_idx, cidx));
+                    let blk = self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    if !skip_residual && blk.stored_len > 0 {
+                        let work_len = blk.raw_len as usize;
+                        stage1_work_bytes = stage1_work_bytes.saturating_add(work_len);
+                        stage1_tasks.push(TakeStage1Item {
+                            work_len,
+                            task: TakeStage1Task::ShreddedResidual {
+                                mb_pos,
+                                cidx,
+                                blk,
+                                mask: Arc::clone(mask_arc),
+                            },
+                        });
+                    }
+                }
             }
 
             for &cidx in &non_payload_cols {
@@ -2446,6 +2544,7 @@ impl StatamReader {
                 payload_p1,
                 mb_cols: HashMap::with_capacity(non_payload_cols.len()),
                 mb_subs: HashMap::with_capacity(needed_sub_pidxs.len()),
+                mb_residuals: HashMap::with_capacity(shredded_map_cols_order.len()),
             });
         }
 
@@ -2500,6 +2599,16 @@ impl StatamReader {
                             let sub = decode_shredded_subcol_selected(&raw, mb_row_count, &mask)?;
                             Ok(TakeStage1Out::ShreddedSub(mb_pos, sub_pidx, sub))
                         }
+                        TakeStage1Task::ShreddedResidual {
+                            mb_pos,
+                            cidx,
+                            blk,
+                            mask,
+                        } => {
+                            let raw = ctx.block_reader.read_block(&blk)?;
+                            let res = decode_shredded_residual_block_selected(&raw, &blk, &mask)?;
+                            Ok(TakeStage1Out::ShreddedResidual(mb_pos, cidx, res))
+                        }
                         TakeStage1Task::NonPayloadCol {
                             mb_pos,
                             cidx,
@@ -2537,6 +2646,9 @@ impl StatamReader {
                 TakeStage1Out::PackChunks(pidx, pairs) => chunk_groups.push((pidx, pairs)),
                 TakeStage1Out::ShreddedSub(mb_pos, sub_pidx, sub) => {
                     mb_jobs[mb_pos].mb_subs.insert(sub_pidx, sub);
+                }
+                TakeStage1Out::ShreddedResidual(mb_pos, cidx, res) => {
+                    mb_jobs[mb_pos].mb_residuals.insert(cidx, res);
                 }
                 TakeStage1Out::NonPayloadCol(mb_pos, cidx, col) => {
                     mb_jobs[mb_pos].mb_cols.insert(cidx, col);

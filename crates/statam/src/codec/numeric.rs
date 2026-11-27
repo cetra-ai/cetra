@@ -10,10 +10,11 @@ use crate::codec::alp::{
     decode_alp_body, decode_alp_selected, decode_alp_take, encode_alp_body, validate_alp_body,
 };
 use crate::codec::fsst::{
-    FsstBlockView, FsstSubchunkedView, decode_fsst_binary, decode_fsst_binary_selected_with_flag,
-    decode_fsst_binary_subchunked, decode_fsst_binary_take, decode_fsst_utf8,
-    decode_fsst_utf8_selected_with_flag, decode_fsst_utf8_subchunked, decode_fsst_utf8_take,
-    encode_fsst_body, encode_fsst_body_adaptive,
+    FSST_SUBCHUNK_MIN_ROWS, FsstBlockView, FsstSubchunkedView, decode_fsst_binary,
+    decode_fsst_binary_selected_with_flag, decode_fsst_binary_subchunked, decode_fsst_binary_take,
+    decode_fsst_utf8, decode_fsst_utf8_selected_with_flag, decode_fsst_utf8_subchunked,
+    decode_fsst_utf8_take, encode_fsst_body, encode_fsst_body_adaptive,
+    encode_fsst_subchunked_only,
 };
 use crate::codec::zonemap::{ZoneMapSummary, compute_zone_map};
 use crate::codec::{EncodedMiniBlock, WriteProfile, preferred_block_codec};
@@ -648,20 +649,51 @@ pub(crate) fn encode_narrow_column_with_locality(
                 FlatData::Binary(b) => b.bytes().len(),
                 _ => 0,
             };
-            let (enc, inner_body, is_subchunked) = if profile == WriteProfile::L1Compact
-                && (256..=8 * 1024 * 1024).contains(&raw_varlen_bytes)
+            let (enc, raw, is_subchunked) = if profile == WriteProfile::L1Compact
                 && !is_wide_row
+                && (256..=8 * 1024 * 1024).contains(&raw_varlen_bytes)
             {
                 let slices = extract_varlen_slices(flat)?;
                 if let Some((fsst, subchunked)) = encode_fsst_body_adaptive(&slices, profile)? {
-                    (Encoding::Fsst, fsst, subchunked)
+                    (
+                        Encoding::Fsst,
+                        prepend_optional_nulls(flat.nulls(), fsst),
+                        subchunked,
+                    )
                 } else {
-                    (Encoding::Plain, encode_plain_body(flat)?, false)
+                    (
+                        Encoding::Plain,
+                        prepend_optional_nulls(flat.nulls(), encode_plain_body(flat)?),
+                        false,
+                    )
+                }
+            } else if profile == WriteProfile::L1Compact
+                && is_wide_row
+                && matches!(dt, DataType::Utf8)
+                && flat.len() > FSST_SUBCHUNK_MIN_ROWS
+                && (64 * 1024..=8 * 1024 * 1024).contains(&raw_varlen_bytes)
+            {
+                let nulls_prefix_len = flat.nulls().map_or(0, |bm| bm.len().div_ceil(8));
+                let plain_raw = prepend_optional_nulls(flat.nulls(), encode_plain_body(flat)?);
+                let slices = extract_varlen_slices(flat)?;
+                if let Some(fsst_subchunked) =
+                    encode_fsst_subchunked_only(&slices, profile, &plain_raw, nulls_prefix_len)?
+                {
+                    (
+                        Encoding::Fsst,
+                        prepend_optional_nulls(flat.nulls(), fsst_subchunked),
+                        true,
+                    )
+                } else {
+                    (Encoding::Plain, plain_raw, false)
                 }
             } else {
-                (Encoding::Plain, encode_plain_body(flat)?, false)
+                (
+                    Encoding::Plain,
+                    prepend_optional_nulls(flat.nulls(), encode_plain_body(flat)?),
+                    false,
+                )
             };
-            let raw = prepend_optional_nulls(flat.nulls(), inner_body);
             let mut block_flags = zm.block_flags;
             let block_codec = if is_subchunked {
                 block_flags |= BLOCK_FLAG_FSST_SUBCHUNKED;
