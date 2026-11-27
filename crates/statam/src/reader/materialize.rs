@@ -9,8 +9,10 @@ use cetra_column::{Batch, Bitmap, Column, DataType, FlatColumn, ScalarValue, Sch
 use crate::StatamError;
 use crate::codec::dict::FileDict;
 use crate::codec::nested::{
-    ShreddedSubCol, decode_shredded_residual_block_selected, decode_shredded_subcol_selected,
-    decode_single_map_key, unshred_map_selected,
+    ShreddedSubCol, decode_shredded_residual_block_keys_only,
+    decode_shredded_residual_block_selected, decode_shredded_subcol_in_map_only,
+    decode_shredded_subcol_selected, decode_single_map_key, strip_map_values_to_keys_only,
+    unshred_map_keys_only_selected, unshred_map_selected,
 };
 use crate::codec::{
     decode_mini_block_selected, decode_mini_block_selected_parallel_bytes, decode_mini_block_take,
@@ -29,7 +31,12 @@ use super::payload::{
     reconstruct_payload_column_take_from_flat, reconstruct_payload_column_take_selected,
 };
 use super::plan::{BlockCacheReader, DecodedPhase1, RgIoPlan, TakeMiniBlock};
-use super::{StatamReader, effective_read_threads};
+use super::{MapReadMode, StatamReader, effective_read_threads};
+
+pub(super) enum DecodedSubCol {
+    Full(ShreddedSubCol),
+    InMapOnly(Bitmap),
+}
 
 #[derive(Clone, Copy)]
 enum DictSource<'a> {
@@ -74,7 +81,7 @@ impl StatamReader {
         plan: &Arc<RgIoPlan>,
         proj_indices: &[usize],
         proj_schema: &Arc<Schema>,
-        map_keys_by_col: &Arc<HashMap<usize, Vec<String>>>,
+        map_proj_by_col: &Arc<HashMap<usize, MapReadMode>>,
         resolved_chunks: &ResolvedChunks,
         read_block: &BlockCacheReader,
         read_threads: usize,
@@ -105,7 +112,7 @@ impl StatamReader {
             let plan_arc = Arc::clone(plan);
             let proj_indices_arc = Arc::new(proj_indices.to_vec());
             let proj_schema_arc = Arc::clone(proj_schema);
-            let map_keys_arc = Arc::clone(map_keys_by_col);
+            let map_proj_arc = Arc::clone(map_proj_by_col);
             let resolved_arc = resolved_chunks.clone();
             let pre_dicts = self.preload_proj_dicts(proj_indices);
             let block_reader = read_block.clone();
@@ -122,7 +129,7 @@ impl StatamReader {
                         &plan_arc,
                         &proj_indices_arc,
                         &proj_schema_arc,
-                        &map_keys_arc,
+                        &map_proj_arc,
                         &resolved_arc,
                         DictSource::Pre(&pre_dicts),
                         &block_reader,
@@ -143,7 +150,7 @@ impl StatamReader {
                 plan,
                 proj_indices,
                 proj_schema,
-                map_keys_by_col,
+                map_proj_by_col,
                 resolved_chunks,
                 DictSource::Reader(self),
                 read_block,
@@ -162,7 +169,7 @@ impl StatamReader {
         plan: &Arc<RgIoPlan>,
         proj_indices: &[usize],
         proj_schema: &Arc<Schema>,
-        empty_map_keys: &Arc<HashMap<usize, Vec<String>>>,
+        empty_map_proj: &Arc<HashMap<usize, MapReadMode>>,
         resolved_chunks: &ResolvedChunks,
         read_block: &BlockCacheReader,
         read_threads: usize,
@@ -190,7 +197,7 @@ impl StatamReader {
             let plan_arc = Arc::clone(plan);
             let proj_indices_arc = Arc::new(proj_indices.to_vec());
             let proj_schema_arc = Arc::clone(proj_schema);
-            let map_keys_arc = Arc::clone(empty_map_keys);
+            let map_proj_arc = Arc::clone(empty_map_proj);
             let resolved_arc = resolved_chunks.clone();
             let pre_dicts = self.preload_proj_dicts(proj_indices);
             let block_reader = read_block.clone();
@@ -208,7 +215,7 @@ impl StatamReader {
                         &plan_arc,
                         &proj_indices_arc,
                         &proj_schema_arc,
-                        &map_keys_arc,
+                        &map_proj_arc,
                         &resolved_arc,
                         DictSource::Pre(&pre_dicts),
                         &block_reader,
@@ -230,7 +237,7 @@ impl StatamReader {
                 plan,
                 proj_indices,
                 proj_schema,
-                empty_map_keys,
+                empty_map_proj,
                 resolved_chunks,
                 DictSource::Reader(self),
                 read_block,
@@ -252,7 +259,7 @@ fn materialize_phase2_mb_with_meta(
     plan: &Arc<RgIoPlan>,
     proj_indices: &[usize],
     proj_schema: &Arc<Schema>,
-    map_keys_by_col: &Arc<HashMap<usize, Vec<String>>>,
+    map_proj_by_col: &Arc<HashMap<usize, MapReadMode>>,
     resolved_chunks: &ResolvedChunks,
     dict_source: DictSource<'_>,
     read_block: &BlockCacheReader,
@@ -277,8 +284,8 @@ fn materialize_phase2_mb_with_meta(
     }
 
     // Decode any needed shredded subcols for projected MapUtf8 columns (moving from decoded_p1).
-    let mut decoded_subs: HashMap<usize, ShreddedSubCol> = HashMap::new();
-    let mut uncached_subs: Vec<usize> = Vec::new();
+    let mut decoded_subs: HashMap<usize, DecodedSubCol> = HashMap::new();
+    let mut uncached_subs: Vec<(usize, bool)> = Vec::new();
     for &cidx in proj_indices {
         if fields[cidx].data_type == DataType::MapUtf8
             && let Some(sm) = meta
@@ -287,22 +294,74 @@ fn materialize_phase2_mb_with_meta(
                 .iter()
                 .find(|s| s.logical_col_idx as usize == cidx)
         {
-            let keys_needed: Vec<&str> = match map_keys_by_col.get(&cidx) {
-                Some(req_keys) => req_keys.iter().map(String::as_str).collect(),
-                None => sm.keys.iter().map(|k| k.key.as_str()).collect(),
-            };
-            for ke in &sm.keys {
-                if !keys_needed.contains(&ke.key.as_str()) {
-                    continue;
+            let mode = map_proj_by_col.get(&cidx).unwrap_or(&MapReadMode::Full);
+            match mode {
+                MapReadMode::KeysOnly => {
+                    let res_blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    if res_blk.encoding == Encoding::ConstNull {
+                        continue;
+                    }
+                    for ke in &sm.keys {
+                        let sub_pidx = ke.sub_col_idx as usize;
+                        if decoded_subs.contains_key(&sub_pidx)
+                            || uncached_subs.iter().any(|&(p, _)| p == sub_pidx)
+                        {
+                            continue;
+                        }
+                        let sblk = &meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
+                        if sblk.null_count == 0 {
+                            decoded_subs.insert(
+                                sub_pidx,
+                                DecodedSubCol::InMapOnly(Bitmap::new_ones(mb_row_count)),
+                            );
+                        } else if sblk.null_count == sblk.row_count {
+                            decoded_subs.insert(
+                                sub_pidx,
+                                DecodedSubCol::InMapOnly(Bitmap::new_zeroed(mb_row_count)),
+                            );
+                        } else if let Some(DecodedPhase1::ShreddedSub(sub)) =
+                            decoded_p1.remove(&sub_pidx)
+                        {
+                            decoded_subs.insert(sub_pidx, DecodedSubCol::Full(sub));
+                        } else {
+                            uncached_subs.push((sub_pidx, true));
+                        }
+                    }
                 }
-                let sub_pidx = ke.sub_col_idx as usize;
-                if decoded_subs.contains_key(&sub_pidx) || uncached_subs.contains(&sub_pidx) {
-                    continue;
+                MapReadMode::Keys(req_keys) => {
+                    for ke in &sm.keys {
+                        if !req_keys.iter().any(|rk| rk == &ke.key) {
+                            continue;
+                        }
+                        let sub_pidx = ke.sub_col_idx as usize;
+                        if decoded_subs.contains_key(&sub_pidx)
+                            || uncached_subs.iter().any(|&(p, _)| p == sub_pidx)
+                        {
+                            continue;
+                        }
+                        if let Some(DecodedPhase1::ShreddedSub(sub)) = decoded_p1.remove(&sub_pidx)
+                        {
+                            decoded_subs.insert(sub_pidx, DecodedSubCol::Full(sub));
+                        } else {
+                            uncached_subs.push((sub_pidx, false));
+                        }
+                    }
                 }
-                if let Some(DecodedPhase1::ShreddedSub(sub)) = decoded_p1.remove(&sub_pidx) {
-                    decoded_subs.insert(sub_pidx, sub);
-                } else {
-                    uncached_subs.push(sub_pidx);
+                MapReadMode::Full => {
+                    for ke in &sm.keys {
+                        let sub_pidx = ke.sub_col_idx as usize;
+                        if decoded_subs.contains_key(&sub_pidx)
+                            || uncached_subs.iter().any(|&(p, _)| p == sub_pidx)
+                        {
+                            continue;
+                        }
+                        if let Some(DecodedPhase1::ShreddedSub(sub)) = decoded_p1.remove(&sub_pidx)
+                        {
+                            decoded_subs.insert(sub_pidx, DecodedSubCol::Full(sub));
+                        } else {
+                            uncached_subs.push((sub_pidx, false));
+                        }
+                    }
                 }
             }
         }
@@ -311,7 +370,7 @@ fn materialize_phase2_mb_with_meta(
     if !uncached_subs.is_empty() {
         let sub_work_bytes: usize = uncached_subs
             .iter()
-            .map(|&sub_pidx| meta.rg_blocks(sub_pidx, rg_idx)[mb_idx].raw_len as usize)
+            .map(|&(sub_pidx, _)| meta.rg_blocks(sub_pidx, rg_idx)[mb_idx].raw_len as usize)
             .fold(0usize, usize::saturating_add);
         let sub_workers = if uncached_subs.len() >= 8 {
             threads
@@ -322,21 +381,42 @@ fn materialize_phase2_mb_with_meta(
             let meta_arc = Arc::clone(meta);
             let block_reader = read_block.clone();
             let mask_arc = Arc::new(mask.clone());
-            let decoded_pairs =
-                parallel_map_in_order_static(uncached_subs, sub_workers, move |sub_pidx| {
+            let decoded_pairs = parallel_map_in_order_static(
+                uncached_subs,
+                sub_workers,
+                move |(sub_pidx, in_map_only)| {
                     let blk = &meta_arc.rg_blocks(sub_pidx, rg_idx)[mb_idx];
                     let raw = block_reader.read_block(blk)?;
-                    let sub = decode_shredded_subcol_selected(&raw, mb_row_count, &mask_arc)?;
+                    let sub = if in_map_only {
+                        DecodedSubCol::InMapOnly(decode_shredded_subcol_in_map_only(
+                            &raw,
+                            mb_row_count,
+                        )?)
+                    } else {
+                        DecodedSubCol::Full(decode_shredded_subcol_selected(
+                            &raw,
+                            mb_row_count,
+                            &mask_arc,
+                        )?)
+                    };
                     Ok((sub_pidx, sub))
-                })?;
+                },
+            )?;
             for (sub_pidx, sub) in decoded_pairs {
                 decoded_subs.insert(sub_pidx, sub);
             }
         } else {
-            for sub_pidx in uncached_subs {
+            for (sub_pidx, in_map_only) in uncached_subs {
                 let blk = &meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
                 let raw = read_block.read_block(blk)?;
-                let sub = decode_shredded_subcol_selected(&raw, mb_row_count, mask)?;
+                let sub = if in_map_only {
+                    DecodedSubCol::InMapOnly(decode_shredded_subcol_in_map_only(
+                        &raw,
+                        mb_row_count,
+                    )?)
+                } else {
+                    DecodedSubCol::Full(decode_shredded_subcol_selected(&raw, mb_row_count, mask)?)
+                };
                 decoded_subs.insert(sub_pidx, sub);
             }
         }
@@ -415,7 +495,7 @@ fn materialize_phase2_mb_with_meta(
                     cached,
                     plan,
                     mb_idx,
-                    map_keys_by_col,
+                    map_proj_by_col,
                     &decoded_subs,
                 )?);
                 continue;
@@ -434,7 +514,7 @@ fn materialize_phase2_mb_with_meta(
                 cidx,
                 mask,
                 plan,
-                map_keys_by_col,
+                map_proj_by_col,
                 &decoded_subs,
                 dict.as_deref(),
                 read_block,
@@ -479,7 +559,7 @@ fn materialize_phase2_mb_with_meta(
                     cached,
                     plan,
                     mb_idx,
-                    map_keys_by_col,
+                    map_proj_by_col,
                     &decoded_subs,
                 )?);
             } else {
@@ -515,7 +595,7 @@ fn materialize_phase2_mb_with_meta(
         if regular_tasks.len() >= 4 && task_workers > 1 {
             let meta_arc = Arc::clone(meta);
             let plan_arc = Arc::clone(plan);
-            let map_keys_arc = Arc::clone(map_keys_by_col);
+            let map_proj_arc = Arc::clone(map_proj_by_col);
             let decoded_subs_arc = Arc::new(decoded_subs);
             let mask_arc = Arc::new(mask.clone());
             let block_reader = read_block.clone();
@@ -531,7 +611,7 @@ fn materialize_phase2_mb_with_meta(
                         cidx,
                         &mask_arc,
                         &plan_arc,
-                        &map_keys_arc,
+                        &map_proj_arc,
                         &decoded_subs_arc,
                         dict.as_deref(),
                         &block_reader,
@@ -552,7 +632,7 @@ fn materialize_phase2_mb_with_meta(
                     cidx,
                     mask,
                     plan,
-                    map_keys_by_col,
+                    map_proj_by_col,
                     &decoded_subs,
                     dict.as_deref(),
                     read_block,
@@ -609,8 +689,8 @@ pub(super) fn materialize_cached_p1_col_with_meta(
     cached: DecodedPhase1,
     plan: &RgIoPlan,
     mb_idx: usize,
-    map_keys_by_col: &HashMap<usize, Vec<String>>,
-    decoded_subs: &HashMap<usize, ShreddedSubCol>,
+    map_proj_by_col: &HashMap<usize, MapReadMode>,
+    decoded_subs: &HashMap<usize, DecodedSubCol>,
 ) -> Result<Column, StatamError> {
     let DecodedPhase1::Col(col) = cached else {
         return Err(StatamError::Corrupt {
@@ -624,6 +704,11 @@ pub(super) fn materialize_cached_p1_col_with_meta(
             .iter()
             .find(|s| s.logical_col_idx as usize == cidx)
     {
+        if matches!(map_proj_by_col.get(&cidx), Some(MapReadMode::KeysOnly))
+            && matches!(col, Column::Const { ref value, .. } if value.is_null())
+        {
+            return Ok(col);
+        }
         let skip_residual = plan.phase2_map_fast_path.contains(&(mb_idx, cidx));
         let residual_flat = if skip_residual {
             None
@@ -637,15 +722,25 @@ pub(super) fn materialize_cached_p1_col_with_meta(
             skip_residual,
             residual_flat.as_ref(),
             mask,
-            map_keys_by_col,
+            map_proj_by_col,
             decoded_subs,
         );
     }
-    if *dt == DataType::MapUtf8
-        && let Some(req_keys) = map_keys_by_col.get(&cidx)
-    {
-        let flat = col.materialize(None)?;
-        return Ok(Column::Flat(filter_residual_to_keys(&flat, req_keys)?));
+    if *dt == DataType::MapUtf8 {
+        match map_proj_by_col.get(&cidx) {
+            Some(MapReadMode::Keys(req_keys)) => {
+                let flat = col.materialize(None)?;
+                return Ok(Column::Flat(filter_residual_to_keys(&flat, req_keys)?));
+            }
+            Some(MapReadMode::KeysOnly) => {
+                if matches!(col, Column::Const { ref value, .. } if value.is_null()) {
+                    return Ok(col);
+                }
+                let flat = col.materialize(None)?;
+                return Ok(Column::Flat(strip_map_values_to_keys_only(&flat)?));
+            }
+            None | Some(MapReadMode::Full) => {}
+        }
     }
     Ok(col)
 }
@@ -659,8 +754,8 @@ pub(super) fn decode_uncached_p2_non_payload_col_with_meta(
     cidx: usize,
     mask: &Bitmap,
     plan: &RgIoPlan,
-    map_keys_by_col: &HashMap<usize, Vec<String>>,
-    decoded_subs: &HashMap<usize, ShreddedSubCol>,
+    map_proj_by_col: &HashMap<usize, MapReadMode>,
+    decoded_subs: &HashMap<usize, DecodedSubCol>,
     dict: Option<&FileDict>,
     read_block: &BlockCacheReader,
 ) -> Result<Column, StatamError> {
@@ -672,17 +767,28 @@ pub(super) fn decode_uncached_p2_non_payload_col_with_meta(
             .iter()
             .find(|s| s.logical_col_idx as usize == cidx)
     {
+        let keys_only = matches!(map_proj_by_col.get(&cidx), Some(MapReadMode::KeysOnly));
+        let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
+        if keys_only && blk.encoding == Encoding::ConstNull {
+            return Ok(Column::try_new_const(
+                ScalarValue::Null(DataType::MapUtf8),
+                mb_row_count,
+            )?);
+        }
         let skip_residual = plan.phase2_map_fast_path.contains(&(mb_idx, cidx));
         let residual_flat = if skip_residual {
             None
         } else {
-            let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
             let raw = if blk.stored_len > 0 {
                 read_block.read_block(blk)?
             } else {
                 Cow::Borrowed(&[][..])
             };
-            Some(decode_shredded_residual_block_selected(&raw, blk, mask)?)
+            Some(if keys_only {
+                decode_shredded_residual_block_keys_only(&raw, blk, mask)?
+            } else {
+                decode_shredded_residual_block_selected(&raw, blk, mask)?
+            })
         };
         return build_shredded_map_col_with_meta(
             mb_row_count,
@@ -691,12 +797,29 @@ pub(super) fn decode_uncached_p2_non_payload_col_with_meta(
             skip_residual,
             residual_flat.as_ref(),
             mask,
-            map_keys_by_col,
+            map_proj_by_col,
             decoded_subs,
         );
     }
 
     let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
+    if *dt == DataType::MapUtf8 && matches!(map_proj_by_col.get(&cidx), Some(MapReadMode::KeysOnly))
+    {
+        if blk.encoding == Encoding::ConstNull {
+            return Ok(Column::try_new_const(
+                ScalarValue::Null(DataType::MapUtf8),
+                mb_row_count,
+            )?);
+        }
+        let raw = if blk.stored_len > 0 {
+            read_block.read_block(blk)?
+        } else {
+            Cow::Borrowed(&[][..])
+        };
+        return Ok(Column::Flat(decode_shredded_residual_block_keys_only(
+            &raw, blk, mask,
+        )?));
+    }
     let raw = if blk.stored_len > 0 {
         read_block.read_block(blk)?
     } else {
@@ -704,7 +827,7 @@ pub(super) fn decode_uncached_p2_non_payload_col_with_meta(
     };
     let col = decode_mini_block_selected(&raw, blk, dt, dict, mask)?;
     if *dt == DataType::MapUtf8
-        && let Some(req_keys) = map_keys_by_col.get(&cidx)
+        && let Some(MapReadMode::Keys(req_keys)) = map_proj_by_col.get(&cidx)
     {
         let flat = col.materialize(None)?;
         return Ok(Column::Flat(filter_residual_to_keys(&flat, req_keys)?));
@@ -724,8 +847,8 @@ fn decode_non_payload_take_with_meta(
     mask_ref: Option<&Bitmap>,
     u32_indices: Option<&[u32]>,
     plan: &RgIoPlan,
-    empty_map_keys: &HashMap<usize, Vec<String>>,
-    decoded_subs: &HashMap<usize, ShreddedSubCol>,
+    empty_map_proj: &HashMap<usize, MapReadMode>,
+    decoded_subs: &HashMap<usize, DecodedSubCol>,
     read_block: &BlockCacheReader,
 ) -> Result<Column, StatamError> {
     let dt = &meta.schema_meta.schema.fields()[cidx].data_type;
@@ -761,7 +884,7 @@ fn decode_non_payload_take_with_meta(
             skip_residual,
             residual_flat.as_ref(),
             mask,
-            empty_map_keys,
+            empty_map_proj,
             decoded_subs,
         )?;
         return Ok(Column::Flat(full_col.take(u32_idx, None)?));
@@ -786,7 +909,7 @@ fn materialize_take_mb_with_meta(
     plan: &Arc<RgIoPlan>,
     proj_indices: &[usize],
     proj_schema: &Arc<Schema>,
-    empty_map_keys: &Arc<HashMap<usize, Vec<String>>>,
+    empty_map_proj: &Arc<HashMap<usize, MapReadMode>>,
     resolved_chunks: &ResolvedChunks,
     dict_source: DictSource<'_>,
     read_block: &BlockCacheReader,
@@ -843,7 +966,7 @@ fn materialize_take_mb_with_meta(
         None
     };
 
-    let mut decoded_subs: HashMap<usize, ShreddedSubCol> = HashMap::new();
+    let mut decoded_subs: HashMap<usize, DecodedSubCol> = HashMap::new();
     if let Some(mask) = mask_ref
         && !uncached_subs.is_empty()
     {
@@ -865,7 +988,7 @@ fn materialize_take_mb_with_meta(
                     let blk = &meta_arc.rg_blocks(sub_pidx, rg_idx)[mb_idx];
                     let raw = block_reader.read_block(blk)?;
                     let sub = decode_shredded_subcol_selected(&raw, mb_row_count, &mask_arc)?;
-                    Ok((sub_pidx, sub))
+                    Ok((sub_pidx, DecodedSubCol::Full(sub)))
                 })?;
             for (sub_pidx, sub) in decoded_pairs {
                 decoded_subs.insert(sub_pidx, sub);
@@ -875,7 +998,7 @@ fn materialize_take_mb_with_meta(
                 let blk = &meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
                 let raw = read_block.read_block(blk)?;
                 let sub = decode_shredded_subcol_selected(&raw, mb_row_count, mask)?;
-                decoded_subs.insert(sub_pidx, sub);
+                decoded_subs.insert(sub_pidx, DecodedSubCol::Full(sub));
             }
         }
     }
@@ -981,7 +1104,7 @@ fn materialize_take_mb_with_meta(
                     mask_ref,
                     u32_indices.as_deref(),
                     plan,
-                    empty_map_keys,
+                    empty_map_proj,
                     &decoded_subs,
                     read_block,
                 )?);
@@ -1027,7 +1150,7 @@ fn materialize_take_mb_with_meta(
         if parallel_tasks.len() >= 4 && task_workers > 1 {
             let meta_arc = Arc::clone(meta);
             let plan_arc = Arc::clone(plan);
-            let map_keys_arc = Arc::clone(empty_map_keys);
+            let map_proj_arc = Arc::clone(empty_map_proj);
             let decoded_subs_arc = Arc::new(decoded_subs);
             let local_indices_arc = Arc::new(local_indices.to_vec());
             let mask_arc_opt = mask_ref.map(|m| Arc::new(m.clone()));
@@ -1048,7 +1171,7 @@ fn materialize_take_mb_with_meta(
                         mask_arc_opt.as_deref(),
                         u32_arc_opt.as_deref().map(Vec::as_slice),
                         &plan_arc,
-                        &map_keys_arc,
+                        &map_proj_arc,
                         &decoded_subs_arc,
                         &block_reader,
                     )?;
@@ -1071,7 +1194,7 @@ fn materialize_take_mb_with_meta(
                     mask_ref,
                     u32_indices.as_deref(),
                     plan,
-                    empty_map_keys,
+                    empty_map_proj,
                     &decoded_subs,
                     read_block,
                 )?);
@@ -1104,60 +1227,89 @@ pub(super) fn build_shredded_map_col_with_meta(
     skip_residual: bool,
     residual_flat: Option<&FlatColumn>,
     mask: &Bitmap,
-    map_keys_by_col: &HashMap<usize, Vec<String>>,
-    decoded_subs: &HashMap<usize, ShreddedSubCol>,
+    map_proj_by_col: &HashMap<usize, MapReadMode>,
+    decoded_subs: &HashMap<usize, DecodedSubCol>,
 ) -> Result<Column, StatamError> {
-    let flat_map = if let Some(req_keys) = map_keys_by_col.get(&cidx) {
-        if req_keys.len() == 1
-            && let Some(ke) = sm.keys.iter().find(|k| k.key == req_keys[0])
-        {
-            let sub = &decoded_subs[&(ke.sub_col_idx as usize)];
-            decode_single_map_key(
+    let flat_map = match map_proj_by_col.get(&cidx) {
+        Some(MapReadMode::KeysOnly) => {
+            let mut sub_in_maps: Vec<(&str, &Bitmap)> = Vec::with_capacity(sm.keys.len());
+            for ke in &sm.keys {
+                if let Some(sub) = decoded_subs.get(&(ke.sub_col_idx as usize)) {
+                    let bm = match sub {
+                        DecodedSubCol::Full(s) => &s.in_map,
+                        DecodedSubCol::InMapOnly(bm) => bm,
+                    };
+                    sub_in_maps.push((ke.key.as_str(), bm));
+                }
+            }
+            unshred_map_keys_only_selected(
                 mb_row_count,
                 residual_flat.and_then(FlatColumn::nulls),
-                &ke.key,
-                sub,
-                if skip_residual { 0 } else { ke.residual_count },
                 residual_flat,
+                &sub_in_maps,
+                mask,
             )?
-        } else {
-            let mut subpairs: Vec<(&str, &ShreddedSubCol)> = Vec::new();
+        }
+        Some(MapReadMode::Keys(req_keys)) => {
+            if req_keys.len() == 1
+                && let Some(ke) = sm.keys.iter().find(|k| k.key == req_keys[0])
+            {
+                let Some(DecodedSubCol::Full(sub)) = decoded_subs.get(&(ke.sub_col_idx as usize))
+                else {
+                    return Err(StatamError::Corrupt {
+                        reason: "missing full shredded subcol for single-key map read",
+                    });
+                };
+                decode_single_map_key(
+                    mb_row_count,
+                    residual_flat.and_then(FlatColumn::nulls),
+                    &ke.key,
+                    sub,
+                    if skip_residual { 0 } else { ke.residual_count },
+                    residual_flat,
+                )?
+            } else {
+                let mut subpairs: Vec<(&str, &ShreddedSubCol)> = Vec::new();
+                for ke in &sm.keys {
+                    if req_keys.iter().any(|rk| rk == &ke.key)
+                        && let Some(DecodedSubCol::Full(sub)) =
+                            decoded_subs.get(&(ke.sub_col_idx as usize))
+                    {
+                        subpairs.push((ke.key.as_str(), sub));
+                    }
+                }
+                let pruned_residual = if skip_residual {
+                    None
+                } else {
+                    residual_flat
+                        .map(|res| filter_residual_to_keys(res, req_keys))
+                        .transpose()?
+                };
+                unshred_map_selected(
+                    mb_row_count,
+                    pruned_residual.as_ref().and_then(FlatColumn::nulls),
+                    pruned_residual.as_ref(),
+                    &subpairs,
+                    mask,
+                )?
+            }
+        }
+        None | Some(MapReadMode::Full) => {
+            let mut subpairs: Vec<(&str, &ShreddedSubCol)> = Vec::with_capacity(sm.keys.len());
             for ke in &sm.keys {
-                if req_keys.iter().any(|rk| rk == &ke.key)
-                    && let Some(sub) = decoded_subs.get(&(ke.sub_col_idx as usize))
+                if let Some(DecodedSubCol::Full(sub)) = decoded_subs.get(&(ke.sub_col_idx as usize))
                 {
                     subpairs.push((ke.key.as_str(), sub));
                 }
             }
-            let pruned_residual = if skip_residual {
-                None
-            } else {
-                residual_flat
-                    .map(|res| filter_residual_to_keys(res, req_keys))
-                    .transpose()?
-            };
             unshred_map_selected(
                 mb_row_count,
-                pruned_residual.as_ref().and_then(FlatColumn::nulls),
-                pruned_residual.as_ref(),
+                residual_flat.and_then(FlatColumn::nulls),
+                residual_flat,
                 &subpairs,
                 mask,
             )?
         }
-    } else {
-        let mut subpairs: Vec<(&str, &ShreddedSubCol)> = Vec::with_capacity(sm.keys.len());
-        for ke in &sm.keys {
-            if let Some(sub) = decoded_subs.get(&(ke.sub_col_idx as usize)) {
-                subpairs.push((ke.key.as_str(), sub));
-            }
-        }
-        unshred_map_selected(
-            mb_row_count,
-            residual_flat.and_then(FlatColumn::nulls),
-            residual_flat,
-            &subpairs,
-            mask,
-        )?
     };
     Ok(Column::Flat(flat_map))
 }

@@ -60,6 +60,51 @@ pub fn ascii_lowercase_into(src: &[u8], dst: &mut Vec<u8>) {
     ascii_lowercase_append(src, dst);
 }
 
+/// Returns `true` if `bytes` contains UTF-8 Kelvin sign `K` (`U+212A` = `[0xE2, 0x84, 0xAA]`)
+/// or Latin small letter long s `ſ` (`U+017F` = `[0xC5, 0xBF]`).
+///
+/// Zero-cost on pure-ASCII inputs (`bytes.is_ascii()` fast reject).
+#[inline]
+pub(crate) fn contains_kelvin_or_long_s(bytes: &[u8]) -> bool {
+    if bytes.is_ascii() {
+        return false;
+    }
+    let mut i = 0usize;
+    while i + 1 < bytes.len() {
+        let b = bytes[i];
+        if b == 0xC5 && bytes[i + 1] == 0xBF {
+            return true;
+        }
+        if b == 0xE2 && i + 2 < bytes.len() && bytes[i + 1] == 0x84 && bytes[i + 2] == 0xAA {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Writes ASCII-lowercased `src` into `dst`, also folding UTF-8 `K` (`U+212A`) -> `b'k'`
+/// and `ſ` (`U+017F`) -> `b's'` for exact Unicode simple-case-fold `ILIKE` parity with
+/// `cetra-query`'s `regex (?i)` matcher.
+pub(crate) fn ascii_lowercase_fold_ks_into(src: &[u8], dst: &mut Vec<u8>) {
+    dst.clear();
+    dst.reserve(src.len());
+    let mut i = 0usize;
+    while i < src.len() {
+        let b = src[i];
+        if b == 0xC5 && i + 1 < src.len() && src[i + 1] == 0xBF {
+            dst.push(b's');
+            i += 2;
+        } else if b == 0xE2 && i + 2 < src.len() && src[i + 1] == 0x84 && src[i + 2] == 0xAA {
+            dst.push(b'k');
+            i += 3;
+        } else {
+            dst.push(b.to_ascii_lowercase());
+            i += 1;
+        }
+    }
+}
+
 /// Computes a deterministic 32-bit hash for a 3-byte trigram.
 #[inline]
 pub fn trigram_hash(b0: u8, b1: u8, b2: u8) -> u32 {
@@ -177,6 +222,19 @@ impl TrigramBloom {
             }
         }
         self.insert_bytes_scalar(bytes);
+    }
+
+    /// Inserts ASCII-lowercased trigrams from `bytes` AND, on non-ASCII inputs containing
+    /// `K` (`U+212A`) or `ſ` (`U+017F`), also inserts trigrams from the `K -> k` / `ſ -> s`
+    /// folded byte stream so ASCII `ILIKE` needles containing `k`/`s` never false-negative while
+    /// preserving exact `LIKE` trigrams and 0 overhead on ASCII inputs.
+    pub fn insert_bytes_ilike_folded(&mut self, bytes: &[u8]) {
+        self.insert_bytes(bytes);
+        if contains_kelvin_or_long_s(bytes) {
+            let mut folded = Vec::new();
+            ascii_lowercase_fold_ks_into(bytes, &mut folded);
+            self.insert_bytes(&folded);
+        }
     }
 
     #[inline]

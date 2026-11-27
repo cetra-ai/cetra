@@ -4,7 +4,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use cetra_column::{Bitmap, Column, DataType, FlatColumn, FlatData, ScalarValue, Utf8Data};
+use cetra_column::{
+    Bitmap, CancelToken, Column, DataType, FlatColumn, FlatData, ScalarValue, Utf8Data,
+};
 use memchr::memmem;
 
 use crate::StatamError;
@@ -16,13 +18,14 @@ use crate::codec::nested::{
 use crate::codec::numeric::read_optional_nulls;
 use crate::codec::{
     FastUtf8Ref, ZonePred, ZoneValue, decode_mini_block, utf8_bytes_at, zone_map_always_matches,
+    zone_map_may_match,
 };
 use crate::format::{
     BLOCK_FLAG_CONST_EMPTY_COLLECTION, BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_HAS_NAN, BlockEntry,
     COL_FLAG_HAS_FILE_DICT, COL_FLAG_IS_SHREDDED_SUBCOL, Encoding, LocalityGroup,
     MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES,
 };
-use crate::parallel::{MAX_PARALLEL_THREADS, parallel_map_in_order, parallel_map_in_order_static};
+use crate::parallel::{MAX_PARALLEL_THREADS, parallel_map_in_order_static};
 use crate::payload::search::{
     RetainedPackChunks, extract_unicode_ilike_ascii_anchor, pack_short_circuits_all,
     unicode_lowercase_context_free_into_bytes,
@@ -32,12 +35,15 @@ use crate::payload::{
 };
 use crate::simd::bitpack::{packed_bytes_len, unpack_u32};
 use crate::simd::filter::{FilterOp, filter_f64, filter_i64, filter_i64_between, filter_u32};
-use crate::simd::trigram::ascii_lowercase_into;
+use crate::simd::trigram::{
+    ascii_lowercase_fold_ks_into, ascii_lowercase_into, contains_kelvin_or_long_s,
+};
 
 use super::meta::StatamFileMeta;
 use super::payload::ParsedL0Payload;
 use super::plan::{
-    ActiveMiniBlock, BlockCacheReader, DecodedPhase1, RgIoPlan, find_shredded_subcol_in_meta,
+    ActiveMiniBlock, BlockCacheReader, DecodedPhase1, ResolvedFilterExpr, RgIoPlan,
+    find_shredded_subcol_in_meta,
 };
 use super::{IdLookup, Predicate, StatamReader, SubstringQuery, TimeRange, effective_read_threads};
 
@@ -66,29 +72,31 @@ impl StatamReader {
         time_range: TimeRange,
         lookups: &[(usize, &IdLookup)],
         preds: &[(usize, &Predicate)],
-        subs: &[(usize, &SubstringQuery)],
-        dict_sub_bitmaps: &[Option<Bitmap>],
+        filter_exprs: &[ResolvedFilterExpr],
+        subs: &[Vec<(usize, SubstringQuery)>],
+        dict_sub_bitmaps: &[Vec<Option<Bitmap>>],
         l0_local: Option<&ParsedL0Payload>,
         read_block: &BlockCacheReader,
         limit_remaining: Option<usize>,
         trim_tail: bool,
         read_threads: usize,
         retained: &RetainedPackChunks,
+        cancel: Option<&CancelToken>,
     ) -> Result<Vec<ActiveMiniBlock>, StatamError> {
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(StatamError::Cancelled);
+        }
         if limit_remaining == Some(0) {
             return Ok(Vec::new());
         }
         let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
-        let has_payload_sub = subs.iter().any(|&(cidx, _)| {
-            self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload
+        let has_payload_sub = subs.iter().any(|clause| {
+            clause.iter().any(|&(cidx, _)| {
+                self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload
+            })
         });
-        if self.reader.is_remote()
-            && has_payload_sub
-            && l0_local.is_none()
-            && surviving_mbs.len() >= 2
-            && limit_remaining.is_none()
-        {
-            return self.eval_phase1_mbs_remote_batched_payload(
+        if has_payload_sub && surviving_mbs.len() >= 2 && limit_remaining.is_none() {
+            return self.eval_phase1_mbs_batched_payload(
                 rg_idx,
                 surviving_mbs,
                 plan,
@@ -97,11 +105,14 @@ impl StatamReader {
                 time_range,
                 lookups,
                 preds,
+                filter_exprs,
                 subs,
                 dict_sub_bitmaps,
+                l0_local,
                 read_block,
                 threads,
                 retained,
+                cancel,
             );
         }
         let mb_workers = if has_payload_sub {
@@ -116,11 +127,16 @@ impl StatamReader {
             }
             effective_read_threads(work_bytes, threads)
         };
-        if mb_workers > 1 && surviving_mbs.len() >= 2 && limit_remaining.is_none() {
+        if !has_payload_sub
+            && mb_workers > 1
+            && surviving_mbs.len() >= 2
+            && limit_remaining.is_none()
+        {
             let fields = self.meta.schema_meta.schema.fields();
             let preload_always_matched_col = if !self.reader.is_remote()
                 && preds.len() == 1
                 && preds[0].1.map_key.is_none()
+                && filter_exprs.is_empty()
                 && lookups.is_empty()
                 && subs.is_empty()
                 && time_col_idx.is_none()
@@ -138,19 +154,19 @@ impl StatamReader {
             } else {
                 None
             };
-            let per_mb = if !has_payload_sub {
-                let meta = Arc::clone(&self.meta);
-                let plan_arc = Arc::clone(plan);
-                let block_reader = read_block.clone();
-                let p1_dicts = self.preload_p1_dicts(plan);
-                let owned_lookups: Arc<Vec<(usize, IdLookup)>> =
-                    Arc::new(lookups.iter().map(|&(c, lk)| (c, (*lk).clone())).collect());
-                let owned_preds: Arc<Vec<(usize, Predicate)>> =
-                    Arc::new(preds.iter().map(|&(c, p)| (c, (*p).clone())).collect());
-                let owned_subs: Arc<Vec<(usize, SubstringQuery)>> =
-                    Arc::new(subs.iter().map(|&(c, s)| (c, (*s).clone())).collect());
-                let owned_dict_sub_bitmaps: Arc<Vec<Option<Bitmap>>> =
-                    Arc::new(dict_sub_bitmaps.to_vec());
+            let meta = Arc::clone(&self.meta);
+            let plan_arc = Arc::clone(plan);
+            let block_reader = read_block.clone();
+            let p1_dicts = self.preload_p1_dicts(plan);
+            let owned_lookups: Arc<Vec<(usize, IdLookup)>> =
+                Arc::new(lookups.iter().map(|&(c, lk)| (c, (*lk).clone())).collect());
+            let owned_preds: Arc<Vec<(usize, Predicate)>> =
+                Arc::new(preds.iter().map(|&(c, p)| (c, (*p).clone())).collect());
+            let owned_filter_exprs: Arc<Vec<ResolvedFilterExpr>> = Arc::new(filter_exprs.to_vec());
+            let owned_subs: Arc<Vec<Vec<(usize, SubstringQuery)>>> = Arc::new(subs.to_vec());
+            let owned_dict_sub_bitmaps: Arc<Vec<Vec<Option<Bitmap>>>> =
+                Arc::new(dict_sub_bitmaps.to_vec());
+            let per_mb =
                 parallel_map_in_order_static(surviving_mbs.to_vec(), mb_workers, move |mb_idx| {
                     let (mask, decoded_p1) = eval_phase1_mb_narrow_static(
                         &meta,
@@ -161,6 +177,7 @@ impl StatamReader {
                         time_range,
                         &owned_lookups,
                         &owned_preds,
+                        &owned_filter_exprs,
                         &owned_subs,
                         &owned_dict_sub_bitmaps,
                         &p1_dicts,
@@ -168,34 +185,7 @@ impl StatamReader {
                         preload_always_matched_col,
                     )?;
                     Ok((mb_idx, mask, decoded_p1))
-                })?
-            } else {
-                let inner_threads = if surviving_mbs.len() >= mb_workers {
-                    1
-                } else {
-                    (mb_workers / surviving_mbs.len()).max(1)
-                };
-                parallel_map_in_order(surviving_mbs.to_vec(), mb_workers, |mb_idx| {
-                    let (mask, decoded_p1) = self.eval_phase1_mb(
-                        rg_idx,
-                        mb_idx,
-                        plan,
-                        proj_indices,
-                        time_col_idx,
-                        time_range,
-                        lookups,
-                        preds,
-                        subs,
-                        dict_sub_bitmaps,
-                        l0_local,
-                        read_block,
-                        inner_threads,
-                        retained,
-                        preload_always_matched_col,
-                    )?;
-                    Ok((mb_idx, mask, decoded_p1))
-                })?
-            };
+                })?;
             let mut active = Vec::new();
             for (mb_idx, mask, decoded_p1) in per_mb {
                 if mask.count_ones() > 0 {
@@ -208,6 +198,9 @@ impl StatamReader {
         let mut active_mbs = Vec::new();
         let mut active_rows = 0usize;
         for &mb_idx in surviving_mbs {
+            if cancel.is_some_and(CancelToken::is_cancelled) {
+                return Err(StatamError::Cancelled);
+            }
             let (mut mask, decoded_p1) = self.eval_phase1_mb(
                 rg_idx,
                 mb_idx,
@@ -217,6 +210,7 @@ impl StatamReader {
                 time_range,
                 lookups,
                 preds,
+                filter_exprs,
                 subs,
                 dict_sub_bitmaps,
                 l0_local,
@@ -224,6 +218,7 @@ impl StatamReader {
                 read_threads,
                 retained,
                 None,
+                cancel,
             )?;
             let hits = mask.count_ones();
             if hits > 0 {
@@ -252,7 +247,7 @@ impl StatamReader {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn eval_phase1_mbs_remote_batched_payload(
+    pub(super) fn eval_phase1_mbs_batched_payload(
         &self,
         rg_idx: usize,
         surviving_mbs: &[usize],
@@ -262,14 +257,20 @@ impl StatamReader {
         time_range: TimeRange,
         lookups: &[(usize, &IdLookup)],
         preds: &[(usize, &Predicate)],
-        subs: &[(usize, &SubstringQuery)],
-        dict_sub_bitmaps: &[Option<Bitmap>],
+        filter_exprs: &[ResolvedFilterExpr],
+        subs: &[Vec<(usize, SubstringQuery)>],
+        dict_sub_bitmaps: &[Vec<Option<Bitmap>>],
+        l0_local: Option<&ParsedL0Payload>,
         read_block: &BlockCacheReader,
         threads: usize,
         retained: &RetainedPackChunks,
+        cancel: Option<&CancelToken>,
     ) -> Result<Vec<ActiveMiniBlock>, StatamError> {
-        // Stage 1: Evaluate narrow predicates + non-payload substring filters across surviving MBs
-        // so masks are as selective as possible before touching `.stpk`.
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(StatamError::Cancelled);
+        }
+        // Stage 1: Evaluate narrow predicates, 3VL filter_exprs, and pure-narrow CNF substring
+        // clauses across surviving MBs so masks are as selective as possible before touching `.stpk`.
         let mut narrow_work_bytes = 0usize;
         for &mb_idx in surviving_mbs {
             for &pidx in &plan.phase1_phys_cols {
@@ -289,9 +290,9 @@ impl StatamReader {
                 Arc::new(lookups.iter().map(|&(c, lk)| (c, (*lk).clone())).collect());
             let owned_preds: Arc<Vec<(usize, Predicate)>> =
                 Arc::new(preds.iter().map(|&(c, p)| (c, (*p).clone())).collect());
-            let owned_subs: Arc<Vec<(usize, SubstringQuery)>> =
-                Arc::new(subs.iter().map(|&(c, s)| (c, (*s).clone())).collect());
-            let owned_dict_sub_bitmaps: Arc<Vec<Option<Bitmap>>> =
+            let owned_filter_exprs: Arc<Vec<ResolvedFilterExpr>> = Arc::new(filter_exprs.to_vec());
+            let owned_subs: Arc<Vec<Vec<(usize, SubstringQuery)>>> = Arc::new(subs.to_vec());
+            let owned_dict_sub_bitmaps: Arc<Vec<Vec<Option<Bitmap>>>> =
                 Arc::new(dict_sub_bitmaps.to_vec());
             let per_mb = parallel_map_in_order_static(
                 surviving_mbs.to_vec(),
@@ -306,6 +307,7 @@ impl StatamReader {
                         time_range,
                         &owned_lookups,
                         &owned_preds,
+                        &owned_filter_exprs,
                         &owned_subs,
                         &owned_dict_sub_bitmaps,
                         &p1_dicts,
@@ -322,6 +324,9 @@ impl StatamReader {
         } else {
             let mut out = Vec::with_capacity(surviving_mbs.len());
             for &mb_idx in surviving_mbs {
+                if cancel.is_some_and(CancelToken::is_cancelled) {
+                    return Err(StatamError::Cancelled);
+                }
                 let (mask, decoded_p1) = self.eval_phase1_mb_narrow(
                     rg_idx,
                     mb_idx,
@@ -330,6 +335,7 @@ impl StatamReader {
                     time_range,
                     lookups,
                     preds,
+                    filter_exprs,
                     subs,
                     dict_sub_bitmaps,
                     read_block,
@@ -346,121 +352,193 @@ impl StatamReader {
             return Ok(active);
         }
 
-        // Stage 2: Evaluate each ExternalPayload substring query ONCE across all surviving MBs
-        // so `.stpk` frame reads are deduplicated into a single wave per pack.
-        for (sq_idx, &(cidx, sq)) in subs.iter().enumerate() {
-            if self.meta.col_dir[cidx].locality_group != LocalityGroup::ExternalPayload {
+        // Stage 2: Evaluate each mixed/payload CNF clause ONCE across all surviving MBs so `.stpk`
+        // frame reads are deduplicated into a single wave per pack, evaluating narrow disjuncts
+        // first to shrink per-MB remaining masks before touching ExternalPayload columns.
+        for (ci, clause) in subs.iter().enumerate() {
+            let clause_has_payload = clause.iter().any(|(cidx, _)| {
+                self.meta.col_dir[*cidx].locality_group == LocalityGroup::ExternalPayload
+            });
+            if !clause_has_payload {
                 continue;
             }
-
-            let mut pack_chunk_counts = Vec::new();
-            let mut pack_has_edges = Vec::new();
-            let mut inline_fast_path_ok = false;
-
-            if !self.meta.schema_meta.pack_ids.is_empty() {
-                let mut all_short_circuit = true;
-                pack_chunk_counts.reserve(self.meta.schema_meta.pack_ids.len());
-                pack_has_edges.reserve(self.meta.schema_meta.pack_ids.len());
-                for &pack_id in &self.meta.schema_meta.pack_ids {
-                    let pack = self.resolve_pack(pack_id)?;
-                    if !pack_short_circuits_all(&pack, &sq.needle, sq.case_insensitive)? {
-                        all_short_circuit = false;
-                        break;
-                    }
-                    pack_chunk_counts.push(pack.toc().chunks.len());
-                    pack_has_edges.push(pack.postscript().edge_table_len > 0);
-                }
-                if all_short_circuit {
-                    let mut needed_by_other = false;
-                    for (j, &(oc, osq)) in subs.iter().enumerate() {
-                        if j != sq_idx && oc == cidx {
-                            for &pack_id in &self.meta.schema_meta.pack_ids {
-                                let pack = self.resolve_pack(pack_id)?;
-                                if !pack_short_circuits_all(
-                                    &pack,
-                                    &osq.needle,
-                                    osq.case_insensitive,
-                                )? {
-                                    needed_by_other = true;
-                                    break;
-                                }
-                            }
-                            if needed_by_other {
-                                break;
-                            }
-                        }
-                    }
-                    inline_fast_path_ok = !needed_by_other;
-                }
+            if clause.is_empty() {
+                return Ok(Vec::new());
             }
 
-            let mut batch_positions: Vec<usize> = Vec::new();
-            for (pos, (mb_idx, mask, decoded_p1)) in active.iter_mut().enumerate() {
-                if mask.all_zeros() {
+            let mut clause_matched: Vec<Bitmap> = active
+                .iter()
+                .map(|(_, mask, _)| Bitmap::new_zeroed(mask.len()))
+                .collect();
+            let mut remaining: Vec<Bitmap> =
+                active.iter().map(|(_, mask, _)| mask.clone()).collect();
+
+            // 2a. Narrow disjuncts first across all active MBs.
+            for (di, (cidx, sq)) in clause.iter().enumerate() {
+                if self.meta.col_dir[*cidx].locality_group == LocalityGroup::ExternalPayload {
                     continue;
                 }
-                let mb_row_count = self.meta.rg_blocks(0, rg_idx)[*mb_idx].row_count as usize;
-                if !decoded_p1.contains_key(&cidx) {
-                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[*mb_idx];
-                    if blk.encoding == Encoding::ConstNull {
-                        *mask = Bitmap::new_zeroed(mb_row_count);
+                let dict_bm = dict_sub_bitmaps
+                    .get(ci)
+                    .and_then(|v| v.get(di))
+                    .and_then(Option::as_ref);
+                for (pos, (mb_idx, _, decoded_p1)) in active.iter_mut().enumerate() {
+                    if remaining[pos].all_zeros() {
                         continue;
                     }
-                    if inline_fast_path_ok {
-                        let raw = read_block.read_block(blk)?;
-                        let mut matcher = Utf8Matcher::new(&sq.needle, sq.case_insensitive);
-                        let bm = scan_payload_refs_inline_substring(
-                            &raw,
-                            mb_row_count,
-                            mask,
-                            &pack_chunk_counts,
-                            &pack_has_edges,
-                            |bytes| matcher.matches(bytes),
-                        )?;
-                        *mask = mask.and(&bm)?;
-                        continue;
-                    }
-                    self.ensure_p1_col(
-                        cidx,
+                    let mb_row_count = self.meta.rg_blocks(0, rg_idx)[*mb_idx].row_count as usize;
+                    let hits = eval_narrow_sub_disjunct(
+                        &self.meta,
                         rg_idx,
                         *mb_idx,
                         mb_row_count,
+                        *cidx,
+                        sq,
+                        dict_bm,
+                        &remaining[pos],
+                        &|c| self.get_cached_dict(c),
                         read_block,
                         decoded_p1,
                     )?;
-                }
-                batch_positions.push(pos);
-            }
-
-            if !batch_positions.is_empty() {
-                let mut mb_inputs: Vec<(&FlatPayloadRefs, &Bitmap)> =
-                    Vec::with_capacity(batch_positions.len());
-                for &pos in &batch_positions {
-                    let (_, mask, decoded_p1) = &active[pos];
-                    let DecodedPhase1::FlatPayloadRefs(refs) = &decoded_p1[&cidx] else {
-                        return Err(StatamError::Corrupt {
-                            reason: "unexpected Phase 1 variant for ExternalPayload substring query",
-                        });
-                    };
-                    mb_inputs.push((refs, mask));
-                }
-                let batch_bms = self.eval_payload_refs_substring_batch(
-                    &mb_inputs,
-                    &sq.needle,
-                    sq.case_insensitive,
-                    None,
-                    threads,
-                    if proj_indices.contains(&cidx) {
-                        Some(retained)
-                    } else {
-                        None
-                    },
-                )?;
-                for (pos, bm) in batch_positions.into_iter().zip(batch_bms) {
-                    active[pos].1 = active[pos].1.and(&bm)?;
+                    if !hits.all_zeros() {
+                        clause_matched[pos] = clause_matched[pos].or(&hits)?;
+                        remaining[pos] = remaining[pos].and(&hits.not())?;
+                    }
                 }
             }
 
+            // 2b. ExternalPayload disjuncts ONLY on rows still unmatched in `remaining`.
+            for (di, (cidx, sq)) in clause.iter().enumerate() {
+                if self.meta.col_dir[*cidx].locality_group != LocalityGroup::ExternalPayload {
+                    continue;
+                }
+                if cancel.is_some_and(CancelToken::is_cancelled) {
+                    return Err(StatamError::Cancelled);
+                }
+                if remaining.iter().all(Bitmap::all_zeros) {
+                    break;
+                }
+
+                let mut pack_chunk_counts = Vec::new();
+                let mut pack_has_edges = Vec::new();
+                let mut inline_fast_path_ok = false;
+
+                if l0_local.is_none() && !self.meta.schema_meta.pack_ids.is_empty() {
+                    let mut all_short_circuit = true;
+                    pack_chunk_counts.reserve(self.meta.schema_meta.pack_ids.len());
+                    pack_has_edges.reserve(self.meta.schema_meta.pack_ids.len());
+                    for &pack_id in &self.meta.schema_meta.pack_ids {
+                        let pack = self.resolve_pack(pack_id)?;
+                        if !pack_short_circuits_all(&pack, &sq.needle, sq.case_insensitive)? {
+                            all_short_circuit = false;
+                            break;
+                        }
+                        pack_chunk_counts.push(pack.toc().chunks.len());
+                        pack_has_edges.push(pack.postscript().edge_table_len > 0);
+                    }
+                    if all_short_circuit {
+                        let mut needed_by_other = false;
+                        'other: for (oci, oclause) in subs.iter().enumerate() {
+                            for (odi, (oc, osq)) in oclause.iter().enumerate() {
+                                if (oci != ci || odi != di) && *oc == *cidx {
+                                    for &pack_id in &self.meta.schema_meta.pack_ids {
+                                        let pack = self.resolve_pack(pack_id)?;
+                                        if !pack_short_circuits_all(
+                                            &pack,
+                                            &osq.needle,
+                                            osq.case_insensitive,
+                                        )? {
+                                            needed_by_other = true;
+                                            break 'other;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        inline_fast_path_ok = !needed_by_other;
+                    }
+                }
+
+                let mut batch_positions: Vec<usize> = Vec::new();
+                for (pos, (mb_idx, _, decoded_p1)) in active.iter_mut().enumerate() {
+                    if remaining[pos].all_zeros() {
+                        continue;
+                    }
+                    let mb_row_count = self.meta.rg_blocks(0, rg_idx)[*mb_idx].row_count as usize;
+                    if !decoded_p1.contains_key(cidx) {
+                        let blk = &self.meta.rg_blocks(*cidx, rg_idx)[*mb_idx];
+                        if blk.encoding == Encoding::ConstNull {
+                            // Disjunct produces 0 hits for this MB (do NOT zero other OR branches).
+                            continue;
+                        }
+                        if inline_fast_path_ok {
+                            let raw = read_block.read_block(blk)?;
+                            let mut matcher = Utf8Matcher::new(&sq.needle, sq.case_insensitive);
+                            let bm = scan_payload_refs_inline_substring(
+                                &raw,
+                                mb_row_count,
+                                &remaining[pos],
+                                &pack_chunk_counts,
+                                &pack_has_edges,
+                                |bytes| matcher.matches(bytes),
+                            )?;
+                            let hits = bm.and(&remaining[pos])?;
+                            if !hits.all_zeros() {
+                                clause_matched[pos] = clause_matched[pos].or(&hits)?;
+                                remaining[pos] = remaining[pos].and(&hits.not())?;
+                            }
+                            continue;
+                        }
+                        self.ensure_p1_col(
+                            *cidx,
+                            rg_idx,
+                            *mb_idx,
+                            mb_row_count,
+                            read_block,
+                            decoded_p1,
+                        )?;
+                    }
+                    batch_positions.push(pos);
+                }
+
+                if !batch_positions.is_empty() {
+                    let mut mb_inputs: Vec<(&FlatPayloadRefs, &Bitmap)> =
+                        Vec::with_capacity(batch_positions.len());
+                    for &pos in &batch_positions {
+                        let (_, _, decoded_p1) = &active[pos];
+                        let DecodedPhase1::FlatPayloadRefs(refs) = &decoded_p1[cidx] else {
+                            return Err(StatamError::Corrupt {
+                                reason: "unexpected Phase 1 variant for ExternalPayload substring query",
+                            });
+                        };
+                        mb_inputs.push((refs, &remaining[pos]));
+                    }
+                    let batch_bms = self.eval_payload_refs_substring_batch(
+                        &mb_inputs,
+                        &sq.needle,
+                        sq.case_insensitive,
+                        l0_local,
+                        threads,
+                        if proj_indices.contains(cidx) {
+                            Some(retained)
+                        } else {
+                            None
+                        },
+                        cancel,
+                    )?;
+                    for (pos, bm) in batch_positions.into_iter().zip(batch_bms) {
+                        let hits = bm.and(&remaining[pos])?;
+                        if !hits.all_zeros() {
+                            clause_matched[pos] = clause_matched[pos].or(&hits)?;
+                            remaining[pos] = remaining[pos].and(&hits.not())?;
+                        }
+                    }
+                }
+            }
+
+            for (pos, (_, mask, _)) in active.iter_mut().enumerate() {
+                *mask = mask.and(&clause_matched[pos])?;
+            }
             active.retain(|(_, mask, _)| mask.count_ones() > 0);
             if active.is_empty() {
                 break;
@@ -481,13 +559,15 @@ impl StatamReader {
         time_range: TimeRange,
         lookups: &[(usize, &IdLookup)],
         preds: &[(usize, &Predicate)],
-        subs: &[(usize, &SubstringQuery)],
-        dict_sub_bitmaps: &[Option<Bitmap>],
+        filter_exprs: &[ResolvedFilterExpr],
+        subs: &[Vec<(usize, SubstringQuery)>],
+        dict_sub_bitmaps: &[Vec<Option<Bitmap>>],
         l0_local: Option<&ParsedL0Payload>,
         read_block: &BlockCacheReader,
         read_threads: usize,
         retained: &RetainedPackChunks,
         preload_always_matched_col: Option<usize>,
+        cancel: Option<&CancelToken>,
     ) -> Result<(Bitmap, HashMap<usize, DecodedPhase1>), StatamError> {
         let (mut mask, mut decoded_p1) = self.eval_phase1_mb_narrow(
             rg_idx,
@@ -497,6 +577,7 @@ impl StatamReader {
             time_range,
             lookups,
             preds,
+            filter_exprs,
             subs,
             dict_sub_bitmaps,
             read_block,
@@ -507,100 +588,160 @@ impl StatamReader {
         }
 
         let mb_row_count = self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
-        for (sq_idx, &(cidx, sq)) in subs.iter().enumerate() {
-            if self.meta.col_dir[cidx].locality_group != LocalityGroup::ExternalPayload {
+        for (ci, clause) in subs.iter().enumerate() {
+            let clause_has_payload = clause.iter().any(|(cidx, _)| {
+                self.meta.col_dir[*cidx].locality_group == LocalityGroup::ExternalPayload
+            });
+            if !clause_has_payload {
                 continue;
             }
-            if l0_local.is_none()
-                && !self.meta.schema_meta.pack_ids.is_empty()
-                && !decoded_p1.contains_key(&cidx)
-            {
-                let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
-                if blk.encoding == Encoding::ConstNull {
-                    return Ok((Bitmap::new_zeroed(mb_row_count), decoded_p1));
+            if clause.is_empty() {
+                return Ok((Bitmap::new_zeroed(mb_row_count), decoded_p1));
+            }
+
+            let mut clause_matched = Bitmap::new_zeroed(mb_row_count);
+            let mut remaining = mask.clone();
+
+            // Narrow disjuncts first so `remaining` is minimized before touching `.stpk` / L0.
+            for (di, (cidx, sq)) in clause.iter().enumerate() {
+                if self.meta.col_dir[*cidx].locality_group == LocalityGroup::ExternalPayload {
+                    continue;
                 }
-                let mut all_short_circuit = true;
-                let mut pack_chunk_counts =
-                    Vec::with_capacity(self.meta.schema_meta.pack_ids.len());
-                let mut pack_has_edges = Vec::with_capacity(self.meta.schema_meta.pack_ids.len());
-                for &pack_id in &self.meta.schema_meta.pack_ids {
-                    let pack = self.resolve_pack(pack_id)?;
-                    if !pack_short_circuits_all(&pack, &sq.needle, sq.case_insensitive)? {
-                        all_short_circuit = false;
-                        break;
-                    }
-                    pack_chunk_counts.push(pack.toc().chunks.len());
-                    pack_has_edges.push(pack.postscript().edge_table_len > 0);
+                if remaining.all_zeros() {
+                    break;
                 }
-                if all_short_circuit {
-                    let mut needed_by_other = false;
-                    for (j, &(oc, osq)) in subs.iter().enumerate() {
-                        if j != sq_idx && oc == cidx {
-                            for &pack_id in &self.meta.schema_meta.pack_ids {
-                                let pack = self.resolve_pack(pack_id)?;
-                                if !pack_short_circuits_all(
-                                    &pack,
-                                    &osq.needle,
-                                    osq.case_insensitive,
-                                )? {
-                                    needed_by_other = true;
-                                    break;
-                                }
-                            }
-                            if needed_by_other {
-                                break;
-                            }
-                        }
-                    }
-                    if !needed_by_other {
-                        let raw = read_block.read_block(blk)?;
-                        let mut matcher = Utf8Matcher::new(&sq.needle, sq.case_insensitive);
-                        let bm = scan_payload_refs_inline_substring(
-                            &raw,
-                            mb_row_count,
-                            &mask,
-                            &pack_chunk_counts,
-                            &pack_has_edges,
-                            |bytes| matcher.matches(bytes),
-                        )?;
-                        mask = mask.and(&bm)?;
-                        if mask.all_zeros() {
-                            return Ok((mask, decoded_p1));
-                        }
-                        continue;
-                    }
+                let dict_bm = dict_sub_bitmaps
+                    .get(ci)
+                    .and_then(|v| v.get(di))
+                    .and_then(Option::as_ref);
+                let hits = eval_narrow_sub_disjunct(
+                    &self.meta,
+                    rg_idx,
+                    mb_idx,
+                    mb_row_count,
+                    *cidx,
+                    sq,
+                    dict_bm,
+                    &remaining,
+                    &|c| self.get_cached_dict(c),
+                    read_block,
+                    &mut decoded_p1,
+                )?;
+                if !hits.all_zeros() {
+                    clause_matched = clause_matched.or(&hits)?;
+                    remaining = remaining.and(&hits.not())?;
                 }
             }
-            self.ensure_p1_col(
-                cidx,
-                rg_idx,
-                mb_idx,
-                mb_row_count,
-                read_block,
-                &mut decoded_p1,
-            )?;
-            let item = &decoded_p1[&cidx];
-            let bm = match item {
-                DecodedPhase1::FlatPayloadRefs(refs) => self.eval_payload_refs_substring(
-                    refs,
-                    &mask,
-                    &sq.needle,
-                    sq.case_insensitive,
-                    l0_local,
-                    read_threads,
-                    if proj_indices.contains(&cidx) {
-                        Some(retained)
-                    } else {
-                        None
-                    },
-                )?,
-                _ => {
-                    return Err(StatamError::Corrupt {
-                        reason: "unexpected Phase 1 variant for substring query",
-                    });
+
+            // ExternalPayload disjuncts ONLY on rows still in `remaining`.
+            for (di, (cidx, sq)) in clause.iter().enumerate() {
+                if self.meta.col_dir[*cidx].locality_group != LocalityGroup::ExternalPayload {
+                    continue;
                 }
-            };
-            mask = mask.and(&bm)?;
+                if remaining.all_zeros() {
+                    break;
+                }
+                if cancel.is_some_and(CancelToken::is_cancelled) {
+                    return Err(StatamError::Cancelled);
+                }
+                if !decoded_p1.contains_key(cidx) {
+                    let blk = &self.meta.rg_blocks(*cidx, rg_idx)[mb_idx];
+                    if blk.encoding == Encoding::ConstNull {
+                        continue;
+                    }
+                    if l0_local.is_none() && !self.meta.schema_meta.pack_ids.is_empty() {
+                        let mut all_short_circuit = true;
+                        let mut pack_chunk_counts =
+                            Vec::with_capacity(self.meta.schema_meta.pack_ids.len());
+                        let mut pack_has_edges =
+                            Vec::with_capacity(self.meta.schema_meta.pack_ids.len());
+                        for &pack_id in &self.meta.schema_meta.pack_ids {
+                            let pack = self.resolve_pack(pack_id)?;
+                            if !pack_short_circuits_all(&pack, &sq.needle, sq.case_insensitive)? {
+                                all_short_circuit = false;
+                                break;
+                            }
+                            pack_chunk_counts.push(pack.toc().chunks.len());
+                            pack_has_edges.push(pack.postscript().edge_table_len > 0);
+                        }
+                        if all_short_circuit {
+                            let mut needed_by_other = false;
+                            'other: for (oci, oclause) in subs.iter().enumerate() {
+                                for (odi, (oc, osq)) in oclause.iter().enumerate() {
+                                    if (oci != ci || odi != di) && *oc == *cidx {
+                                        for &pack_id in &self.meta.schema_meta.pack_ids {
+                                            let pack = self.resolve_pack(pack_id)?;
+                                            if !pack_short_circuits_all(
+                                                &pack,
+                                                &osq.needle,
+                                                osq.case_insensitive,
+                                            )? {
+                                                needed_by_other = true;
+                                                break 'other;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if !needed_by_other {
+                                let raw = read_block.read_block(blk)?;
+                                let mut matcher = Utf8Matcher::new(&sq.needle, sq.case_insensitive);
+                                let bm = scan_payload_refs_inline_substring(
+                                    &raw,
+                                    mb_row_count,
+                                    &remaining,
+                                    &pack_chunk_counts,
+                                    &pack_has_edges,
+                                    |bytes| matcher.matches(bytes),
+                                )?;
+                                let hits = bm.and(&remaining)?;
+                                if !hits.all_zeros() {
+                                    clause_matched = clause_matched.or(&hits)?;
+                                    remaining = remaining.and(&hits.not())?;
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                }
+                self.ensure_p1_col(
+                    *cidx,
+                    rg_idx,
+                    mb_idx,
+                    mb_row_count,
+                    read_block,
+                    &mut decoded_p1,
+                )?;
+                let item = &decoded_p1[cidx];
+                let bm = match item {
+                    DecodedPhase1::FlatPayloadRefs(refs) => self.eval_payload_refs_substring(
+                        refs,
+                        &remaining,
+                        &sq.needle,
+                        sq.case_insensitive,
+                        l0_local,
+                        read_threads,
+                        if proj_indices.contains(cidx) {
+                            Some(retained)
+                        } else {
+                            None
+                        },
+                        cancel,
+                    )?,
+                    _ => {
+                        return Err(StatamError::Corrupt {
+                            reason: "unexpected Phase 1 variant for substring query",
+                        });
+                    }
+                };
+                let hits = bm.and(&remaining)?;
+                if !hits.all_zeros() {
+                    clause_matched = clause_matched.or(&hits)?;
+                    remaining = remaining.and(&hits.not())?;
+                }
+            }
+
+            mask = mask.and(&clause_matched)?;
             if mask.all_zeros() {
                 return Ok((mask, decoded_p1));
             }
@@ -619,8 +760,9 @@ impl StatamReader {
         time_range: TimeRange,
         lookups: &[(usize, &IdLookup)],
         preds: &[(usize, &Predicate)],
-        subs: &[(usize, &SubstringQuery)],
-        dict_sub_bitmaps: &[Option<Bitmap>],
+        filter_exprs: &[ResolvedFilterExpr],
+        subs: &[Vec<(usize, SubstringQuery)>],
+        dict_sub_bitmaps: &[Vec<Option<Bitmap>>],
         read_block: &BlockCacheReader,
         preload_always_matched_col: Option<usize>,
     ) -> Result<(Bitmap, HashMap<usize, DecodedPhase1>), StatamError> {
@@ -633,6 +775,7 @@ impl StatamReader {
             time_range,
             lookups,
             preds,
+            filter_exprs,
             subs,
             dict_sub_bitmaps,
             &|cidx| self.get_cached_dict(cidx),
@@ -673,15 +816,15 @@ fn eval_phase1_mb_narrow_static(
     time_range: TimeRange,
     lookups: &[(usize, IdLookup)],
     preds: &[(usize, Predicate)],
-    subs: &[(usize, SubstringQuery)],
-    dict_sub_bitmaps: &[Option<Bitmap>],
+    filter_exprs: &[ResolvedFilterExpr],
+    subs: &[Vec<(usize, SubstringQuery)>],
+    dict_sub_bitmaps: &[Vec<Option<Bitmap>>],
     p1_dicts: &HashMap<usize, Arc<FileDict>>,
     read_block: &BlockCacheReader,
     preload_always_matched_col: Option<usize>,
 ) -> Result<(Bitmap, HashMap<usize, DecodedPhase1>), StatamError> {
     let lookup_refs: Vec<(usize, &IdLookup)> = lookups.iter().map(|(c, lk)| (*c, lk)).collect();
     let pred_refs: Vec<(usize, &Predicate)> = preds.iter().map(|(c, p)| (*c, p)).collect();
-    let sub_refs: Vec<(usize, &SubstringQuery)> = subs.iter().map(|(c, s)| (*c, s)).collect();
     eval_phase1_mb_narrow_impl(
         meta,
         rg_idx,
@@ -691,12 +834,92 @@ fn eval_phase1_mb_narrow_static(
         time_range,
         &lookup_refs,
         &pred_refs,
-        &sub_refs,
+        filter_exprs,
+        subs,
         dict_sub_bitmaps,
         &|cidx| p1_dicts.get(&cidx).map(Arc::clone),
         read_block,
         preload_always_matched_col,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn eval_narrow_sub_disjunct(
+    meta: &StatamFileMeta,
+    rg_idx: usize,
+    mb_idx: usize,
+    mb_row_count: usize,
+    cidx: usize,
+    sq: &SubstringQuery,
+    dict_bm: Option<&Bitmap>,
+    active_mask: &Bitmap,
+    get_dict: &dyn Fn(usize) -> Option<Arc<FileDict>>,
+    read_block: &BlockCacheReader,
+    decoded_p1: &mut HashMap<usize, DecodedPhase1>,
+) -> Result<Bitmap, StatamError> {
+    if active_mask.all_zeros() {
+        return Ok(Bitmap::new_zeroed(mb_row_count));
+    }
+    if !decoded_p1.contains_key(&cidx) {
+        let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
+        if blk.encoding == Encoding::ConstNull {
+            return Ok(Bitmap::new_zeroed(mb_row_count));
+        }
+        if matches!(
+            blk.encoding,
+            Encoding::Const | Encoding::Rle | Encoding::Plain | Encoding::Fsst | Encoding::Dict
+        ) {
+            let dict = if blk.encoding == Encoding::Dict {
+                get_dict(cidx)
+            } else {
+                None
+            };
+            if blk.encoding != Encoding::Dict
+                || (dict.is_some() && (dict_bm.is_some() || sq.needle.is_empty()))
+            {
+                let raw = if blk.encoding == Encoding::Const || blk.stored_len == 0 {
+                    Cow::Borrowed(&[][..])
+                } else {
+                    read_block.read_block(blk)?
+                };
+                let bm = eval_utf8_block_substring_raw(
+                    &raw,
+                    blk,
+                    mb_row_count,
+                    active_mask,
+                    &sq.needle,
+                    sq.case_insensitive,
+                    dict_bm,
+                    dict.as_deref(),
+                )?;
+                return Ok(bm.and(active_mask)?);
+            }
+        }
+    }
+    ensure_p1_col_with_meta(
+        meta,
+        cidx,
+        rg_idx,
+        mb_idx,
+        mb_row_count,
+        get_dict,
+        read_block,
+        decoded_p1,
+    )?;
+    let item = &decoded_p1[&cidx];
+    let bm = match item {
+        DecodedPhase1::Col(col) => {
+            eval_utf8_substring(col, &sq.needle, sq.case_insensitive, dict_bm)?
+        }
+        DecodedPhase1::FlatPayloadRefs(_)
+        | DecodedPhase1::SelectedPayloadRefs(_)
+        | DecodedPhase1::ShreddedSub(_) => {
+            return Err(StatamError::Corrupt {
+                reason: "unexpected Phase 1 variant for substring query",
+            });
+        }
+    };
+    Ok(bm.and(active_mask)?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -709,8 +932,9 @@ fn eval_phase1_mb_narrow_impl(
     time_range: TimeRange,
     lookups: &[(usize, &IdLookup)],
     preds: &[(usize, &Predicate)],
-    subs: &[(usize, &SubstringQuery)],
-    dict_sub_bitmaps: &[Option<Bitmap>],
+    filter_exprs: &[ResolvedFilterExpr],
+    subs: &[Vec<(usize, SubstringQuery)>],
+    dict_sub_bitmaps: &[Vec<Option<Bitmap>>],
     get_dict: &dyn Fn(usize) -> Option<Arc<FileDict>>,
     read_block: &BlockCacheReader,
     preload_always_matched_col: Option<usize>,
@@ -917,90 +1141,413 @@ fn eval_phase1_mb_narrow_impl(
         }
     }
 
-    // Evaluate non-payload substring queries BEFORE ExternalPayload substrings so
-    // `mask` is as narrow as possible before touching `.stpk` or L0 payload chunks.
-    for (sq_idx, &(cidx, sq)) in subs.iter().enumerate() {
-        if meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload {
-            continue;
-        }
-        if !decoded_p1.contains_key(&cidx) {
-            let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
-            if matches!(
-                blk.encoding,
-                Encoding::ConstNull
-                    | Encoding::Const
-                    | Encoding::Rle
-                    | Encoding::Plain
-                    | Encoding::Fsst
-                    | Encoding::Dict
-            ) {
-                let dict_bm = dict_sub_bitmaps.get(sq_idx).and_then(Option::as_ref);
-                let dict = if blk.encoding == Encoding::Dict {
-                    get_dict(cidx)
-                } else {
-                    None
-                };
-                if blk.encoding != Encoding::Dict
-                    || (dict.is_some() && (dict_bm.is_some() || sq.needle.is_empty()))
-                {
-                    let raw = if matches!(blk.encoding, Encoding::ConstNull | Encoding::Const)
-                        || blk.stored_len == 0
-                    {
-                        Cow::Borrowed(&[][..])
-                    } else {
-                        read_block.read_block(blk)?
-                    };
-                    let bm = eval_utf8_block_substring_raw(
-                        &raw,
-                        blk,
-                        mb_row_count,
-                        &mask,
-                        &sq.needle,
-                        sq.case_insensitive,
-                        dict_bm,
-                        dict.as_deref(),
-                    )?;
-                    mask = mask.and(&bm)?;
-                    if mask.all_zeros() {
-                        return Ok((mask, decoded_p1));
-                    }
-                    continue;
-                }
-            }
-        }
-        ensure_p1_col_with_meta(
+    for expr in filter_exprs {
+        let (is_true, _) = eval_filter_expr_3vl(
             meta,
-            cidx,
             rg_idx,
             mb_idx,
             mb_row_count,
+            plan,
+            expr,
             get_dict,
             read_block,
             &mut decoded_p1,
         )?;
-        let item = &decoded_p1[&cidx];
-        let bm = match item {
-            DecodedPhase1::Col(col) => eval_utf8_substring(
-                col,
-                &sq.needle,
-                sq.case_insensitive,
-                dict_sub_bitmaps.get(sq_idx).and_then(Option::as_ref),
-            )?,
-            DecodedPhase1::FlatPayloadRefs(_)
-            | DecodedPhase1::SelectedPayloadRefs(_)
-            | DecodedPhase1::ShreddedSub(_) => {
-                return Err(StatamError::Corrupt {
-                    reason: "unexpected Phase 1 variant for substring query",
-                });
+        mask = mask.and(&is_true)?;
+        if mask.all_zeros() {
+            return Ok((mask, decoded_p1));
+        }
+    }
+
+    // Evaluate pure-narrow CNF substring clauses BEFORE ExternalPayload clauses so
+    // `mask` is as narrow as possible before touching `.stpk` or L0 payload chunks.
+    for (ci, clause) in subs.iter().enumerate() {
+        let clause_has_payload = clause
+            .iter()
+            .any(|(cidx, _)| meta.col_dir[*cidx].locality_group == LocalityGroup::ExternalPayload);
+        if clause_has_payload {
+            continue;
+        }
+        if clause.is_empty() {
+            return Ok((Bitmap::new_zeroed(mb_row_count), decoded_p1));
+        }
+        let mut clause_matched = Bitmap::new_zeroed(mb_row_count);
+        let mut remaining = mask.clone();
+        for (di, (cidx, sq)) in clause.iter().enumerate() {
+            if remaining.all_zeros() {
+                break;
             }
-        };
-        mask = mask.and(&bm)?;
+            let dict_bm = dict_sub_bitmaps
+                .get(ci)
+                .and_then(|v| v.get(di))
+                .and_then(Option::as_ref);
+            let hits = eval_narrow_sub_disjunct(
+                meta,
+                rg_idx,
+                mb_idx,
+                mb_row_count,
+                *cidx,
+                sq,
+                dict_bm,
+                &remaining,
+                get_dict,
+                read_block,
+                &mut decoded_p1,
+            )?;
+            if !hits.all_zeros() {
+                clause_matched = clause_matched.or(&hits)?;
+                remaining = remaining.and(&hits.not())?;
+            }
+        }
+        mask = mask.and(&clause_matched)?;
         if mask.all_zeros() {
             return Ok((mask, decoded_p1));
         }
     }
 
     Ok((mask, decoded_p1))
+}
+
+/// Evaluates a [`ResolvedFilterExpr`] in exact SQL 3-valued logic, returning
+/// `(is_true, is_valid)` where `is_true` has 1s for TRUE rows and `is_valid` has 1s
+/// for known (TRUE or FALSE) rows (`is_true <= is_valid`).
+#[allow(clippy::too_many_arguments)]
+fn eval_filter_expr_3vl(
+    meta: &StatamFileMeta,
+    rg_idx: usize,
+    mb_idx: usize,
+    mb_row_count: usize,
+    plan: &RgIoPlan,
+    expr: &ResolvedFilterExpr,
+    get_dict: &dyn Fn(usize) -> Option<Arc<FileDict>>,
+    read_block: &BlockCacheReader,
+    decoded_p1: &mut HashMap<usize, DecodedPhase1>,
+) -> Result<(Bitmap, Bitmap), StatamError> {
+    let fields = meta.schema_meta.schema.fields();
+    match expr {
+        ResolvedFilterExpr::Pred { cidx, pred } => {
+            if let Some(key) = &pred.map_key {
+                if let Some((sub_pidx, res_count)) = find_shredded_subcol_in_meta(meta, *cidx, key)
+                {
+                    let fast_no_res =
+                        res_count == 0 && plan.phase1_map_fast_path.contains(&(mb_idx, *cidx));
+                    if fast_no_res {
+                        ensure_p1_col_with_meta(
+                            meta,
+                            sub_pidx,
+                            rg_idx,
+                            mb_idx,
+                            mb_row_count,
+                            get_dict,
+                            read_block,
+                            decoded_p1,
+                        )?;
+                        let DecodedPhase1::ShreddedSub(sub) = &decoded_p1[&sub_pidx] else {
+                            return Err(StatamError::Corrupt {
+                                reason: "expected ShreddedSub in Phase 1",
+                            });
+                        };
+                        eval_shredded_subcol_pred_3vl(sub, &pred.pred)
+                    } else {
+                        ensure_p1_col_with_meta(
+                            meta,
+                            sub_pidx,
+                            rg_idx,
+                            mb_idx,
+                            mb_row_count,
+                            get_dict,
+                            read_block,
+                            decoded_p1,
+                        )?;
+                        ensure_p1_col_with_meta(
+                            meta,
+                            *cidx,
+                            rg_idx,
+                            mb_idx,
+                            mb_row_count,
+                            get_dict,
+                            read_block,
+                            decoded_p1,
+                        )?;
+                        let DecodedPhase1::ShreddedSub(sub) = &decoded_p1[&sub_pidx] else {
+                            return Err(StatamError::Corrupt {
+                                reason: "expected ShreddedSub in Phase 1",
+                            });
+                        };
+                        let DecodedPhase1::Col(res_col) = &decoded_p1[cidx] else {
+                            return Err(StatamError::Corrupt {
+                                reason: "expected MapUtf8 residual in Phase 1",
+                            });
+                        };
+                        let res_flat = res_col.materialize(None)?;
+                        let single_map = decode_single_map_key(
+                            mb_row_count,
+                            res_flat.nulls(),
+                            key,
+                            sub,
+                            res_count,
+                            Some(&res_flat),
+                        )?;
+                        eval_map_key_pred_3vl(&single_map, key, &pred.pred)
+                    }
+                } else {
+                    ensure_p1_col_with_meta(
+                        meta,
+                        *cidx,
+                        rg_idx,
+                        mb_idx,
+                        mb_row_count,
+                        get_dict,
+                        read_block,
+                        decoded_p1,
+                    )?;
+                    let DecodedPhase1::Col(col) = &decoded_p1[cidx] else {
+                        return Err(StatamError::Corrupt {
+                            reason: "expected MapUtf8 in Phase 1",
+                        });
+                    };
+                    let flat = col.materialize(None)?;
+                    eval_map_key_pred_3vl(&flat, key, &pred.pred)
+                }
+            } else {
+                let blk = &meta.rg_blocks(*cidx, rg_idx)[mb_idx];
+                let dt = &fields[*cidx].data_type;
+                if zone_map_always_matches(blk, dt, &pred.pred) {
+                    return Ok((
+                        Bitmap::new_ones(mb_row_count),
+                        Bitmap::new_ones(mb_row_count),
+                    ));
+                }
+                let dict = if blk.encoding == Encoding::Dict {
+                    get_dict(*cidx)
+                } else {
+                    None
+                };
+                if (blk.null_count == 0
+                    || matches!(pred.pred, ZonePred::IsNull | ZonePred::IsNotNull))
+                    && !zone_map_may_match(
+                        blk,
+                        dt,
+                        meta.col_dir[*cidx].col_flags,
+                        &pred.pred,
+                        dict.as_deref(),
+                    )
+                {
+                    return Ok((
+                        Bitmap::new_zeroed(mb_row_count),
+                        Bitmap::new_ones(mb_row_count),
+                    ));
+                }
+                ensure_p1_col_with_meta(
+                    meta,
+                    *cidx,
+                    rg_idx,
+                    mb_idx,
+                    mb_row_count,
+                    get_dict,
+                    read_block,
+                    decoded_p1,
+                )?;
+                match &decoded_p1[cidx] {
+                    DecodedPhase1::Col(col) => eval_column_pred_3vl(
+                        col,
+                        &pred.pred,
+                        (blk.block_flags & BLOCK_FLAG_HAS_NAN) != 0,
+                    ),
+                    DecodedPhase1::FlatPayloadRefs(refs) => {
+                        eval_payload_refs_pred_3vl(refs, &pred.pred)
+                    }
+                    _ => Err(StatamError::Corrupt {
+                        reason: "expected scalar/nested Column or FlatPayloadRefs in Phase 1",
+                    }),
+                }
+            }
+        }
+        ResolvedFilterExpr::Not(inner) => {
+            let (t, v) = eval_filter_expr_3vl(
+                meta,
+                rg_idx,
+                mb_idx,
+                mb_row_count,
+                plan,
+                inner,
+                get_dict,
+                read_block,
+                decoded_p1,
+            )?;
+            Ok((t.not().and(&v)?, v))
+        }
+        ResolvedFilterExpr::And(children) => {
+            let mut acc_t = Bitmap::new_ones(mb_row_count);
+            let mut acc_v = Bitmap::new_ones(mb_row_count);
+            for child in children {
+                let (ct, cv) = eval_filter_expr_3vl(
+                    meta,
+                    rg_idx,
+                    mb_idx,
+                    mb_row_count,
+                    plan,
+                    child,
+                    get_dict,
+                    read_block,
+                    decoded_p1,
+                )?;
+                let next_t = acc_t.and(&ct)?;
+                let known_both = acc_v.and(&cv)?;
+                let known_false_acc = acc_t.not().and(&acc_v)?;
+                let known_false_c = ct.not().and(&cv)?;
+                let next_v = known_both.or(&known_false_acc)?.or(&known_false_c)?;
+                acc_t = next_t;
+                acc_v = next_v;
+                // Early exit only when EVERY row is already known FALSE (`acc_t == 0 && acc_v == all_ones`).
+                if acc_t.all_zeros() && acc_v.all_ones() {
+                    break;
+                }
+            }
+            Ok((acc_t, acc_v))
+        }
+        ResolvedFilterExpr::Or(children) => {
+            let mut acc_t = Bitmap::new_zeroed(mb_row_count);
+            let mut acc_v = Bitmap::new_ones(mb_row_count);
+            for child in children {
+                let (ct, cv) = eval_filter_expr_3vl(
+                    meta,
+                    rg_idx,
+                    mb_idx,
+                    mb_row_count,
+                    plan,
+                    child,
+                    get_dict,
+                    read_block,
+                    decoded_p1,
+                )?;
+                let next_t = acc_t.or(&ct)?;
+                let known_both = acc_v.and(&cv)?;
+                let next_v = known_both.or(&acc_t)?.or(&ct)?;
+                acc_t = next_t;
+                acc_v = next_v;
+                // Early exit when EVERY row is already known TRUE (`acc_t == all_ones`).
+                if acc_t.all_ones() {
+                    break;
+                }
+            }
+            Ok((acc_t, acc_v))
+        }
+    }
+}
+
+fn eval_payload_refs_pred_3vl(
+    refs: &FlatPayloadRefs,
+    pred: &ZonePred,
+) -> Result<(Bitmap, Bitmap), StatamError> {
+    let is_true = eval_payload_refs_pred(refs, pred)?;
+    let is_valid = Bitmap::new_ones(refs.len());
+    Ok((is_true, is_valid))
+}
+
+fn eval_column_pred_3vl(
+    col: &Column,
+    pred: &ZonePred,
+    has_nan: bool,
+) -> Result<(Bitmap, Bitmap), StatamError> {
+    let n = col.len();
+    match pred {
+        ZonePred::IsNull | ZonePred::IsNotNull => {
+            let is_true = eval_column_pred(col, pred, has_nan)?;
+            Ok((is_true, Bitmap::new_ones(n)))
+        }
+        ZonePred::In(vs) if vs.is_empty() => Ok((Bitmap::new_zeroed(n), Bitmap::new_ones(n))),
+        _ => {
+            let is_true = eval_column_pred(col, pred, has_nan)?;
+            let is_valid = eval_column_pred(col, &ZonePred::IsNotNull, false)?;
+            Ok((is_true, is_valid))
+        }
+    }
+}
+
+fn eval_shredded_subcol_pred_3vl(
+    sub: &ShreddedSubCol,
+    pred: &ZonePred,
+) -> Result<(Bitmap, Bitmap), StatamError> {
+    let n = sub.in_map.len();
+    match pred {
+        ZonePred::IsNull | ZonePred::IsNotNull => {
+            let is_true = eval_shredded_subcol_pred(sub, pred)?;
+            Ok((is_true, Bitmap::new_ones(n)))
+        }
+        ZonePred::In(vs) if vs.is_empty() => Ok((Bitmap::new_zeroed(n), Bitmap::new_ones(n))),
+        _ => {
+            let is_true = eval_shredded_subcol_pred(sub, pred)?;
+            let is_valid = sub.in_map.and(&sub.value_null)?;
+            Ok((is_true, is_valid))
+        }
+    }
+}
+
+fn eval_map_key_pred_3vl(
+    map_col: &FlatColumn,
+    key: &str,
+    pred: &ZonePred,
+) -> Result<(Bitmap, Bitmap), StatamError> {
+    let FlatData::MapUtf8(map) = map_col.data() else {
+        return Err(StatamError::SchemaMismatch {
+            reason: "eval_map_key_pred_3vl expects MapUtf8",
+        });
+    };
+    let n = map_col.len();
+    if matches!(pred, ZonePred::In(vs) if vs.is_empty()) {
+        return Ok((Bitmap::new_zeroed(n), Bitmap::new_ones(n)));
+    }
+    let mut is_true = Bitmap::new_zeroed(n);
+    let mut is_valid = if matches!(pred, ZonePred::IsNull | ZonePred::IsNotNull) {
+        Bitmap::new_ones(n)
+    } else {
+        Bitmap::new_zeroed(n)
+    };
+    let offsets = map.offsets();
+    let keys = map.keys();
+    let vals = map.values();
+    let val_nulls = map.value_nulls();
+    let row_nulls = map_col.nulls();
+    let key_bytes = key.as_bytes();
+
+    for r in 0..n {
+        if row_nulls.is_some_and(|bm| !bm.get(r)) {
+            if matches!(pred, ZonePred::IsNull) {
+                let _ = is_true.set(r, true);
+            }
+            continue;
+        }
+        let s = offsets[r] as usize;
+        let e = offsets[r + 1] as usize;
+        let mut found: Option<Option<&[u8]>> = None;
+        for idx in s..e {
+            if utf8_bytes_at(keys, idx) == Some(key_bytes) {
+                if val_nulls.is_some_and(|bm| !bm.get(idx)) {
+                    found = Some(None);
+                } else {
+                    found = Some(utf8_bytes_at(vals, idx));
+                }
+                break;
+            }
+        }
+        match (found, pred) {
+            (None | Some(None), ZonePred::IsNull) => {
+                let _ = is_true.set(r, true);
+            }
+            (Some(Some(_)), ZonePred::IsNotNull) => {
+                let _ = is_true.set(r, true);
+            }
+            (Some(Some(b)), _) => {
+                let _ = is_valid.set(r, true);
+                if eval_bytes_val(b, pred) {
+                    let _ = is_true.set(r, true);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((is_true, is_valid))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1644,6 +2191,7 @@ fn eval_map_key_pred(
                 } else {
                     found = Some(utf8_bytes_at(vals, idx));
                 }
+                break;
             }
         }
         let hit = match (found, pred) {
@@ -2233,6 +2781,7 @@ pub(super) enum Utf8Matcher {
     Exact(memmem::Finder<'static>),
     AsciiIlike {
         finder: memmem::Finder<'static>,
+        has_ks: bool,
         scratch: Vec<u8>,
     },
     UnicodeIlike {
@@ -2253,8 +2802,10 @@ impl Utf8Matcher {
         if needle.is_ascii() {
             let mut lowered = Vec::new();
             ascii_lowercase_into(needle, &mut lowered);
+            let has_ks = lowered.iter().any(|&b| b == b'k' || b == b's');
             return Self::AsciiIlike {
                 finder: memmem::Finder::new(&lowered).into_owned(),
+                has_ks,
                 scratch: Vec::new(),
             };
         }
@@ -2278,6 +2829,7 @@ impl Utf8Matcher {
             }
             Err(_) => Self::AsciiIlike {
                 finder: memmem::Finder::new(&ascii_lowered).into_owned(),
+                has_ks: false,
                 scratch: Vec::new(),
             },
         }
@@ -2286,8 +2838,16 @@ impl Utf8Matcher {
     pub(super) fn matches(&mut self, haystack: &[u8]) -> bool {
         match self {
             Self::Exact(finder) => finder.find(haystack).is_some(),
-            Self::AsciiIlike { finder, scratch } => {
-                ascii_lowercase_into(haystack, scratch);
+            Self::AsciiIlike {
+                finder,
+                has_ks,
+                scratch,
+            } => {
+                if *has_ks && contains_kelvin_or_long_s(haystack) {
+                    ascii_lowercase_fold_ks_into(haystack, scratch);
+                } else {
+                    ascii_lowercase_into(haystack, scratch);
+                }
                 finder.find(scratch).is_some()
             }
             Self::UnicodeIlike {

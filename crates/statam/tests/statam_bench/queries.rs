@@ -1207,32 +1207,32 @@ fn run_statam_query(
         },
         (TableKindBench::Spans, "map_key_lookup") => ScanRequest {
             projection: Some(vec![1, 6]),
-            map_keys: vec![("metadata".to_owned(), "customer_id".to_owned())],
             predicates: vec![Predicate::map_key(
                 "metadata",
                 "customer_id",
                 ZonePred::Eq(ZoneValue::Bytes(b"cust-42".to_vec())),
             )],
             ..ScanRequest::default()
-        },
+        }
+        .with_map_keys("metadata", vec!["customer_id".to_owned()]),
         (TableKindBench::Scores, "map_key_lookup") => ScanRequest {
             projection: Some(vec![1, 20]),
-            map_keys: vec![("metadata".to_owned(), "customer_id".to_owned())],
             predicates: vec![Predicate::map_key(
                 "metadata",
                 "customer_id",
                 ZonePred::Eq(ZoneValue::Bytes(b"cust-42".to_vec())),
             )],
             ..ScanRequest::default()
-        },
+        }
+        .with_map_keys("metadata", vec!["customer_id".to_owned()]),
         (TableKindBench::Spans, "substring_rare") => ScanRequest {
             projection: Some(vec![1]),
-            substrings: vec![SubstringQuery::ilike("input", RARE_NEEDLE)],
+            substrings: vec![vec![SubstringQuery::ilike("input", RARE_NEEDLE)]],
             ..ScanRequest::default()
         },
         (TableKindBench::Spans, "substring_absent") => ScanRequest {
             projection: Some(vec![1]),
-            substrings: vec![SubstringQuery::ilike("input", ABSENT_NEEDLE)],
+            substrings: vec![vec![SubstringQuery::ilike("input", ABSENT_NEEDLE)]],
             ..ScanRequest::default()
         },
         _ => ScanRequest::default(),

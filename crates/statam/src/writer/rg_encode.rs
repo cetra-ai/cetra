@@ -19,7 +19,7 @@ use crate::format::{
     MAX_ROW_PAYLOAD_BYTES, MAX_ROWS_PER_FILE, RowGroupEntry, ShreddedMapDir, ShreddedMapKeyEntry,
     write_framed_block,
 };
-use crate::parallel::parallel_map_in_order;
+use crate::parallel::{enter_executor_scope, parallel_map_in_order_static};
 use crate::payload::chunker::{
     DedupBypassDetector, INLINE_PAYLOAD_THRESHOLD, chunk_json_array_continuation, chunk_payload,
 };
@@ -126,6 +126,8 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                 reason: "row_group first_row overflows u32",
             })?;
 
+        let _exec_guard = enter_executor_scope(self.options.executor.as_ref());
+
         // Gate RG-level worker thread spawning on large RGs so tiny/1-row flushes stay 1T.
         let rg_threads = if rg_rows >= MIN_PARALLEL_RG_ROWS {
             self.options.write_threads
@@ -150,25 +152,33 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
         bloom_indices.sort_unstable();
         if rg_threads > 1 && bloom_indices.len() > 1 {
             let profile = self.options.profile;
-            let schema_ref = &self.schema;
-            let phys_meta_ref = &self.phys_col_meta;
-            let results = parallel_map_in_order(bloom_indices, rg_threads, |cidx| {
-                let col_name = schema_ref.fields()[cidx].name.as_str();
-                let rg0_dict = if is_rg0 {
-                    phys_meta_ref[cidx].dict.as_deref()
-                } else {
-                    None
-                };
-                let (sbbf, had_any) = build_rg_sbbf(
-                    &rg_cols[cidx],
-                    base_row_off,
-                    rg_rows,
-                    profile,
-                    col_name,
-                    rg0_dict,
-                )?;
-                Ok((cidx, sbbf, had_any))
-            })?;
+            let bloom_tasks: Vec<_> = bloom_indices
+                .into_iter()
+                .map(|cidx| {
+                    let col_name = self.schema.fields()[cidx].name.clone();
+                    let rg0_dict = if is_rg0 {
+                        self.phys_col_meta[cidx].dict.clone()
+                    } else {
+                        None
+                    };
+                    (cidx, Arc::clone(&rg_cols[cidx]), col_name, rg0_dict)
+                })
+                .collect();
+            let results = parallel_map_in_order_static(
+                bloom_tasks,
+                rg_threads,
+                move |(cidx, col, col_name, rg0_dict)| {
+                    let (sbbf, had_any) = build_rg_sbbf(
+                        &col,
+                        base_row_off,
+                        rg_rows,
+                        profile,
+                        col_name.as_str(),
+                        rg0_dict.as_deref(),
+                    )?;
+                    Ok((cidx, sbbf, had_any))
+                },
+            )?;
             for (cidx, sbbf, had_any) in results {
                 if had_any {
                     self.bloom_has_values.insert(cidx, true);
@@ -444,9 +454,19 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
         let mut rg0_codes_map = std::mem::take(&mut self.rg0_dict_codes);
 
         enum RgEncodeTask {
-            ShreddedMap(usize),
+            ShreddedMap {
+                s_idx: usize,
+                sm: ShreddedMapDir,
+                is_metadata: bool,
+                col: Arc<Column>,
+            },
             ScalarOrNested {
                 cidx: usize,
+                col: Arc<Column>,
+                dt: DataType,
+                is_wide_row: bool,
+                dict: Option<Arc<FileDict>>,
+                track_trigram: bool,
                 precomputed_rg0: Option<(Vec<u32>, Option<cetra_column::Bitmap>)>,
             },
         }
@@ -459,44 +479,61 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
         // Schedule heaviest tasks (shredded maps + WideRow cols) before small Core cols.
         let mut tasks = Vec::with_capacity(num_shredded + num_logical);
         for s_idx in 0..num_shredded {
-            tasks.push(RgEncodeTask::ShreddedMap(s_idx));
+            let sm = self.shredded_maps[s_idx].clone();
+            let logical_col = sm.logical_col_idx as usize;
+            let is_metadata = self.schema.fields()[logical_col].name == "metadata";
+            tasks.push(RgEncodeTask::ShreddedMap {
+                s_idx,
+                sm,
+                is_metadata,
+                col: Arc::clone(&rg_cols[logical_col]),
+            });
         }
-        for cidx in 0..num_logical {
+        for (cidx, col) in rg_cols.iter().enumerate().take(num_logical) {
             if self.logical_locality[cidx] == LocalityGroup::WideRow
                 && !self.logical_to_shredded.contains_key(&cidx)
             {
                 tasks.push(RgEncodeTask::ScalarOrNested {
                     cidx,
+                    col: Arc::clone(col),
+                    dt: self.schema.fields()[cidx].data_type.clone(),
+                    is_wide_row: true,
+                    dict: self.phys_col_meta[cidx].dict.clone(),
+                    track_trigram: self.narrow_trigram_col_set.contains(&cidx),
                     precomputed_rg0: rg0_codes_map.remove(&cidx),
                 });
             }
         }
-        for cidx in 0..num_logical {
+        for (cidx, col) in rg_cols.iter().enumerate().take(num_logical) {
             if self.logical_locality[cidx] == LocalityGroup::Core {
                 tasks.push(RgEncodeTask::ScalarOrNested {
                     cidx,
+                    col: Arc::clone(col),
+                    dt: self.schema.fields()[cidx].data_type.clone(),
+                    is_wide_row: false,
+                    dict: self.phys_col_meta[cidx].dict.clone(),
+                    track_trigram: self.narrow_trigram_col_set.contains(&cidx),
                     precomputed_rg0: rg0_codes_map.remove(&cidx),
                 });
             }
         }
 
-        let schema_ref = &self.schema;
-        let logical_locality = &self.logical_locality;
-        let phys_col_meta = &self.phys_col_meta;
-        let narrow_trigram_col_set = &self.narrow_trigram_col_set;
-        let shredded_maps = &self.shredded_maps;
         let profile = self.options.profile;
 
-        let encoded =
-            parallel_map_in_order(tasks, self.options.write_threads, |task| match task {
-                RgEncodeTask::ShreddedMap(s_idx) => {
-                    let sm = &shredded_maps[s_idx];
-                    let logical_col = sm.logical_col_idx as usize;
-                    let is_metadata = schema_ref.fields()[logical_col].name == "metadata";
+        let encoded = parallel_map_in_order_static(
+            tasks,
+            self.options.write_threads,
+            move |task| match task {
+                RgEncodeTask::ShreddedMap {
+                    s_idx,
+                    sm,
+                    is_metadata,
+                    col,
+                } => {
                     let res = encode_shredded_map_to_local(
-                        sm,
+                        &sm,
                         is_metadata,
-                        &rg_cols[logical_col],
+                        &col,
                         base_row_off,
                         rg_rows,
                         first_row_u32,
@@ -508,22 +545,23 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                 }
                 RgEncodeTask::ScalarOrNested {
                     cidx,
+                    col,
+                    dt,
+                    is_wide_row,
+                    dict,
+                    track_trigram,
                     precomputed_rg0,
                 } => {
-                    let dt = &schema_ref.fields()[cidx].data_type;
-                    let is_wide_row = logical_locality[cidx] == LocalityGroup::WideRow;
-                    let dict = phys_col_meta[cidx].dict.as_deref();
-                    let track_trigram = narrow_trigram_col_set.contains(&cidx);
                     let mut local_buf = Vec::new();
                     let mut blocks = Vec::new();
                     let mut local_tris = Vec::new();
                     let (used_dict_encoding, has_non_dict_data_block, null_count_total) =
                         encode_scalar_or_nested_col_into(
-                            &rg_cols[cidx],
-                            dt,
+                            &col,
+                            &dt,
                             profile,
                             is_wide_row,
-                            dict,
+                            dict.as_deref(),
                             precomputed_rg0,
                             base_row_off,
                             rg_rows,
@@ -547,7 +585,8 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                         },
                     ))
                 }
-            })?;
+            },
+        )?;
 
         let mut col_results: Vec<Option<EncodedScalarCol>> =
             (0..num_logical).map(|_| None).collect();
@@ -783,10 +822,14 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                         zstd_level,
                         core_buf,
                     )?;
+                    let absent_count = u16::try_from(
+                        mb_len.saturating_sub(shredded.sub_cols[k_idx].in_map.count_ones()),
+                    )
+                    .unwrap_or(u16::MAX);
                     self.phys_blocks[sub_pidx].push(BlockEntry {
                         first_row: mb_first_row,
                         row_count: mb_len as u16,
-                        null_count: 0,
+                        null_count: absent_count,
                         offset: blk_off,
                         stored_len: info.stored_len,
                         raw_len: info.raw_len,
@@ -873,8 +916,8 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
         rg_rows: usize,
     ) -> Result<(), StatamError> {
         enum Rg0InitTask {
-            ShreddedMap(usize),
-            DictCandidate(usize),
+            ShreddedMap(usize, Arc<Column>),
+            DictCandidate(usize, Arc<Column>, String, LocalityGroup),
         }
 
         enum Rg0InitResult {
@@ -888,37 +931,43 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
         if self.options.profile == WriteProfile::L1Compact {
             for (cidx, field) in fields.iter().enumerate() {
                 if field.data_type == DataType::MapUtf8 {
-                    tasks.push(Rg0InitTask::ShreddedMap(cidx));
+                    tasks.push(Rg0InitTask::ShreddedMap(cidx, Arc::clone(&rg_cols[cidx])));
                 }
             }
         }
         for (cidx, field) in fields.iter().enumerate() {
             if is_rg0_dict_candidate(field, self.logical_locality[cidx], self.options.profile) {
-                tasks.push(Rg0InitTask::DictCandidate(cidx));
+                tasks.push(Rg0InitTask::DictCandidate(
+                    cidx,
+                    Arc::clone(&rg_cols[cidx]),
+                    field.name.clone(),
+                    self.logical_locality[cidx],
+                ));
             }
         }
 
         let profile = self.options.profile;
-        let logical_locality = &self.logical_locality;
-        let results =
-            parallel_map_in_order(tasks, self.options.write_threads, |task| match task {
-                Rg0InitTask::ShreddedMap(cidx) => {
-                    let promoted =
-                        extract_rg0_shredded_keys(&rg_cols[cidx], base_row_off, rg_rows)?;
+        let results = parallel_map_in_order_static(
+            tasks,
+            self.options.write_threads,
+            move |task| match task {
+                Rg0InitTask::ShreddedMap(cidx, col) => {
+                    let promoted = extract_rg0_shredded_keys(&col, base_row_off, rg_rows)?;
                     Ok(Rg0InitResult::ShreddedMap(cidx, promoted))
                 }
-                Rg0InitTask::DictCandidate(cidx) => {
+                Rg0InitTask::DictCandidate(cidx, col, col_name, locality) => {
                     let res = eval_rg0_dict_candidate(
-                        &rg_cols[cidx],
-                        fields[cidx].name.as_str(),
-                        logical_locality[cidx],
+                        &col,
+                        col_name.as_str(),
+                        locality,
                         profile,
                         base_row_off,
                         rg_rows,
                     )?;
                     Ok(Rg0InitResult::DictCandidate(cidx, res))
                 }
-            })?;
+            },
+        )?;
 
         for res in results {
             match res {
@@ -2318,10 +2367,13 @@ fn encode_shredded_map_to_local(
                 zstd_level,
                 &mut local_core_buf,
             )?;
+            let absent_count =
+                u16::try_from(mb_len.saturating_sub(shredded.sub_cols[k_idx].in_map.count_ones()))
+                    .unwrap_or(u16::MAX);
             sub_blocks[k_idx].push(BlockEntry {
                 first_row: mb_first_row,
                 row_count: mb_len as u16,
-                null_count: 0,
+                null_count: absent_count,
                 offset: blk_off,
                 stored_len: info.stored_len,
                 raw_len: info.raw_len,
@@ -2638,7 +2690,7 @@ fn build_narrow_trigram_for_mb(col: &Column, stored_len: usize) -> Option<Vec<u8
             && b.len() >= 3
         {
             any_trigram = true;
-            bloom.insert_bytes(b);
+            bloom.insert_bytes_ilike_folded(b);
         }
     }
     if !any_trigram {

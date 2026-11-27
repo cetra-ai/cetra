@@ -47,10 +47,11 @@ pub use fsst::{
 };
 pub use nested::{
     ShreddedMapBlocks, ShreddedSubCol, decode_nested_column_selected,
-    decode_shredded_residual_block, decode_shredded_residual_block_selected,
-    decode_shredded_subcol, decode_shredded_subcol_selected, decode_single_map_key,
+    decode_shredded_residual_block, decode_shredded_residual_block_keys_only,
+    decode_shredded_residual_block_selected, decode_shredded_subcol,
+    decode_shredded_subcol_in_map_only, decode_shredded_subcol_selected, decode_single_map_key,
     encode_shredded_residual_block, encode_shredded_subcol, select_shredded_keys, shred_map,
-    unshred_map, unshred_map_selected,
+    unshred_map, unshred_map_keys_only_selected, unshred_map_selected,
 };
 pub use zonemap::{
     ZoneMapSummary, ZonePred, ZoneValue, compute_zone_map as block_zone_map,

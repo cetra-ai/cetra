@@ -8,6 +8,7 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::Bytes;
+use cetra_column::CancelToken;
 
 use crate::StatamError;
 use crate::format::{
@@ -1102,8 +1103,8 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
                 {
                     continue;
                 }
-                edge_tail_bloom.insert_bytes(tail.as_slice());
-                edge_head_bloom.insert_bytes(head.as_slice());
+                edge_tail_bloom.insert_bytes_ilike_folded(tail.as_slice());
+                edge_head_bloom.insert_bytes_ilike_folded(head.as_slice());
             }
 
             let prefix_u32 =
@@ -1598,64 +1599,78 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
 
         let options = self.options;
         let frame_target = self.effective_target_frame_raw_bytes;
-        let trained_dict = self.trained_dict.as_deref();
-        let encoded = parallel_map_in_order_with_init(
+        let trained_dict: Option<Arc<[u8]>> = self
+            .trained_dict
+            .as_ref()
+            .map(|d| Arc::<[u8]>::from(d.as_slice()));
+        let encoded = parallel_map_in_order_static_with_ctx(
+            (options, frame_target, trained_dict),
             batch,
             options.write_threads,
-            || Ok(None::<PackDictCompressor>),
-            |worker_comp, (raw, chunks, is_bypass, min_savings_pct)| {
-                if chunks.is_empty() {
-                    return Ok(None);
-                }
-                if !is_bypass
-                    && worker_comp.is_none()
-                    && let Some(dict_bytes) = trained_dict
-                {
-                    *worker_comp = Some(PackDictCompressor::new(options.zstd_level, dict_bytes)?);
-                }
-                let mut framed = Vec::new();
-                let frame_codec = if is_bypass {
-                    default_bypass_codec()
-                } else {
-                    options.codec
-                };
-                let dict_comp = if is_bypass {
-                    None
-                } else {
-                    worker_comp.as_mut()
-                };
-                let info = write_framed_pack_frame_with_compressor_min_savings(
-                    &raw,
-                    frame_codec,
-                    0,
-                    options.zstd_level,
-                    min_savings_pct,
-                    dict_comp,
-                    &mut framed,
-                )?;
-                let frame_flags = framed.get(3).copied().unwrap_or(0);
-                let trigram_evaluated = !is_bypass
-                    && chunks.len() > 1
-                    && options.enable_trigram_skip
-                    && (info.stored_len as usize) >= MIN_FRAME_FOR_TRIGRAM;
-                let (filter_bytes, high_density) = if !is_bypass
-                    && options.enable_trigram_skip
-                    && (info.stored_len as usize) >= MIN_FRAME_FOR_TRIGRAM
-                {
-                    build_frame_trigram_bytes(&raw, &chunks, info.stored_len as usize, frame_target)
-                } else {
-                    (None, false)
-                };
-                drop(raw);
-                Ok(Some((
-                    framed,
-                    info,
-                    frame_flags,
-                    filter_bytes,
-                    trigram_evaluated,
-                    high_density,
-                    chunks,
-                )))
+            |(options, frame_target, trained_dict), worker| {
+                worker.run_with_init(
+                    || Ok(None::<PackDictCompressor>),
+                    |worker_comp, (raw, chunks, is_bypass, min_savings_pct)| {
+                        if chunks.is_empty() {
+                            return Ok(None);
+                        }
+                        if !is_bypass
+                            && worker_comp.is_none()
+                            && let Some(dict_bytes) = trained_dict.as_deref()
+                        {
+                            *worker_comp =
+                                Some(PackDictCompressor::new(options.zstd_level, dict_bytes)?);
+                        }
+                        let mut framed = Vec::new();
+                        let frame_codec = if is_bypass {
+                            default_bypass_codec()
+                        } else {
+                            options.codec
+                        };
+                        let dict_comp = if is_bypass {
+                            None
+                        } else {
+                            worker_comp.as_mut()
+                        };
+                        let info = write_framed_pack_frame_with_compressor_min_savings(
+                            &raw,
+                            frame_codec,
+                            0,
+                            options.zstd_level,
+                            min_savings_pct,
+                            dict_comp,
+                            &mut framed,
+                        )?;
+                        let frame_flags = framed.get(3).copied().unwrap_or(0);
+                        let trigram_evaluated = !is_bypass
+                            && chunks.len() > 1
+                            && options.enable_trigram_skip
+                            && (info.stored_len as usize) >= MIN_FRAME_FOR_TRIGRAM;
+                        let (filter_bytes, high_density) = if !is_bypass
+                            && options.enable_trigram_skip
+                            && (info.stored_len as usize) >= MIN_FRAME_FOR_TRIGRAM
+                        {
+                            build_frame_trigram_bytes(
+                                &raw,
+                                &chunks,
+                                info.stored_len as usize,
+                                *frame_target,
+                            )
+                        } else {
+                            (None, false)
+                        };
+                        drop(raw);
+                        Ok(Some((
+                            framed,
+                            info,
+                            frame_flags,
+                            filter_bytes,
+                            trigram_evaluated,
+                            high_density,
+                            chunks,
+                        )))
+                    },
+                )
             },
         )?;
 
@@ -1878,7 +1893,7 @@ fn build_frame_trigram_bloom(
     for c in chunks {
         let start = c.offset_in_frame as usize;
         let end = start + c.raw_len as usize;
-        bloom.insert_bytes(&raw[start..end]);
+        bloom.insert_bytes_ilike_folded(&raw[start..end]);
         scanned_bytes += end - start;
         if scanned_bytes >= next_check_bytes {
             if bloom.bit_density() > MAX_TRIGRAM_DENSITY {
@@ -2942,6 +2957,10 @@ impl ChunkPackReader {
         Ok(out)
     }
 
+    pub(crate) fn toc_arc(&self) -> &Arc<PackToc> {
+        &self.toc
+    }
+
     fn decompress_and_visit_frame<'a, F>(
         &self,
         fid: u32,
@@ -2949,42 +2968,35 @@ impl ChunkPackReader {
         cids: &[u32],
         dict: Option<&'a PackDecoderDict>,
         dict_decomp: &mut PackFrameDecompressor<'a>,
-        mut visit: F,
+        visit: F,
     ) -> Result<(), StatamError>
     where
         F: FnMut(u32, &[u8]),
     {
-        let entry = &self.toc.frames[fid as usize];
-        verify_raw_frame_matches_entry(raw, entry)?;
-        let (_, _, decoded) =
-            read_framed_pack_frame_with_decompressor(raw, MAX_FRAME_RAW_BYTES, dict, dict_decomp)?;
-        if decoded.len() != entry.raw_len as usize {
-            return Err(StatamError::Corrupt {
-                reason: "decompressed frame length mismatch",
-            });
-        }
-        for &cid in cids {
-            let loc = &self.toc.chunks[cid as usize];
-            let start = loc.offset_in_frame as usize;
-            let end = start + loc.raw_len as usize;
-            let slice = decoded.get(start..end).ok_or(StatamError::Corrupt {
-                reason: "chunk slice out of decoded frame bounds",
-            })?;
-            visit(cid, slice);
-        }
-        Ok(())
+        decompress_and_visit_frame_with_toc(&self.toc, fid, raw, cids, dict, dict_decomp, visit)
     }
 
     /// Scans all requested unique `chunk_ids` in a single `read_ranges` wave, passing each
     /// chunk slice directly from the decompressed frame buffer with zero per-chunk clones.
-    pub fn scan_chunks_in_frames<F>(
+    pub fn scan_chunks_in_frames<F>(&self, chunk_ids: &[u32], visit: F) -> Result<(), StatamError>
+    where
+        F: FnMut(u32, &[u8]),
+    {
+        self.scan_chunks_in_frames_cancellable(chunk_ids, None, visit)
+    }
+
+    pub(crate) fn scan_chunks_in_frames_cancellable<F>(
         &self,
         chunk_ids: &[u32],
+        cancel: Option<&CancelToken>,
         mut visit: F,
     ) -> Result<(), StatamError>
     where
         F: FnMut(u32, &[u8]),
     {
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(StatamError::Cancelled);
+        }
         if chunk_ids.is_empty() {
             return Ok(());
         }
@@ -2993,6 +3005,9 @@ impl ChunkPackReader {
         let mut dict_decomp = PackFrameDecompressor::new();
 
         for ((fid, cids), raw) in frame_groups.iter().zip(frame_bytes_list.iter()) {
+            if cancel.is_some_and(CancelToken::is_cancelled) {
+                return Err(StatamError::Cancelled);
+            }
             self.decompress_and_visit_frame(
                 *fid,
                 raw,
@@ -3021,6 +3036,25 @@ impl ChunkPackReader {
         Init: Fn() -> Result<S, StatamError> + Sync,
         F: Fn(&mut S, u32, &[u8]) -> Option<T> + Sync,
     {
+        self.scan_chunks_in_frames_parallel_cancellable(chunk_ids, read_threads, None, init, f)
+    }
+
+    pub(crate) fn scan_chunks_in_frames_parallel_cancellable<S, T, Init, F>(
+        &self,
+        chunk_ids: &[u32],
+        read_threads: usize,
+        cancel: Option<&CancelToken>,
+        init: Init,
+        f: F,
+    ) -> Result<Vec<T>, StatamError>
+    where
+        T: Send,
+        Init: Fn() -> Result<S, StatamError> + Sync,
+        F: Fn(&mut S, u32, &[u8]) -> Option<T> + Sync,
+    {
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(StatamError::Cancelled);
+        }
         if chunk_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -3045,6 +3079,9 @@ impl ChunkPackReader {
             let mut dict_decomp = PackFrameDecompressor::new();
             let mut out = Vec::new();
             for ((fid, cids), raw) in frame_groups.iter().zip(frame_bytes_list.iter()) {
+                if cancel.is_some_and(CancelToken::is_cancelled) {
+                    return Err(StatamError::Cancelled);
+                }
                 self.decompress_and_visit_frame(
                     *fid,
                     raw,
@@ -3074,6 +3111,9 @@ impl ChunkPackReader {
             workers,
             || Ok((init()?, PackFrameDecompressor::new())),
             |(state, dict_decomp), (fid, raw, cids)| {
+                if cancel.is_some_and(CancelToken::is_cancelled) {
+                    return Err(StatamError::Cancelled);
+                }
                 let mut frame_out = Vec::new();
                 self.decompress_and_visit_frame(
                     fid,
@@ -3099,6 +3139,7 @@ impl ChunkPackReader {
         Ok(out)
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn decompress_and_run_frame<'a, S, T, F>(
         &self,
@@ -3113,22 +3154,14 @@ impl ChunkPackReader {
     where
         F: Fn(&mut S, u32, &[u8], &[u32]) -> Result<Option<T>, StatamError>,
     {
-        let entry = &self.toc.frames[fid as usize];
-        verify_raw_frame_matches_entry(raw, entry)?;
-        let (_, _, decoded) =
-            read_framed_pack_frame_with_decompressor(raw, MAX_FRAME_RAW_BYTES, dict, dict_decomp)?;
-        if decoded.len() != entry.raw_len as usize {
-            return Err(StatamError::Corrupt {
-                reason: "decompressed frame length mismatch",
-            });
-        }
-        f(state, fid, &decoded, cids)
+        decompress_and_run_frame_with_toc(&self.toc, fid, raw, cids, dict, dict_decomp, state, f)
     }
 
     /// Frame-level variant of [`Self::scan_chunks_in_frames_parallel`] that passes the full
     /// decompressed frame buffer and its requested `chunk_ids` to `f`, enabling callers (e.g.
     /// Phase-1 substring search) to retain matched rows' chunks (including same-frame siblings)
     /// without re-reading the frame in Phase 2.
+    #[cfg(test)]
     pub(crate) fn scan_frames_parallel<S, T, Init, F>(
         &self,
         chunk_ids: &[u32],
@@ -3141,6 +3174,26 @@ impl ChunkPackReader {
         Init: Fn() -> Result<S, StatamError> + Sync,
         F: Fn(&mut S, u32, &[u8], &[u32]) -> Result<Option<T>, StatamError> + Sync,
     {
+        self.scan_frames_parallel_cancellable(chunk_ids, read_threads, None, init, f)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scan_frames_parallel_cancellable<S, T, Init, F>(
+        &self,
+        chunk_ids: &[u32],
+        read_threads: usize,
+        cancel: Option<&CancelToken>,
+        init: Init,
+        f: F,
+    ) -> Result<Vec<T>, StatamError>
+    where
+        T: Send,
+        Init: Fn() -> Result<S, StatamError> + Sync,
+        F: Fn(&mut S, u32, &[u8], &[u32]) -> Result<Option<T>, StatamError> + Sync,
+    {
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(StatamError::Cancelled);
+        }
         if chunk_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -3166,6 +3219,9 @@ impl ChunkPackReader {
             let mut dict_decomp = PackFrameDecompressor::new();
             let mut out = Vec::new();
             for ((fid, cids), raw) in frame_groups.iter().zip(frame_bytes_list.iter()) {
+                if cancel.is_some_and(CancelToken::is_cancelled) {
+                    return Err(StatamError::Cancelled);
+                }
                 if let Some(item) = self.decompress_and_run_frame(
                     *fid,
                     raw,
@@ -3194,6 +3250,9 @@ impl ChunkPackReader {
             workers,
             || Ok((init()?, PackFrameDecompressor::new())),
             |(state, dict_decomp), (fid, raw, cids)| {
+                if cancel.is_some_and(CancelToken::is_cancelled) {
+                    return Err(StatamError::Cancelled);
+                }
                 self.decompress_and_run_frame(
                     fid,
                     &raw,
@@ -3202,6 +3261,208 @@ impl ChunkPackReader {
                     dict_decomp,
                     state,
                     &f,
+                )
+            },
+        )?;
+
+        Ok(per_frame.into_iter().flatten().collect())
+    }
+
+    pub(crate) fn scan_chunks_in_frames_parallel_static_cancellable<S, T, Init, F>(
+        &self,
+        chunk_ids: &[u32],
+        read_threads: usize,
+        cancel: Option<&CancelToken>,
+        init: Init,
+        f: F,
+    ) -> Result<Vec<T>, StatamError>
+    where
+        T: Send + 'static,
+        Init: Fn() -> Result<S, StatamError> + Send + Sync + 'static,
+        F: Fn(&mut S, u32, &[u8]) -> Option<T> + Send + Sync + 'static,
+    {
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(StatamError::Cancelled);
+        }
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let (frame_groups, frame_bytes_list, dict) = self.fetch_frame_chunk_groups(chunk_ids)?;
+
+        let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
+        let mut compressed_frames = 0usize;
+        let mut total_raw_bytes = 0usize;
+        for &(fid, _) in &frame_groups {
+            let entry = &self.toc.frames[fid as usize];
+            if entry.codec != Codec::None {
+                compressed_frames += 1;
+            }
+            total_raw_bytes = total_raw_bytes.saturating_add(entry.raw_len as usize);
+        }
+        if threads <= 1
+            || frame_groups.len() <= 1
+            || (compressed_frames < 4 && total_raw_bytes < 2 * 1024 * 1024)
+        {
+            let mut state = init()?;
+            let mut dict_decomp = PackFrameDecompressor::new();
+            let mut out = Vec::new();
+            for ((fid, cids), raw) in frame_groups.iter().zip(frame_bytes_list.iter()) {
+                if cancel.is_some_and(CancelToken::is_cancelled) {
+                    return Err(StatamError::Cancelled);
+                }
+                decompress_and_visit_frame_with_toc(
+                    &self.toc,
+                    *fid,
+                    raw,
+                    cids,
+                    dict.as_deref(),
+                    &mut dict_decomp,
+                    |cid, slice| {
+                        if let Some(item) = f(&mut state, cid, slice) {
+                            out.push(item);
+                        }
+                    },
+                )?;
+            }
+            return Ok(out);
+        }
+
+        let workers = threads.min(frame_groups.len());
+        let frame_tasks: Vec<(u32, Bytes, Vec<u32>)> = frame_groups
+            .into_iter()
+            .zip(frame_bytes_list)
+            .map(|((fid, cids), raw)| (fid, raw, cids))
+            .collect();
+
+        let per_frame = parallel_map_in_order_static_with_ctx(
+            (Arc::clone(&self.toc), dict, cancel.cloned(), init, f),
+            frame_tasks,
+            workers,
+            |(toc, dict, cancel_opt, init, f), worker| {
+                worker.run_with_init(
+                    || Ok((init()?, PackFrameDecompressor::new())),
+                    |(state, dict_decomp), (fid, raw, cids)| {
+                        if cancel_opt.as_ref().is_some_and(CancelToken::is_cancelled) {
+                            return Err(StatamError::Cancelled);
+                        }
+                        let mut frame_out = Vec::new();
+                        decompress_and_visit_frame_with_toc(
+                            toc,
+                            fid,
+                            &raw,
+                            &cids,
+                            dict.as_deref(),
+                            dict_decomp,
+                            |cid, slice| {
+                                if let Some(item) = f(state, cid, slice) {
+                                    frame_out.push(item);
+                                }
+                            },
+                        )?;
+                        Ok(frame_out)
+                    },
+                )
+            },
+        )?;
+
+        let total: usize = per_frame.iter().map(Vec::len).sum();
+        let mut out = Vec::with_capacity(total);
+        for mut items in per_frame {
+            out.append(&mut items);
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn scan_frames_parallel_static_cancellable<S, T, Init, F>(
+        &self,
+        chunk_ids: &[u32],
+        read_threads: usize,
+        cancel: Option<&CancelToken>,
+        init: Init,
+        f: F,
+    ) -> Result<Vec<T>, StatamError>
+    where
+        T: Send + 'static,
+        Init: Fn() -> Result<S, StatamError> + Send + Sync + 'static,
+        F: Fn(&mut S, u32, &[u8], &[u32]) -> Result<Option<T>, StatamError> + Send + Sync + 'static,
+    {
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(StatamError::Cancelled);
+        }
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let (frame_groups, frame_bytes_list, dict) = self.fetch_frame_chunk_groups(chunk_ids)?;
+
+        let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
+        let mut compressed_frames = 0usize;
+        let mut total_raw_bytes = 0usize;
+        for &(fid, _) in &frame_groups {
+            let entry = &self.toc.frames[fid as usize];
+            if entry.codec != Codec::None {
+                compressed_frames += 1;
+            }
+            total_raw_bytes = total_raw_bytes.saturating_add(entry.raw_len as usize);
+        }
+
+        if threads <= 1
+            || frame_groups.len() <= 1
+            || (compressed_frames < 4 && total_raw_bytes < 2 * 1024 * 1024)
+        {
+            let mut state = init()?;
+            let mut dict_decomp = PackFrameDecompressor::new();
+            let mut out = Vec::new();
+            for ((fid, cids), raw) in frame_groups.iter().zip(frame_bytes_list.iter()) {
+                if cancel.is_some_and(CancelToken::is_cancelled) {
+                    return Err(StatamError::Cancelled);
+                }
+                if let Some(item) = decompress_and_run_frame_with_toc(
+                    &self.toc,
+                    *fid,
+                    raw,
+                    cids,
+                    dict.as_deref(),
+                    &mut dict_decomp,
+                    &mut state,
+                    &f,
+                )? {
+                    out.push(item);
+                }
+            }
+            return Ok(out);
+        }
+
+        let workers = threads.min(frame_groups.len());
+        let frame_tasks: Vec<(u32, Bytes, Vec<u32>)> = frame_groups
+            .into_iter()
+            .zip(frame_bytes_list)
+            .map(|((fid, cids), raw)| (fid, raw, cids))
+            .collect();
+
+        let per_frame = parallel_map_in_order_static_with_ctx(
+            (Arc::clone(&self.toc), dict, cancel.cloned(), init, f),
+            frame_tasks,
+            workers,
+            |(toc, dict, cancel_opt, init, f), worker| {
+                worker.run_with_init(
+                    || Ok((init()?, PackFrameDecompressor::new())),
+                    |(state, dict_decomp), (fid, raw, cids)| {
+                        if cancel_opt.as_ref().is_some_and(CancelToken::is_cancelled) {
+                            return Err(StatamError::Cancelled);
+                        }
+                        decompress_and_run_frame_with_toc(
+                            toc,
+                            fid,
+                            &raw,
+                            &cids,
+                            dict.as_deref(),
+                            dict_decomp,
+                            state,
+                            f,
+                        )
+                    },
                 )
             },
         )?;
@@ -3847,6 +4108,65 @@ fn frame_byte_range(entry: &FrameEntry) -> Result<Range<u64>, StatamError> {
             reason: "frame byte range end overflow",
         })?;
     Ok(entry.offset..end)
+}
+
+fn decompress_and_visit_frame_with_toc<'a, F>(
+    toc: &PackToc,
+    fid: u32,
+    raw: &[u8],
+    cids: &[u32],
+    dict: Option<&'a PackDecoderDict>,
+    dict_decomp: &mut PackFrameDecompressor<'a>,
+    mut visit: F,
+) -> Result<(), StatamError>
+where
+    F: FnMut(u32, &[u8]),
+{
+    let entry = &toc.frames[fid as usize];
+    verify_raw_frame_matches_entry(raw, entry)?;
+    let (_, _, decoded) =
+        read_framed_pack_frame_with_decompressor(raw, MAX_FRAME_RAW_BYTES, dict, dict_decomp)?;
+    if decoded.len() != entry.raw_len as usize {
+        return Err(StatamError::Corrupt {
+            reason: "decompressed frame length mismatch",
+        });
+    }
+    for &cid in cids {
+        let loc = &toc.chunks[cid as usize];
+        let start = loc.offset_in_frame as usize;
+        let end = start + loc.raw_len as usize;
+        let slice = decoded.get(start..end).ok_or(StatamError::Corrupt {
+            reason: "chunk slice out of decoded frame bounds",
+        })?;
+        visit(cid, slice);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decompress_and_run_frame_with_toc<'a, S, T, F>(
+    toc: &PackToc,
+    fid: u32,
+    raw: &[u8],
+    cids: &[u32],
+    dict: Option<&'a PackDecoderDict>,
+    dict_decomp: &mut PackFrameDecompressor<'a>,
+    state: &mut S,
+    f: &F,
+) -> Result<Option<T>, StatamError>
+where
+    F: Fn(&mut S, u32, &[u8], &[u32]) -> Result<Option<T>, StatamError>,
+{
+    let entry = &toc.frames[fid as usize];
+    verify_raw_frame_matches_entry(raw, entry)?;
+    let (_, _, decoded) =
+        read_framed_pack_frame_with_decompressor(raw, MAX_FRAME_RAW_BYTES, dict, dict_decomp)?;
+    if decoded.len() != entry.raw_len as usize {
+        return Err(StatamError::Corrupt {
+            reason: "decompressed frame length mismatch",
+        });
+    }
+    f(state, fid, &decoded, cids)
 }
 
 fn decompress_frame_chunks_as_bytes_with_toc<'a>(

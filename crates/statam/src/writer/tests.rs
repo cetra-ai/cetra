@@ -970,11 +970,11 @@ fn writer_single_chunk_only_omits_edge_table_and_preserves_substring_parity() {
 
     let like_hits = reader
         .scan(&ScanRequest {
-            substrings: vec![SubstringQuery {
+            substrings: vec![vec![SubstringQuery {
                 column: "input".to_owned(),
                 needle: b"NeedleSingleAlpha".to_vec(),
                 case_insensitive: false,
-            }],
+            }]],
             ..ScanRequest::default()
         })
         .unwrap();
@@ -983,11 +983,11 @@ fn writer_single_chunk_only_omits_edge_table_and_preserves_substring_parity() {
 
     let ilike_hits = reader
         .scan(&ScanRequest {
-            substrings: vec![SubstringQuery {
+            substrings: vec![vec![SubstringQuery {
                 column: "input".to_owned(),
                 needle: b"needlesinglealpha".to_vec(),
                 case_insensitive: true,
-            }],
+            }]],
             ..ScanRequest::default()
         })
         .unwrap();
@@ -996,11 +996,11 @@ fn writer_single_chunk_only_omits_edge_table_and_preserves_substring_parity() {
 
     let miss_hits = reader
         .scan(&ScanRequest {
-            substrings: vec![SubstringQuery {
+            substrings: vec![vec![SubstringQuery {
                 column: "input".to_owned(),
                 needle: b"NotPresentAnywhere".to_vec(),
                 case_insensitive: false,
-            }],
+            }]],
             ..ScanRequest::default()
         })
         .unwrap();
@@ -1139,11 +1139,11 @@ fn writer_mixed_single_and_multi_chunk_zeros_non_boundary_edges_and_matches_seam
     let seam_needle = b"SEAM_LEFT\"},{\"role\":\"assistant\",\"txt\":\"SEAM_RIGHT";
     let seam_like = reader
         .scan(&ScanRequest {
-            substrings: vec![SubstringQuery {
+            substrings: vec![vec![SubstringQuery {
                 column: "input".to_owned(),
                 needle: seam_needle.to_vec(),
                 case_insensitive: false,
-            }],
+            }]],
             ..ScanRequest::default()
         })
         .unwrap();
@@ -1152,11 +1152,11 @@ fn writer_mixed_single_and_multi_chunk_zeros_non_boundary_edges_and_matches_seam
     let seam_ilike_needle = b"seam_left\"},{\"ROLE\":\"ASSISTANT\",\"txt\":\"seam_right";
     let seam_ilike = reader
         .scan(&ScanRequest {
-            substrings: vec![SubstringQuery {
+            substrings: vec![vec![SubstringQuery {
                 column: "input".to_owned(),
                 needle: seam_ilike_needle.to_vec(),
                 case_insensitive: true,
-            }],
+            }]],
             ..ScanRequest::default()
         })
         .unwrap();
@@ -1165,11 +1165,11 @@ fn writer_mixed_single_and_multi_chunk_zeros_non_boundary_edges_and_matches_seam
     // Large multi-chunk row (row 98) must match at both interior and across any CDC boundary.
     let big_like = reader
         .scan(&ScanRequest {
-            substrings: vec![SubstringQuery {
+            substrings: vec![vec![SubstringQuery {
                 column: "input".to_owned(),
                 needle: b"BIG_CDC_PART_ABIG_CDC_PART_B".to_vec(),
                 case_insensitive: false,
-            }],
+            }]],
             ..ScanRequest::default()
         })
         .unwrap();

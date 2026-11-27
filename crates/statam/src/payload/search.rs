@@ -2,11 +2,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasherDefault;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use cetra_column::Bitmap;
+use cetra_column::{Bitmap, CancelToken};
 use memchr::memmem;
 
 use crate::StatamError;
@@ -16,7 +16,8 @@ use crate::payload::{
     FLAT_REF_CHUNKS, FLAT_REF_INLINE, FLAT_REF_NULL, FlatPayloadRefs, PayloadRefRow,
 };
 use crate::simd::trigram::{
-    TrigramBloom, ascii_lowercase_append, ascii_lowercase_into, extract_trigram_hashes,
+    TrigramBloom, ascii_lowercase_append, ascii_lowercase_fold_ks_into, ascii_lowercase_into,
+    contains_kelvin_or_long_s, extract_trigram_hashes,
 };
 
 /// Maximum needle byte length guaranteed to span at most two adjacent `>= 256 B` chunks
@@ -30,7 +31,12 @@ pub(crate) const PHASE1_RETAINED_CHUNKS_MAX_BYTES: usize = 64 * 1024 * 1024;
 ///
 /// Peak retained + in-flight reserved bytes across all concurrent frames, mini-blocks, and
 /// row-groups sharing this instance can never exceed `max_bytes` (default `64 MiB`).
+#[derive(Clone)]
 pub(crate) struct RetainedPackChunks {
+    inner: Arc<RetainedPackChunksInner>,
+}
+
+struct RetainedPackChunksInner {
     #[cfg(test)]
     max_bytes: usize,
     remaining: AtomicUsize,
@@ -46,28 +52,31 @@ impl Default for RetainedPackChunks {
 impl RetainedPackChunks {
     pub(crate) fn new(max_bytes: usize) -> Self {
         Self {
-            #[cfg(test)]
-            max_bytes,
-            remaining: AtomicUsize::new(max_bytes),
-            chunks: Mutex::new(HashMap::new()),
+            inner: Arc::new(RetainedPackChunksInner {
+                #[cfg(test)]
+                max_bytes,
+                remaining: AtomicUsize::new(max_bytes),
+                chunks: Mutex::new(HashMap::new()),
+            }),
         }
     }
 
     #[inline]
     pub(crate) fn remaining_bytes(&self) -> usize {
-        self.remaining.load(Ordering::Acquire)
+        self.inner.remaining.load(Ordering::Acquire)
     }
 
     #[inline]
     #[cfg(test)]
     pub(crate) fn used_bytes(&self) -> usize {
-        self.max_bytes.saturating_sub(self.remaining_bytes())
+        self.inner.max_bytes.saturating_sub(self.remaining_bytes())
     }
 
     /// Atomically reserves `len` bytes from the remaining retention budget.
     #[inline]
     pub(crate) fn try_reserve(&self, len: usize) -> bool {
-        self.remaining
+        self.inner
+            .remaining
             .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                 cur.checked_sub(len)
             })
@@ -77,7 +86,7 @@ impl RetainedPackChunks {
     /// Releases `len` previously reserved bytes back to the retention budget.
     #[inline]
     pub(crate) fn release(&self, len: usize) {
-        self.remaining.fetch_add(len, Ordering::AcqRel);
+        self.inner.remaining.fetch_add(len, Ordering::AcqRel);
     }
 
     /// Inserts `(pack_id, cid) -> data` if `data.len()` fits within the remaining budget.
@@ -88,7 +97,7 @@ impl RetainedPackChunks {
         if !self.try_reserve(len) {
             return false;
         }
-        let mut guard = self.chunks.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.inner.chunks.lock().unwrap_or_else(|p| p.into_inner());
         let key = (pack_id, cid);
         if let std::collections::hash_map::Entry::Vacant(e) = guard.entry(key) {
             e.insert(data);
@@ -108,7 +117,7 @@ impl RetainedPackChunks {
             return;
         }
         let mut refund = 0usize;
-        let mut guard = self.chunks.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.inner.chunks.lock().unwrap_or_else(|p| p.into_inner());
         for (cid, data) in items {
             let len = data.len();
             if let std::collections::hash_map::Entry::Vacant(e) = guard.entry((pack_id, cid)) {
@@ -125,7 +134,10 @@ impl RetainedPackChunks {
     }
 
     pub(crate) fn into_map(self) -> HashMap<([u8; 16], u32), Bytes> {
-        self.chunks.into_inner().unwrap_or_else(|p| p.into_inner())
+        match Arc::try_unwrap(self.inner) {
+            Ok(inner) => inner.chunks.into_inner().unwrap_or_else(|p| p.into_inner()),
+            Err(arc) => std::mem::take(&mut *arc.chunks.lock().unwrap_or_else(|p| p.into_inner())),
+        }
     }
 }
 
@@ -402,6 +414,7 @@ enum NeedleMatcher {
     Exact(memmem::Finder<'static>),
     AsciiIlike {
         finder: memmem::Finder<'static>,
+        has_ks: bool,
         scratch: Vec<u8>,
     },
     UnicodeIlike {
@@ -422,8 +435,10 @@ impl NeedleMatcher {
         if needle.is_ascii() {
             let mut lowered = Vec::new();
             ascii_lowercase_into(needle, &mut lowered);
+            let has_ks = lowered.iter().any(|&b| b == b'k' || b == b's');
             return Self::AsciiIlike {
                 finder: memmem::Finder::new(&lowered).into_owned(),
+                has_ks,
                 scratch: Vec::new(),
             };
         }
@@ -448,6 +463,7 @@ impl NeedleMatcher {
             }
             Err(_) => Self::AsciiIlike {
                 finder: memmem::Finder::new(&ascii_lowered).into_owned(),
+                has_ks: false,
                 scratch: Vec::new(),
             },
         }
@@ -456,8 +472,16 @@ impl NeedleMatcher {
     fn matches(&mut self, haystack: &[u8]) -> bool {
         match self {
             Self::Exact(finder) => finder.find(haystack).is_some(),
-            Self::AsciiIlike { finder, scratch } => {
-                ascii_lowercase_into(haystack, scratch);
+            Self::AsciiIlike {
+                finder,
+                has_ks,
+                scratch,
+            } => {
+                if *has_ks && contains_kelvin_or_long_s(haystack) {
+                    ascii_lowercase_fold_ks_into(haystack, scratch);
+                } else {
+                    ascii_lowercase_into(haystack, scratch);
+                }
                 finder.find(scratch).is_some()
             }
             Self::UnicodeIlike {
@@ -561,6 +585,7 @@ pub fn search_pack_rows(
         case_insensitive,
         1,
         None,
+        None,
     )
 }
 
@@ -585,6 +610,7 @@ pub(crate) fn search_pack_rows_masked_with_threads(
         case_insensitive,
         read_threads,
         None,
+        None,
     )
 }
 
@@ -601,6 +627,7 @@ pub(crate) fn search_pack_rows_flat_masked_with_threads(
     case_insensitive: bool,
     read_threads: usize,
     retain: Option<([u8; 16], &RetainedPackChunks)>,
+    cancel: Option<&CancelToken>,
 ) -> Result<Bitmap, StatamError> {
     search_pack_rows_impl(
         pack,
@@ -611,6 +638,7 @@ pub(crate) fn search_pack_rows_flat_masked_with_threads(
         case_insensitive,
         read_threads,
         retain,
+        cancel,
     )
 }
 
@@ -626,7 +654,11 @@ pub(crate) fn search_pack_rows_flat_multi_masked_with_threads(
     case_insensitive: bool,
     read_threads: usize,
     retain: Option<([u8; 16], &RetainedPackChunks)>,
+    cancel: Option<&CancelToken>,
 ) -> Result<Vec<Bitmap>, StatamError> {
+    if cancel.is_some_and(CancelToken::is_cancelled) {
+        return Err(StatamError::Cancelled);
+    }
     if mb_refs.len() != mb_masks.len() {
         return Err(StatamError::Corrupt {
             reason: "multi-mb payload search refs/masks length mismatch",
@@ -645,6 +677,7 @@ pub(crate) fn search_pack_rows_flat_multi_masked_with_threads(
             case_insensitive,
             read_threads,
             retain,
+            cancel,
         )?;
         return Ok(vec![bm]);
     }
@@ -686,6 +719,7 @@ pub(crate) fn search_pack_rows_flat_multi_masked_with_threads(
         case_insensitive,
         read_threads,
         retain,
+        cancel,
     )?;
 
     let mut out: Vec<Bitmap> = mb_refs
@@ -1013,7 +1047,11 @@ fn search_pack_rows_impl<S: PayloadRefSource>(
     case_insensitive: bool,
     read_threads: usize,
     retain: Option<([u8; 16], &RetainedPackChunks)>,
+    cancel: Option<&CancelToken>,
 ) -> Result<Bitmap, StatamError> {
+    if cancel.is_some_and(CancelToken::is_cancelled) {
+        return Err(StatamError::Cancelled);
+    }
     let row_count = row_refs.row_count();
     let mut results = Bitmap::new_zeroed(row_count);
     if active_mask.is_some_and(Bitmap::all_zeros) {
@@ -1098,18 +1136,7 @@ fn search_pack_rows_impl<S: PayloadRefSource>(
         return Ok(results);
     }
 
-    let max_match_bytes = if case_insensitive && !needle.is_ascii() {
-        let mut uni_lower = String::new();
-        let nl: &[u8] = if let Ok(s) = std::str::from_utf8(needle) {
-            unicode_lowercase_context_free_into(s, &mut uni_lower);
-            uni_lower.as_bytes()
-        } else {
-            needle
-        };
-        max_unicode_haystack_match_bytes(nl)
-    } else {
-        needle.len()
-    };
+    let max_match_bytes = max_haystack_match_bytes(needle, case_insensitive);
 
     if max_match_bytes <= MAX_EDGE_NEEDLE_LEN {
         search_short_needle_rows(
@@ -1125,6 +1152,7 @@ fn search_pack_rows_impl<S: PayloadRefSource>(
             &needed_bits,
             &mut results,
             retain,
+            cancel,
         )?;
     } else {
         search_long_needle_rows(
@@ -1137,6 +1165,7 @@ fn search_pack_rows_impl<S: PayloadRefSource>(
             &needed_bits,
             &mut results,
             retain,
+            cancel,
         )?;
     }
 
@@ -1157,7 +1186,11 @@ fn search_short_needle_rows<S: PayloadRefSource>(
     needed_bits: &[u64],
     results: &mut Bitmap,
     retain: Option<([u8; 16], &RetainedPackChunks)>,
+    cancel: Option<&CancelToken>,
 ) -> Result<(), StatamError> {
+    if cancel.is_some_and(CancelToken::is_cancelled) {
+        return Err(StatamError::Cancelled);
+    }
     if pack.postscript().edge_table_len == 0 {
         for &row_idx in chunk_rows {
             let mut pack_refs = 0usize;
@@ -1200,14 +1233,22 @@ fn search_short_needle_rows<S: PayloadRefSource>(
         if let Some((pack_id, retained)) = retain
             && retained.remaining_bytes() > 0
         {
-            let toc_chunks = &pack.toc().chunks;
-            let same_frame_siblings =
-                SameFrameSiblings::build(row_refs, chunk_rows, pack_idx, toc_chunks);
-            let frame_results = pack.scan_frames_parallel(
+            let toc_arc = Arc::clone(pack.toc_arc());
+            let same_frame_siblings = Arc::new(SameFrameSiblings::build(
+                row_refs,
+                chunk_rows,
+                pack_idx,
+                &toc_arc.chunks,
+            ));
+            let retained_owned = retained.clone();
+            let needle_owned: Arc<[u8]> = Arc::from(needle);
+            let frame_results = pack.scan_frames_parallel_static_cancellable(
                 &surviving_chunks,
                 read_threads,
-                || Ok(NeedleMatcher::new(needle, case_insensitive)),
-                |m, _fid, decoded, cids| {
+                cancel,
+                move || Ok(NeedleMatcher::new(&needle_owned, case_insensitive)),
+                move |m, _fid, decoded, cids| {
+                    let toc_chunks = &toc_arc.chunks;
                     let mut matched_cids = Vec::new();
                     for &cid in cids {
                         let loc = &toc_chunks[cid as usize];
@@ -1223,8 +1264,8 @@ fn search_short_needle_rows<S: PayloadRefSource>(
                     if matched_cids.is_empty() {
                         return Ok(None);
                     }
-                    if retained.remaining_bytes() > 0 {
-                        let mut kept = ReservedFrameChunks::new(retained);
+                    if retained_owned.remaining_bytes() > 0 {
+                        let mut kept = ReservedFrameChunks::new(&retained_owned);
                         let mut seen_in_frame: HashSet<u32> = if same_frame_siblings.is_empty() {
                             HashSet::new()
                         } else {
@@ -1232,7 +1273,7 @@ fn search_short_needle_rows<S: PayloadRefSource>(
                         };
                         let mut visited_groups: HashSet<usize> = HashSet::new();
                         'retain: for &cid in &matched_cids {
-                            if retained.remaining_bytes() == 0 {
+                            if retained_owned.remaining_bytes() == 0 {
                                 break;
                             }
                             if same_frame_siblings.is_empty() || seen_in_frame.insert(cid) {
@@ -1248,7 +1289,7 @@ fn search_short_needle_rows<S: PayloadRefSource>(
                                 for &gidx in group_idxs {
                                     if visited_groups.insert(gidx) {
                                         for &sib_cid in same_frame_siblings.group(gidx) {
-                                            if retained.remaining_bytes() == 0 {
+                                            if retained_owned.remaining_bytes() == 0 {
                                                 break 'retain;
                                             }
                                             if seen_in_frame.insert(sib_cid) {
@@ -1279,10 +1320,12 @@ fn search_short_needle_rows<S: PayloadRefSource>(
                 }
             }
         } else if read_threads.clamp(1, crate::parallel::MAX_PARALLEL_THREADS) > 1 {
-            let matched = pack.scan_chunks_in_frames_parallel(
+            let needle_owned: Arc<[u8]> = Arc::from(needle);
+            let matched = pack.scan_chunks_in_frames_parallel_static_cancellable(
                 &surviving_chunks,
                 read_threads,
-                || Ok(NeedleMatcher::new(needle, case_insensitive)),
+                cancel,
+                move || Ok(NeedleMatcher::new(&needle_owned, case_insensitive)),
                 |m, cid, bytes| m.matches(bytes).then_some(cid),
             )?;
             for cid in matched {
@@ -1290,7 +1333,7 @@ fn search_short_needle_rows<S: PayloadRefSource>(
                 any_matched = true;
             }
         } else {
-            pack.scan_chunks_in_frames(&surviving_chunks, |cid, bytes| {
+            pack.scan_chunks_in_frames_cancellable(&surviving_chunks, cancel, |cid, bytes| {
                 if matcher.matches(bytes) {
                     bitset_set(&mut matched_bits, cid as usize);
                     any_matched = true;
@@ -1332,6 +1375,10 @@ fn search_short_needle_rows<S: PayloadRefSource>(
         return Ok(());
     }
 
+    if cancel.is_some_and(CancelToken::is_cancelled) {
+        return Err(StatamError::Cancelled);
+    }
+
     // Step B: Cross-chunk boundary matches using FlatEdgeTable (0 extra data frame reads).
     let mut distinct_pairs: HashSet<(u32, u32), BuildHasherDefault<FastPairHasher>> =
         HashSet::default();
@@ -1353,6 +1400,9 @@ fn search_short_needle_rows<S: PayloadRefSource>(
     let is_unicode_ilike = matches!(matcher, NeedleMatcher::UnicodeIlike { .. });
 
     for (left_cid, right_cid) in distinct_pairs {
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(StatamError::Cancelled);
+        }
         if (left_cid as usize) >= edge_count {
             return Err(StatamError::Corrupt {
                 reason: "left chunk_id missing from edge table",
@@ -1403,16 +1453,21 @@ fn search_long_needle_rows<S: PayloadRefSource>(
     needed_bits: &[u64],
     results: &mut Bitmap,
     retain: Option<([u8; 16], &RetainedPackChunks)>,
+    cancel: Option<&CancelToken>,
 ) -> Result<(), StatamError> {
+    if cancel.is_some_and(CancelToken::is_cancelled) {
+        return Err(StatamError::Cancelled);
+    }
     let all_needed = collect_set_bits(needed_bits);
     let mut total_chunk_bytes = 0usize;
     let mut total_frame_bytes = 0usize;
     pack.check_chunks_budget(&all_needed, &mut total_chunk_bytes, &mut total_frame_bytes)?;
     let fetched: HashMap<u32, Bytes> =
         if read_threads.clamp(1, crate::parallel::MAX_PARALLEL_THREADS) > 1 {
-            pack.scan_chunks_in_frames_parallel(
+            pack.scan_chunks_in_frames_parallel_static_cancellable(
                 &all_needed,
                 read_threads,
+                cancel,
                 || Ok(()),
                 |(), cid, bytes| Some((cid, Bytes::copy_from_slice(bytes))),
             )?
@@ -1420,7 +1475,7 @@ fn search_long_needle_rows<S: PayloadRefSource>(
             .collect()
         } else {
             let mut map = HashMap::with_capacity(all_needed.len());
-            pack.scan_chunks_in_frames(&all_needed, |cid, bytes| {
+            pack.scan_chunks_in_frames_cancellable(&all_needed, cancel, |cid, bytes| {
                 map.insert(cid, Bytes::copy_from_slice(bytes));
             })?;
             map
@@ -1430,6 +1485,9 @@ fn search_long_needle_rows<S: PayloadRefSource>(
     let mut scratch_buf = Vec::new();
 
     for &row_idx in chunk_rows {
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(StatamError::Cancelled);
+        }
         let Some(key) = row_refs.seq_key(row_idx) else {
             continue;
         };
@@ -1611,6 +1669,35 @@ fn max_unicode_haystack_match_bytes(nl: &[u8]) -> usize {
     total
 }
 
+/// Conservative upper bound on the UTF-8 byte length of any haystack substring that can match
+/// `needle` under `case_insensitive` (`ILIKE` folds `U+212A` `K` -> `k` (+2 B) and `U+017F` `ſ`
+/// -> `s` (+1 B) for ASCII needles).
+fn max_haystack_match_bytes(needle: &[u8], case_insensitive: bool) -> usize {
+    if !case_insensitive {
+        return needle.len();
+    }
+    if needle.is_ascii() {
+        let mut extra = 0usize;
+        for &b in needle {
+            match b {
+                b'k' | b'K' => extra = extra.saturating_add(2),
+                b's' | b'S' => extra = extra.saturating_add(1),
+                _ => {}
+            }
+        }
+        needle.len().saturating_add(extra)
+    } else {
+        let mut uni_lower = String::new();
+        let nl: &[u8] = if let Ok(s) = std::str::from_utf8(needle) {
+            unicode_lowercase_context_free_into(s, &mut uni_lower);
+            uni_lower.as_bytes()
+        } else {
+            needle
+        };
+        max_unicode_haystack_match_bytes(nl)
+    }
+}
+
 pub(crate) fn pack_rejects_boundary_pigeonhole(
     edge_blooms: Option<&(TrigramBloom, TrigramBloom)>,
     needle: &[u8],
@@ -1620,13 +1707,29 @@ pub(crate) fn pack_rejects_boundary_pigeonhole(
         return false;
     };
     if !case_insensitive || needle.is_ascii() {
-        if needle.len() < 5 || needle.len() > MAX_EDGE_NEEDLE_LEN {
+        if needle.len() < 5
+            || max_haystack_match_bytes(needle, case_insensitive) > MAX_EDGE_NEEDLE_LEN
+        {
             return false;
         }
         let n = needle.len();
-        let half = n.div_ceil(2);
-        let prefix_hashes = extract_needle_trigram_hashes(&needle[..half], case_insensitive);
-        let suffix_hashes = extract_needle_trigram_hashes(&needle[n - half..], case_insensitive);
+        let (prefix, suffix) =
+            if case_insensitive && n % 2 == 1 && matches!(needle[n / 2], b'k' | b'K' | b's' | b'S')
+            {
+                // An odd-length ASCII ILIKE needle whose center byte is `k`/`K`/`s`/`S` can match
+                // multi-byte `K` (3 B) or `ſ` (2 B) split mid-codepoint by FastCDC. Excluding the
+                // center byte guarantees disjoint halves (requires `n >= 7` so each half has >= 3 B).
+                if n < 7 {
+                    return false;
+                }
+                let half = n / 2;
+                (&needle[..half], &needle[n - half..])
+            } else {
+                let half = n.div_ceil(2);
+                (&needle[..half], &needle[n - half..])
+            };
+        let prefix_hashes = extract_needle_trigram_hashes(prefix, case_insensitive);
+        let suffix_hashes = extract_needle_trigram_hashes(suffix, case_insensitive);
         let tail_may = tail_bloom.may_contain_hashes(&prefix_hashes);
         let head_may = head_bloom.may_contain_hashes(&suffix_hashes);
         return !tail_may && !head_may;
@@ -1664,7 +1767,10 @@ pub(crate) fn pack_short_circuits_all(
     }
 
     let no_edges = pack.postscript().edge_table_len == 0;
-    if !no_edges && (needle.len() < 5 || needle.len() > MAX_EDGE_NEEDLE_LEN) {
+    if !no_edges
+        && (needle.len() < 5
+            || max_haystack_match_bytes(needle, case_insensitive) > MAX_EDGE_NEEDLE_LEN)
+    {
         return Ok(false);
     }
 
@@ -2577,7 +2683,7 @@ mod tests {
         for needle in ["Alienación".as_bytes(), "ALIENACIÓN".as_bytes()] {
             let bm_rows = search_pack_rows(&pack, &rows, 0, needle, true).unwrap();
             let bm_flat = search_pack_rows_flat_masked_with_threads(
-                &pack, &flat, &mask, 0, needle, true, 1, None,
+                &pack, &flat, &mask, 0, needle, true, 1, None, None,
             )
             .unwrap();
             assert_eq!(bm_rows.iter_ones().collect::<Vec<_>>(), vec![0, 1, 3]);
@@ -2594,6 +2700,7 @@ mod tests {
             "Desaparición".as_bytes(),
             true,
             1,
+            None,
             None,
         )
         .unwrap();
@@ -2890,7 +2997,7 @@ mod tests {
         for needle in ["café".as_bytes(), long_tail_lower.as_bytes()] {
             for threads in [1usize, 2] {
                 let bm_no_retain = search_pack_rows_flat_masked_with_threads(
-                    &pack, &flat, &mask, 0, needle, true, threads, None,
+                    &pack, &flat, &mask, 0, needle, true, threads, None, None,
                 )
                 .unwrap();
                 let retained = RetainedPackChunks::default();
@@ -2903,6 +3010,7 @@ mod tests {
                     true,
                     threads,
                     Some((pack_id, &retained)),
+                    None,
                 )
                 .unwrap();
                 assert_eq!(bm_no_retain.iter_ones().collect::<Vec<_>>(), vec![0]);
@@ -2958,6 +3066,7 @@ mod tests {
                 false,
                 threads,
                 Some((pack_id, &retained)),
+                None,
             )
             .unwrap();
             assert_eq!(bm.count_ones(), rows.len());
@@ -3019,6 +3128,7 @@ mod tests {
             false,
             1,
             Some((pack_id, &retained)),
+            None,
         )
         .unwrap();
         assert_eq!(bm.iter_ones().collect::<Vec<_>>(), vec![0]);
@@ -3260,6 +3370,135 @@ mod tests {
         assert!(ascii.matches(b"\xFF\xFEhas_NeEdLe\x80"));
         assert!(!ascii.matches(b"clean ascii without match"));
         assert!(ascii.matches(b"needle"));
+    }
+
+    #[test]
+    fn m35_b1_ascii_ilike_expansion_past_64b_never_short_circuits() {
+        // ASCII ILIKE needle of length 22 (`"k" * 22`) expands to 66 UTF-8 bytes when matching
+        // `U+212A` (`K`, 3 bytes each) — strictly exceeding `MAX_EDGE_NEEDLE_LEN` (64).
+        // `pack_short_circuits_all` must return `false`, and `search_pack_rows` must find the hit
+        // even when `K` characters span a chunk boundary!
+        let pack_id = [0xB1; 16];
+        let mut builder = ChunkPackBuilder::new(
+            pack_id,
+            PackWriteOptions {
+                codec: Codec::None,
+                enable_trigram_skip: true,
+                ..PackWriteOptions::default()
+            },
+        );
+        // Split 22 `K` characters across two >= 256 B chunks (11 `K` = 33 B at tail of left,
+        // 11 `K` = 33 B at head of right), padded with filler that shares no `kkk` trigrams.
+        let mut left = b"0123456789".repeat(30);
+        for _ in 0..11 {
+            left.extend_from_slice("\u{212A}".as_bytes());
+        }
+        let mut right = Vec::new();
+        for _ in 0..11 {
+            right.extend_from_slice("\u{212A}".as_bytes());
+        }
+        right.extend_from_slice(&b"9876543210".repeat(30));
+
+        let c_left = builder.intern_chunk(&left).unwrap();
+        let c_right = builder.intern_chunk(&right).unwrap();
+        let mut pack_bytes = Vec::new();
+        builder.finish(&mut pack_bytes).unwrap();
+        let pack = ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes))).unwrap();
+
+        // Also test `s` expansion past 64 B: 33 `'s'` -> 66 bytes of `U+017F` (`ſ`, 2 B each).
+        let needle_k = vec![b'k'; 22];
+        assert!(needle_k.len() <= MAX_EDGE_NEEDLE_LEN);
+        assert!(max_haystack_match_bytes(&needle_k, true) > MAX_EDGE_NEEDLE_LEN);
+        assert!(
+            !pack_short_circuits_all(&pack, &needle_k, true).unwrap(),
+            "B1: ASCII ILIKE needle expanding > 64 B must not short-circuit"
+        );
+
+        let rows = vec![PayloadRefRow::Chunks(vec![(0, c_left), (0, c_right)])];
+        let bm = search_pack_rows(&pack, &rows, 0, &needle_k, true).unwrap();
+        assert_eq!(bm.iter_ones().collect::<Vec<_>>(), vec![0]);
+
+        // Repeat with 33 `ſ` split across a chunk boundary (needle `"s" * 33`, 66 matched bytes).
+        let mut builder_s = ChunkPackBuilder::new(
+            [0xB2; 16],
+            PackWriteOptions {
+                codec: Codec::None,
+                enable_trigram_skip: true,
+                ..PackWriteOptions::default()
+            },
+        );
+        let mut left_s = b"0123456789".repeat(30);
+        for _ in 0..17 {
+            left_s.extend_from_slice("\u{017F}".as_bytes());
+        }
+        let mut right_s = Vec::new();
+        for _ in 0..16 {
+            right_s.extend_from_slice("\u{017F}".as_bytes());
+        }
+        right_s.extend_from_slice(&b"9876543210".repeat(30));
+        let cs_l = builder_s.intern_chunk(&left_s).unwrap();
+        let cs_r = builder_s.intern_chunk(&right_s).unwrap();
+        let mut pack_s_bytes = Vec::new();
+        builder_s.finish(&mut pack_s_bytes).unwrap();
+        let pack_s = ChunkPackReader::open(Arc::new(SliceReader::new(pack_s_bytes))).unwrap();
+        let needle_s = vec![b's'; 33];
+        assert!(needle_s.len() <= MAX_EDGE_NEEDLE_LEN);
+        assert!(max_haystack_match_bytes(&needle_s, true) > MAX_EDGE_NEEDLE_LEN);
+        assert!(!pack_short_circuits_all(&pack_s, &needle_s, true).unwrap());
+        let rows_s = vec![PayloadRefRow::Chunks(vec![(0, cs_l), (0, cs_r)])];
+        let bm_s = search_pack_rows(&pack_s, &rows_s, 0, &needle_s, true).unwrap();
+        assert_eq!(bm_s.iter_ones().collect::<Vec<_>>(), vec![0]);
+    }
+
+    #[test]
+    fn m35_b2_odd_length_ascii_ilike_center_ks_split_across_chunk_boundary() {
+        // Odd-length ASCII ILIKE needles whose center byte is `k`/`s` matching `K` (`[0xE2, 0x84, 0xAA]`)
+        // or `ſ` (`[0xC5, 0xBF]`) when FastCDC cuts RIGHT INSIDE the multi-byte UTF-8 sequence.
+        let cases: &[(&[u8], &[u8], &[u8])] = &[
+            // "abkcd" (len 5, center 'k') cut after 1 byte of K: "ab\xE2" | "\x84\xAAcd"
+            (b"abkcd", b"ab\xE2", b"\x84\xAAcd"),
+            // "abkcd" (len 5, center 'k') cut after 2 bytes of K: "ab\xE2\x84" | "\xAAcd"
+            (b"abkcd", b"ab\xE2\x84", b"\xAAcd"),
+            // "abscd" (len 5, center 's') cut mid-ſ: "ab\xC5" | "\xBFcd"
+            (b"abscd", b"ab\xC5", b"\xBFcd"),
+            // "abckdef" (len 7, center 'k') cut mid-K: "abc\xE2" | "\x84\xAAdef"
+            (b"abckdef", b"abc\xE2", b"\x84\xAAdef"),
+            // "abcsdef" (len 7, center 's') cut mid-ſ: "abc\xC5" | "\xBFdef"
+            (b"abcsdef", b"abc\xC5", b"\xBFdef"),
+        ];
+
+        for (case_idx, &(needle, left_suffix, right_prefix)) in cases.iter().enumerate() {
+            let mut builder = ChunkPackBuilder::new(
+                [0xC0 + case_idx as u8; 16],
+                PackWriteOptions {
+                    codec: Codec::None,
+                    enable_trigram_skip: true,
+                    ..PackWriteOptions::default()
+                },
+            );
+            let mut left = b"0123456789".repeat(30);
+            left.extend_from_slice(left_suffix);
+            let mut right = right_prefix.to_vec();
+            right.extend_from_slice(&b"9876543210".repeat(30));
+
+            let c_left = builder.intern_chunk(&left).unwrap();
+            let c_right = builder.intern_chunk(&right).unwrap();
+            let mut pack_bytes = Vec::new();
+            builder.finish(&mut pack_bytes).unwrap();
+            let pack = ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes))).unwrap();
+
+            assert!(
+                !pack_short_circuits_all(&pack, needle, true).unwrap(),
+                "B2 case {case_idx} must not short-circuit"
+            );
+            let rows = vec![PayloadRefRow::Chunks(vec![(0, c_left), (0, c_right)])];
+            let bm = search_pack_rows(&pack, &rows, 0, needle, true).unwrap();
+            assert_eq!(
+                bm.iter_ones().collect::<Vec<_>>(),
+                vec![0],
+                "B2 case {case_idx} missed mid-char split across chunk boundary"
+            );
+        }
     }
 
     proptest::proptest! {

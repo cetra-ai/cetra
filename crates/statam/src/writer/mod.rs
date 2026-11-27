@@ -162,7 +162,7 @@ const KNOWN_LOW_CARD_DICT_COLS: &[&str] = &[
 ];
 
 /// Configuration options for [`StatamWriter`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct WriteOptions {
     /// Encoding and compression profile (`L0Fast` vs `L1Compact`).
     pub profile: WriteProfile,
@@ -193,7 +193,53 @@ pub struct WriteOptions {
     pub pack_id: Option<[u8; 16]>,
     /// Number of worker threads for parallel Row Group encoding (default: `1`).
     pub write_threads: usize,
+    /// Optional pluggable [`crate::TaskExecutor`] used for parallel Row Group encoding instead
+    /// of Statam's internal fallback worker pool.
+    pub executor: Option<Arc<dyn crate::parallel::TaskExecutor>>,
 }
+
+impl fmt::Debug for WriteOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WriteOptions")
+            .field("profile", &self.profile)
+            .field("table_kind", &self.table_kind)
+            .field("sort_cols", &self.sort_cols)
+            .field("bloom_cols", &self.bloom_cols)
+            .field("hot_bloom_col", &self.hot_bloom_col)
+            .field("payload_cols", &self.payload_cols)
+            .field("narrow_trigram_cols", &self.narrow_trigram_cols)
+            .field("row_group_size", &self.row_group_size)
+            .field("max_row_group_bytes", &self.max_row_group_bytes)
+            .field("mini_block_size", &self.mini_block_size)
+            .field("zstd_level", &self.zstd_level)
+            .field("compress_hot_tail_lz4", &self.compress_hot_tail_lz4)
+            .field("pack_id", &self.pack_id)
+            .field("write_threads", &self.write_threads)
+            .field("has_executor", &self.executor.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for WriteOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.profile == other.profile
+            && self.table_kind == other.table_kind
+            && self.sort_cols == other.sort_cols
+            && self.bloom_cols == other.bloom_cols
+            && self.hot_bloom_col == other.hot_bloom_col
+            && self.payload_cols == other.payload_cols
+            && self.narrow_trigram_cols == other.narrow_trigram_cols
+            && self.row_group_size == other.row_group_size
+            && self.max_row_group_bytes == other.max_row_group_bytes
+            && self.mini_block_size == other.mini_block_size
+            && self.zstd_level == other.zstd_level
+            && self.compress_hot_tail_lz4 == other.compress_hot_tail_lz4
+            && self.pack_id == other.pack_id
+            && self.write_threads == other.write_threads
+    }
+}
+
+impl Eq for WriteOptions {}
 
 impl Default for WriteOptions {
     fn default() -> Self {
@@ -260,6 +306,7 @@ impl WriteOptions {
             compress_hot_tail_lz4: true,
             pack_id: None,
             write_threads: 1,
+            executor: None,
         }
     }
 }
@@ -642,6 +689,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
 
     /// Appends a [`Batch`] to the stream, flushing full Row Groups incrementally.
     pub fn write_batch(&mut self, batch: &Batch) -> Result<(), StatamError> {
+        let _exec_guard = crate::parallel::enter_executor_scope(self.options.executor.as_ref());
         if batch.schema().as_ref() != self.schema.as_ref() {
             return Err(StatamError::SchemaMismatch {
                 reason: "batch schema does not match writer schema",
@@ -1575,6 +1623,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
     pub fn finish_into_inner(
         mut self,
     ) -> Result<(W, WriteStats, Option<ChunkPackBuilder<PW>>), StatamError> {
+        let _exec_guard = crate::parallel::enter_executor_scope(self.options.executor.as_ref());
         if self.rg_buf_rows > 0 {
             self.flush_row_group()?;
         }

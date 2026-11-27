@@ -5,7 +5,7 @@ use crate::format::{
     BLOB_DEDICATED_FRAME_BYTES, BLOB_MAX_CHUNK_BYTES, BLOB_SMALL_FRAME_TARGET_BYTES, ChunkLoc,
     Codec, MAX_FRAME_RAW_BYTES, MAX_ROW_PAYLOAD_BYTES, write_framed_pack_frame_with_min_savings,
 };
-use crate::parallel::{MAX_PARALLEL_THREADS, parallel_map_in_order};
+use crate::parallel::{MAX_PARALLEL_THREADS, parallel_map_in_order_static};
 
 use super::default_l1_codec;
 
@@ -250,10 +250,10 @@ impl LocalL0PayloadBuilder {
             return Ok(());
         }
         let zstd_level = self.zstd_level;
-        let encoded = parallel_map_in_order(
+        let encoded = parallel_map_in_order_static(
             batch,
             self.write_threads,
-            |(raw, frame_chunks, min_savings_pct)| {
+            move |(raw, frame_chunks, min_savings_pct)| {
                 let mut framed = Vec::new();
                 let codec = if raw.len() < 1024 {
                     Codec::Lz4

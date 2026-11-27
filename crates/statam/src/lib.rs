@@ -47,6 +47,7 @@ pub use io::{
     FileReader, IoCounters, RangeReader, S3_CACHE_BLOCK_BYTES, SimulatedS3Config, SimulatedS3Mode,
     SimulatedS3Reader, SliceReader, simulate_wave_latency_ms,
 };
+pub use parallel::TaskExecutor;
 pub use payload::{
     PayloadRefRow,
     chunker::{
@@ -58,8 +59,8 @@ pub use payload::{
     search::{search_pack_chunks, search_pack_rows},
 };
 pub use reader::{
-    CoalesceMode, IdLookup, InMemoryPackResolver, PackResolver, Predicate, ScanRequest,
-    StatamFileMeta, StatamReader, StatamScanIter, SubstringQuery, TimeRange,
+    CoalesceMode, FilterExpr, IdLookup, InMemoryPackResolver, MapReadMode, PackResolver, Predicate,
+    ScanRequest, StatamFileMeta, StatamReader, StatamScanIter, SubstringQuery, TimeRange,
 };
 pub use simd::{FilterOp, Sbbf, TrigramBloom, statam_bloom_hash};
 pub use writer::{L0_LOCAL_PACK_IDX, StatamWriter, WriteOptions, WriteStats};

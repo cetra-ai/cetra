@@ -1,25 +1,29 @@
 //! Stateful mini-block streaming scan iterator with cooperative cancellation and memory reservation.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use cetra_column::{Batch, Bitmap, CancelToken, DataType, Reservation, Schema};
+use cetra_column::{Batch, Bitmap, CancelToken, DataType, Reservation, Schema, Selection};
 
 use crate::StatamError;
 use crate::format::{
     BLOCK_FRAME_HEADER_LEN, COL_FLAG_HAS_FILE_DICT, COL_FLAG_HAS_TRIGRAM_INDEX, Encoding,
     LocalityGroup,
 };
+use crate::parallel::{TaskExecutor, enter_executor_scope};
 use crate::payload::search::RetainedPackChunks;
 use crate::simd::bloom::statam_bloom_hash;
 
 use super::eval::{is_always_false_pred, is_supported_id_lookup_type, trim_bitmap_mask};
 use super::payload::{ParsedL0Payload, PayloadWavePlan, ResolvedChunks, clone_decoded_p1_for_wave};
-use super::plan::{ActiveMiniBlock, BlockCacheReader, DecodedPhase1, RgIoPlan, find_time_column};
+use super::plan::{
+    ActiveMiniBlock, BlockCacheReader, DecodedPhase1, ResolvedFilterExpr, RgIoPlan,
+    find_time_column,
+};
 use super::{
-    CoalesceMode, IO_WAVE_MAX_BYTES, IdLookup, P2CandidateFetch, Predicate,
+    CoalesceMode, IO_WAVE_MAX_BYTES, IdLookup, MapReadMode, P2CandidateFetch, Predicate,
     REMOTE_SINGLE_WAVE_P2_MAX_BYTES, ScanRequest, StatamReader, SubstringQuery, TimeRange,
     truncate_batch_selection, truncate_batch_selection_tail,
 };
@@ -71,22 +75,24 @@ pub struct StatamScanIter {
     proj_schema: Arc<Schema>,
     proj_payload_cols: Vec<usize>,
     has_payload_proj: bool,
-    map_keys_by_col: Arc<HashMap<usize, Vec<String>>>,
+    map_proj_by_col: Arc<HashMap<usize, MapReadMode>>,
     time_col_idx: Option<usize>,
     time_range: TimeRange,
     resolved_lookups: Vec<(usize, IdLookup)>,
     resolved_preds: Vec<(usize, Predicate)>,
-    resolved_subs: Vec<(usize, SubstringQuery)>,
+    resolved_filter_exprs: Vec<ResolvedFilterExpr>,
+    resolved_subs: Vec<Vec<(usize, SubstringQuery)>>,
     lookup_hashes: Vec<(usize, Vec<u64>)>,
     bloom_cols: Vec<usize>,
     sub_cols_with_trigram: Vec<usize>,
     preload_dict_cols: Vec<usize>,
-    dict_sub_bitmaps: Vec<Option<Bitmap>>,
+    dict_sub_bitmaps: Vec<Vec<Option<Bitmap>>>,
     has_filters: bool,
     mode: CoalesceMode,
     desc_limit: bool,
     remaining_limit: Option<usize>,
     read_threads: usize,
+    executor: Option<Arc<dyn TaskExecutor>>,
     rg_order: VecDeque<usize>,
     preloaded: bool,
     cur_rg: Option<ActiveRgCursor>,
@@ -187,40 +193,59 @@ impl StatamReader {
             resolved_preds.push((cidx, pred));
         }
 
-        let mut resolved_subs = Vec::with_capacity(req.substrings.len());
-        for sq in req.substrings {
-            let cidx = schema
-                .index_of(&sq.column)
-                .ok_or(StatamError::SchemaMismatch {
-                    reason: "substring query column not found in schema",
-                })?;
-            if schema.fields()[cidx].data_type != DataType::Utf8 {
-                return Err(StatamError::SchemaMismatch {
-                    reason: "substring query on non-Utf8 column",
-                });
-            }
-            resolved_subs.push((cidx, sq));
+        let mut resolved_filter_exprs = Vec::with_capacity(req.filter_exprs.len());
+        for expr in &req.filter_exprs {
+            resolved_filter_exprs.push(self.resolve_filter_expr(expr)?);
         }
 
-        let mut map_keys_by_col: HashMap<usize, Vec<String>> = HashMap::new();
-        for (col_name, key) in req.map_keys {
+        let mut resolved_subs: Vec<Vec<(usize, SubstringQuery)>> =
+            Vec::with_capacity(req.substrings.len());
+        for clause in req.substrings {
+            if clause.is_empty() {
+                early_empty = true;
+            }
+            let mut resolved_clause = Vec::with_capacity(clause.len());
+            for sq in clause {
+                let cidx = schema
+                    .index_of(&sq.column)
+                    .ok_or(StatamError::SchemaMismatch {
+                        reason: "substring query column not found in schema",
+                    })?;
+                if schema.fields()[cidx].data_type != DataType::Utf8 {
+                    return Err(StatamError::SchemaMismatch {
+                        reason: "substring query on non-Utf8 column",
+                    });
+                }
+                resolved_clause.push((cidx, sq));
+            }
+            resolved_subs.push(resolved_clause);
+        }
+
+        let mut map_proj_by_col: HashMap<usize, MapReadMode> = HashMap::new();
+        for (col_name, mode) in req.map_projections {
             let cidx = schema
                 .index_of(&col_name)
                 .ok_or(StatamError::SchemaMismatch {
-                    reason: "map_keys column not found in schema",
+                    reason: "map_projections column not found in schema",
                 })?;
             if schema.fields()[cidx].data_type != DataType::MapUtf8 {
                 return Err(StatamError::SchemaMismatch {
-                    reason: "map_keys specified for non-MapUtf8 column",
+                    reason: "map_projections specified for non-MapUtf8 column",
                 });
             }
-            map_keys_by_col.entry(cidx).or_default().push(key);
+            match mode {
+                MapReadMode::Full => {}
+                MapReadMode::KeysOnly => {
+                    map_proj_by_col.insert(cidx, MapReadMode::KeysOnly);
+                }
+                MapReadMode::Keys(mut keys) => {
+                    keys.sort_unstable();
+                    keys.dedup();
+                    map_proj_by_col.insert(cidx, MapReadMode::Keys(keys));
+                }
+            }
         }
-        for keys in map_keys_by_col.values_mut() {
-            keys.sort_unstable();
-            keys.dedup();
-        }
-        let map_keys_by_col = Arc::new(map_keys_by_col);
+        let map_proj_by_col = Arc::new(map_proj_by_col);
 
         let mut proj_payload_cols: Vec<usize> = proj_indices
             .iter()
@@ -243,7 +268,16 @@ impl StatamReader {
 
         let pred_refs: Vec<(usize, &Predicate)> =
             resolved_preds.iter().map(|(c, p)| (*c, p)).collect();
-        let mut rg_vec = self.candidate_rg_range(time_col_idx, req.time_range, &pred_refs);
+        let mut rg_vec = self.candidate_rg_range(
+            time_col_idx,
+            req.time_range,
+            &pred_refs,
+            &resolved_filter_exprs,
+        );
+        if let Some(allowed_rgs) = req.rg_indices {
+            let allowed: HashSet<usize> = allowed_rgs.into_iter().collect();
+            rg_vec.retain(|rg_idx| allowed.contains(rg_idx));
+        }
         let can_reverse_early_stop =
             req.sort_desc_hint && req.limit.is_some() && self.is_sort_col0_mb_monotonic();
         let desc_limit = can_reverse_early_stop;
@@ -269,13 +303,16 @@ impl StatamReader {
         };
 
         let bloom_cols: Vec<usize> = lookup_hashes.iter().map(|&(cidx, _)| cidx).collect();
-        let sub_cols_with_trigram: Vec<usize> = resolved_subs
+        let mut sub_cols_with_trigram: Vec<usize> = resolved_subs
             .iter()
+            .flat_map(|cl| cl.iter())
             .filter_map(|(cidx, _)| {
                 ((self.meta.col_dir[*cidx].col_flags & COL_FLAG_HAS_TRIGRAM_INDEX) != 0)
                     .then_some(*cidx)
             })
             .collect();
+        sub_cols_with_trigram.sort_unstable();
+        sub_cols_with_trigram.dedup();
 
         let mut preload_dict_cols = Vec::new();
         if let Some(tc) = time_col_idx {
@@ -292,14 +329,22 @@ impl StatamReader {
                 preload_dict_cols.push(sub_pidx);
             }
         }
-        for (cidx, _) in &resolved_subs {
-            preload_dict_cols.push(*cidx);
+        for expr in &resolved_filter_exprs {
+            self.collect_filter_expr_dict_cols(expr, &mut preload_dict_cols);
+        }
+        for clause in &resolved_subs {
+            for (cidx, _) in clause {
+                preload_dict_cols.push(*cidx);
+            }
         }
 
         let has_filters = time_col_idx.is_some()
             || !resolved_lookups.is_empty()
             || !resolved_preds.is_empty()
+            || !resolved_filter_exprs.is_empty()
             || !resolved_subs.is_empty();
+
+        let executor = req.executor.or_else(|| self.executor.clone());
 
         Ok(StatamScanIter {
             reader: Arc::clone(self),
@@ -307,11 +352,12 @@ impl StatamReader {
             proj_schema,
             proj_payload_cols,
             has_payload_proj,
-            map_keys_by_col,
+            map_proj_by_col,
             time_col_idx,
             time_range: req.time_range,
             resolved_lookups,
             resolved_preds,
+            resolved_filter_exprs,
             resolved_subs,
             lookup_hashes,
             bloom_cols,
@@ -323,6 +369,7 @@ impl StatamReader {
             desc_limit,
             remaining_limit,
             read_threads: req.read_threads,
+            executor,
             rg_order: rg_vec.into(),
             preloaded: false,
             cur_rg: None,
@@ -340,8 +387,31 @@ impl StatamScanIter {
     pub fn next_batch(
         &mut self,
         cancel: Option<&CancelToken>,
-        mut res: Option<&mut Reservation>,
+        res: Option<&mut Reservation>,
     ) -> Result<Option<Batch>, StatamError> {
+        Ok(self.next_batch_inner(cancel, res, false)?.map(|(b, _)| b))
+    }
+
+    /// Decodes and returns the next mini-block [`Batch`] paired with exact file-global 0-based
+    /// `u64` row indices matching every active row of `batch` (computed before `Selection` compaction).
+    ///
+    /// Enforces the same cooperative cancellation and exact `Reservation` postconditions as
+    /// [`Self::next_batch`].
+    pub fn next_batch_with_row_ids(
+        &mut self,
+        cancel: Option<&CancelToken>,
+        res: Option<&mut Reservation>,
+    ) -> Result<Option<(Batch, Vec<u64>)>, StatamError> {
+        self.next_batch_inner(cancel, res, true)
+    }
+
+    fn next_batch_inner(
+        &mut self,
+        cancel: Option<&CancelToken>,
+        mut res: Option<&mut Reservation>,
+        want_row_ids: bool,
+    ) -> Result<Option<(Batch, Vec<u64>)>, StatamError> {
+        let _exec_guard = enter_executor_scope(self.executor.as_ref());
         let res_before = res.as_ref().map(|r| r.size());
         check_cancel(cancel)?;
         if self.done || self.remaining_limit == Some(0) {
@@ -367,9 +437,7 @@ impl StatamScanIter {
                 self.reader
                     .load_inline_lazy_indexes(&[], &[], &self.preload_dict_cols)?;
             }
-            let sub_refs: Vec<(usize, &SubstringQuery)> =
-                self.resolved_subs.iter().map(|(c, s)| (*c, s)).collect();
-            self.dict_sub_bitmaps = self.reader.build_dict_sub_bitmaps(&sub_refs);
+            self.dict_sub_bitmaps = self.reader.build_dict_sub_bitmaps(&self.resolved_subs);
             self.preloaded = true;
         }
 
@@ -383,7 +451,7 @@ impl StatamScanIter {
 
             if self.cur_rg.is_some() {
                 match self.next_mb_from_active_rg(cancel)? {
-                    Some(batch) => {
+                    Some((batch, first_row)) => {
                         if batch.is_empty() {
                             continue;
                         }
@@ -413,6 +481,22 @@ impl StatamScanIter {
                             return Err(StatamError::MemoryExceeded);
                         }
 
+                        let row_ids = if want_row_ids {
+                            match batch.selection() {
+                                Selection::All => {
+                                    (0..batch.raw_len()).map(|r| first_row + r as u64).collect()
+                                }
+                                Selection::Mask(bm) => {
+                                    bm.iter_ones().map(|r| first_row + r as u64).collect()
+                                }
+                                Selection::Indices(idxs) => {
+                                    idxs.iter().map(|&r| first_row + u64::from(r)).collect()
+                                }
+                            }
+                        } else {
+                            Vec::new()
+                        };
+
                         if let Some(rem) = &mut self.remaining_limit {
                             *rem = rem.saturating_sub(batch.num_rows());
                             if *rem == 0 {
@@ -420,7 +504,7 @@ impl StatamScanIter {
                                 self.done = true;
                             }
                         }
-                        return Ok(Some(batch));
+                        return Ok(Some((batch, row_ids)));
                     }
                     None => {
                         self.cur_rg = None;
@@ -454,8 +538,6 @@ impl StatamScanIter {
                     .collect();
                 let pred_refs: Vec<(usize, &Predicate)> =
                     self.resolved_preds.iter().map(|(c, p)| (*c, p)).collect();
-                let sub_refs: Vec<(usize, &SubstringQuery)> =
-                    self.resolved_subs.iter().map(|(c, s)| (*c, s)).collect();
 
                 let mut surviving_mbs = self.reader.prune_rg_mini_blocks(
                     rg_idx,
@@ -464,7 +546,8 @@ impl StatamScanIter {
                     self.time_range,
                     &lookup_refs,
                     &pred_refs,
-                    &sub_refs,
+                    &self.resolved_filter_exprs,
+                    &self.resolved_subs,
                     &self.dict_sub_bitmaps,
                 )?;
                 if surviving_mbs.is_empty() {
@@ -494,12 +577,13 @@ impl StatamScanIter {
                     rg_idx,
                     &surviving_mbs,
                     &self.proj_indices,
-                    &self.map_keys_by_col,
+                    &self.map_proj_by_col,
                     self.time_col_idx,
                     self.time_range,
                     &lookup_refs,
                     &pred_refs,
-                    &sub_refs,
+                    &self.resolved_filter_exprs,
+                    &self.resolved_subs,
                 ));
                 (surviving_mbs, plan)
             };
@@ -554,6 +638,9 @@ impl StatamScanIter {
                 .is_some_and(|f| f.data_type == DataType::MapUtf8);
             let in_phase1 = plan.phase1_phys_cols.contains(&pidx);
             for &mb_idx in &surviving_mbs {
+                if !in_phase1 && plan.phase2_skip_subcols.contains(&(mb_idx, pidx)) {
+                    continue;
+                }
                 if is_map
                     && plan.phase2_map_fast_path.contains(&(mb_idx, pidx))
                     && (!in_phase1 || plan.phase1_map_fast_path.contains(&(mb_idx, pidx)))
@@ -650,10 +737,8 @@ impl StatamScanIter {
                 Bytes::new()
             };
 
-        let sub_refs: Vec<(usize, &SubstringQuery)> =
-            self.resolved_subs.iter().map(|(c, s)| (*c, s)).collect();
         self.reader
-            .refresh_dict_sub_bitmaps(&sub_refs, &mut self.dict_sub_bitmaps);
+            .refresh_dict_sub_bitmaps(&self.resolved_subs, &mut self.dict_sub_bitmaps);
 
         let l0_parsed = if need_l0_payload && rg.l0_payload_len > 0 {
             let rel_start = rg
@@ -711,6 +796,9 @@ impl StatamScanIter {
         let mut ranges = Vec::new();
         for &mb_idx in &surviving_mbs {
             for &pidx in plan.all_phys_cols() {
+                if plan.phase2_skip_subcols.contains(&(mb_idx, pidx)) {
+                    continue;
+                }
                 if self
                     .reader
                     .meta
@@ -869,8 +957,10 @@ impl StatamScanIter {
             }
         }
 
-        let has_payload_sub = self.resolved_subs.iter().any(|(cidx, _)| {
-            self.reader.meta.col_dir[*cidx].locality_group == LocalityGroup::ExternalPayload
+        let has_payload_sub = self.resolved_subs.iter().any(|cl| {
+            cl.iter().any(|(cidx, _)| {
+                self.reader.meta.col_dir[*cidx].locality_group == LocalityGroup::ExternalPayload
+            })
         });
 
         let p1_l0_needed = rg.l0_payload_len > 0 && has_payload_sub;
@@ -923,14 +1013,17 @@ impl StatamScanIter {
 
         let eligible_for_pack_prefetch = has_payload_sub
             && self.resolved_preds.is_empty()
+            && self.resolved_filter_exprs.is_empty()
             && self.time_col_idx.is_none()
             && self.resolved_lookups.is_empty()
-            && self.resolved_subs.iter().any(|(cidx, _)| {
-                self.reader.meta.col_dir[*cidx].locality_group == LocalityGroup::ExternalPayload
-                    && surviving_mbs.iter().any(|&mb| {
-                        self.reader.meta.rg_blocks(*cidx, rg_idx)[mb].encoding
-                            != Encoding::ConstNull
-                    })
+            && self.resolved_subs.iter().any(|cl| {
+                cl.iter().any(|(cidx, _)| {
+                    self.reader.meta.col_dir[*cidx].locality_group == LocalityGroup::ExternalPayload
+                        && surviving_mbs.iter().any(|&mb| {
+                            self.reader.meta.rg_blocks(*cidx, rg_idx)[mb].encoding
+                                != Encoding::ConstNull
+                        })
+                })
             });
 
         // Wave 1: Phase-1 blocks + dicts.
@@ -943,10 +1036,8 @@ impl StatamScanIter {
             eligible_for_pack_prefetch,
         )?);
 
-        let sub_refs: Vec<(usize, &SubstringQuery)> =
-            self.resolved_subs.iter().map(|(c, s)| (*c, s)).collect();
         self.reader
-            .refresh_dict_sub_bitmaps(&sub_refs, &mut self.dict_sub_bitmaps);
+            .refresh_dict_sub_bitmaps(&self.resolved_subs, &mut self.dict_sub_bitmaps);
 
         let l0_from_p1 = if p1_l0_needed {
             p1_cache
@@ -971,55 +1062,84 @@ impl StatamScanIter {
             .collect();
         let pred_refs: Vec<(usize, &Predicate)> =
             self.resolved_preds.iter().map(|(c, p)| (*c, p)).collect();
-        let sub_refs: Vec<(usize, &SubstringQuery)> =
-            self.resolved_subs.iter().map(|(c, s)| (*c, s)).collect();
 
-        // Evaluate Phase 1 mini-block by mini-block so cancellation is checked before each MB.
+        // Hoist `.stpk` frame dedup to RG level when there is NO `LIMIT`; preserve MB-by-MB
+        // early exit when `remaining_limit` is set.
         let retained = RetainedPackChunks::default();
-        let mut active_mbs: VecDeque<ActiveMiniBlock> = VecDeque::new();
-        let mut active_rows = 0usize;
-        for &mb_idx in surviving_mbs {
-            check_cancel(cancel)?;
-            let (mut mask, decoded_p1) = self.reader.eval_phase1_mb(
-                rg_idx,
-                mb_idx,
-                &plan,
-                &self.proj_indices,
-                self.time_col_idx,
-                self.time_range,
-                &lookup_refs,
-                &pred_refs,
-                &sub_refs,
-                &self.dict_sub_bitmaps,
-                l0_from_p1.as_deref(),
-                &p1_reader,
-                self.read_threads,
-                &retained,
-                None,
-            )?;
-            let hits = mask.count_ones();
-            if hits > 0 {
-                if let Some(lim) = self.remaining_limit {
-                    let rem = lim.saturating_sub(active_rows);
-                    if rem == 0 {
-                        break;
+        let active_mbs: VecDeque<ActiveMiniBlock> =
+            if self.remaining_limit.is_none() && has_payload_sub && surviving_mbs.len() >= 2 {
+                let threads = self
+                    .read_threads
+                    .clamp(1, crate::parallel::MAX_PARALLEL_THREADS);
+                self.reader
+                    .eval_phase1_mbs_batched_payload(
+                        rg_idx,
+                        surviving_mbs,
+                        &plan,
+                        &self.proj_indices,
+                        self.time_col_idx,
+                        self.time_range,
+                        &lookup_refs,
+                        &pred_refs,
+                        &self.resolved_filter_exprs,
+                        &self.resolved_subs,
+                        &self.dict_sub_bitmaps,
+                        l0_from_p1.as_deref(),
+                        &p1_reader,
+                        threads,
+                        &retained,
+                        cancel,
+                    )?
+                    .into()
+            } else {
+                let mut active_mbs: VecDeque<ActiveMiniBlock> = VecDeque::new();
+                let mut active_rows = 0usize;
+                for &mb_idx in surviving_mbs {
+                    check_cancel(cancel)?;
+                    let (mut mask, decoded_p1) = self.reader.eval_phase1_mb(
+                        rg_idx,
+                        mb_idx,
+                        &plan,
+                        &self.proj_indices,
+                        self.time_col_idx,
+                        self.time_range,
+                        &lookup_refs,
+                        &pred_refs,
+                        &self.resolved_filter_exprs,
+                        &self.resolved_subs,
+                        &self.dict_sub_bitmaps,
+                        l0_from_p1.as_deref(),
+                        &p1_reader,
+                        self.read_threads,
+                        &retained,
+                        None,
+                        cancel,
+                    )?;
+                    let hits = mask.count_ones();
+                    if hits > 0 {
+                        if let Some(lim) = self.remaining_limit {
+                            let rem = lim.saturating_sub(active_rows);
+                            if rem == 0 {
+                                break;
+                            }
+                            if hits > rem {
+                                trim_bitmap_mask(&mut mask, rem, self.desc_limit);
+                                active_mbs.push_back((mb_idx, mask, decoded_p1));
+                                break;
+                            }
+                            active_rows = active_rows.saturating_add(hits);
+                            active_mbs.push_back((mb_idx, mask, decoded_p1));
+                            if active_rows >= lim {
+                                break;
+                            }
+                        } else {
+                            active_rows = active_rows.saturating_add(hits);
+                            active_mbs.push_back((mb_idx, mask, decoded_p1));
+                        }
                     }
-                    if hits > rem {
-                        trim_bitmap_mask(&mut mask, rem, self.desc_limit);
-                        active_mbs.push_back((mb_idx, mask, decoded_p1));
-                        break;
-                    }
-                    active_rows = active_rows.saturating_add(hits);
-                    active_mbs.push_back((mb_idx, mask, decoded_p1));
-                    if active_rows >= lim {
-                        break;
-                    }
-                } else {
-                    active_rows = active_rows.saturating_add(hits);
-                    active_mbs.push_back((mb_idx, mask, decoded_p1));
                 }
-            }
-        }
+                active_mbs
+            };
 
         if active_mbs.is_empty() {
             return Ok(None);
@@ -1080,7 +1200,7 @@ impl StatamScanIter {
     fn next_mb_from_active_rg(
         &mut self,
         cancel: Option<&CancelToken>,
-    ) -> Result<Option<Batch>, StatamError> {
+    ) -> Result<Option<(Batch, u64)>, StatamError> {
         let lookup_refs: Vec<(usize, &IdLookup)> = self
             .resolved_lookups
             .iter()
@@ -1088,8 +1208,6 @@ impl StatamScanIter {
             .collect();
         let pred_refs: Vec<(usize, &Predicate)> =
             self.resolved_preds.iter().map(|(c, p)| (*c, p)).collect();
-        let sub_refs: Vec<(usize, &SubstringQuery)> =
-            self.resolved_subs.iter().map(|(c, s)| (*c, s)).collect();
 
         loop {
             check_cancel(cancel)?;
@@ -1102,6 +1220,8 @@ impl StatamScanIter {
                 && let Some(sub_mask) = pw.sub_masks.pop_front()
             {
                 let mb_idx = pw.mb_idx;
+                let first_row =
+                    u64::from(self.reader.meta.rg_blocks(0, cur.rg_idx)[mb_idx].first_row);
                 let (decoded_p1, local_retained) = if pw.sub_masks.is_empty() {
                     (pw.decoded_p1, pw.local_retained)
                 } else {
@@ -1128,13 +1248,13 @@ impl StatamScanIter {
                     &cur.plan,
                     &self.proj_indices,
                     &self.proj_schema,
-                    &self.map_keys_by_col,
+                    &self.map_proj_by_col,
                     &resolved,
                     &cur.block_reader,
                     self.read_threads,
                 )?;
                 if let Some(batch) = batches.pop() {
-                    return Ok(Some(batch));
+                    return Ok(Some((batch, first_row)));
                 }
                 continue;
             }
@@ -1156,13 +1276,15 @@ impl StatamScanIter {
                             self.time_range,
                             &lookup_refs,
                             &pred_refs,
-                            &sub_refs,
+                            &self.resolved_filter_exprs,
+                            &self.resolved_subs,
                             &self.dict_sub_bitmaps,
                             cur.l0_parsed.as_deref(),
                             &cur.block_reader,
                             self.read_threads,
                             &retained,
                             None,
+                            cancel,
                         )?;
                         let hits = mask.count_ones();
                         if hits == 0 {
@@ -1186,6 +1308,8 @@ impl StatamScanIter {
             let Some((mb, local_retained)) = next_mb else {
                 return Ok(None);
             };
+            let mb_idx = mb.0;
+            let first_row = u64::from(self.reader.meta.rg_blocks(0, cur.rg_idx)[mb_idx].first_row);
 
             check_cancel(cancel)?;
             if !self.has_payload_proj {
@@ -1195,13 +1319,13 @@ impl StatamScanIter {
                     &cur.plan,
                     &self.proj_indices,
                     &self.proj_schema,
-                    &self.map_keys_by_col,
+                    &self.map_proj_by_col,
                     &ResolvedChunks::empty(),
                     &cur.block_reader,
                     self.read_threads,
                 )?;
                 if let Some(batch) = batches.pop() {
-                    return Ok(Some(batch));
+                    return Ok(Some((batch, first_row)));
                 }
                 continue;
             }
@@ -1236,13 +1360,13 @@ impl StatamScanIter {
                         &cur.plan,
                         &self.proj_indices,
                         &self.proj_schema,
-                        &self.map_keys_by_col,
+                        &self.map_proj_by_col,
                         &resolved,
                         &cur.block_reader,
                         self.read_threads,
                     )?;
                     if let Some(batch) = batches.pop() {
-                        return Ok(Some(batch));
+                        return Ok(Some((batch, first_row)));
                     }
                 }
                 PayloadWavePlan::MultiWave(waves) => {
@@ -1470,14 +1594,14 @@ mod tests {
                 // 3. Narrow predicate + time range + map_keys shredded projection
                 ScanRequest {
                     projection: Some(vec![0, 2, 4]),
-                    map_keys: vec![("metadata".to_owned(), "env".to_owned())],
                     time_range: TimeRange::new(15_000, 35_000),
                     predicates: vec![Predicate::new(
                         "status",
                         ZonePred::Eq(ZoneValue::Bytes(b"ERROR".to_vec())),
                     )],
                     ..ScanRequest::default()
-                },
+                }
+                .with_map_keys("metadata", vec!["env".to_owned()]),
                 // 4. Point lookup via SBBF bloom
                 ScanRequest {
                     id_lookups: vec![IdLookup::eq("trace_id", target_tid)],
@@ -1487,13 +1611,13 @@ mod tests {
                 // 5. Payload substring search
                 ScanRequest {
                     projection: Some(vec![0, 5]),
-                    substrings: vec![SubstringQuery::like("input", b"NEEDLE_HIT_")],
+                    substrings: vec![vec![SubstringQuery::like("input", b"NEEDLE_HIT_")]],
                     ..ScanRequest::default()
                 },
                 // 6. Narrow substring search
                 ScanRequest {
                     projection: Some(vec![0, 3]),
-                    substrings: vec![SubstringQuery::like("name", b"op-7")],
+                    substrings: vec![vec![SubstringQuery::like("name", b"op-7")]],
                     ..ScanRequest::default()
                 },
                 // 7. Reverse early-stop sort_desc_hint + limit
@@ -1687,5 +1811,245 @@ mod tests {
         let expected = fresh_reader.scan(&ScanRequest::default()).unwrap();
         let actual = cached_reader.scan(&ScanRequest::default()).unwrap();
         assert_eq!(flatten_rows(&actual), flatten_rows(&expected));
+    }
+
+    #[test]
+    fn m35_next_batch_with_row_ids_exact_parity_and_take_rows_roundtrip() {
+        for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
+            let (statam_bytes, pack_opt) = build_multi_rg_fixture(profile);
+            let mut resolver = InMemoryPackResolver::new();
+            if let Some((pid, pbytes)) = pack_opt {
+                resolver.insert_bytes(pid, pbytes).unwrap();
+            }
+            let reader = Arc::new(
+                StatamReader::open(
+                    Arc::new(SliceReader::new(statam_bytes)),
+                    Some(Arc::new(resolver)),
+                )
+                .unwrap(),
+            );
+
+            let requests: Vec<(bool, ScanRequest)> = vec![
+                (false, ScanRequest::default()),
+                (
+                    false,
+                    ScanRequest {
+                        projection: Some(vec![0, 2, 5]),
+                        predicates: vec![Predicate::new(
+                            "status",
+                            ZonePred::Eq(ZoneValue::Bytes(b"ERROR".to_vec())),
+                        )],
+                        ..ScanRequest::default()
+                    },
+                ),
+                (
+                    false,
+                    ScanRequest {
+                        projection: Some(vec![0, 2, 3]),
+                        predicates: vec![Predicate::new(
+                            "status",
+                            ZonePred::Eq(ZoneValue::Bytes(b"ERROR".to_vec())),
+                        )],
+                        limit: Some(25),
+                        ..ScanRequest::default()
+                    },
+                ),
+                (
+                    true,
+                    ScanRequest {
+                        projection: Some(vec![0, 2]),
+                        sort_desc_hint: true,
+                        limit: Some(50),
+                        ..ScanRequest::default()
+                    },
+                ),
+                (
+                    false,
+                    ScanRequest {
+                        projection: Some(vec![0, 3, 5]),
+                        rg_indices: Some(vec![1, 2]),
+                        ..ScanRequest::default()
+                    },
+                ),
+            ];
+
+            let scoped = GlobalPool::standalone(64 * 1024 * 1024);
+            let mut res = scoped.register("row_ids_test", false);
+
+            for (idx, (is_desc, req)) in requests.into_iter().enumerate() {
+                let proj = req.projection.clone();
+                let mut iter = reader.scan_iter(req).unwrap();
+                let mut batches = Vec::new();
+                let mut all_ids: Vec<u64> = Vec::new();
+                while let Some((b, ids)) =
+                    iter.next_batch_with_row_ids(None, Some(&mut res)).unwrap()
+                {
+                    assert_eq!(
+                        ids.len(),
+                        b.num_rows(),
+                        "row_ids len mismatch profile={profile:?} idx={idx}"
+                    );
+                    res.shrink(b.memory_bytes());
+                    assert_eq!(res.size(), 0);
+                    all_ids.extend_from_slice(&ids);
+                    batches.push(b);
+                }
+                assert!(
+                    iter.next_batch_with_row_ids(None, Some(&mut res))
+                        .unwrap()
+                        .is_none()
+                );
+                assert_eq!(res.size(), 0);
+                assert!(!all_ids.is_empty());
+
+                let taken = reader.take_rows(&all_ids, proj.as_deref(), 1).unwrap();
+                let mut got_rows = flatten_rows(&batches);
+                let mut taken_rows = flatten_rows(&taken);
+                if is_desc {
+                    // Reverse-order scan yields MBs in descending order while take_rows returns
+                    // ascending global file order; sort both by start_time (col 0) to verify exact
+                    // row-set identity.
+                    got_rows.sort_by_key(|r| match &r[0] {
+                        ScalarValue::TimestampNs { value, .. } => *value,
+                        _ => unreachable!(),
+                    });
+                    taken_rows.sort_by_key(|r| match &r[0] {
+                        ScalarValue::TimestampNs { value, .. } => *value,
+                        _ => unreachable!(),
+                    });
+                }
+                assert_eq!(
+                    got_rows, taken_rows,
+                    "take_rows(row_ids) mismatch profile={profile:?} idx={idx}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn m35_scan_iter_rg_wide_stpk_frame_dedup_limit_and_cancel() {
+        // 1 RG with 6 mini-blocks (192 rows total), all sharing a small number of `.stpk` frames.
+        let schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("input", DataType::Utf8, true),
+        ])
+        .unwrap();
+        let n = 192usize;
+        let ids: Vec<i64> = (0..n as i64).collect();
+        let inputs: Vec<String> = (0..n)
+            .map(|i| {
+                if i % 32 == 0 {
+                    format!("COMMON_TOKEN_{i}_HIT_{}", "a".repeat(3_500))
+                } else {
+                    format!("COMMON_TOKEN_{i}_MISS_{}", "b".repeat(3_500))
+                }
+            })
+            .collect();
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(inputs.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n,
+        )
+        .unwrap();
+
+        let pack_id = [0x99u8; 16];
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts.sort_cols = vec![0];
+        opts.row_group_size = n;
+        opts.mini_block_size = 32; // 6 mini-blocks in 1 RG
+        opts.pack_id = Some(pack_id);
+        let pb = ChunkPackBuilder::new_streaming(
+            pack_id,
+            PackWriteOptions {
+                target_frame_raw_bytes: 128 * 1024,
+                ..PackWriteOptions::default()
+            },
+            Cursor::new(Vec::new()),
+        )
+        .unwrap();
+        let mut writer =
+            StatamWriter::new_with_owned_pack(Cursor::new(Vec::new()), schema, opts, Some(pb))
+                .unwrap();
+        writer.write_batch(&batch).unwrap();
+        let (statam_cursor, _, owned_pack) = writer.finish_into_inner().unwrap();
+        let (pack_cursor, _) = owned_pack.unwrap().finish_into_inner().unwrap();
+        let statam_bytes = statam_cursor.into_inner();
+        let pack_bytes = pack_cursor.into_inner();
+
+        let pack_s3 = Arc::new(SimulatedS3Reader::new(
+            Arc::new(SliceReader::new(pack_bytes)),
+            SimulatedS3Config::default(),
+        ));
+        let pack_reader = Arc::new(
+            ChunkPackReader::open(Arc::clone(&pack_s3) as Arc<dyn crate::RangeReader>).unwrap(),
+        );
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert(pack_id, pack_reader);
+        let reader = Arc::new(
+            StatamReader::open(
+                Arc::new(SliceReader::new(statam_bytes)),
+                Some(Arc::new(resolver)),
+            )
+            .unwrap(),
+        );
+
+        // 1. Unbounded `scan_iter` hoists `.stpk` frame dedup to RG level: total pack bytes read
+        //    is strictly bounded (not 6x re-reads of the same frame across 6 MBs).
+        pack_s3.reset_counters();
+        let req_all = ScanRequest {
+            projection: Some(vec![0]),
+            substrings: vec![vec![SubstringQuery::like("input", b"_HIT_")]],
+            ..ScanRequest::default()
+        };
+        let mut iter = reader.scan_iter(req_all.clone()).unwrap();
+        let mut got_all = Vec::new();
+        while let Some(b) = iter.next_batch(None, None).unwrap() {
+            got_all.push(b);
+        }
+        assert_eq!(got_all.iter().map(Batch::num_rows).sum::<usize>(), 6);
+        let unbounded_gets = pack_s3.counters().gets;
+        assert!(
+            unbounded_gets <= 3,
+            "RG-wide .stpk frame dedup should coalesce across all 6 MBs (got {unbounded_gets} GETs)"
+        );
+
+        // 2. With `LIMIT 1`, MB-by-MB early exit stops after MB 0 without scanning later frames.
+        pack_s3.reset_counters();
+        let req_lim = ScanRequest {
+            projection: Some(vec![0]),
+            substrings: vec![vec![SubstringQuery::like("input", b"_HIT_")]],
+            limit: Some(1),
+            ..ScanRequest::default()
+        };
+        let mut iter_lim = reader.scan_iter(req_lim).unwrap();
+        let mut got_lim = Vec::new();
+        while let Some(b) = iter_lim.next_batch(None, None).unwrap() {
+            got_lim.push(b);
+        }
+        assert_eq!(got_lim.iter().map(Batch::num_rows).sum::<usize>(), 1);
+        assert!(
+            pack_s3.counters().bytes_requested <= crate::RangeReader::file_len(pack_s3.as_ref()),
+            "LIMIT 1 must exit early without redundant reads"
+        );
+
+        // 3. Pre-cancelled CancelToken aborts before any pack frame search GETs.
+        pack_s3.reset_counters();
+        let tok = CancelToken::new();
+        tok.cancel();
+        let mut iter_cancel = reader.scan_iter(req_all).unwrap();
+        let err = iter_cancel.next_batch(Some(&tok), None).unwrap_err();
+        assert!(matches!(err, StatamError::Cancelled));
+        assert_eq!(pack_s3.counters().gets, 0);
     }
 }

@@ -940,7 +940,10 @@ fn shredded_map_key_query_reads_only_subcolumn_and_skips_residual() {
     let res = reader
         .scan(&ScanRequest {
             projection: Some(vec![0, 1]),
-            map_keys: vec![("attributes".to_owned(), "customer_id".to_owned())],
+            map_projections: HashMap::from([(
+                "attributes".to_owned(),
+                MapReadMode::Keys(vec!["customer_id".to_owned()]),
+            )]),
             predicates: vec![Predicate::map_key(
                 "attributes",
                 "customer_id",
@@ -1087,7 +1090,7 @@ fn substring_search_e2e_inline_pack_boundary_and_spans_name() {
     // 1. Inline match
     let res_inline = reader
         .scan(&ScanRequest {
-            substrings: vec![SubstringQuery::like("input", "TINY_NEEDLE_MATCH")],
+            substrings: vec![vec![SubstringQuery::like("input", "TINY_NEEDLE_MATCH")]],
             ..ScanRequest::default()
         })
         .unwrap();
@@ -1101,7 +1104,10 @@ fn substring_search_e2e_inline_pack_boundary_and_spans_name() {
     // 2. Cross-chunk boundary match straddling structural JSON comma boundary
     let res_boundary = reader
         .scan(&ScanRequest {
-            substrings: vec![SubstringQuery::ilike("input", "boundary_\",\"split_token")],
+            substrings: vec![vec![SubstringQuery::ilike(
+                "input",
+                "boundary_\",\"split_token",
+            )]],
             ..ScanRequest::default()
         })
         .unwrap();
@@ -1115,7 +1121,7 @@ fn substring_search_e2e_inline_pack_boundary_and_spans_name() {
     // 3. Narrow `spans.name` trigram-indexed substring search
     let res_name = reader
         .scan(&ScanRequest {
-            substrings: vec![SubstringQuery::ilike("name", "special_span_token_7")],
+            substrings: vec![vec![SubstringQuery::ilike("name", "special_span_token_7")]],
             ..ScanRequest::default()
         })
         .unwrap();
@@ -1419,7 +1425,7 @@ fn shredded_map_filter_with_full_map_projection_preserves_rare_residual_keys() {
     let res = reader
         .scan(&ScanRequest {
             projection: Some(vec![0, 1]),
-            map_keys: Vec::new(),
+            map_projections: HashMap::new(),
             predicates: vec![Predicate::map_key(
                 "attributes",
                 "env",
@@ -1804,7 +1810,7 @@ fn masked_payload_substring_and_coalesced_stpk_read_chunks() {
                 "tag",
                 ZonePred::Eq(ZoneValue::Bytes(b"missing".to_vec())),
             )],
-            substrings: vec![SubstringQuery::like("input", "IN_5")],
+            substrings: vec![vec![SubstringQuery::like("input", "IN_5")]],
             ..ScanRequest::default()
         })
         .unwrap();
@@ -2306,11 +2312,11 @@ fn inline_only_short_circuit_fast_path_matches_inline_and_validates_chunk_bounds
     let batches = reader
         .scan(&ScanRequest {
             projection: Some(vec![0]),
-            substrings: vec![SubstringQuery {
+            substrings: vec![vec![SubstringQuery {
                 column: "input".to_owned(),
                 needle: b"inline_rare_needle_xyz987".to_vec(),
                 case_insensitive: false,
-            }],
+            }]],
             ..ScanRequest::default()
         })
         .unwrap();
@@ -2367,11 +2373,11 @@ fn inline_only_short_circuit_fast_path_matches_inline_and_validates_chunk_bounds
     let err = bad_reader
         .scan(&ScanRequest {
             projection: Some(vec![0]),
-            substrings: vec![SubstringQuery {
+            substrings: vec![vec![SubstringQuery {
                 column: "input".to_owned(),
                 needle: b"inline_rare_needle_xyz987".to_vec(),
                 case_insensitive: false,
-            }],
+            }]],
             ..ScanRequest::default()
         })
         .unwrap_err();
@@ -2477,7 +2483,7 @@ fn parallel_read_threads_matches_single_threaded_on_substring_and_wide_point_loo
         let sub_seq = reader
             .scan(&ScanRequest {
                 projection: None,
-                substrings: vec![SubstringQuery::ilike("input", b"\"role\":\"USER\"")],
+                substrings: vec![vec![SubstringQuery::ilike("input", b"\"role\":\"USER\"")]],
                 read_threads: 1,
                 ..ScanRequest::default()
             })
@@ -2485,7 +2491,7 @@ fn parallel_read_threads_matches_single_threaded_on_substring_and_wide_point_loo
         let sub_par = reader
             .scan(&ScanRequest {
                 projection: None,
-                substrings: vec![SubstringQuery::ilike("input", b"\"role\":\"USER\"")],
+                substrings: vec![vec![SubstringQuery::ilike("input", b"\"role\":\"USER\"")]],
                 read_threads: 4,
                 ..ScanRequest::default()
             })
@@ -2891,7 +2897,7 @@ fn parallel_miniblock_scan_matches_single_threaded_across_multiple_mbs() {
                 "url",
                 ZonePred::Ne(ZoneValue::Bytes(Vec::new())),
             )],
-            substrings: vec![SubstringQuery::like("title", b"Special Report")],
+            substrings: vec![vec![SubstringQuery::like("title", b"Special Report")]],
             coalesce_mode: mode,
             read_threads: 1,
             ..ScanRequest::default()
@@ -3177,7 +3183,7 @@ fn raw_utf8_phase1_substring_parity_and_unicode_narrow_trigram_pruning() {
     for needle in ["Alienación".as_bytes(), "ALIENACIÓN".as_bytes()] {
         let req = ScanRequest {
             projection: Some(vec![0, 1]),
-            substrings: vec![SubstringQuery::ilike("title", needle)],
+            substrings: vec![vec![SubstringQuery::ilike("title", needle)]],
             ..ScanRequest::default()
         };
         let scanned = reader.scan(&req).unwrap();
@@ -3495,7 +3501,7 @@ fn reader_rejects_multi_chunk_payload_referencing_pack_without_edge_table() {
     let err_scan = reader
         .scan(&ScanRequest {
             projection: Some(vec![0]),
-            substrings: vec![SubstringQuery::like("body", "XYZ_ABSENT_999")],
+            substrings: vec![vec![SubstringQuery::like("body", "XYZ_ABSENT_999")]],
             ..ScanRequest::default()
         })
         .unwrap_err();
@@ -3526,6 +3532,7 @@ fn reader_rejects_multi_chunk_payload_referencing_pack_without_edge_table() {
             false,
             None,
             1,
+            None,
             None,
         )
         .unwrap_err();
@@ -3823,7 +3830,10 @@ fn b4_point_mode_mixed_shredded_and_residual_or_is_not_null_map_predicates() {
     let out_a = reader
         .scan(&ScanRequest {
             coalesce_mode: CoalesceMode::Point,
-            map_keys: vec![("attributes".to_owned(), "k1".to_owned())],
+            map_projections: HashMap::from([(
+                "attributes".to_owned(),
+                MapReadMode::Keys(vec!["k1".to_owned()]),
+            )]),
             predicates: vec![
                 Predicate {
                     column: "attributes".to_owned(),
@@ -3850,7 +3860,10 @@ fn b4_point_mode_mixed_shredded_and_residual_or_is_not_null_map_predicates() {
     let out_b = reader
         .scan(&ScanRequest {
             coalesce_mode: CoalesceMode::Point,
-            map_keys: vec![("attributes".to_owned(), "k1".to_owned())],
+            map_projections: HashMap::from([(
+                "attributes".to_owned(),
+                MapReadMode::Keys(vec!["k1".to_owned()]),
+            )]),
             predicates: vec![
                 Predicate {
                     column: "attributes".to_owned(),
@@ -3962,11 +3975,11 @@ fn b7_l0_aliased_chunks_budget_and_streaming_l0_substring_scan() {
     let reader = StatamReader::open(Arc::new(SliceReader::new(file_bytes)), None).unwrap();
     let out = reader
         .scan(&ScanRequest {
-            substrings: vec![SubstringQuery {
+            substrings: vec![vec![SubstringQuery {
                 column: "body".to_owned(),
                 needle: "οδυσσευς_target".as_bytes().to_vec(),
                 case_insensitive: true,
-            }],
+            }]],
             ..ScanRequest::default()
         })
         .unwrap();
@@ -4797,7 +4810,7 @@ fn binary_external_payload_end_to_end_l0_l1_stpk_predicates_and_gdpr() {
     // 6. Reject SubstringQuery / IdLookup / value Predicate on Binary ExternalPayload with SchemaMismatch.
     assert!(matches!(
         reader.scan(&ScanRequest {
-            substrings: vec![SubstringQuery::like("blob", b"PNG")],
+            substrings: vec![vec![SubstringQuery::like("blob", b"PNG")]],
             ..ScanRequest::default()
         }),
         Err(StatamError::SchemaMismatch { .. })
@@ -5187,15 +5200,15 @@ fn subchunked_fsst_e2e_scan_take_and_eval_utf8_substring_parity() {
     // Substring queries: LIKE, ILIKE, and empty needle parity between L0Fast and L1Compact.
     for req in [
         ScanRequest {
-            substrings: vec![SubstringQuery::like("url", b"AlertSpike")],
+            substrings: vec![vec![SubstringQuery::like("url", b"AlertSpike")]],
             ..Default::default()
         },
         ScanRequest {
-            substrings: vec![SubstringQuery::ilike("url", b"alertspike")],
+            substrings: vec![vec![SubstringQuery::ilike("url", b"alertspike")]],
             ..Default::default()
         },
         ScanRequest {
-            substrings: vec![SubstringQuery::like("url", b"")],
+            substrings: vec![vec![SubstringQuery::like("url", b"")]],
             ..Default::default()
         },
     ] {
@@ -6070,7 +6083,7 @@ fn pass13a_phase1_to_phase2_stpk_chunk_reuse_avoids_reread() {
         let base_batches = reader_base
             .scan(&ScanRequest {
                 projection: Some(vec![0]),
-                substrings: vec![SubstringQuery::like("input", "UNIQUE_PHASE1_HIT")],
+                substrings: vec![vec![SubstringQuery::like("input", "UNIQUE_PHASE1_HIT")]],
                 read_threads: threads,
                 ..ScanRequest::default()
             })
@@ -6098,7 +6111,7 @@ fn pass13a_phase1_to_phase2_stpk_chunk_reuse_avoids_reread() {
         let batches = reader
             .scan(&ScanRequest {
                 projection: Some(vec![0, 1]),
-                substrings: vec![SubstringQuery::like("input", "UNIQUE_PHASE1_HIT")],
+                substrings: vec![vec![SubstringQuery::like("input", "UNIQUE_PHASE1_HIT")]],
                 read_threads: threads,
                 ..ScanRequest::default()
             })
@@ -6144,7 +6157,7 @@ fn pass13a_phase1_to_phase2_stpk_chunk_reuse_avoids_reread() {
     let long_batches = reader_long
         .scan(&ScanRequest {
             projection: Some(vec![0, 1]),
-            substrings: vec![SubstringQuery::like("input", long_needle)],
+            substrings: vec![vec![SubstringQuery::like("input", long_needle)]],
             ..ScanRequest::default()
         })
         .unwrap();
@@ -6247,7 +6260,7 @@ fn pass13_fix_b1_unicode_ilike_mid_codepoint_chunk_with_projection() {
         let unproj = reader
             .scan(&ScanRequest {
                 projection: Some(vec![0]),
-                substrings: vec![SubstringQuery::ilike("input", "café")],
+                substrings: vec![vec![SubstringQuery::ilike("input", "café")]],
                 read_threads: threads,
                 ..ScanRequest::default()
             })
@@ -6260,7 +6273,7 @@ fn pass13_fix_b1_unicode_ilike_mid_codepoint_chunk_with_projection() {
         let proj = reader
             .scan(&ScanRequest {
                 projection: Some(vec![0, 1]),
-                substrings: vec![SubstringQuery::ilike("input", "café")],
+                substrings: vec![vec![SubstringQuery::ilike("input", "café")]],
                 read_threads: threads,
                 ..ScanRequest::default()
             })
@@ -6354,7 +6367,7 @@ fn pass13_fix_b2_partial_cache_hit_and_multi_rg_shared_retention() {
     let batches = reader
         .scan(&ScanRequest {
             projection: Some(vec![0, 1]),
-            substrings: vec![SubstringQuery::like("input", "PARTIAL_CACHE_NEEDLE")],
+            substrings: vec![vec![SubstringQuery::like("input", "PARTIAL_CACHE_NEEDLE")]],
             ..ScanRequest::default()
         })
         .unwrap();
@@ -6438,7 +6451,7 @@ fn pass13_fix_b2_partial_cache_hit_and_multi_rg_shared_retention() {
     // Direct check: sharing one `RetainedPackChunks::default()` across all 4 RGs / 8 MBs
     // strictly enforces `<= PHASE1_RETAINED_CHUNKS_MAX_BYTES` (64 MiB).
     let sub_q = SubstringQuery::like("input", "CAP_TEST_HIT_");
-    let subs = vec![(1usize, &sub_q)];
+    let subs = vec![vec![(1usize, sub_q)]];
     let wave_retained = RetainedPackChunks::default();
     let mut total_hits = 0usize;
     for rg_idx in 0..big_reader.meta().rg_dir.len() {
@@ -6450,6 +6463,7 @@ fn pass13_fix_b2_partial_cache_hit_and_multi_rg_shared_retention() {
             &HashMap::new(),
             None,
             TimeRange::ALL,
+            &[],
             &[],
             &[],
             &subs,
@@ -6471,14 +6485,16 @@ fn pass13_fix_b2_partial_cache_hit_and_multi_rg_shared_retention() {
                 TimeRange::ALL,
                 &[],
                 &[],
+                &[],
                 &subs,
-                &[None],
+                &[vec![None]],
                 None,
                 &read_blk,
                 None,
                 false,
                 4,
                 &wave_retained,
+                None,
             )
             .unwrap();
         total_hits += active.iter().map(|(_, m, _)| m.count_ones()).sum::<usize>();
@@ -6500,7 +6516,7 @@ fn pass13_fix_b2_partial_cache_hit_and_multi_rg_shared_retention() {
     let scanned = big_reader
         .scan(&ScanRequest {
             projection: Some(vec![0, 1]),
-            substrings: vec![SubstringQuery::like("input", "CAP_TEST_HIT_")],
+            substrings: vec![vec![SubstringQuery::like("input", "CAP_TEST_HIT_")]],
             read_threads: 4,
             ..ScanRequest::default()
         })
@@ -7351,10 +7367,10 @@ fn pass13_single_flight_pack_open_trigram_and_edge_table_under_parallel_scan() {
     let out = reader
         .scan(&ScanRequest {
             projection: Some(vec![0]),
-            substrings: vec![SubstringQuery::like(
+            substrings: vec![vec![SubstringQuery::like(
                 "input",
                 "UNIQUE_SINGLE_FLIGHT_NEEDLE_XYZ",
-            )],
+            )]],
             read_threads: 8,
             ..ScanRequest::default()
         })
@@ -7852,7 +7868,10 @@ fn pass18_remote_single_wave_folding_normal_l0_and_shredded_map() {
 
     let req_map = ScanRequest {
         projection: Some(vec![0, 1]),
-        map_keys: vec![("attrs".to_owned(), "env".to_owned())],
+        map_projections: HashMap::from([(
+            "attrs".to_owned(),
+            MapReadMode::Keys(vec!["env".to_owned()]),
+        )]),
         predicates: vec![Predicate::new(
             "id",
             ZonePred::Between(ZoneValue::I64(10), ZoneValue::I64(50)),
@@ -8344,7 +8363,7 @@ fn pass18_remote_stpk_open_only_prefetch_and_all_guards() {
         let _ = reader
             .scan(&ScanRequest {
                 projection: Some(vec![0, 1]),
-                substrings: vec![SubstringQuery::like("input", "PASS18_NEEDLE_RG1")],
+                substrings: vec![vec![SubstringQuery::like("input", "PASS18_NEEDLE_RG1")]],
                 limit: Some(5),
                 ..ScanRequest::default()
             })
@@ -8376,7 +8395,7 @@ fn pass18_remote_stpk_open_only_prefetch_and_all_guards() {
         let out = reader
             .scan(&ScanRequest {
                 projection: Some(vec![0]),
-                substrings: vec![SubstringQuery::like("input", "PASS18_NEEDLE_RG1")],
+                substrings: vec![vec![SubstringQuery::like("input", "PASS18_NEEDLE_RG1")]],
                 limit: Some(5),
                 ..ScanRequest::default()
             })
@@ -8410,7 +8429,7 @@ fn pass18_remote_stpk_open_only_prefetch_and_all_guards() {
             .scan(&ScanRequest {
                 projection: Some(vec![0]),
                 predicates: vec![Predicate::new("id", ZonePred::Eq(ZoneValue::I64(3)))],
-                substrings: vec![SubstringQuery::like("input", "PASS18_NEEDLE_RG0")],
+                substrings: vec![vec![SubstringQuery::like("input", "PASS18_NEEDLE_RG0")]],
                 ..ScanRequest::default()
             })
             .unwrap();
@@ -8683,7 +8702,10 @@ fn pass19_remote_payload_substring_absent_skips_phase2_folding() {
     let out_absent = reader
         .scan(&ScanRequest {
             projection: Some(vec![0, 2]),
-            substrings: vec![SubstringQuery::like("input", "ABSENT_PASS19_NEEDLE_XYZ")],
+            substrings: vec![vec![SubstringQuery::like(
+                "input",
+                "ABSENT_PASS19_NEEDLE_XYZ",
+            )]],
             ..ScanRequest::default()
         })
         .unwrap();
@@ -8909,7 +8931,7 @@ fn pass19_remote_cross_mb_batched_stpk_substring_dedup_seam_and_retention() {
         // A. Shared-frame rare token across all 3 MBs + projected `input` (exercises chunk retention!):
         let req_rare = ScanRequest {
             projection: Some(vec![0, 1]),
-            substrings: vec![SubstringQuery::like("input", "PASS19_RARE_TOKEN")],
+            substrings: vec![vec![SubstringQuery::like("input", "PASS19_RARE_TOKEN")]],
             read_threads,
             ..ScanRequest::default()
         };
@@ -8950,7 +8972,7 @@ fn pass19_remote_cross_mb_batched_stpk_substring_dedup_seam_and_retention() {
             1,
             "3 surviving MBs + Phase-2 retained projection must issue exactly 1 `.stpk` frame wave (threads={read_threads}); got {frame_waves:?}"
         );
-        let mut seen_ranges = std::collections::HashSet::new();
+        let mut seen_ranges = HashSet::new();
         for r in frame_waves[0] {
             assert!(
                 seen_ranges.insert((r.start, r.end)),
@@ -8961,7 +8983,7 @@ fn pass19_remote_cross_mb_batched_stpk_substring_dedup_seam_and_retention() {
         // B. Multi-chunk seam match parity across 3 MBs!
         let req_seam = ScanRequest {
             projection: Some(vec![0, 1]),
-            substrings: vec![SubstringQuery::like("input", seam_needle.as_str())],
+            substrings: vec![vec![SubstringQuery::like("input", seam_needle.as_str())]],
             read_threads,
             ..ScanRequest::default()
         };
@@ -9851,7 +9873,7 @@ fn pass22_fused_phase2_and_direct_take_payload_parity() {
         &r_l1,
         &ScanRequest {
             projection: Some(vec![0, 3, 4, 6]),
-            substrings: vec![SubstringQuery::like("input", "UNIQUE_PASS22_NEEDLE")],
+            substrings: vec![vec![SubstringQuery::like("input", "UNIQUE_PASS22_NEEDLE")]],
             ..ScanRequest::default()
         },
         "l1_preresolved_100pct",
@@ -9863,7 +9885,7 @@ fn pass22_fused_phase2_and_direct_take_payload_parity() {
         &r_l1,
         &ScanRequest {
             projection: Some(vec![0, 3, 4, 6, 7]),
-            substrings: vec![SubstringQuery::like("input", "UNIQUE_PASS22_NEEDLE")],
+            substrings: vec![vec![SubstringQuery::like("input", "UNIQUE_PASS22_NEEDLE")]],
             ..ScanRequest::default()
         },
         "l1_preresolved_partial",
@@ -11478,7 +11500,10 @@ fn pass25_widerow_subchunked_fsst_and_stage1_shredded_residual_parity() {
         //    + duplicate projections + `map_keys` (`skip_residual = true` on `attrs_fast`).
         let dup_proj = vec![0usize, 1, 1, 2, 3, 4, 4, 5, 5];
         let dup_schema = Arc::new(schema.project(&dup_proj).unwrap());
-        let map_keys_fast = vec![("attrs_fast".to_owned(), "svc".to_owned())];
+        let map_proj_fast = HashMap::from([(
+            "attrs_fast".to_owned(),
+            MapReadMode::Keys(vec!["svc".to_owned()]),
+        )]);
 
         for (label, req, out_schema) in [
             (
@@ -11493,7 +11518,7 @@ fn pass25_widerow_subchunked_fsst_and_stage1_shredded_residual_parity() {
                 "dup_proj_with_skip_residual",
                 ScanRequest {
                     projection: Some(dup_proj.clone()),
-                    map_keys: map_keys_fast.clone(),
+                    map_projections: map_proj_fast.clone(),
                     read_threads: 1,
                     ..ScanRequest::default()
                 },
@@ -11546,6 +11571,1395 @@ fn pass25_widerow_subchunked_fsst_and_stage1_shredded_residual_parity() {
                     t8.column(ci).unwrap().materialize(None).unwrap(),
                     "{mode}/{label} col {ci} 1T vs 8T mismatch"
                 );
+            }
+        }
+    }
+}
+
+#[test]
+fn m35_1_cnf_or_substrings_and_unicode_ilike_ks_parity() {
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("name", DataType::Utf8, true),
+        Field::new("input", DataType::Utf8, true),
+        Field::new("output", DataType::Utf8, true),
+        Field::new("system_instructions", DataType::Utf8, true),
+    ])
+    .unwrap();
+
+    // Build 96 rows across 3 mini-blocks (MB 0: 0..32, MB 1: 32..64, MB 2: 64..96).
+    // In MB 2, `input` is all-NULL (`ConstNull`) to prove `NULL OR true == true` even when
+    // a disjunct's block is `ConstNull`!
+    let n = 96usize;
+    let mut ids = Vec::with_capacity(n);
+    let mut names: Vec<Option<String>> = Vec::with_capacity(n);
+    let mut inputs: Vec<Option<String>> = Vec::with_capacity(n);
+    let mut outputs: Vec<Option<String>> = Vec::with_capacity(n);
+    let mut sys_insts: Vec<Option<String>> = Vec::with_capacity(n);
+
+    // Cross-chunk > 64 B needle spanning a CDC/JSON boundary.
+    let cross_left = "CROSS_BOUNDARY_LEFT_SEGMENT_0123456789_ALPHA_";
+    let cross_right = "_BETA_9876543210_CROSS_BOUNDARY_RIGHT_SEGMENT";
+    let long_needle = format!("{cross_left}\"}},{{\"role\":\"assistant\",\"txt\":\"{cross_right}");
+    assert!(long_needle.len() > 64);
+
+    for r in 0..n {
+        ids.push(r as i64);
+        let name = match r {
+            1 => Some("narrow_match_OMEGA_token".to_owned()),
+            10 => Some("measure_300_\u{212A}elvin_temp".to_owned()), // U+212A Kelvin sign
+            11 => Some("narrow_\u{017F}kip_token_here".to_owned()),  // U+017F Long s
+            40 => Some("cnf_left_hit".to_owned()),
+            _ => Some(format!("plain_span_{r}")),
+        };
+        let input = if r >= 64 {
+            None // ConstNull mini-block!
+        } else {
+            match r {
+                2 => Some("inline_input_OMEGA_hit".to_owned()), // inline (< 256 B)
+                12 => Some(format!("payload_with_\u{212A}elvin_{}", "p".repeat(3_500))),
+                41 => Some(format!("cnf_left_hit_payload_{}", "q".repeat(3_500))),
+                _ => Some(format!("boring_input_{r}_{}", "a".repeat(3_000))),
+            }
+        };
+        let output = match r {
+            3 => Some(format!(
+                "[{{\"role\":\"user\",\"txt\":\"{}_{cross_left}\"}},{{\"role\":\"assistant\",\"txt\":\"{cross_right}_{}\"}}]",
+                "z".repeat(4_000),
+                "w".repeat(4_000),
+            )),
+            4 => Some(format!("big_output_OMEGA_hit_{}", "m".repeat(3_500))),
+            13 => Some(format!(
+                "payload_with_\u{017F}kip_token_{}",
+                "r".repeat(3_500)
+            )),
+            40 => Some(format!("cnf_right_hit_payload_{}", "t".repeat(3_500))),
+            70 => None, // NULL alongside ConstNull input; matched via system_instructions
+            _ => Some(format!("boring_output_{r}_{}", "b".repeat(3_000))),
+        };
+        let sys = match r {
+            70 => Some(format!("sys_only_OMEGA_hit_{}", "s".repeat(3_500))),
+            41 => Some("cnf_right_hit_inline".to_owned()),
+            _ => None,
+        };
+        names.push(name);
+        inputs.push(input);
+        outputs.push(output);
+        sys_insts.push(sys);
+    }
+
+    let make_opt_utf8 = |vals: &[Option<String>]| -> Column {
+        let mut bm = Bitmap::new_zeroed(vals.len());
+        let slices: Vec<&str> = vals
+            .iter()
+            .enumerate()
+            .map(|(i, v)| match v {
+                Some(s) => {
+                    let _ = bm.set(i, true);
+                    s.as_str()
+                }
+                None => "",
+            })
+            .collect();
+        let nulls = if bm.all_ones() { None } else { Some(bm) };
+        Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(slices).unwrap()),
+                nulls,
+            )
+            .unwrap(),
+        )
+    };
+
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            make_opt_utf8(&names),
+            make_opt_utf8(&inputs),
+            make_opt_utf8(&outputs),
+            make_opt_utf8(&sys_insts),
+        ],
+        n,
+    )
+    .unwrap();
+
+    for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
+        let mut opts = WriteOptions::for_table(TableKind::Spans, profile);
+        opts.sort_cols = vec![0];
+        opts.row_group_size = n;
+        opts.mini_block_size = 32;
+        let (file_bytes, resolver_opt) = if profile == WriteProfile::L1Compact {
+            let pack_id = [0xA1u8; 16];
+            opts.pack_id = Some(pack_id);
+            let mut pb = ChunkPackBuilder::new(pack_id, test_pack_opts());
+            let mut fbytes = Vec::new();
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut fbytes),
+                Arc::clone(&schema),
+                opts,
+                Some(&mut pb),
+            )
+            .unwrap();
+            w.write_batch(&batch).unwrap();
+            w.finish().unwrap();
+            let mut pbytes = Vec::new();
+            pb.finish(&mut pbytes).unwrap();
+            let mut resolver = InMemoryPackResolver::new();
+            resolver.insert_bytes(pack_id, pbytes).unwrap();
+            (fbytes, Some(Arc::new(resolver) as Arc<dyn PackResolver>))
+        } else {
+            let mut fbytes = Vec::new();
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut fbytes),
+                Arc::clone(&schema),
+                opts,
+                None,
+            )
+            .unwrap();
+            w.write_batch(&batch).unwrap();
+            w.finish().unwrap();
+            (fbytes, None)
+        };
+
+        let reader = Arc::new(
+            StatamReader::open(Arc::new(SliceReader::new(file_bytes)), resolver_opt).unwrap(),
+        );
+
+        let collect_ids = |req: ScanRequest| -> Vec<i64> {
+            let scan_batches = reader.scan(&req).unwrap();
+            let mut iter = reader.scan_iter(req).unwrap();
+            let mut iter_batches = Vec::new();
+            while let Some(b) = iter.next_batch(None, None).unwrap() {
+                iter_batches.push(b);
+            }
+            let extract = |batches: &[Batch]| -> Vec<i64> {
+                let mut out = Vec::new();
+                for b in batches {
+                    let c = b.compact(None).unwrap();
+                    let col = c.column(0).unwrap().materialize(None).unwrap();
+                    let FlatData::I64(vs) = col.data() else {
+                        unreachable!();
+                    };
+                    out.extend_from_slice(vs);
+                }
+                out
+            };
+            let s_ids = extract(&scan_batches);
+            let i_ids = extract(&iter_batches);
+            assert_eq!(s_ids, i_ids, "scan vs scan_iter mismatch for {profile:?}");
+            s_ids
+        };
+
+        // 1. 4-way OR across narrow + inline + .stpk + ConstNull MB (`NULL OR true == true`)!
+        let req_4way = ScanRequest {
+            projection: Some(vec![0]),
+            substrings: vec![vec![
+                SubstringQuery::ilike("name", "omega"),
+                SubstringQuery::ilike("input", "omega"),
+                SubstringQuery::ilike("output", "omega"),
+                SubstringQuery::ilike("system_instructions", "omega"),
+            ]],
+            ..ScanRequest::default()
+        };
+        assert_eq!(collect_ids(req_4way), vec![1, 2, 4, 70]);
+
+        // 2. > 64 B cross-chunk needle inside an OR clause!
+        let req_long_or = ScanRequest {
+            projection: Some(vec![0]),
+            substrings: vec![vec![
+                SubstringQuery::like("name", "NEVER_MATCHES_XYZ"),
+                SubstringQuery::ilike("output", long_needle.to_lowercase()),
+            ]],
+            ..ScanRequest::default()
+        };
+        assert_eq!(collect_ids(req_long_or), vec![3]);
+
+        // 3. Unicode ILIKE parity: ASCII "kelvin" matches U+212A "Kelvin" on BOTH narrow and .stpk!
+        let req_kelvin = ScanRequest {
+            projection: Some(vec![0]),
+            substrings: vec![vec![
+                SubstringQuery::ilike("name", "kelvin"),
+                SubstringQuery::ilike("input", "kelvin"),
+            ]],
+            ..ScanRequest::default()
+        };
+        assert_eq!(collect_ids(req_kelvin), vec![10, 12]);
+
+        // 4. Unicode ILIKE parity: ASCII "skip_token" matches U+017F "ſkip_token" on BOTH narrow and .stpk!
+        let req_long_s = ScanRequest {
+            projection: Some(vec![0]),
+            substrings: vec![vec![
+                SubstringQuery::ilike("name", "skip_token"),
+                SubstringQuery::ilike("output", "skip_token"),
+            ]],
+            ..ScanRequest::default()
+        };
+        assert_eq!(collect_ids(req_long_s), vec![11, 13]);
+
+        // 5. Multi-clause CNF: (name OR input) AND (output OR system_instructions)!
+        let req_cnf = ScanRequest {
+            projection: Some(vec![0]),
+            substrings: vec![
+                vec![
+                    SubstringQuery::like("name", "cnf_left_hit"),
+                    SubstringQuery::like("input", "cnf_left_hit"),
+                ],
+                vec![
+                    SubstringQuery::like("output", "cnf_right_hit"),
+                    SubstringQuery::like("system_instructions", "cnf_right_hit"),
+                ],
+            ],
+            ..ScanRequest::default()
+        };
+        assert_eq!(collect_ids(req_cnf), vec![40, 41]);
+
+        // 6. Empty inner OR clause is FALSE (0 rows).
+        let req_empty_clause = ScanRequest {
+            projection: Some(vec![0]),
+            substrings: vec![vec![]],
+            ..ScanRequest::default()
+        };
+        assert!(collect_ids(req_empty_clause).is_empty());
+    }
+}
+
+#[test]
+fn m35_2_3vl_filter_expr_and_duplicate_map_key_first_match() {
+    // Part A: Exact SQL 3-valued logic (`FilterExpr`) + zone-map pruning across multiple MBs.
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("a", DataType::I64, true),
+        Field::new("b", DataType::I64, true),
+    ])
+    .unwrap();
+
+    // 64 rows across 2 mini-blocks of 32:
+    // MB 0 (rows 0..32): special 3VL truth-table rows at 0..6, rest are (1, 2)
+    // MB 1 (rows 32..64): all non-null (100, 200) to exercise zone-map pruning on OR / NOT!
+    let n = 64usize;
+    let mut ids = Vec::with_capacity(n);
+    let mut a_vals = Vec::with_capacity(n);
+    let mut a_nulls = Bitmap::new_ones(n);
+    let mut b_vals = Vec::with_capacity(n);
+    let mut b_nulls = Bitmap::new_ones(n);
+
+    let cases: [(Option<i64>, Option<i64>); 6] = [
+        (None, Some(3)),    // row 0: (NULL, 3)
+        (Some(1), Some(2)), // row 1: (1, 2)
+        (Some(1), None),    // row 2: (1, NULL)
+        (None, None),       // row 3: (NULL, NULL)
+        (Some(5), Some(2)), // row 4: (5, 2)
+        (Some(5), Some(3)), // row 5: (5, 3)
+    ];
+    for r in 0..n {
+        ids.push(r as i64);
+        let (av, bv) = if let Some(&pair) = cases.get(r) {
+            pair
+        } else if r < 32 {
+            (Some(1), Some(2))
+        } else {
+            (Some(100), Some(200))
+        };
+        match av {
+            Some(v) => a_vals.push(v),
+            None => {
+                a_vals.push(0);
+                let _ = a_nulls.set(r, false);
+            }
+        }
+        match bv {
+            Some(v) => b_vals.push(v),
+            None => {
+                b_vals.push(0);
+                let _ = b_nulls.set(r, false);
+            }
+        }
+    }
+
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            Column::Flat(FlatColumn::try_new(FlatData::I64(a_vals), Some(a_nulls)).unwrap()),
+            Column::Flat(FlatColumn::try_new(FlatData::I64(b_vals), Some(b_nulls)).unwrap()),
+        ],
+        n,
+    )
+    .unwrap();
+
+    let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+    opts.sort_cols = vec![0];
+    opts.row_group_size = n;
+    opts.mini_block_size = 32;
+    let mut file_bytes = Vec::new();
+    let mut w = StatamWriter::new(
+        std::io::Cursor::new(&mut file_bytes),
+        Arc::clone(&schema),
+        opts,
+        None,
+    )
+    .unwrap();
+    w.write_batch(&batch).unwrap();
+    w.finish().unwrap();
+
+    let reader =
+        Arc::new(StatamReader::open(Arc::new(SliceReader::new(file_bytes)), None).unwrap());
+
+    let run_expr = |expr: FilterExpr| -> Vec<i64> {
+        let req = ScanRequest {
+            projection: Some(vec![0]),
+            filter_exprs: vec![expr],
+            ..ScanRequest::default()
+        };
+        let extract = |batches: &[Batch]| -> Vec<i64> {
+            let mut out = Vec::new();
+            for b in batches {
+                let c = b.compact(None).unwrap();
+                let col = c.column(0).unwrap().materialize(None).unwrap();
+                let FlatData::I64(vs) = col.data() else {
+                    unreachable!();
+                };
+                out.extend_from_slice(vs);
+            }
+            out
+        };
+        let s = extract(&reader.scan(&req).unwrap());
+        let mut iter = reader.scan_iter(req).unwrap();
+        let mut ib = Vec::new();
+        while let Some(b) = iter.next_batch(None, None).unwrap() {
+            ib.push(b);
+        }
+        let i = extract(&ib);
+        assert_eq!(s, i);
+        s
+    };
+
+    let a_eq_1 = FilterExpr::Pred(Predicate::new("a", ZonePred::Eq(ZoneValue::I64(1))));
+    let b_eq_2 = FilterExpr::Pred(Predicate::new("b", ZonePred::Eq(ZoneValue::I64(2))));
+
+    // NOT (a = 1 AND b = 2):
+    // row 0 (NULL, 3): NULL AND FALSE = FALSE -> NOT FALSE = TRUE!
+    // row 1 (1, 2): TRUE AND TRUE = TRUE -> FALSE
+    // row 2 (1, NULL): TRUE AND NULL = NULL -> NULL (filtered!)
+    // row 3 (NULL, NULL): NULL -> NULL (filtered!)
+    // row 4 (5, 2): FALSE AND TRUE = FALSE -> TRUE
+    // row 5 (5, 3): FALSE AND FALSE = FALSE -> TRUE
+    // rows 6..32 (1, 2): FALSE
+    // rows 32..64 (100, 200): TRUE
+    let not_and = run_expr(FilterExpr::Not(Box::new(FilterExpr::And(vec![
+        a_eq_1.clone(),
+        b_eq_2.clone(),
+    ]))));
+    let mut expected_not_and = vec![0i64, 4, 5];
+    expected_not_and.extend(32i64..64);
+    assert_eq!(not_and, expected_not_and);
+
+    // NOT (a = 1 OR b = 2):
+    // row 0 (NULL, 3): NULL OR FALSE = NULL -> NOT NULL = NULL (filtered!)
+    // row 5 (5, 3): FALSE OR FALSE = FALSE -> TRUE!
+    // rows 32..64 (100, 200): TRUE!
+    let not_or = run_expr(FilterExpr::Not(Box::new(FilterExpr::Or(vec![
+        a_eq_1, b_eq_2,
+    ]))));
+    let mut expected_not_or = vec![5i64];
+    expected_not_or.extend(32i64..64);
+    assert_eq!(not_or, expected_not_or);
+
+    // OR across zone-map ranges: (a = 5 OR b = 200) -> rows 4, 5, and 32..64
+    let or_zm = run_expr(FilterExpr::Or(vec![
+        FilterExpr::Pred(Predicate::new("a", ZonePred::Eq(ZoneValue::I64(5)))),
+        FilterExpr::Pred(Predicate::new("b", ZonePred::Eq(ZoneValue::I64(200)))),
+    ]));
+    let mut expected_or_zm = vec![4i64, 5];
+    expected_or_zm.extend(32i64..64);
+    assert_eq!(or_zm, expected_or_zm);
+
+    // Non-invertible leaf under NOT: NOT (a IN (1, 100)) -> must NOT wrongly prune MB 0 or MB 1,
+    // matching rows 4 and 5 (and excluding NULL rows 0, 3 and 1/100 rows!).
+    let not_in = run_expr(FilterExpr::Not(Box::new(FilterExpr::Pred(Predicate::new(
+        "a",
+        ZonePred::In(vec![ZoneValue::I64(1), ZoneValue::I64(100)]),
+    )))));
+    assert_eq!(not_in, vec![4, 5]);
+
+    // NOT (a IS NULL) == a IS NOT NULL (all non-null `a` rows: 1, 2, 4..64).
+    let not_is_null = run_expr(FilterExpr::Not(Box::new(FilterExpr::Pred(Predicate::new(
+        "a",
+        ZonePred::IsNull,
+    )))));
+    let mut expected_not_null = vec![1i64, 2];
+    expected_not_null.extend(4i64..64);
+    assert_eq!(not_is_null, expected_not_null);
+
+    // Part B: Duplicate map key first-match parity (unshredded L0Fast AND shredded L1Compact).
+    let map_schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("attributes", DataType::MapUtf8, true),
+    ])
+    .unwrap();
+    let m_n = 32usize;
+    let m_ids: Vec<i64> = (0..m_n as i64).collect();
+    let mut m_offs = vec![0u32];
+    let mut m_keys = Vec::new();
+    let mut m_vals = Vec::new();
+    let mut m_val_valid = Vec::new();
+    for r in 0..m_n {
+        match r {
+            0 => {
+                // Duplicate key: first is "first", second is "second" -> MUST match "first"!
+                m_keys.extend(["k", "k"]);
+                m_vals.extend(["first", "second"]);
+                m_val_valid.extend([true, true]);
+            }
+            1 => {
+                // Duplicate key: first is "second", second is "first" -> MUST match "second", NOT "first"!
+                m_keys.extend(["k", "k"]);
+                m_vals.extend(["second", "first"]);
+                m_val_valid.extend([true, true]);
+            }
+            2 => {
+                // Duplicate key: first is SQL NULL, second is "first" -> MUST be NULL!
+                m_keys.extend(["k", "k"]);
+                m_vals.extend(["", "first"]);
+                m_val_valid.extend([false, true]);
+            }
+            _ => {
+                // Non-duplicate rows so "k" reaches high coverage and gets shredded in L1Compact!
+                m_keys.push("k");
+                m_vals.push("other");
+                m_val_valid.push(true);
+            }
+        }
+        m_offs.push(m_keys.len() as u32);
+    }
+    let map_data = MapData::try_new(
+        m_offs,
+        Utf8Data::try_from_slices(m_keys).unwrap(),
+        Utf8Data::try_from_slices(m_vals).unwrap(),
+        Some(Bitmap::from_bools(&m_val_valid)),
+    )
+    .unwrap();
+    let map_batch = Batch::try_new_all(
+        Arc::clone(&map_schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(m_ids), None).unwrap()),
+            Column::Flat(FlatColumn::try_new(FlatData::MapUtf8(Box::new(map_data)), None).unwrap()),
+        ],
+        m_n,
+    )
+    .unwrap();
+
+    for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
+        let mut m_opts = WriteOptions::for_table(TableKind::Spans, profile);
+        m_opts.sort_cols = vec![0];
+        let mut buf = Vec::new();
+        let mut mw = StatamWriter::new(
+            std::io::Cursor::new(&mut buf),
+            Arc::clone(&map_schema),
+            m_opts,
+            None,
+        )
+        .unwrap();
+        mw.write_batch(&map_batch).unwrap();
+        mw.finish().unwrap();
+        let mr = StatamReader::open(Arc::new(SliceReader::new(buf)), None).unwrap();
+        if profile == WriteProfile::L1Compact {
+            assert!(
+                !mr.meta().schema_meta.shredded_maps.is_empty(),
+                "expected attributes to be shredded in L1Compact"
+            );
+        }
+
+        let extract_ids = |req: &ScanRequest| -> Vec<i64> {
+            let mut out = Vec::new();
+            for b in mr.scan(req).unwrap() {
+                let c = b.compact(None).unwrap();
+                let col = c.column(0).unwrap().materialize(None).unwrap();
+                let FlatData::I64(vs) = col.data() else {
+                    unreachable!();
+                };
+                out.extend_from_slice(vs);
+            }
+            out
+        };
+
+        // `attributes['k'] = 'first'` -> ONLY row 0!
+        let eq_first = extract_ids(&ScanRequest {
+            projection: Some(vec![0]),
+            predicates: vec![Predicate::map_key(
+                "attributes",
+                "k",
+                ZonePred::Eq(ZoneValue::Bytes(b"first".to_vec())),
+            )],
+            ..ScanRequest::default()
+        });
+        assert_eq!(eq_first, vec![0], "first-match failed for {profile:?}");
+
+        // `attributes['k'] IS NULL` -> ONLY row 2!
+        let is_null = extract_ids(&ScanRequest {
+            projection: Some(vec![0]),
+            predicates: vec![Predicate::map_key("attributes", "k", ZonePred::IsNull)],
+            ..ScanRequest::default()
+        });
+        assert_eq!(is_null, vec![2], "null first-match failed for {profile:?}");
+
+        // 3VL `NOT (attributes['k'] = 'first')` -> rows 1 and 3..32 (excludes row 0 TRUE and row 2 NULL)!
+        let not_eq_first = extract_ids(&ScanRequest {
+            projection: Some(vec![0]),
+            filter_exprs: vec![FilterExpr::Not(Box::new(FilterExpr::Pred(
+                Predicate::map_key(
+                    "attributes",
+                    "k",
+                    ZonePred::Eq(ZoneValue::Bytes(b"first".to_vec())),
+                ),
+            )))],
+            ..ScanRequest::default()
+        });
+        let mut expected_not = vec![1i64];
+        expected_not.extend(3i64..m_n as i64);
+        assert_eq!(
+            not_eq_first, expected_not,
+            "3VL map NOT failed for {profile:?}"
+        );
+    }
+}
+
+#[test]
+fn m35_3_rg_indices_and_custom_task_executor_dispatch() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingExecutor {
+        threads: usize,
+        batch_calls: Arc<AtomicUsize>,
+        task_count: Arc<AtomicUsize>,
+    }
+
+    impl TaskExecutor for CountingExecutor {
+        fn max_threads(&self) -> usize {
+            self.threads
+        }
+
+        fn run_batch(
+            &self,
+            tasks: Vec<Box<dyn FnOnce() + Send + 'static>>,
+        ) -> Result<(), StatamError> {
+            self.batch_calls.fetch_add(1, Ordering::SeqCst);
+            self.task_count.fetch_add(tasks.len(), Ordering::SeqCst);
+            std::thread::scope(|s| {
+                let handles: Vec<_> = tasks.into_iter().map(|t| s.spawn(t)).collect();
+                for h in handles {
+                    h.join().map_err(|_| StatamError::Corrupt {
+                        reason: "counting executor worker panicked",
+                    })?;
+                }
+                Ok(())
+            })
+        }
+    }
+
+    let schema = make_spans_schema();
+    // Use >= MIN_PARALLEL_RG_ROWS (1_024) per RG so the writer engages its parallel RG encode path.
+    let rg_len = 1_024usize;
+    let b0 = make_spans_batch(&schema, 0, rg_len);
+    let b1 = make_spans_batch(&schema, rg_len, rg_len);
+    let b2 = make_spans_batch(&schema, rg_len * 2, rg_len);
+
+    let write_batches = Arc::new(AtomicUsize::new(0));
+    let write_tasks = Arc::new(AtomicUsize::new(0));
+    let write_exec: Arc<dyn TaskExecutor> = Arc::new(CountingExecutor {
+        threads: 4,
+        batch_calls: Arc::clone(&write_batches),
+        task_count: Arc::clone(&write_tasks),
+    });
+
+    let pack_id = [0x33u8; 16];
+    let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+    opts.sort_cols = vec![2]; // start_time
+    opts.row_group_size = rg_len;
+    opts.mini_block_size = 256;
+    opts.write_threads = 4;
+    opts.pack_id = Some(pack_id);
+    opts.executor = Some(write_exec);
+
+    let mut pb = ChunkPackBuilder::new(pack_id, test_pack_opts());
+    let mut file_bytes = Vec::new();
+    let mut writer = StatamWriter::new(
+        std::io::Cursor::new(&mut file_bytes),
+        Arc::clone(&schema),
+        opts,
+        Some(&mut pb),
+    )
+    .unwrap();
+    writer.write_batch(&b0).unwrap();
+    writer.write_batch(&b1).unwrap();
+    writer.write_batch(&b2).unwrap();
+    writer.finish().unwrap();
+    let mut pack_bytes = Vec::new();
+    pb.finish(&mut pack_bytes).unwrap();
+
+    assert!(
+        write_batches.load(Ordering::SeqCst) > 0 && write_tasks.load(Ordering::SeqCst) > 0,
+        "StatamWriter must dispatch parallel work onto the custom TaskExecutor"
+    );
+
+    let mut resolver = InMemoryPackResolver::new();
+    resolver.insert_bytes(pack_id, pack_bytes).unwrap();
+    let read_batches = Arc::new(AtomicUsize::new(0));
+    let read_tasks = Arc::new(AtomicUsize::new(0));
+    let read_exec: Arc<dyn TaskExecutor> = Arc::new(CountingExecutor {
+        threads: 4,
+        batch_calls: Arc::clone(&read_batches),
+        task_count: Arc::clone(&read_tasks),
+    });
+
+    let reader = Arc::new(
+        StatamReader::open(
+            Arc::new(SliceReader::new(file_bytes)),
+            Some(Arc::new(resolver)),
+        )
+        .unwrap()
+        .with_executor(Arc::clone(&read_exec)),
+    );
+    assert_eq!(reader.meta().rg_dir.len(), 3);
+
+    // 1. `rg_indices: Some(vec![1])` returns ONLY RG 1's rows and dispatches on `read_exec`.
+    let rg1_req = ScanRequest {
+        rg_indices: Some(vec![1]),
+        read_threads: 4,
+        ..ScanRequest::default()
+    };
+    let rg1_scan = reader.scan(&rg1_req).unwrap();
+    let rg1_rows: usize = rg1_scan.iter().map(Batch::num_rows).sum();
+    assert_eq!(rg1_rows, rg_len);
+    assert!(
+        read_batches.load(Ordering::SeqCst) > 0,
+        "StatamReader::scan must dispatch parallel work onto the custom TaskExecutor"
+    );
+
+    // Parity with `scan_iter` and `rg_indices: Some(vec![])` empty subset.
+    let mut iter = reader.scan_iter(rg1_req).unwrap();
+    let mut iter_rows = 0usize;
+    while let Some(b) = iter.next_batch(None, None).unwrap() {
+        iter_rows += b.num_rows();
+    }
+    assert_eq!(iter_rows, rg_len);
+
+    let empty_req = ScanRequest {
+        rg_indices: Some(vec![]),
+        ..ScanRequest::default()
+    };
+    assert!(reader.scan(&empty_req).unwrap().is_empty());
+    let mut empty_iter = reader.scan_iter(empty_req).unwrap();
+    assert!(empty_iter.next_batch(None, None).unwrap().is_none());
+
+    // Per-request executor override takes precedence over reader's executor.
+    let req_batches = Arc::new(AtomicUsize::new(0));
+    let req_tasks = Arc::new(AtomicUsize::new(0));
+    let req_exec: Arc<dyn TaskExecutor> = Arc::new(CountingExecutor {
+        threads: 4,
+        batch_calls: Arc::clone(&req_batches),
+        task_count: Arc::clone(&req_tasks),
+    });
+    let override_req = ScanRequest {
+        read_threads: 4,
+        executor: Some(req_exec),
+        ..ScanRequest::default()
+    };
+    let all = reader.scan(&override_req).unwrap();
+    assert_eq!(all.iter().map(Batch::num_rows).sum::<usize>(), rg_len * 3);
+    assert!(
+        req_batches.load(Ordering::SeqCst) > 0,
+        "ScanRequest::executor override must receive parallel scan tasks"
+    );
+}
+
+#[test]
+fn m35_4_shredded_subcol_null_count_and_map_read_mode_keys_only() {
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("attributes", DataType::MapUtf8, true),
+    ])
+    .unwrap();
+
+    // 4 mini-blocks of 32 rows = 128 rows:
+    // - MB 0 (0..32):
+    //     * `always_present`: present on ALL 32 rows (even row 0 has SQL NULL value -> still in_map=1!)
+    //     * `always_absent`: ABSENT on ALL 32 rows (present on MB 1..2 so it gets promoted!)
+    //     * `mixed_key`: present on even rows only (16 of 32)
+    //     * `rare_key`: present only on row 5 (stays in residual)
+    // - MB 1 (32..64):
+    //     * `always_present`, `always_absent`, `mixed_key` present on most rows;
+    //     * row 32 is SQL NULL map; row 33 is empty `{}` map; row 34 has duplicate `always_present` (spills to residual!)
+    // - MB 2 (64..96):
+    //     * `always_present` and `always_absent` present on all rows (high overall coverage -> both promoted!)
+    // - MB 3 (96..128):
+    //     * ALL 32 rows are SQL NULL map (`ConstNull` residual block!)
+    let n = 128usize;
+    let ids: Vec<i64> = (0..n as i64).collect();
+    let mut row_nulls = Bitmap::new_ones(n);
+    let mut map_offs = vec![0u32];
+    let mut map_keys: Vec<String> = Vec::new();
+    let mut map_vals: Vec<String> = Vec::new();
+    let mut val_valid: Vec<bool> = Vec::new();
+
+    // Reference expected key sets per row (None = SQL NULL map, Some(sorted keys) = non-null map).
+    let mut expected_keys: Vec<Option<Vec<String>>> = Vec::with_capacity(n);
+
+    for r in 0..n {
+        if r == 32 || r >= 96 {
+            let _ = row_nulls.set(r, false);
+            map_offs.push(map_keys.len() as u32);
+            expected_keys.push(None);
+            continue;
+        }
+        if r == 33 {
+            // Non-NULL empty `{}` map.
+            map_offs.push(map_keys.len() as u32);
+            expected_keys.push(Some(Vec::new()));
+            continue;
+        }
+        let mut row_ks: Vec<String> = Vec::new();
+        if r < 32 {
+            // MB 0
+            map_keys.push("always_present".to_owned());
+            if r == 0 {
+                // Present key with SQL NULL value -> in_map=1!
+                map_vals.push(String::new());
+                val_valid.push(false);
+            } else {
+                map_vals.push(format!("huge_value_always_present_{r}_{}", "v".repeat(64)));
+                val_valid.push(true);
+            }
+            row_ks.push("always_present".to_owned());
+            if r % 2 == 0 {
+                map_keys.push("mixed_key".to_owned());
+                map_vals.push(format!("mixed_val_{r}_{}", "m".repeat(48)));
+                val_valid.push(true);
+                row_ks.push("mixed_key".to_owned());
+            }
+            if r == 5 {
+                map_keys.push("rare_key".to_owned());
+                map_vals.push("rare_secret_value".to_owned());
+                val_valid.push(true);
+                row_ks.push("rare_key".to_owned());
+            }
+        } else if r < 64 {
+            // MB 1
+            if r == 34 {
+                // Duplicate promoted key spills to residual.
+                map_keys.push("always_present".to_owned());
+                map_vals.push("dup_1".to_owned());
+                val_valid.push(true);
+                map_keys.push("always_present".to_owned());
+                map_vals.push("dup_2".to_owned());
+                val_valid.push(true);
+                row_ks.push("always_present".to_owned());
+                row_ks.push("always_present".to_owned());
+            } else {
+                map_keys.push("always_present".to_owned());
+                map_vals.push(format!("mb1_ap_{r}"));
+                val_valid.push(true);
+                row_ks.push("always_present".to_owned());
+            }
+            map_keys.push("always_absent".to_owned());
+            map_vals.push(format!("mb1_aa_{r}_{}", "a".repeat(64)));
+            val_valid.push(true);
+            row_ks.push("always_absent".to_owned());
+            map_keys.push("mixed_key".to_owned());
+            map_vals.push(format!("mb1_mk_{r}"));
+            val_valid.push(true);
+            row_ks.push("mixed_key".to_owned());
+        } else {
+            // MB 2 (64..96)
+            map_keys.push("always_present".to_owned());
+            map_vals.push(format!("mb2_ap_{r}"));
+            val_valid.push(true);
+            row_ks.push("always_present".to_owned());
+            map_keys.push("always_absent".to_owned());
+            map_vals.push(format!("mb2_aa_{r}"));
+            val_valid.push(true);
+            row_ks.push("always_absent".to_owned());
+            map_keys.push("mixed_key".to_owned());
+            map_vals.push(format!("mb2_mk_{r}"));
+            val_valid.push(true);
+            row_ks.push("mixed_key".to_owned());
+        }
+        row_ks.sort();
+        expected_keys.push(Some(row_ks));
+        map_offs.push(map_keys.len() as u32);
+    }
+
+    let map_data = MapData::try_new(
+        map_offs,
+        Utf8Data::try_from_slices(map_keys.iter().map(String::as_str)).unwrap(),
+        Utf8Data::try_from_slices(map_vals.iter().map(String::as_str)).unwrap(),
+        Some(Bitmap::from_bools(&val_valid)),
+    )
+    .unwrap();
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(FlatData::MapUtf8(Box::new(map_data)), Some(row_nulls))
+                    .unwrap(),
+            ),
+        ],
+        n,
+    )
+    .unwrap();
+
+    let verify_keys_only_batches = |batches: &[Batch], row_offset: usize, count: usize| {
+        let out = concat_scanned_batches(&schema, batches);
+        assert_eq!(out.num_rows(), count);
+        let col = out.column(1).unwrap().materialize(None).unwrap();
+        let FlatData::MapUtf8(m) = col.data() else {
+            unreachable!();
+        };
+        let offsets = m.offsets();
+        let keys = m.keys();
+        let vals = m.values();
+        let col_nulls = col.nulls();
+        for local_r in 0..count {
+            let global_r = row_offset + local_r;
+            let is_null = col_nulls.is_some_and(|bm| !bm.get(local_r));
+            match &expected_keys[global_r] {
+                None => assert!(is_null, "row {global_r} must be SQL NULL map"),
+                Some(exp_ks) => {
+                    assert!(!is_null, "row {global_r} must be non-NULL map");
+                    let s = offsets[local_r] as usize;
+                    let e = offsets[local_r + 1] as usize;
+                    let mut got_ks: Vec<String> = Vec::with_capacity(e - s);
+                    for idx in s..e {
+                        got_ks.push(
+                            std::str::from_utf8(crate::codec::utf8_bytes_at(keys, idx).unwrap())
+                                .unwrap()
+                                .to_owned(),
+                        );
+                        // Every value in `MapReadMode::KeysOnly` is empty `""` placeholder.
+                        assert_eq!(
+                            crate::codec::utf8_bytes_at(vals, idx).unwrap(),
+                            b"",
+                            "KeysOnly must emit empty string placeholder values"
+                        );
+                    }
+                    got_ks.sort();
+                    assert_eq!(
+                        &got_ks, exp_ks,
+                        "KeysOnly key set mismatch at row {global_r}"
+                    );
+                }
+            }
+        }
+    };
+
+    // Test L1Compact with BOTH 1T and parallel writes, AND L0Fast (unshredded Plain map).
+    for (profile, write_threads) in [
+        (WriteProfile::L1Compact, 1usize),
+        (WriteProfile::L1Compact, 4usize),
+        (WriteProfile::L0Fast, 1usize),
+    ] {
+        let mut opts = WriteOptions::for_table(TableKind::Spans, profile);
+        opts.sort_cols = vec![0];
+        opts.row_group_size = n;
+        opts.mini_block_size = 32;
+        opts.write_threads = write_threads;
+        let mut buf = Vec::new();
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut buf),
+            Arc::clone(&schema),
+            opts,
+            None,
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+
+        let s3 = Arc::new(SimulatedS3Reader::new(
+            Arc::new(SliceReader::new(buf)),
+            SimulatedS3Config::default(),
+        ));
+        let reader =
+            Arc::new(StatamReader::open(Arc::clone(&s3) as Arc<dyn RangeReader>, None).unwrap());
+
+        if profile == WriteProfile::L1Compact {
+            let sm = &reader.meta().schema_meta.shredded_maps[0];
+            let ap = sm.keys.iter().find(|k| k.key == "always_present").unwrap();
+            let aa = sm.keys.iter().find(|k| k.key == "always_absent").unwrap();
+            let mk = sm.keys.iter().find(|k| k.key == "mixed_key").unwrap();
+
+            // Verify exact `BlockEntry.null_count` (absent-from-subcol count) on MB 0!
+            let ap_blk0 = reader.meta().rg_blocks(ap.sub_col_idx as usize, 0)[0];
+            let aa_blk0 = reader.meta().rg_blocks(aa.sub_col_idx as usize, 0)[0];
+            let mk_blk0 = reader.meta().rg_blocks(mk.sub_col_idx as usize, 0)[0];
+            assert_eq!(
+                ap_blk0.null_count, 0,
+                "always_present must have null_count=0 on MB 0 (wt={write_threads})"
+            );
+            assert_eq!(
+                aa_blk0.null_count, 32,
+                "always_absent must have null_count=32 on MB 0 (wt={write_threads})"
+            );
+            assert_eq!(
+                mk_blk0.null_count, 16,
+                "mixed_key must have null_count=16 on MB 0 (wt={write_threads})"
+            );
+
+            // Scan ONLY MB 0 (id BETWEEN 0 AND 31) in Full vs KeysOnly mode and prove 0-byte
+            // skip of `always_present` (null_count==0) and `always_absent` (null_count==32)!
+            let mb0_full_req = ScanRequest {
+                projection: Some(vec![0, 1]),
+                predicates: vec![Predicate::new(
+                    "id",
+                    ZonePred::Between(ZoneValue::I64(0), ZoneValue::I64(31)),
+                )],
+                ..ScanRequest::default()
+            };
+            s3.reset_counters();
+            let _ = reader.scan(&mb0_full_req).unwrap();
+            let full_bytes = s3.counters().bytes_requested;
+
+            let mb0_keys_only_req = ScanRequest {
+                projection: Some(vec![0, 1]),
+                predicates: vec![Predicate::new(
+                    "id",
+                    ZonePred::Between(ZoneValue::I64(0), ZoneValue::I64(31)),
+                )],
+                ..ScanRequest::default()
+            }
+            .with_map_mode("attributes", MapReadMode::KeysOnly);
+            s3.reset_counters();
+            let ko_mb0 = reader.scan(&mb0_keys_only_req).unwrap();
+            let ko_bytes = s3.counters().bytes_requested;
+
+            let skipped_bytes = u64::from(ap_blk0.stored_len) + u64::from(aa_blk0.stored_len);
+            assert!(skipped_bytes > 0);
+            assert!(
+                ko_bytes + skipped_bytes <= full_bytes + 64,
+                "KeysOnly must skip reading always_present & always_absent subcols (ko={ko_bytes}, full={full_bytes}, skipped={skipped_bytes})"
+            );
+            verify_keys_only_batches(&ko_mb0, 0, 32);
+        }
+
+        // Full-file KeysOnly verification (all 4 MBs including ConstNull MB 3, NULL row, `{}` row,
+        // duplicate key row, and rare residual key row) across scan, scan_iter, and 4T!
+        for read_threads in [1usize, 4usize] {
+            let req = ScanRequest {
+                read_threads,
+                ..ScanRequest::default()
+            }
+            .with_map_mode("attributes", MapReadMode::KeysOnly);
+            let scanned = reader.scan(&req).unwrap();
+            verify_keys_only_batches(&scanned, 0, n);
+
+            let mut iter = reader.scan_iter(req).unwrap();
+            let mut streamed = Vec::new();
+            while let Some(b) = iter.next_batch(None, None).unwrap() {
+                streamed.push(b);
+            }
+            verify_keys_only_batches(&streamed, 0, n);
+        }
+    }
+}
+
+#[test]
+fn m35_5_take_rows_with_limits_cancel_and_reservation_oom_rollback() {
+    use cetra_column::GlobalPool;
+
+    let schema = make_spans_schema();
+    let b0 = make_spans_batch(&schema, 0, 128);
+    let b1 = make_spans_batch(&schema, 128, 128);
+
+    let pack_id = [0x55u8; 16];
+    let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+    opts.sort_cols = vec![2];
+    opts.row_group_size = 128;
+    opts.mini_block_size = 32;
+    opts.pack_id = Some(pack_id);
+    let mut pb = ChunkPackBuilder::new(pack_id, test_pack_opts());
+    let mut file_bytes = Vec::new();
+    let mut w = StatamWriter::new(
+        std::io::Cursor::new(&mut file_bytes),
+        Arc::clone(&schema),
+        opts,
+        Some(&mut pb),
+    )
+    .unwrap();
+    w.write_batch(&b0).unwrap();
+    w.write_batch(&b1).unwrap();
+    w.finish().unwrap();
+    let mut pack_bytes = Vec::new();
+    pb.finish(&mut pack_bytes).unwrap();
+
+    let s3 = Arc::new(SimulatedS3Reader::new(
+        Arc::new(SliceReader::new(file_bytes)),
+        SimulatedS3Config::default(),
+    ));
+    let mut resolver = InMemoryPackResolver::new();
+    resolver.insert_bytes(pack_id, pack_bytes).unwrap();
+    let reader = StatamReader::open(
+        Arc::clone(&s3) as Arc<dyn RangeReader>,
+        Some(Arc::new(resolver)),
+    )
+    .unwrap();
+
+    let indices = [0u64, 5, 33, 127, 128, 160, 255];
+
+    // 1. Pre-cancelled CancelToken returns Cancelled with 0 extra GETs and untouched Reservation.
+    let scoped = GlobalPool::standalone(64 * 1024 * 1024);
+    let mut res = scoped.register("take_test", false);
+    res.try_grow(64).unwrap();
+    let before = res.size();
+    s3.reset_counters();
+    let pre_cancel = CancelToken::new();
+    pre_cancel.cancel();
+    let err = reader
+        .take_rows_with_limits(&indices, None, 1, Some(&pre_cancel), Some(&mut res))
+        .unwrap_err();
+    assert!(matches!(err, StatamError::Cancelled));
+    assert_eq!(s3.counters().gets, 0);
+    assert_eq!(res.size(), before);
+
+    // 2. Normal execution reserves exact sum of batch.memory_bytes() and matches take_rows.
+    let batches = reader
+        .take_rows_with_limits(&indices, Some(&[2, 3, 15]), 2, None, Some(&mut res))
+        .unwrap();
+    let expected_mem: usize = batches.iter().map(Batch::memory_bytes).sum();
+    assert!(expected_mem > 0);
+    assert_eq!(res.size(), before + expected_mem);
+    let plain = reader.take_rows(&indices, Some(&[2, 3, 15]), 1).unwrap();
+    assert_eq!(
+        batches.iter().map(Batch::num_rows).sum::<usize>(),
+        indices.len()
+    );
+    assert_eq!(
+        batches.iter().map(Batch::num_rows).sum::<usize>(),
+        plain.iter().map(Batch::num_rows).sum::<usize>()
+    );
+    res.shrink(expected_mem);
+    assert_eq!(res.size(), before);
+
+    // 3. OOM rollback: tiny pool rejects try_grow -> StatamError::MemoryExceeded with full rollback!
+    let tiny_pool = GlobalPool::standalone(256);
+    let mut tiny_res = tiny_pool.register("take_tiny", false);
+    tiny_res.try_grow(32).unwrap();
+    let tiny_before = tiny_res.size();
+    let oom_err = reader
+        .take_rows_with_limits(&indices, None, 1, None, Some(&mut tiny_res))
+        .unwrap_err();
+    assert!(matches!(oom_err, StatamError::MemoryExceeded));
+    assert_eq!(tiny_res.size(), tiny_before);
+
+    // 4. Empty & out-of-bounds indices leave Reservation unchanged.
+    let empty = reader
+        .take_rows_with_limits(&[999_999], None, 1, None, Some(&mut tiny_res))
+        .unwrap();
+    assert!(empty.is_empty());
+    assert_eq!(tiny_res.size(), tiny_before);
+}
+
+#[test]
+fn m35_m1_multiframe_stpk_search_dispatches_on_task_executor() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingExecutor {
+        threads: usize,
+        batch_calls: Arc<AtomicUsize>,
+    }
+
+    impl TaskExecutor for CountingExecutor {
+        fn max_threads(&self) -> usize {
+            self.threads
+        }
+
+        fn run_batch(
+            &self,
+            tasks: Vec<Box<dyn FnOnce() + Send + 'static>>,
+        ) -> Result<(), StatamError> {
+            self.batch_calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::scope(|s| {
+                let handles: Vec<_> = tasks.into_iter().map(|t| s.spawn(t)).collect();
+                for h in handles {
+                    h.join().map_err(|_| StatamError::Corrupt {
+                        reason: "counting executor worker panicked",
+                    })?;
+                }
+                Ok(())
+            })
+        }
+    }
+
+    // Build a single-MB file whose `.stpk` pack has >= 6 compressed frames (all matching
+    // trigram prefix `"COMMON_FRAME_TOK"` so every frame survives trigram pruning and triggers
+    // parallel multi-frame `.stpk` decompression with `read_threads = 4`).
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("input", DataType::Utf8, true),
+    ])
+    .unwrap();
+    let n = 32usize;
+    let ids: Vec<i64> = (0..n as i64).collect();
+    let inputs: Vec<String> = (0..n)
+        .map(|i| {
+            // Distinct 8 KiB payloads so CDC produces >= 16 compressed frames at 16 KiB/frame.
+            let mut body = format!("COMMON_FRAME_TOK_row_{i:03}_");
+            if i % 8 == 0 {
+                body.push_str("TARGET_MATCH_MARKER_");
+            }
+            let filler_ch = (b'a' + (i as u8 % 26)) as char;
+            for j in 0..512 {
+                body.push(filler_ch);
+                body.push_str(&format!("{:02x}", (i * 31 + j * 17) & 0xff));
+            }
+            body
+        })
+        .collect();
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(inputs.iter().map(String::as_str)).unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        n,
+    )
+    .unwrap();
+
+    let pack_id = [0xD1u8; 16];
+    let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+    opts.sort_cols = vec![0];
+    opts.row_group_size = n;
+    opts.mini_block_size = n; // 1 MB so Phase-1 MB loop stays sequential and ONLY .stpk search fans out
+    opts.pack_id = Some(pack_id);
+    let mut pb = ChunkPackBuilder::new(
+        pack_id,
+        PackWriteOptions {
+            codec: Codec::Lz4,
+            target_frame_raw_bytes: 16 * 1024,
+            enable_trigram_skip: true,
+            ..PackWriteOptions::default()
+        },
+    );
+    let mut file_bytes = Vec::new();
+    let mut w = StatamWriter::new(
+        std::io::Cursor::new(&mut file_bytes),
+        Arc::clone(&schema),
+        opts,
+        Some(&mut pb),
+    )
+    .unwrap();
+    w.write_batch(&batch).unwrap();
+    w.finish().unwrap();
+    let mut pack_bytes = Vec::new();
+    pb.finish(&mut pack_bytes).unwrap();
+    let pack = Arc::new(ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes))).unwrap());
+    assert!(
+        pack.toc().frames.len() >= 4,
+        "expected >= 4 compressed frames, got {}",
+        pack.toc().frames.len()
+    );
+
+    let mut resolver = InMemoryPackResolver::new();
+    resolver.insert(pack_id, pack);
+    let reader = StatamReader::open(
+        Arc::new(SliceReader::new(file_bytes)),
+        Some(Arc::new(resolver)),
+    )
+    .unwrap();
+
+    // Test BOTH non-retained path (projection = [0], `scan_chunks_in_frames_parallel_static_cancellable`)
+    // AND retained path (projection = [0, 1], `scan_frames_parallel_static_cancellable`).
+    for (label, proj) in [("non_retained", vec![0]), ("retained", vec![0, 1])] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let exec: Arc<dyn TaskExecutor> = Arc::new(CountingExecutor {
+            threads: 4,
+            batch_calls: Arc::clone(&calls),
+        });
+        let req = ScanRequest {
+            projection: Some(proj),
+            substrings: vec![vec![SubstringQuery::like("input", "COMMON_FRAME_TOK_row_")]],
+            read_threads: 4,
+            executor: Some(exec),
+            ..ScanRequest::default()
+        };
+        let batches = reader.scan(&req).unwrap();
+        let rows: usize = batches.iter().map(Batch::num_rows).sum();
+        assert_eq!(rows, n, "{label} row count mismatch");
+        assert!(
+            calls.load(Ordering::SeqCst) > 0,
+            "M1 ({label}): multi-frame .stpk parallel substring search must dispatch onto TaskExecutor"
+        );
+    }
+}
+
+#[test]
+fn m35_m1_phase1_map_key_filter_with_phase2_keys_only_projection() {
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("attributes", DataType::MapUtf8, true),
+    ])
+    .unwrap();
+
+    let n = 64usize;
+    let ids: Vec<i64> = (0..n as i64).collect();
+    let mut row_nulls = Bitmap::new_ones(n);
+    let mut map_offs = vec![0u32];
+    let mut map_keys: Vec<String> = Vec::new();
+    let mut map_vals: Vec<String> = Vec::new();
+    for r in 0..n {
+        if r == 62 {
+            let _ = row_nulls.set(r, false);
+            map_offs.push(map_keys.len() as u32);
+            continue;
+        }
+        if r == 63 {
+            // Empty `{}` map
+            map_offs.push(map_keys.len() as u32);
+            continue;
+        }
+        map_keys.push("env".to_owned());
+        map_vals.push(if r % 4 == 0 { "prod" } else { "dev" }.to_owned());
+        map_keys.push("svc".to_owned());
+        map_vals.push(format!("svc-{}", r % 3));
+        if r == 4 || r == 12 {
+            map_keys.push("rare_flag".to_owned());
+            map_vals.push("enabled".to_owned());
+        }
+        map_offs.push(map_keys.len() as u32);
+    }
+    let map_data = MapData::try_new(
+        map_offs,
+        Utf8Data::try_from_slices(map_keys.iter().map(String::as_str)).unwrap(),
+        Utf8Data::try_from_slices(map_vals.iter().map(String::as_str)).unwrap(),
+        None,
+    )
+    .unwrap();
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(FlatData::MapUtf8(Box::new(map_data)), Some(row_nulls))
+                    .unwrap(),
+            ),
+        ],
+        n,
+    )
+    .unwrap();
+
+    for profile in [WriteProfile::L1Compact, WriteProfile::L0Fast] {
+        let mut opts = WriteOptions::for_table(TableKind::Spans, profile);
+        opts.sort_cols = vec![0];
+        opts.row_group_size = n;
+        opts.mini_block_size = 32;
+        let mut buf = Vec::new();
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut buf),
+            Arc::clone(&schema),
+            opts,
+            None,
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+
+        let reader = Arc::new(StatamReader::open(Arc::new(SliceReader::new(buf)), None).unwrap());
+        if profile == WriteProfile::L1Compact {
+            assert!(!reader.meta().schema_meta.shredded_maps.is_empty());
+        }
+
+        // Case 1: Phase-1 promoted key filter (`env = 'prod'`) + Phase-2 `KeysOnly` on same map col!
+        let req_promoted = ScanRequest {
+            projection: Some(vec![0, 1]),
+            predicates: vec![Predicate::map_key(
+                "attributes",
+                "env",
+                ZonePred::Eq(ZoneValue::Bytes(b"prod".to_vec())),
+            )],
+            ..ScanRequest::default()
+        }
+        .with_map_mode("attributes", MapReadMode::KeysOnly);
+
+        // Case 2: Phase-1 residual key filter (`rare_flag = 'enabled'`) + Phase-2 `KeysOnly` on same map col!
+        let req_residual = ScanRequest {
+            projection: Some(vec![0, 1]),
+            predicates: vec![Predicate::map_key(
+                "attributes",
+                "rare_flag",
+                ZonePred::Eq(ZoneValue::Bytes(b"enabled".to_vec())),
+            )],
+            ..ScanRequest::default()
+        }
+        .with_map_mode("attributes", MapReadMode::KeysOnly);
+
+        for (label, req, exp_ids) in [
+            (
+                "promoted_key_filter",
+                req_promoted,
+                (0..62i64).filter(|r| r % 4 == 0).collect::<Vec<_>>(),
+            ),
+            ("residual_key_filter", req_residual, vec![4i64, 12]),
+        ] {
+            let scanned = reader.scan(&req).unwrap();
+            let mut iter = reader.scan_iter(req).unwrap();
+            let mut streamed = Vec::new();
+            while let Some(b) = iter.next_batch(None, None).unwrap() {
+                streamed.push(b);
+            }
+            for (mode, batches) in [("scan", &scanned), ("scan_iter", &streamed)] {
+                let out = concat_scanned_batches(&schema, batches);
+                let id_col = out.column(0).unwrap().materialize(None).unwrap();
+                let FlatData::I64(got_ids) = id_col.data() else {
+                    unreachable!();
+                };
+                assert_eq!(
+                    got_ids,
+                    exp_ids.as_slice(),
+                    "{profile:?}/{label}/{mode} ids"
+                );
+
+                let map_col = out.column(1).unwrap().materialize(None).unwrap();
+                let FlatData::MapUtf8(m) = map_col.data() else {
+                    unreachable!();
+                };
+                for (row_pos, &row_id) in got_ids.iter().enumerate() {
+                    assert!(map_col.nulls().is_none_or(|bm| bm.get(row_pos)));
+                    let s = m.offsets()[row_pos] as usize;
+                    let e = m.offsets()[row_pos + 1] as usize;
+                    let mut ks = Vec::new();
+                    for idx in s..e {
+                        ks.push(
+                            std::str::from_utf8(
+                                crate::codec::utf8_bytes_at(m.keys(), idx).unwrap(),
+                            )
+                            .unwrap()
+                            .to_owned(),
+                        );
+                        assert_eq!(
+                            crate::codec::utf8_bytes_at(m.values(), idx).unwrap(),
+                            b"",
+                            "{profile:?}/{label}/{mode} KeysOnly must emit empty values"
+                        );
+                    }
+                    ks.sort();
+                    let mut expected_ks = vec!["env".to_owned(), "svc".to_owned()];
+                    if row_id == 4 || row_id == 12 {
+                        expected_ks.push("rare_flag".to_owned());
+                    }
+                    expected_ks.sort();
+                    assert_eq!(
+                        ks, expected_ks,
+                        "{profile:?}/{label}/{mode} keys at row {row_id}"
+                    );
+                }
             }
         }
     }

@@ -9,11 +9,12 @@ use bytes::Bytes;
 use cetra_column::{Bitmap, Column, DataType, Schema};
 
 use crate::StatamError;
+use crate::codec::dict::FileDict;
 use crate::codec::nested::ShreddedSubCol;
 use crate::codec::{ZonePred, ZoneValue, zone_map_always_matches, zone_map_may_match};
 use crate::format::{
-    BLOCK_FLAG_MIN_MAX_VALID, BLOCK_FRAME_HEADER_LEN, BlockEntry, Codec, Encoding,
-    MAX_BLOCK_RAW_BYTES, read_framed_block_checked_cow,
+    BLOCK_FLAG_HAS_NAN, BLOCK_FLAG_MIN_MAX_VALID, BLOCK_FRAME_HEADER_LEN, BlockEntry, Codec,
+    Encoding, LocalityGroup, MAX_BLOCK_RAW_BYTES, read_framed_block_checked_cow,
 };
 use crate::io::RangeReader;
 use crate::payload::search::extract_ilike_trigram_hashes;
@@ -22,15 +23,24 @@ use crate::simd::trigram::extract_trigram_hashes;
 
 use super::eval::id_lookup_zone_pred;
 use super::{
-    IdLookup, Predicate, REMOTE_SCAN_COALESCE_MAX_GAP, SCAN_COALESCE_MAX_GAP,
-    SCAN_COALESCE_MAX_SPAN, StatamReader, SubstringQuery, TimeRange,
+    FilterExpr, IdLookup, MapReadMode, Predicate, REMOTE_SCAN_COALESCE_MAX_GAP,
+    SCAN_COALESCE_MAX_GAP, SCAN_COALESCE_MAX_SPAN, StatamReader, SubstringQuery, TimeRange,
 };
+
+#[derive(Clone)]
+pub(super) enum ResolvedFilterExpr {
+    Pred { cidx: usize, pred: Predicate },
+    And(Vec<ResolvedFilterExpr>),
+    Or(Vec<ResolvedFilterExpr>),
+    Not(Box<ResolvedFilterExpr>),
+}
 
 pub(super) struct RgIoPlan {
     pub(super) phase1_phys_cols: Vec<usize>,
     pub(super) phase2_only_phys_cols: Vec<usize>,
     pub(super) phase1_map_fast_path: HashSet<(usize, usize)>,
     pub(super) phase2_map_fast_path: HashSet<(usize, usize)>,
+    pub(super) phase2_skip_subcols: HashSet<(usize, usize)>,
 }
 
 impl RgIoPlan {
@@ -260,11 +270,84 @@ impl StatamReader {
         prev_bmax.is_some()
     }
 
+    pub(super) fn resolve_filter_expr(
+        &self,
+        expr: &FilterExpr,
+    ) -> Result<ResolvedFilterExpr, StatamError> {
+        let schema = &self.meta.schema_meta.schema;
+        match expr {
+            FilterExpr::Pred(pred) => {
+                let cidx = schema
+                    .index_of(&pred.column)
+                    .ok_or(StatamError::SchemaMismatch {
+                        reason: "predicate column not found in schema",
+                    })?;
+                if pred.map_key.is_some() && schema.fields()[cidx].data_type != DataType::MapUtf8 {
+                    return Err(StatamError::SchemaMismatch {
+                        reason: "map_key predicate on non-MapUtf8 column",
+                    });
+                }
+                if self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload
+                    && !matches!(pred.pred, ZonePred::IsNull | ZonePred::IsNotNull)
+                {
+                    return Err(StatamError::SchemaMismatch {
+                        reason: "value predicate not supported on ExternalPayload column",
+                    });
+                }
+                Ok(ResolvedFilterExpr::Pred {
+                    cidx,
+                    pred: pred.clone(),
+                })
+            }
+            FilterExpr::And(children) => {
+                let mut out = Vec::with_capacity(children.len());
+                for c in children {
+                    out.push(self.resolve_filter_expr(c)?);
+                }
+                Ok(ResolvedFilterExpr::And(out))
+            }
+            FilterExpr::Or(children) => {
+                let mut out = Vec::with_capacity(children.len());
+                for c in children {
+                    out.push(self.resolve_filter_expr(c)?);
+                }
+                Ok(ResolvedFilterExpr::Or(out))
+            }
+            FilterExpr::Not(inner) => Ok(ResolvedFilterExpr::Not(Box::new(
+                self.resolve_filter_expr(inner)?,
+            ))),
+        }
+    }
+
+    pub(super) fn collect_filter_expr_dict_cols(
+        &self,
+        expr: &ResolvedFilterExpr,
+        out: &mut Vec<usize>,
+    ) {
+        match expr {
+            ResolvedFilterExpr::Pred { cidx, pred } => {
+                out.push(*cidx);
+                if let Some(key) = &pred.map_key
+                    && let Some((sub_pidx, _)) = self.find_shredded_subcol(*cidx, key)
+                {
+                    out.push(sub_pidx);
+                }
+            }
+            ResolvedFilterExpr::And(cs) | ResolvedFilterExpr::Or(cs) => {
+                for c in cs {
+                    self.collect_filter_expr_dict_cols(c, out);
+                }
+            }
+            ResolvedFilterExpr::Not(inner) => self.collect_filter_expr_dict_cols(inner, out),
+        }
+    }
+
     pub(super) fn candidate_rg_range(
         &self,
         time_col_idx: Option<usize>,
         time_range: TimeRange,
         preds: &[(usize, &Predicate)],
+        filter_exprs: &[ResolvedFilterExpr],
     ) -> Vec<usize> {
         let n = self.meta.rg_dir.len();
         if n == 0 {
@@ -291,7 +374,7 @@ impl StatamReader {
             lo_bound = lo_bound.max(time_range.min_ns);
             hi_bound = hi_bound.min(time_range.max_ns);
         }
-        for &(cidx, p) in preds {
+        let mut tighten = |cidx: usize, p: &Predicate| {
             if cidx == sc0_idx && p.map_key.is_none() {
                 match &p.pred {
                     ZonePred::Eq(ZoneValue::I64(v) | ZoneValue::TimestampNs(v)) => {
@@ -320,6 +403,23 @@ impl StatamReader {
                     _ => {}
                 }
             }
+        };
+        for &(cidx, p) in preds {
+            tighten(cidx, p);
+        }
+        fn tighten_expr(expr: &ResolvedFilterExpr, tighten: &mut impl FnMut(usize, &Predicate)) {
+            match expr {
+                ResolvedFilterExpr::Pred { cidx, pred } => tighten(*cidx, pred),
+                ResolvedFilterExpr::And(cs) => {
+                    for c in cs {
+                        tighten_expr(c, tighten);
+                    }
+                }
+                ResolvedFilterExpr::Or(_) | ResolvedFilterExpr::Not(_) => {}
+            }
+        }
+        for expr in filter_exprs {
+            tighten_expr(expr, &mut tighten);
         }
         if lo_bound == i64::MIN && hi_bound == i64::MAX {
             return (0..n).collect();
@@ -381,8 +481,9 @@ impl StatamReader {
         time_range: TimeRange,
         lookups: &[(usize, &IdLookup)],
         preds: &[(usize, &Predicate)],
-        subs: &[(usize, &SubstringQuery)],
-        dict_sub_bitmaps: &[Option<Bitmap>],
+        filter_exprs: &[ResolvedFilterExpr],
+        subs: &[Vec<(usize, SubstringQuery)>],
+        dict_sub_bitmaps: &[Vec<Option<Bitmap>>],
     ) -> Result<Vec<usize>, StatamError> {
         let fields = self.meta.schema_meta.schema.fields();
         let caches = self.caches.lock().unwrap_or_else(|p| p.into_inner());
@@ -447,60 +548,83 @@ impl StatamReader {
             }
 
             if keep {
-                for (sq_idx, &(cidx, sq)) in subs.iter().enumerate() {
-                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
-                    if blk.null_count == blk.row_count {
+                for expr in filter_exprs {
+                    if !filter_expr_may_be_true(&self.meta, rg_idx, mb_idx, expr, &caches.dicts) {
                         keep = false;
                         break;
                     }
-                    if !sq.needle.is_empty() {
-                        if blk.encoding == Encoding::Dict
-                            && let Some(Some(code_bm)) = dict_sub_bitmaps.get(sq_idx)
-                        {
-                            if code_bm.all_zeros() {
-                                keep = false;
-                                break;
-                            }
-                            if (blk.block_flags & BLOCK_FLAG_MIN_MAX_VALID) != 0
-                                && blk.min_inline_len >= 4
-                                && blk.max_inline_len >= 4
+                }
+            }
+
+            if keep {
+                for (cl_idx, clause) in subs.iter().enumerate() {
+                    // Sound CNF OR pruning: a mini-block may ONLY be pruned if EVERY disjunct
+                    // in this clause is pruned or provably empty/ConstNull.
+                    let mut any_disjunct_may_match = false;
+                    for (d_idx, (cidx, sq)) in clause.iter().enumerate() {
+                        let cidx = *cidx;
+                        let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                        if blk.null_count == blk.row_count {
+                            continue;
+                        }
+                        let mut disjunct_ok = true;
+                        if !sq.needle.is_empty() {
+                            let dict_bm = dict_sub_bitmaps
+                                .get(cl_idx)
+                                .and_then(|v| v.get(d_idx))
+                                .and_then(Option::as_ref);
+                            if blk.encoding == Encoding::Dict
+                                && let Some(code_bm) = dict_bm
                             {
-                                let min_code = u32::from_le_bytes([
-                                    blk.min_inline[0],
-                                    blk.min_inline[1],
-                                    blk.min_inline[2],
-                                    blk.min_inline[3],
-                                ]) as usize;
-                                let max_code = u32::from_le_bytes([
-                                    blk.max_inline[0],
-                                    blk.max_inline[1],
-                                    blk.max_inline[2],
-                                    blk.max_inline[3],
-                                ]) as usize;
-                                let hi = max_code.min(code_bm.len().saturating_sub(1));
-                                let any_in_range =
-                                    min_code <= hi && (min_code..=hi).any(|c| code_bm.get(c));
-                                if !any_in_range {
-                                    keep = false;
-                                    break;
+                                if code_bm.all_zeros() {
+                                    disjunct_ok = false;
+                                } else if (blk.block_flags & BLOCK_FLAG_MIN_MAX_VALID) != 0
+                                    && blk.min_inline_len >= 4
+                                    && blk.max_inline_len >= 4
+                                {
+                                    let min_code = u32::from_le_bytes([
+                                        blk.min_inline[0],
+                                        blk.min_inline[1],
+                                        blk.min_inline[2],
+                                        blk.min_inline[3],
+                                    ]) as usize;
+                                    let max_code = u32::from_le_bytes([
+                                        blk.max_inline[0],
+                                        blk.max_inline[1],
+                                        blk.max_inline[2],
+                                        blk.max_inline[3],
+                                    ]) as usize;
+                                    let hi = max_code.min(code_bm.len().saturating_sub(1));
+                                    let any_in_range =
+                                        min_code <= hi && (min_code..=hi).any(|c| code_bm.get(c));
+                                    if !any_in_range {
+                                        disjunct_ok = false;
+                                    }
                                 }
-                            }
-                        } else if let Some(tri_vec) = caches.narrow_trigrams.get(&cidx) {
-                            let global_mb_idx = self.global_mb_idx(cidx, rg_idx, mb_idx);
-                            if let Some(Some(bloom)) = tri_vec.get(global_mb_idx) {
-                                let hashes = if sq.case_insensitive {
-                                    extract_ilike_trigram_hashes(&sq.needle)
-                                } else {
-                                    let mut h = Vec::new();
-                                    extract_trigram_hashes(&sq.needle, false, &mut h);
-                                    h
-                                };
-                                if !hashes.is_empty() && !bloom.may_contain_hashes(&hashes) {
-                                    keep = false;
-                                    break;
+                            } else if let Some(tri_vec) = caches.narrow_trigrams.get(&cidx) {
+                                let global_mb_idx = self.global_mb_idx(cidx, rg_idx, mb_idx);
+                                if let Some(Some(bloom)) = tri_vec.get(global_mb_idx) {
+                                    let hashes = if sq.case_insensitive {
+                                        extract_ilike_trigram_hashes(&sq.needle)
+                                    } else {
+                                        let mut h = Vec::new();
+                                        extract_trigram_hashes(&sq.needle, false, &mut h);
+                                        h
+                                    };
+                                    if !hashes.is_empty() && !bloom.may_contain_hashes(&hashes) {
+                                        disjunct_ok = false;
+                                    }
                                 }
                             }
                         }
+                        if disjunct_ok {
+                            any_disjunct_may_match = true;
+                            break;
+                        }
+                    }
+                    if !any_disjunct_may_match {
+                        keep = false;
+                        break;
                     }
                 }
             }
@@ -527,12 +651,13 @@ impl StatamReader {
         rg_idx: usize,
         surviving_mbs: &[usize],
         proj_indices: &[usize],
-        map_keys_by_col: &HashMap<usize, Vec<String>>,
+        map_proj_by_col: &HashMap<usize, MapReadMode>,
         time_col_idx: Option<usize>,
         time_range: TimeRange,
         lookups: &[(usize, &IdLookup)],
         preds: &[(usize, &Predicate)],
-        subs: &[(usize, &SubstringQuery)],
+        filter_exprs: &[ResolvedFilterExpr],
+        subs: &[Vec<(usize, SubstringQuery)>],
     ) -> RgIoPlan {
         let fields = self.meta.schema_meta.schema.fields();
         let mut phase1_set = BTreeSet::new();
@@ -540,6 +665,7 @@ impl StatamReader {
         let mut phase1_map_fast_path = HashSet::new();
         let mut phase1_needs_residual = HashSet::new();
         let mut phase2_map_fast_path = HashSet::new();
+        let mut phase2_skip_subcols = HashSet::new();
 
         if let Some(tc) = time_col_idx {
             let time_pred = ZonePred::Between(
@@ -558,21 +684,28 @@ impl StatamReader {
         for &(cidx, _) in lookups {
             phase1_set.insert(cidx);
         }
-        for &(cidx, pred) in preds {
-            if let Some(key) = &pred.map_key {
-                if let Some((sub_pidx, res_count)) = self.find_shredded_subcol(cidx, key) {
-                    phase1_set.insert(sub_pidx);
-                    if res_count == 0 {
-                        let mut any_p1_needs_res = false;
-                        for &mb in surviving_mbs {
-                            if self.meta.rg_blocks(cidx, rg_idx)[mb].null_count == 0 {
-                                phase1_map_fast_path.insert((mb, cidx));
-                            } else {
-                                phase1_needs_residual.insert((mb, cidx));
-                                any_p1_needs_res = true;
+        let mut register_pred_p1 =
+            |cidx: usize, pred: &Predicate, allow_always_match_skip: bool| {
+                if let Some(key) = &pred.map_key {
+                    if let Some((sub_pidx, res_count)) = self.find_shredded_subcol(cidx, key) {
+                        phase1_set.insert(sub_pidx);
+                        if res_count == 0 {
+                            let mut any_p1_needs_res = false;
+                            for &mb in surviving_mbs {
+                                if self.meta.rg_blocks(cidx, rg_idx)[mb].null_count == 0 {
+                                    phase1_map_fast_path.insert((mb, cidx));
+                                } else {
+                                    phase1_needs_residual.insert((mb, cidx));
+                                    any_p1_needs_res = true;
+                                }
                             }
-                        }
-                        if any_p1_needs_res {
+                            if any_p1_needs_res {
+                                phase1_set.insert(cidx);
+                            }
+                        } else {
+                            for &mb in surviving_mbs {
+                                phase1_needs_residual.insert((mb, cidx));
+                            }
                             phase1_set.insert(cidx);
                         }
                     } else {
@@ -582,31 +715,49 @@ impl StatamReader {
                         phase1_set.insert(cidx);
                     }
                 } else {
+                    let blks = self.meta.rg_blocks(cidx, rg_idx);
+                    let dt = &fields[cidx].data_type;
+                    let mut any_needed = false;
                     for &mb in surviving_mbs {
-                        phase1_needs_residual.insert((mb, cidx));
-                    }
-                    phase1_set.insert(cidx);
-                }
-            } else {
-                let blks = self.meta.rg_blocks(cidx, rg_idx);
-                let dt = &fields[cidx].data_type;
-                let mut any_needed = false;
-                for &mb in surviving_mbs {
-                    if !zone_map_always_matches(&blks[mb], dt, &pred.pred) {
-                        any_needed = true;
-                        if *dt == DataType::MapUtf8 {
-                            phase1_needs_residual.insert((mb, cidx));
+                        if !allow_always_match_skip
+                            || !zone_map_always_matches(&blks[mb], dt, &pred.pred)
+                        {
+                            any_needed = true;
+                            if *dt == DataType::MapUtf8 {
+                                phase1_needs_residual.insert((mb, cidx));
+                            }
                         }
                     }
+                    if any_needed {
+                        phase1_set.insert(cidx);
+                    }
                 }
-                if any_needed {
-                    phase1_set.insert(cidx);
+            };
+        for &(cidx, pred) in preds {
+            register_pred_p1(cidx, pred, true);
+        }
+        fn walk_filter_expr_p1(
+            expr: &ResolvedFilterExpr,
+            register: &mut impl FnMut(usize, &Predicate, bool),
+        ) {
+            match expr {
+                ResolvedFilterExpr::Pred { cidx, pred } => register(*cidx, pred, false),
+                ResolvedFilterExpr::And(cs) | ResolvedFilterExpr::Or(cs) => {
+                    for c in cs {
+                        walk_filter_expr_p1(c, register);
+                    }
                 }
+                ResolvedFilterExpr::Not(inner) => walk_filter_expr_p1(inner, register),
             }
         }
+        for expr in filter_exprs {
+            walk_filter_expr_p1(expr, &mut register_pred_p1);
+        }
         phase1_map_fast_path.retain(|k| !phase1_needs_residual.contains(k));
-        for &(cidx, _) in subs {
-            phase1_set.insert(cidx);
+        for clause in subs {
+            for (cidx, _) in clause {
+                phase1_set.insert(*cidx);
+            }
         }
 
         for &cidx in proj_indices {
@@ -619,37 +770,66 @@ impl StatamReader {
                     .iter()
                     .find(|s| s.logical_col_idx as usize == cidx)
             {
-                if let Some(req_keys) = map_keys_by_col.get(&cidx) {
-                    let mut all_shredded_zero_res = !req_keys.is_empty();
-                    for rk in req_keys {
-                        if let Some(ke) = sm.keys.iter().find(|k| &k.key == rk) {
-                            phase2_set.insert(ke.sub_col_idx as usize);
-                            if ke.residual_count != 0 {
+                match map_proj_by_col.get(&cidx) {
+                    Some(MapReadMode::Keys(req_keys)) => {
+                        let mut all_shredded_zero_res = !req_keys.is_empty();
+                        for rk in req_keys {
+                            if let Some(ke) = sm.keys.iter().find(|k| &k.key == rk) {
+                                phase2_set.insert(ke.sub_col_idx as usize);
+                                if ke.residual_count != 0 {
+                                    all_shredded_zero_res = false;
+                                }
+                            } else {
                                 all_shredded_zero_res = false;
                             }
-                        } else {
-                            all_shredded_zero_res = false;
                         }
-                    }
-                    if all_shredded_zero_res {
-                        let mut any_needs_residual = false;
-                        for &mb in surviving_mbs {
-                            if self.meta.rg_blocks(cidx, rg_idx)[mb].null_count == 0 {
-                                phase2_map_fast_path.insert((mb, cidx));
-                            } else {
-                                any_needs_residual = true;
+                        if all_shredded_zero_res {
+                            let mut any_needs_residual = false;
+                            for &mb in surviving_mbs {
+                                if self.meta.rg_blocks(cidx, rg_idx)[mb].null_count == 0 {
+                                    phase2_map_fast_path.insert((mb, cidx));
+                                } else {
+                                    any_needs_residual = true;
+                                }
                             }
-                        }
-                        if any_needs_residual {
+                            if any_needs_residual {
+                                phase2_set.insert(cidx);
+                            }
+                        } else {
                             phase2_set.insert(cidx);
                         }
-                    } else {
-                        phase2_set.insert(cidx);
                     }
-                } else {
-                    phase2_set.insert(cidx);
-                    for ke in &sm.keys {
-                        phase2_set.insert(ke.sub_col_idx as usize);
+                    Some(MapReadMode::KeysOnly) => {
+                        // Always schedule residual (stored_len == 0 for Const/ConstNull so 0 I/O
+                        // when empty/all-null; carries rare keys, duplicate spills, and row_nulls).
+                        phase2_set.insert(cidx);
+                        for ke in &sm.keys {
+                            let sub_pidx = ke.sub_col_idx as usize;
+                            let mut any_mb_needs_sub = false;
+                            for &mb in surviving_mbs {
+                                let res_blk = &self.meta.rg_blocks(cidx, rg_idx)[mb];
+                                let sblk = &self.meta.rg_blocks(sub_pidx, rg_idx)[mb];
+                                // 0-byte skip: all-null map row OR key present on every row
+                                // (null_count == 0) OR key absent on every row (null_count == row_count).
+                                if res_blk.encoding == Encoding::ConstNull
+                                    || sblk.null_count == 0
+                                    || sblk.null_count == sblk.row_count
+                                {
+                                    phase2_skip_subcols.insert((mb, sub_pidx));
+                                } else {
+                                    any_mb_needs_sub = true;
+                                }
+                            }
+                            if any_mb_needs_sub {
+                                phase2_set.insert(sub_pidx);
+                            }
+                        }
+                    }
+                    None | Some(MapReadMode::Full) => {
+                        phase2_set.insert(cidx);
+                        for ke in &sm.keys {
+                            phase2_set.insert(ke.sub_col_idx as usize);
+                        }
                     }
                 }
             } else {
@@ -669,6 +849,7 @@ impl StatamReader {
             phase2_only_phys_cols,
             phase1_map_fast_path,
             phase2_map_fast_path,
+            phase2_skip_subcols,
         }
     }
 
@@ -693,6 +874,112 @@ pub(super) fn find_shredded_subcol_in_meta(
         .find(|s| s.logical_col_idx as usize == logical_col)?;
     let ke = sm.keys.iter().find(|k| k.key == key)?;
     Some((ke.sub_col_idx as usize, ke.residual_count))
+}
+
+fn invert_zone_pred_for_3vl(pred: &ZonePred) -> Option<ZonePred> {
+    match pred {
+        ZonePred::Eq(v) => Some(ZonePred::Ne(v.clone())),
+        ZonePred::Ne(v) => Some(ZonePred::Eq(v.clone())),
+        ZonePred::Lt(v) => Some(ZonePred::Ge(v.clone())),
+        ZonePred::Le(v) => Some(ZonePred::Gt(v.clone())),
+        ZonePred::Gt(v) => Some(ZonePred::Le(v.clone())),
+        ZonePred::Ge(v) => Some(ZonePred::Lt(v.clone())),
+        ZonePred::IsNull => Some(ZonePred::IsNotNull),
+        ZonePred::IsNotNull => Some(ZonePred::IsNull),
+        ZonePred::Between(_, _) | ZonePred::In(_) | ZonePred::Prefix(_) => None,
+    }
+}
+
+fn zone_pred_has_nan(pred: &ZonePred) -> bool {
+    match pred {
+        ZonePred::Eq(ZoneValue::F64(v))
+        | ZonePred::Ne(ZoneValue::F64(v))
+        | ZonePred::Lt(ZoneValue::F64(v))
+        | ZonePred::Le(ZoneValue::F64(v))
+        | ZonePred::Gt(ZoneValue::F64(v))
+        | ZonePred::Ge(ZoneValue::F64(v)) => v.is_nan(),
+        _ => false,
+    }
+}
+
+/// Sound 3VL zone-map check: returns `false` ONLY if no row in `(rg_idx, mb_idx)` can
+/// evaluate `expr` to SQL `TRUE`.
+pub(super) fn filter_expr_may_be_true(
+    meta: &super::StatamFileMeta,
+    rg_idx: usize,
+    mb_idx: usize,
+    expr: &ResolvedFilterExpr,
+    dicts: &HashMap<usize, Arc<FileDict>>,
+) -> bool {
+    match expr {
+        ResolvedFilterExpr::Pred { cidx, pred } => {
+            if pred.map_key.is_some() {
+                return true;
+            }
+            let blk = &meta.rg_blocks(*cidx, rg_idx)[mb_idx];
+            let dt = &meta.schema_meta.schema.fields()[*cidx].data_type;
+            zone_map_may_match(
+                blk,
+                dt,
+                meta.col_dir[*cidx].col_flags,
+                &pred.pred,
+                dicts.get(cidx).map(Arc::as_ref),
+            )
+        }
+        ResolvedFilterExpr::And(cs) => cs
+            .iter()
+            .all(|c| filter_expr_may_be_true(meta, rg_idx, mb_idx, c, dicts)),
+        ResolvedFilterExpr::Or(cs) => cs
+            .iter()
+            .any(|c| filter_expr_may_be_true(meta, rg_idx, mb_idx, c, dicts)),
+        ResolvedFilterExpr::Not(inner) => {
+            filter_expr_may_be_false(meta, rg_idx, mb_idx, inner, dicts)
+        }
+    }
+}
+
+/// Sound 3VL zone-map check: returns `false` ONLY if no row in `(rg_idx, mb_idx)` can
+/// evaluate `expr` to SQL `FALSE` (so `NOT expr` can never evaluate to SQL `TRUE`).
+fn filter_expr_may_be_false(
+    meta: &super::StatamFileMeta,
+    rg_idx: usize,
+    mb_idx: usize,
+    expr: &ResolvedFilterExpr,
+    dicts: &HashMap<usize, Arc<FileDict>>,
+) -> bool {
+    match expr {
+        ResolvedFilterExpr::Pred { cidx, pred } => {
+            if pred.map_key.is_some() {
+                return true;
+            }
+            let Some(inv) = invert_zone_pred_for_3vl(&pred.pred) else {
+                return true;
+            };
+            let blk = &meta.rg_blocks(*cidx, rg_idx)[mb_idx];
+            let dt = &meta.schema_meta.schema.fields()[*cidx].data_type;
+            if matches!(dt, DataType::F64)
+                && ((blk.block_flags & BLOCK_FLAG_HAS_NAN) != 0 || zone_pred_has_nan(&pred.pred))
+            {
+                return true;
+            }
+            zone_map_may_match(
+                blk,
+                dt,
+                meta.col_dir[*cidx].col_flags,
+                &inv,
+                dicts.get(cidx).map(Arc::as_ref),
+            )
+        }
+        ResolvedFilterExpr::And(cs) => cs
+            .iter()
+            .any(|c| filter_expr_may_be_false(meta, rg_idx, mb_idx, c, dicts)),
+        ResolvedFilterExpr::Or(cs) => cs
+            .iter()
+            .all(|c| filter_expr_may_be_false(meta, rg_idx, mb_idx, c, dicts)),
+        ResolvedFilterExpr::Not(inner) => {
+            filter_expr_may_be_true(meta, rg_idx, mb_idx, inner, dicts)
+        }
+    }
 }
 
 pub(super) fn fetch_coalesced_blocks(

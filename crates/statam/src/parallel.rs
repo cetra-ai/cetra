@@ -1,14 +1,26 @@
 //! Bounded parallel map helpers (`std::thread::scope` and persistent zero-`unsafe` worker pool)
 //! with deterministic ordering.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use crate::StatamError;
 
-/// Maximum worker threads spawned by [`parallel_map_in_order`] and [`parallel_map_in_order_static`].
+/// Pluggable task executor allowing callers (e.g. `cetra-storage` / `cetra-query`)
+/// to execute Statam's internal parallel batches on an existing shared worker pool
+/// instead of spawning `statam-pool-*` threads.
+pub trait TaskExecutor: Send + Sync {
+    /// Maximum concurrency supported by this executor.
+    fn max_threads(&self) -> usize;
+
+    /// Executes all `tasks` to completion (may run work on the calling thread and/or
+    /// pool worker threads). Returning `Err(_)` aborts waiting and propagates the error.
+    fn run_batch(&self, tasks: Vec<Box<dyn FnOnce() + Send + 'static>>) -> Result<(), StatamError>;
+}
+
+/// Maximum worker threads spawned by [`parallel_map_in_order_static`].
 pub(crate) const MAX_PARALLEL_THREADS: usize = 32;
 
 /// Maximum persistent background worker threads kept in the global [`WorkerPool`]
@@ -21,6 +33,31 @@ const WORKER_SPIN_ITERS: usize = 256;
 
 thread_local! {
     static IN_PARALLEL_SCOPE: Cell<bool> = const { Cell::new(false) };
+    static ACTIVE_EXECUTOR: RefCell<Option<Arc<dyn TaskExecutor>>> = const { RefCell::new(None) };
+}
+
+/// RAII guard restoring the thread-local [`TaskExecutor`] on drop.
+pub(crate) struct ExecutorScopeGuard(Option<Arc<dyn TaskExecutor>>);
+
+impl Drop for ExecutorScopeGuard {
+    fn drop(&mut self) {
+        let prev = self.0.take();
+        ACTIVE_EXECUTOR.with(|cell| {
+            *cell.borrow_mut() = prev;
+        });
+    }
+}
+
+/// Scopes `exec` as the active [`TaskExecutor`] for the current thread until the returned guard drops.
+pub(crate) fn enter_executor_scope(exec: Option<&Arc<dyn TaskExecutor>>) -> ExecutorScopeGuard {
+    let next = exec.cloned();
+    let prev = ACTIVE_EXECUTOR.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), next));
+    ExecutorScopeGuard(prev)
+}
+
+#[inline]
+pub(crate) fn active_executor() -> Option<Arc<dyn TaskExecutor>> {
+    ACTIVE_EXECUTOR.with(|cell| cell.borrow().clone())
 }
 
 /// Returns `true` if the calling thread is already inside a parallel map scope.
@@ -550,13 +587,33 @@ where
         }));
     }
 
-    let workers = threads.min(len);
-    let helpers = workers - 1;
+    let custom_exec = active_executor();
+    let workers = if let Some(ref exec) = custom_exec {
+        threads.min(exec.max_threads().max(1)).min(len)
+    } else {
+        threads.min(len)
+    };
+    if workers <= 1 {
+        let mut items = items;
+        let mut result = None;
+        let _done = run_worker(
+            &ctx,
+            BatchWorker {
+                inner: BatchWorkerInner::Sequential {
+                    items: &mut items,
+                    result: &mut result,
+                },
+            },
+        );
+        return result.unwrap_or(Err(StatamError::Corrupt {
+            reason: "parallel worker missing sequential result",
+        }));
+    }
+
     let mut slots = Vec::with_capacity(len);
     slots.resize_with(len, || None);
 
     let stopped = Arc::new(AtomicBool::new(false));
-    let in_queue = Arc::new(AtomicBool::new(false));
 
     let batch = Arc::new(BatchState {
         ctx,
@@ -571,74 +628,120 @@ where
         },
     });
 
-    let pool = global_pool();
     let run_worker = Arc::new(run_worker);
 
-    let _prune_guard = PoolPruneGuard {
-        pool,
-        stopped: Arc::clone(&stopped),
-        in_queue: Arc::clone(&in_queue),
-    };
-
-    if helpers > 0 {
-        let batch_for_pool = Arc::clone(&batch);
-        let run_worker_for_pool = Arc::clone(&run_worker);
-        let job_run: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(move || {
-            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _done = (run_worker_for_pool)(
-                    &batch_for_pool.ctx,
-                    BatchWorker {
-                        inner: BatchWorkerInner::Parallel {
-                            shared: &batch_for_pool.shared,
-                        },
-                    },
-                );
-            }));
-            if res.is_err() {
-                batch_for_pool
-                    .shared
-                    .panicked
-                    .store(true, Ordering::Release);
-                batch_for_pool.shared.stopped.store(true, Ordering::Release);
-            }
-        });
-        pool.submit(helpers, stopped, in_queue, job_run);
-    }
-
-    // Caller participates as worker #0.
-    let _caller_done = (run_worker)(
-        &batch.ctx,
-        BatchWorker {
-            inner: BatchWorkerInner::Parallel {
-                shared: &batch.shared,
-            },
-        },
-    );
-
-    // Mandatory caller queue fence: any helper that pops an item increments `done_mu` while
-    // holding `queue`, so acquiring `queue`, setting `stopped = true`, and draining unpopped
-    // items makes it impossible for any helper to pop or become active afterwards.
-    {
-        let mut q = batch.shared.queue.lock().unwrap_or_else(|p| p.into_inner());
-        batch.shared.stopped.store(true, Ordering::Release);
-        for _ in q.by_ref() {}
-    }
-    {
-        let mut active = batch
-            .shared
-            .done_mu
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        while *active > 0 {
-            active = batch
-                .shared
-                .done_cv
-                .wait(active)
-                .unwrap_or_else(|p| p.into_inner());
+    if let Some(exec) = custom_exec {
+        struct ExecBatchDrainGuard<'a, I, O> {
+            shared: &'a BatchShared<I, O>,
         }
-    }
 
-    drop(_prune_guard);
+        impl<I, O> Drop for ExecBatchDrainGuard<'_, I, O> {
+            fn drop(&mut self) {
+                let mut q = self.shared.queue.lock().unwrap_or_else(|p| p.into_inner());
+                self.shared.stopped.store(true, Ordering::Release);
+                for _ in q.by_ref() {}
+            }
+        }
+
+        let mut tasks: Vec<Box<dyn FnOnce() + Send + 'static>> = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let batch_for_task = Arc::clone(&batch);
+            let run_worker_for_task = Arc::clone(&run_worker);
+            tasks.push(Box::new(move || {
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _done = (run_worker_for_task)(
+                        &batch_for_task.ctx,
+                        BatchWorker {
+                            inner: BatchWorkerInner::Parallel {
+                                shared: &batch_for_task.shared,
+                            },
+                        },
+                    );
+                }));
+                if res.is_err() {
+                    batch_for_task
+                        .shared
+                        .panicked
+                        .store(true, Ordering::Release);
+                    batch_for_task.shared.stopped.store(true, Ordering::Release);
+                }
+            }));
+        }
+        let _drain_guard = ExecBatchDrainGuard {
+            shared: &batch.shared,
+        };
+        exec.run_batch(tasks)?;
+    } else {
+        let helpers = workers - 1;
+        let in_queue = Arc::new(AtomicBool::new(false));
+        let pool = global_pool();
+
+        let _prune_guard = PoolPruneGuard {
+            pool,
+            stopped: Arc::clone(&stopped),
+            in_queue: Arc::clone(&in_queue),
+        };
+
+        if helpers > 0 {
+            let batch_for_pool = Arc::clone(&batch);
+            let run_worker_for_pool = Arc::clone(&run_worker);
+            let job_run: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(move || {
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _done = (run_worker_for_pool)(
+                        &batch_for_pool.ctx,
+                        BatchWorker {
+                            inner: BatchWorkerInner::Parallel {
+                                shared: &batch_for_pool.shared,
+                            },
+                        },
+                    );
+                }));
+                if res.is_err() {
+                    batch_for_pool
+                        .shared
+                        .panicked
+                        .store(true, Ordering::Release);
+                    batch_for_pool.shared.stopped.store(true, Ordering::Release);
+                }
+            });
+            pool.submit(helpers, stopped, in_queue, job_run);
+        }
+
+        // Caller participates as worker #0.
+        let _caller_done = (run_worker)(
+            &batch.ctx,
+            BatchWorker {
+                inner: BatchWorkerInner::Parallel {
+                    shared: &batch.shared,
+                },
+            },
+        );
+
+        // Mandatory caller queue fence: any helper that pops an item increments `done_mu` while
+        // holding `queue`, so acquiring `queue`, setting `stopped = true`, and draining unpopped
+        // items makes it impossible for any helper to pop or become active afterwards.
+        {
+            let mut q = batch.shared.queue.lock().unwrap_or_else(|p| p.into_inner());
+            batch.shared.stopped.store(true, Ordering::Release);
+            for _ in q.by_ref() {}
+        }
+        {
+            let mut active = batch
+                .shared
+                .done_mu
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            while *active > 0 {
+                active = batch
+                    .shared
+                    .done_cv
+                    .wait(active)
+                    .unwrap_or_else(|p| p.into_inner());
+            }
+        }
+
+        drop(_prune_guard);
+    }
 
     if batch.shared.panicked.load(Ordering::Acquire) {
         return Err(StatamError::Corrupt {
@@ -703,6 +806,7 @@ where
 
 /// Applies `f` across `items` using up to `threads.clamp(1, MAX_PARALLEL_THREADS)` worker threads,
 /// returning outputs in input order or the first [`StatamError`] in input order.
+#[cfg(test)]
 pub(crate) fn parallel_map_in_order<T, R, F>(
     items: Vec<T>,
     threads: usize,

@@ -413,19 +413,19 @@ fn exercise_reader_queries(reader: &StatamReader) {
             .and_then(|sm| sm.keys.first())
             .map(|k| k.key.clone())
             .unwrap_or_else(|| "customer_id".to_owned());
-        let _ = reader.scan(&ScanRequest {
-            map_keys: vec![(map_col.name.clone(), key.clone())],
-            ..Default::default()
-        });
-        let _ = reader.scan(&ScanRequest {
-            predicates: vec![Predicate::map_key(
-                &map_col.name,
-                &key,
-                ZonePred::Eq(ZoneValue::Bytes(b"cust_0".to_vec())),
-            )],
-            map_keys: vec![(map_col.name.clone(), key)],
-            ..Default::default()
-        });
+        let _ = reader
+            .scan(&ScanRequest::default().with_map_keys(map_col.name.clone(), vec![key.clone()]));
+        let _ = reader.scan(
+            &ScanRequest {
+                predicates: vec![Predicate::map_key(
+                    &map_col.name,
+                    &key,
+                    ZonePred::Eq(ZoneValue::Bytes(b"cust_0".to_vec())),
+                )],
+                ..Default::default()
+            }
+            .with_map_keys(map_col.name.clone(), vec![key]),
+        );
     }
 
     if let Some(num_col) = fields.iter().find(|f| {
@@ -448,19 +448,22 @@ fn exercise_reader_queries(reader: &StatamReader) {
 
 fn run_utf8_queries(reader: &StatamReader, col_name: &str) {
     let _ = reader.scan(&ScanRequest {
-        substrings: vec![SubstringQuery::like(col_name, b"err")],
+        substrings: vec![vec![SubstringQuery::like(col_name, b"err")]],
         ..Default::default()
     });
     let _ = reader.scan(&ScanRequest {
-        substrings: vec![SubstringQuery::ilike(col_name, b"PROMPT")],
+        substrings: vec![vec![SubstringQuery::ilike(col_name, b"PROMPT")]],
         ..Default::default()
     });
     let _ = reader.scan(&ScanRequest {
-        substrings: vec![SubstringQuery::ilike(col_name, "Alienación".as_bytes())],
+        substrings: vec![vec![SubstringQuery::ilike(
+            col_name,
+            "Alienación".as_bytes(),
+        )]],
         ..Default::default()
     });
     let _ = reader.scan(&ScanRequest {
-        substrings: vec![SubstringQuery::ilike(col_name, "\u{212A}".as_bytes())],
+        substrings: vec![vec![SubstringQuery::ilike(col_name, "\u{212A}".as_bytes())]],
         ..Default::default()
     });
     let _ = reader.scan(&ScanRequest {

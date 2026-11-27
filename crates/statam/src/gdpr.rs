@@ -2509,11 +2509,11 @@ mod tests {
             };
             let hits = reader
                 .scan(&ScanRequest {
-                    substrings: vec![crate::reader::SubstringQuery {
+                    substrings: vec![vec![crate::reader::SubstringQuery {
                         column: "input".to_owned(),
                         needle,
                         case_insensitive: ci,
-                    }],
+                    }]],
                     ..ScanRequest::default()
                 })
                 .unwrap();

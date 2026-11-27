@@ -22,10 +22,10 @@ use crate::codec::fsst::{
     decode_fsst_utf8_selected_with_flag, decode_fsst_utf8_subchunked, encode_fsst_body,
 };
 use crate::codec::numeric::{
-    decode_const_block, decode_inner_data, decode_plain_map_selected, decode_plain_varlen_selected,
-    decode_rle_block, encode_delta_bitpack_body, encode_for_bitpack_body, encode_plain_body,
-    encode_plain_utf8, read_optional_nulls, read_u32_le_at, try_encode_const_or_null,
-    validate_plain_offsets_raw, write_optional_nulls,
+    decode_const_block, decode_inner_data, decode_plain_map_keys_only, decode_plain_map_selected,
+    decode_plain_varlen_selected, decode_rle_block, encode_delta_bitpack_body,
+    encode_for_bitpack_body, encode_plain_body, encode_plain_utf8, read_optional_nulls,
+    read_u32_le_at, try_encode_const_or_null, validate_plain_offsets_raw, write_optional_nulls,
 };
 use crate::codec::zonemap::{ZoneMapSummary, compute_zone_map, count_col_nulls};
 use crate::codec::{
@@ -1611,6 +1611,418 @@ fn probe_shredded_residual_zstd_len(raw: &[u8]) -> Result<usize, StatamError> {
         })?;
         Ok(compressed.len())
     })
+}
+
+/// Decodes ONLY the `in_map` presence bitmap from a [`ShreddedSubCol`] block, skipping
+/// `value_null` and all `Utf8` value decoding/allocation (used by `MapReadMode::KeysOnly`).
+pub fn decode_shredded_subcol_in_map_only(
+    src: &[u8],
+    row_count: usize,
+) -> Result<Bitmap, StatamError> {
+    if row_count
+        .checked_mul(4)
+        .is_none_or(|b| b > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "shredded subcol row_count exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    let (in_map, _rest) = decode_bitmap_mode(src, row_count)?;
+    Ok(in_map)
+}
+
+/// Decodes ONLY keys and `row_nulls` from a `ShreddedMap` (or `Plain` `MapUtf8`) residual block,
+/// emitting empty `""` placeholder values and skipping all value decoding/copies.
+pub fn decode_shredded_residual_block_keys_only(
+    raw_body: &[u8],
+    entry: &BlockEntry,
+    mask: &Bitmap,
+) -> Result<FlatColumn, StatamError> {
+    if mask.len() != entry.row_count as usize {
+        return Err(StatamError::Corrupt {
+            reason: "selection mask length mismatch",
+        });
+    }
+    if entry.encoding == Encoding::ConstNull || entry.encoding == Encoding::Const {
+        return Ok(decode_const_block(entry, &DataType::MapUtf8)?.materialize(None)?);
+    }
+    let row_count = entry.row_count as usize;
+    if row_count == 0 {
+        if !raw_body.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in empty shredded residual",
+            });
+        }
+        return Ok(FlatColumn::empty(&DataType::MapUtf8));
+    }
+    if entry.encoding == Encoding::Plain {
+        let (nulls, body) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
+        let data = decode_plain_map_keys_only(body, row_count, mask)?;
+        return Ok(FlatColumn::try_new(data, nulls)?);
+    }
+    if entry.encoding != Encoding::ShreddedMap {
+        return Err(StatamError::Corrupt {
+            reason: "incompatible encoding for ShreddedMap residual block",
+        });
+    }
+
+    let mut budget = MAX_BLOCK_RAW_BYTES;
+    let parsed =
+        parse_shredded_residual_parts_lazy(raw_body, row_count, entry.block_flags, &mut budget)?;
+    if parsed.entry_count == 0 {
+        return Ok(FlatColumn::try_new(
+            FlatData::MapUtf8(Box::new(empty_map_with_rows(row_count)?)),
+            parsed.row_nulls,
+        )?);
+    }
+
+    if mask.all_ones() || mask.count_ones().saturating_mul(16) >= row_count {
+        let mut key_codes = Vec::with_capacity(parsed.entry_count);
+        unpack_u32(
+            parsed.kcode_packed,
+            parsed.entry_count,
+            parsed.kcode_bw,
+            &mut key_codes,
+        )?;
+        for &c in &key_codes {
+            if (c as usize) >= parsed.num_keys {
+                return Err(StatamError::Corrupt {
+                    reason: "shredded residual key code out of bounds",
+                });
+            }
+        }
+        let key_dict = Utf8Data::try_new(parsed.key_offsets, parsed.keys_blob.to_vec())?;
+        let keys_mat_bytes = sum_varlen_take_bytes(key_dict.offsets(), &key_codes, None, budget)?;
+        let keys_offs_bytes = parsed
+            .entry_count
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "shredded key offsets overflow",
+            })?;
+        debit_budget(
+            &mut budget,
+            keys_mat_bytes
+                .checked_add(keys_offs_bytes)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "shredded key bytes overflow",
+                })?,
+            "shredded residual keys exceed MAX_BLOCK_RAW_BYTES",
+        )?;
+        let keys_data = key_dict.take(&key_codes, None)?;
+        let vals_data = Utf8Data::try_new(vec![0u32; parsed.entry_count + 1], Vec::new())?;
+        let map = MapData::try_new(parsed.offsets, keys_data, vals_data, None)?;
+        return Ok(FlatColumn::try_new(
+            FlatData::MapUtf8(Box::new(map)),
+            parsed.row_nulls,
+        )?);
+    }
+
+    let mut selected_entries = 0usize;
+    for row in mask.iter_ones() {
+        if row >= row_count {
+            break;
+        }
+        selected_entries = selected_entries
+            .saturating_add((parsed.offsets[row + 1] - parsed.offsets[row]) as usize);
+    }
+    let bulk_key_codes: Option<Vec<u32>> =
+        if selected_entries > 0 && selected_entries.saturating_mul(64) >= parsed.entry_count {
+            let mut codes = Vec::with_capacity(parsed.entry_count);
+            unpack_u32(
+                parsed.kcode_packed,
+                parsed.entry_count,
+                parsed.kcode_bw,
+                &mut codes,
+            )?;
+            Some(codes)
+        } else {
+            None
+        };
+
+    let mut out_offsets = Vec::with_capacity(row_count + 1);
+    out_offsets.push(0u32);
+    let mut out_key_offsets = Vec::with_capacity(selected_entries.saturating_add(1));
+    out_key_offsets.push(0u32);
+    let mut out_key_bytes = Vec::new();
+    let mut out_entry_count = 0usize;
+
+    for row in mask.iter_ones() {
+        if row >= row_count {
+            break;
+        }
+        let cur_entries = out_entry_count as u32;
+        if out_offsets.len() <= row {
+            out_offsets.resize(row + 1, cur_entries);
+        }
+        let rs = parsed.offsets[row] as usize;
+        let re = parsed.offsets[row + 1] as usize;
+        for idx in rs..re {
+            let kc = match &bulk_key_codes {
+                Some(codes) => codes[idx] as usize,
+                None => unpack_u32_at(
+                    parsed.kcode_packed,
+                    parsed.entry_count,
+                    parsed.kcode_bw,
+                    idx,
+                )? as usize,
+            };
+            if kc >= parsed.num_keys {
+                return Err(StatamError::Corrupt {
+                    reason: "shredded residual key code out of bounds",
+                });
+            }
+            let ks = parsed.key_offsets[kc] as usize;
+            let ke = parsed.key_offsets[kc + 1] as usize;
+            let klen = ke - ks;
+            if out_key_bytes.len().saturating_add(klen) > MAX_BLOCK_RAW_BYTES {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "shredded residual keys exceed MAX_BLOCK_RAW_BYTES",
+                });
+            }
+            out_key_bytes.extend_from_slice(&parsed.keys_blob[ks..ke]);
+            out_key_offsets.push(out_key_bytes.len() as u32);
+            out_entry_count += 1;
+        }
+        out_offsets.push(out_entry_count as u32);
+    }
+    let tail_entries = out_entry_count as u32;
+    if out_offsets.len() < row_count + 1 {
+        out_offsets.resize(row_count + 1, tail_entries);
+    }
+
+    let keys_data = Utf8Data::try_new(out_key_offsets, out_key_bytes)?;
+    let vals_data = Utf8Data::try_new(vec![0u32; out_entry_count + 1], Vec::new())?;
+    let map = MapData::try_new(out_offsets, keys_data, vals_data, None)?;
+    Ok(FlatColumn::try_new(
+        FlatData::MapUtf8(Box::new(map)),
+        parsed.row_nulls,
+    )?)
+}
+
+/// Replaces all values in a decoded `MapUtf8` [`FlatColumn`] with empty `""` placeholder
+/// strings while preserving exact keys, offsets, and row validity (`NULL` map vs `{}`).
+pub(crate) fn strip_map_values_to_keys_only(
+    map_col: &FlatColumn,
+) -> Result<FlatColumn, StatamError> {
+    let FlatData::MapUtf8(map) = map_col.data() else {
+        return Err(StatamError::SchemaMismatch {
+            reason: "strip_map_values_to_keys_only expects MapUtf8",
+        });
+    };
+    let entry_count = map.entry_count();
+    let vals = Utf8Data::try_new(vec![0u32; entry_count + 1], Vec::new())?;
+    let stripped = MapData::try_new(map.offsets().to_vec(), map.keys().clone(), vals, None)?;
+    Ok(FlatColumn::try_new(
+        FlatData::MapUtf8(Box::new(stripped)),
+        map_col.nulls().cloned(),
+    )?)
+}
+
+/// Reconstructs a keys-only `MapUtf8` [`FlatColumn`] (with empty `""` placeholder values)
+/// from an optional residual map and promoted key `in_map` presence bitmaps, preserving
+/// exact `row_nulls` (`NULL` map vs `{}` empty map) and merging sorted promoted keys with
+/// residual keys.
+pub fn unshred_map_keys_only_selected(
+    row_count: usize,
+    row_nulls: Option<&Bitmap>,
+    residual: Option<&FlatColumn>,
+    sub_in_maps: &[(&str, &Bitmap)],
+    mask: &Bitmap,
+) -> Result<FlatColumn, StatamError> {
+    if mask.len() != row_count {
+        return Err(StatamError::Corrupt {
+            reason: "selection mask length mismatch",
+        });
+    }
+    if let Some(bm) = row_nulls
+        && bm.len() != row_count
+    {
+        return Err(StatamError::Corrupt {
+            reason: "unshred_map_keys_only row_nulls length mismatch",
+        });
+    }
+    for &(_, bm) in sub_in_maps {
+        if bm.len() != row_count {
+            return Err(StatamError::Corrupt {
+                reason: "shredded sub-column in_map length mismatch",
+            });
+        }
+    }
+
+    let res_ref = match residual {
+        Some(fc) => {
+            if fc.len() != row_count {
+                return Err(StatamError::Corrupt {
+                    reason: "shredded residual row count mismatch",
+                });
+            }
+            let FlatData::MapUtf8(m) = fc.data() else {
+                return Err(StatamError::SchemaMismatch {
+                    reason: "shredded residual is not MapUtf8",
+                });
+            };
+            Some((
+                m.offsets(),
+                FastUtf8Ref::new(m.keys())?,
+                fc.nulls(),
+                m.entry_count(),
+                m.keys().bytes().len(),
+            ))
+        }
+        None => None,
+    };
+
+    // Drop all-zero promoted keys upfront; remember all-ones keys to skip per-row bit checks.
+    struct KeyBitView<'a> {
+        key: &'a str,
+        in_map: &'a Bitmap,
+        all_ones: bool,
+    }
+    let mut key_views = Vec::with_capacity(sub_in_maps.len());
+    for &(key, bm) in sub_in_maps {
+        if bm.all_zeros() {
+            continue;
+        }
+        key_views.push(KeyBitView {
+            key,
+            in_map: bm,
+            all_ones: bm.all_ones(),
+        });
+    }
+
+    let sparse = !mask.all_ones() && mask.count_ones().saturating_mul(16) < row_count;
+    let mut out_offsets = Vec::with_capacity(row_count + 1);
+    out_offsets.push(0u32);
+    let mut out_key_offs = vec![0u32];
+    let mut out_key_bytes = Vec::new();
+    let mut out_nulls: Option<Bitmap> = None;
+
+    let push_key = |k: &str,
+                    out_key_offs: &mut Vec<u32>,
+                    out_key_bytes: &mut Vec<u8>|
+     -> Result<(), StatamError> {
+        out_key_bytes.extend_from_slice(k.as_bytes());
+        let end = u32::try_from(out_key_bytes.len()).map_err(|_| StatamError::BoundsExceeded {
+            reason: "unshred_map_keys_only key bytes exceed u32::MAX",
+        })?;
+        out_key_offs.push(end);
+        Ok(())
+    };
+
+    let merge_row_keys = |row: usize,
+                          out_key_offs: &mut Vec<u32>,
+                          out_key_bytes: &mut Vec<u8>|
+     -> Result<(), StatamError> {
+        let (res_start, res_end) = match res_ref {
+            Some((offs, _, _, _, _)) => (offs[row] as usize, offs[row + 1] as usize),
+            None => (0, 0),
+        };
+        if res_start == res_end {
+            for kv in &key_views {
+                if kv.all_ones || kv.in_map.get(row) {
+                    push_key(kv.key, out_key_offs, out_key_bytes)?;
+                }
+            }
+            return Ok(());
+        }
+        let Some((_, res_keys, _, _, _)) = res_ref else {
+            return Ok(());
+        };
+        let mut p_idx = 0usize;
+        let mut r_idx = res_start;
+        while p_idx < key_views.len() && r_idx < res_end {
+            let kv = &key_views[p_idx];
+            if !kv.all_ones && !kv.in_map.get(row) {
+                p_idx += 1;
+                continue;
+            }
+            let pk = kv.key;
+            let rk = res_keys.get(r_idx).unwrap_or("");
+            if pk <= rk {
+                push_key(pk, out_key_offs, out_key_bytes)?;
+                p_idx += 1;
+            } else {
+                push_key(rk, out_key_offs, out_key_bytes)?;
+                r_idx += 1;
+            }
+        }
+        while p_idx < key_views.len() {
+            let kv = &key_views[p_idx];
+            if kv.all_ones || kv.in_map.get(row) {
+                push_key(kv.key, out_key_offs, out_key_bytes)?;
+            }
+            p_idx += 1;
+        }
+        while r_idx < res_end {
+            let rk = res_keys.get(r_idx).unwrap_or("");
+            push_key(rk, out_key_offs, out_key_bytes)?;
+            r_idx += 1;
+        }
+        Ok(())
+    };
+
+    if sparse {
+        for row in mask.iter_ones() {
+            if row >= row_count {
+                break;
+            }
+            let cur_entries = (out_key_offs.len() - 1) as u32;
+            if out_offsets.len() <= row {
+                out_offsets.resize(row + 1, cur_entries);
+            }
+            let is_row_null = row_nulls.is_some_and(|bm| !bm.get(row))
+                || res_ref
+                    .is_some_and(|(_, _, rnulls, _, _)| rnulls.is_some_and(|bm| !bm.get(row)));
+            if is_row_null {
+                let bm = out_nulls.get_or_insert_with(|| Bitmap::new_ones(row_count));
+                let _ = bm.set(row, false);
+                out_offsets.push(cur_entries);
+                continue;
+            }
+            merge_row_keys(row, &mut out_key_offs, &mut out_key_bytes)?;
+            let end_u32 =
+                u32::try_from(out_key_offs.len() - 1).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "unshred_map_keys_only entry count exceeds u32::MAX",
+                })?;
+            out_offsets.push(end_u32);
+        }
+        let tail_entries = (out_key_offs.len() - 1) as u32;
+        if out_offsets.len() < row_count + 1 {
+            out_offsets.resize(row_count + 1, tail_entries);
+        }
+    } else {
+        let has_any_row_nulls = row_nulls.is_some_and(|bm| !bm.all_ones())
+            || res_ref.is_some_and(|(_, _, rnulls, _, _)| rnulls.is_some_and(|bm| !bm.all_ones()));
+        for row in 0..row_count {
+            if has_any_row_nulls {
+                let is_row_null = row_nulls.is_some_and(|bm| !bm.get(row))
+                    || res_ref
+                        .is_some_and(|(_, _, rnulls, _, _)| rnulls.is_some_and(|bm| !bm.get(row)));
+                if is_row_null {
+                    let bm = out_nulls.get_or_insert_with(|| Bitmap::new_ones(row_count));
+                    let _ = bm.set(row, false);
+                    out_offsets.push((out_key_offs.len() - 1) as u32);
+                    continue;
+                }
+            }
+            merge_row_keys(row, &mut out_key_offs, &mut out_key_bytes)?;
+            let end_u32 =
+                u32::try_from(out_key_offs.len() - 1).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "unshred_map_keys_only entry count exceeds u32::MAX",
+                })?;
+            out_offsets.push(end_u32);
+        }
+    }
+
+    let entry_count = out_key_offs.len() - 1;
+    let keys_data = Utf8Data::try_new(out_key_offs, out_key_bytes)?;
+    let vals_data = Utf8Data::try_new(vec![0u32; entry_count + 1], Vec::new())?;
+    let map = MapData::try_new(out_offsets, keys_data, vals_data, None)?;
+    Ok(FlatColumn::try_new(
+        FlatData::MapUtf8(Box::new(map)),
+        out_nulls,
+    )?)
 }
 
 /// Decodes a `ShreddedMap` residual block into a `MapUtf8` [`FlatColumn`].

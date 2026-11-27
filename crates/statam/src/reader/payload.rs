@@ -6,15 +6,16 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cetra_column::{
-    Batch, BinaryData, Bitmap, Column, DataType, FlatColumn, FlatData, ScalarValue, Schema,
-    Selection, Utf8Data,
+    Batch, BinaryData, Bitmap, CancelToken, Column, DataType, FlatColumn, FlatData, ScalarValue,
+    Schema, Selection, Utf8Data,
 };
 
 use crate::StatamError;
 use crate::codec::decode_mini_block_take;
 use crate::codec::dict::FileDict;
 use crate::codec::nested::{
-    ShreddedSubCol, decode_shredded_residual_block_selected, decode_shredded_subcol_selected,
+    decode_shredded_residual_block_keys_only, decode_shredded_residual_block_selected,
+    decode_shredded_subcol_in_map_only, decode_shredded_subcol_selected,
 };
 use crate::format::{
     BlockEntry, ChunkLoc, Codec, Encoding, LocalityGroup, MAX_BATCH_DECODED_BYTES,
@@ -22,7 +23,7 @@ use crate::format::{
     read_framed_pack_frame,
 };
 use crate::parallel::{
-    MAX_PARALLEL_THREADS, in_parallel_scope, parallel_map_in_order, parallel_map_in_order_static,
+    MAX_PARALLEL_THREADS, in_parallel_scope, parallel_map_in_order_static,
     parallel_map_in_order_static_with_ctx,
 };
 use crate::payload::pack::ChunkPackReader;
@@ -37,12 +38,12 @@ use crate::writer::{L0_LOCAL_PACK_IDX, L0_PAYLOAD_DIR_MAGIC};
 
 use super::eval::Utf8Matcher;
 use super::materialize::{
-    build_shredded_map_col_with_meta, decode_uncached_p2_non_payload_col_with_meta,
+    DecodedSubCol, build_shredded_map_col_with_meta, decode_uncached_p2_non_payload_col_with_meta,
     mask_from_indices, materialize_cached_p1_col_with_meta,
 };
 use super::meta::StatamFileMeta;
 use super::plan::{ActiveMiniBlock, BlockCacheReader, DecodedPhase1, RgIoPlan, TouchedMbRows};
-use super::{StatamReader, effective_read_threads};
+use super::{MapReadMode, StatamReader, effective_read_threads};
 
 /// Maximum projected `ExternalPayload` bytes resolved in a single Phase-2 wave (`128 MiB`).
 pub(super) const PHASE2_PAYLOAD_WAVE_TARGET_BYTES: usize = MAX_BATCH_DECODED_BYTES / 2;
@@ -334,7 +335,7 @@ impl StatamReader {
         plan: &Arc<RgIoPlan>,
         proj_indices: &[usize],
         proj_schema: &Arc<Schema>,
-        map_keys_by_col: &Arc<HashMap<usize, Vec<String>>>,
+        map_proj_by_col: &Arc<HashMap<usize, MapReadMode>>,
         l0_local: Option<&Arc<ParsedL0Payload>>,
         pre_resolved: &HashMap<([u8; 16], u32), Bytes>,
         read_block: &BlockCacheReader,
@@ -354,7 +355,7 @@ impl StatamReader {
                 plan,
                 proj_indices,
                 proj_schema,
-                map_keys_by_col,
+                map_proj_by_col,
                 &ResolvedChunks::empty(),
                 read_block,
                 read_threads,
@@ -401,7 +402,7 @@ impl StatamReader {
                         by_pack,
                         &col_decoded,
                         proj_schema,
-                        map_keys_by_col,
+                        map_proj_by_col,
                         l0_local.map(Arc::clone),
                         pre_resolved,
                         read_block,
@@ -421,7 +422,7 @@ impl StatamReader {
                     plan,
                     proj_indices,
                     proj_schema,
-                    map_keys_by_col,
+                    map_proj_by_col,
                     &resolved,
                     read_block,
                     read_threads,
@@ -471,7 +472,7 @@ impl StatamReader {
                         plan,
                         proj_indices,
                         proj_schema,
-                        map_keys_by_col,
+                        map_proj_by_col,
                         &resolved,
                         read_block,
                         read_threads,
@@ -1314,7 +1315,7 @@ impl StatamReader {
         by_pack: Vec<(u16, Vec<u32>)>,
         col_decoded: &[usize],
         proj_schema: &Arc<Schema>,
-        map_keys_by_col: &Arc<HashMap<usize, Vec<String>>>,
+        map_proj_by_col: &Arc<HashMap<usize, MapReadMode>>,
         l0_local: Option<Arc<ParsedL0Payload>>,
         pre_resolved: &HashMap<([u8; 16], u32), Bytes>,
         read_block: &BlockCacheReader,
@@ -1338,9 +1339,11 @@ impl StatamReader {
             },
             ShreddedSub {
                 sub_pidx: usize,
+                in_map_only: bool,
             },
             ShreddedResidual {
                 cidx: usize,
+                keys_only: bool,
             },
             IndepCol {
                 cidx: usize,
@@ -1356,7 +1359,7 @@ impl StatamReader {
         enum Stage1Out {
             PackChunks(u16, Vec<(u32, Bytes)>),
             L0Chunks(Vec<(u32, Bytes)>),
-            ShreddedSub(usize, ShreddedSubCol),
+            ShreddedSub(usize, DecodedSubCol),
             ShreddedResidual(usize, FlatColumn),
             IndepCol(usize, Column),
         }
@@ -1368,8 +1371,8 @@ impl StatamReader {
             block_reader: BlockCacheReader,
             mask: Arc<Bitmap>,
             plan: Arc<RgIoPlan>,
-            map_keys: Arc<HashMap<usize, Vec<String>>>,
-            empty_subs: HashMap<usize, ShreddedSubCol>,
+            map_proj: Arc<HashMap<usize, MapReadMode>>,
+            empty_subs: HashMap<usize, DecodedSubCol>,
             rg_idx: usize,
             mb_idx: usize,
             mb_row_count: usize,
@@ -1397,8 +1400,8 @@ impl StatamReader {
             mb_row_count: usize,
             mask: &Bitmap,
             plan: &RgIoPlan,
-            map_keys_by_col: &HashMap<usize, Vec<String>>,
-            decoded_subs: &HashMap<usize, ShreddedSubCol>,
+            map_proj_by_col: &HashMap<usize, MapReadMode>,
+            decoded_subs: &HashMap<usize, DecodedSubCol>,
             resolved_chunks: &ResolvedChunks,
             block_reader: &BlockCacheReader,
             task: StageBTask,
@@ -1452,7 +1455,7 @@ impl StatamReader {
                             cached,
                             plan,
                             mb_idx,
-                            map_keys_by_col,
+                            map_proj_by_col,
                             decoded_subs,
                         )?
                     } else if let Some(sm) = meta
@@ -1461,19 +1464,34 @@ impl StatamReader {
                         .iter()
                         .find(|s| s.logical_col_idx as usize == cidx)
                     {
+                        let keys_only =
+                            matches!(map_proj_by_col.get(&cidx), Some(MapReadMode::KeysOnly));
+                        let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                        if keys_only && blk.encoding == Encoding::ConstNull {
+                            return Ok((
+                                cidx,
+                                Column::try_new_const(
+                                    ScalarValue::Null(DataType::MapUtf8),
+                                    mb_row_count,
+                                )?,
+                            ));
+                        }
                         let skip_residual = plan.phase2_map_fast_path.contains(&(mb_idx, cidx));
                         let residual_flat = if skip_residual {
                             None
                         } else if let Some(pre) = pre_residual {
                             Some(pre)
                         } else {
-                            let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
                             let raw = if blk.stored_len > 0 {
                                 block_reader.read_block(blk)?
                             } else {
                                 Cow::Borrowed(&[][..])
                             };
-                            Some(decode_shredded_residual_block_selected(&raw, blk, mask)?)
+                            Some(if keys_only {
+                                decode_shredded_residual_block_keys_only(&raw, blk, mask)?
+                            } else {
+                                decode_shredded_residual_block_selected(&raw, blk, mask)?
+                            })
                         };
                         build_shredded_map_col_with_meta(
                             mb_row_count,
@@ -1482,7 +1500,7 @@ impl StatamReader {
                             skip_residual,
                             residual_flat.as_ref(),
                             mask,
-                            map_keys_by_col,
+                            map_proj_by_col,
                             decoded_subs,
                         )?
                     } else {
@@ -1494,7 +1512,7 @@ impl StatamReader {
                             cidx,
                             mask,
                             plan,
-                            map_keys_by_col,
+                            map_proj_by_col,
                             decoded_subs,
                             None,
                             block_reader,
@@ -1596,8 +1614,8 @@ impl StatamReader {
         // 2. Extract P1-cached shredded sub-columns first, then enqueue uncached sub-columns.
         let fields = self.meta.schema_meta.schema.fields();
         let mb_row_count = self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
-        let mut decoded_subs: HashMap<usize, ShreddedSubCol> = HashMap::new();
-        let mut uncached_subs: Vec<usize> = Vec::new();
+        let mut decoded_subs: HashMap<usize, DecodedSubCol> = HashMap::new();
+        let mut uncached_subs: Vec<(usize, bool)> = Vec::new();
         for &cidx in proj_indices {
             if fields[cidx].data_type == DataType::MapUtf8
                 && let Some(sm) = self
@@ -1607,32 +1625,89 @@ impl StatamReader {
                     .iter()
                     .find(|s| s.logical_col_idx as usize == cidx)
             {
-                let keys_needed: Vec<&str> = match map_keys_by_col.get(&cidx) {
-                    Some(req_keys) => req_keys.iter().map(String::as_str).collect(),
-                    None => sm.keys.iter().map(|k| k.key.as_str()).collect(),
-                };
-                for ke in &sm.keys {
-                    if !keys_needed.contains(&ke.key.as_str()) {
-                        continue;
+                let mode = map_proj_by_col.get(&cidx).unwrap_or(&MapReadMode::Full);
+                match mode {
+                    MapReadMode::KeysOnly => {
+                        let res_blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                        if res_blk.encoding == Encoding::ConstNull {
+                            continue;
+                        }
+                        for ke in &sm.keys {
+                            let sub_pidx = ke.sub_col_idx as usize;
+                            if decoded_subs.contains_key(&sub_pidx)
+                                || uncached_subs.iter().any(|&(p, _)| p == sub_pidx)
+                            {
+                                continue;
+                            }
+                            let sblk = &self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
+                            if sblk.null_count == 0 {
+                                decoded_subs.insert(
+                                    sub_pidx,
+                                    DecodedSubCol::InMapOnly(Bitmap::new_ones(mb_row_count)),
+                                );
+                            } else if sblk.null_count == sblk.row_count {
+                                decoded_subs.insert(
+                                    sub_pidx,
+                                    DecodedSubCol::InMapOnly(Bitmap::new_zeroed(mb_row_count)),
+                                );
+                            } else if let Some(DecodedPhase1::ShreddedSub(sub)) =
+                                decoded_p1.remove(&sub_pidx)
+                            {
+                                decoded_subs.insert(sub_pidx, DecodedSubCol::Full(sub));
+                            } else {
+                                uncached_subs.push((sub_pidx, true));
+                            }
+                        }
                     }
-                    let sub_pidx = ke.sub_col_idx as usize;
-                    if decoded_subs.contains_key(&sub_pidx) || uncached_subs.contains(&sub_pidx) {
-                        continue;
+                    MapReadMode::Keys(req_keys) => {
+                        for ke in &sm.keys {
+                            if !req_keys.iter().any(|rk| rk == &ke.key) {
+                                continue;
+                            }
+                            let sub_pidx = ke.sub_col_idx as usize;
+                            if decoded_subs.contains_key(&sub_pidx)
+                                || uncached_subs.iter().any(|&(p, _)| p == sub_pidx)
+                            {
+                                continue;
+                            }
+                            if let Some(DecodedPhase1::ShreddedSub(sub)) =
+                                decoded_p1.remove(&sub_pidx)
+                            {
+                                decoded_subs.insert(sub_pidx, DecodedSubCol::Full(sub));
+                            } else {
+                                uncached_subs.push((sub_pidx, false));
+                            }
+                        }
                     }
-                    if let Some(DecodedPhase1::ShreddedSub(sub)) = decoded_p1.remove(&sub_pidx) {
-                        decoded_subs.insert(sub_pidx, sub);
-                    } else {
-                        uncached_subs.push(sub_pidx);
+                    MapReadMode::Full => {
+                        for ke in &sm.keys {
+                            let sub_pidx = ke.sub_col_idx as usize;
+                            if decoded_subs.contains_key(&sub_pidx)
+                                || uncached_subs.iter().any(|&(p, _)| p == sub_pidx)
+                            {
+                                continue;
+                            }
+                            if let Some(DecodedPhase1::ShreddedSub(sub)) =
+                                decoded_p1.remove(&sub_pidx)
+                            {
+                                decoded_subs.insert(sub_pidx, DecodedSubCol::Full(sub));
+                            } else {
+                                uncached_subs.push((sub_pidx, false));
+                            }
+                        }
                     }
                 }
             }
         }
-        for sub_pidx in uncached_subs {
+        for (sub_pidx, in_map_only) in uncached_subs {
             let work_len = self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx].raw_len as usize;
             stage1_work_bytes = stage1_work_bytes.saturating_add(work_len);
             stage1_tasks.push(Stage1TaskItem {
                 work_len,
-                task: Stage1Task::ShreddedSub { sub_pidx },
+                task: Stage1Task::ShreddedSub {
+                    sub_pidx,
+                    in_map_only,
+                },
             });
         }
 
@@ -1655,14 +1730,19 @@ impl StatamReader {
                     .any(|s| s.logical_col_idx as usize == cidx);
             if is_shredded_map {
                 if seen_shredded_res.insert(cidx) {
+                    let keys_only =
+                        matches!(map_proj_by_col.get(&cidx), Some(MapReadMode::KeysOnly));
                     let skip_residual = plan.phase2_map_fast_path.contains(&(mb_idx, cidx));
                     let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
-                    if !skip_residual && blk.stored_len > 0 {
+                    if !skip_residual
+                        && !(keys_only && blk.encoding == Encoding::ConstNull)
+                        && blk.stored_len > 0
+                    {
                         let work_len = blk.raw_len as usize;
                         stage1_work_bytes = stage1_work_bytes.saturating_add(work_len);
                         stage1_tasks.push(Stage1TaskItem {
                             work_len,
-                            task: Stage1Task::ShreddedResidual { cidx },
+                            task: Stage1Task::ShreddedResidual { cidx, keys_only },
                         });
                     }
                 }
@@ -1705,7 +1785,7 @@ impl StatamReader {
             block_reader: read_block.clone(),
             mask: Arc::clone(&mask),
             plan: Arc::clone(plan),
-            map_keys: Arc::clone(map_keys_by_col),
+            map_proj: Arc::clone(map_proj_by_col),
             empty_subs: HashMap::new(),
             rg_idx,
             mb_idx,
@@ -1742,18 +1822,34 @@ impl StatamReader {
                             let pairs = l0.read_chunks_vec(&cids)?;
                             Ok(Stage1Out::L0Chunks(pairs))
                         }
-                        Stage1Task::ShreddedSub { sub_pidx } => {
+                        Stage1Task::ShreddedSub {
+                            sub_pidx,
+                            in_map_only,
+                        } => {
                             let blk = &ctx.meta.rg_blocks(sub_pidx, ctx.rg_idx)[ctx.mb_idx];
                             let raw = ctx.block_reader.read_block(blk)?;
-                            let sub =
-                                decode_shredded_subcol_selected(&raw, ctx.mb_row_count, &ctx.mask)?;
+                            let sub = if in_map_only {
+                                DecodedSubCol::InMapOnly(decode_shredded_subcol_in_map_only(
+                                    &raw,
+                                    ctx.mb_row_count,
+                                )?)
+                            } else {
+                                DecodedSubCol::Full(decode_shredded_subcol_selected(
+                                    &raw,
+                                    ctx.mb_row_count,
+                                    &ctx.mask,
+                                )?)
+                            };
                             Ok(Stage1Out::ShreddedSub(sub_pidx, sub))
                         }
-                        Stage1Task::ShreddedResidual { cidx } => {
+                        Stage1Task::ShreddedResidual { cidx, keys_only } => {
                             let blk = &ctx.meta.rg_blocks(cidx, ctx.rg_idx)[ctx.mb_idx];
                             let raw = ctx.block_reader.read_block(blk)?;
-                            let res =
-                                decode_shredded_residual_block_selected(&raw, blk, &ctx.mask)?;
+                            let res = if keys_only {
+                                decode_shredded_residual_block_keys_only(&raw, blk, &ctx.mask)?
+                            } else {
+                                decode_shredded_residual_block_selected(&raw, blk, &ctx.mask)?
+                            };
                             Ok(Stage1Out::ShreddedResidual(cidx, res))
                         }
                         Stage1Task::IndepCol { cidx, dict } => {
@@ -1765,7 +1861,7 @@ impl StatamReader {
                                 cidx,
                                 &ctx.mask,
                                 &ctx.plan,
-                                &ctx.map_keys,
+                                &ctx.map_proj,
                                 &ctx.empty_subs,
                                 dict.as_deref(),
                                 &ctx.block_reader,
@@ -1918,7 +2014,7 @@ impl StatamReader {
             let meta_b = Arc::clone(&self.meta);
             let mask_b = Arc::clone(&mask);
             let plan_b = Arc::clone(plan);
-            let map_keys_b = Arc::clone(map_keys_by_col);
+            let map_proj_b = Arc::clone(map_proj_by_col);
             let decoded_subs_b = Arc::clone(&decoded_subs);
             let resolved_b = resolved_chunks;
             let block_reader_b = read_block.clone();
@@ -1931,7 +2027,7 @@ impl StatamReader {
                         mb_row_count,
                         &mask_b,
                         &plan_b,
-                        &map_keys_b,
+                        &map_proj_b,
                         &decoded_subs_b,
                         &resolved_b,
                         &block_reader_b,
@@ -1951,7 +2047,7 @@ impl StatamReader {
                     mb_row_count,
                     &mask,
                     plan,
-                    map_keys_by_col,
+                    map_proj_by_col,
                     &decoded_subs,
                     &resolved_chunks,
                     read_block,
@@ -2028,7 +2124,7 @@ impl StatamReader {
                     cached,
                     plan,
                     mb_idx,
-                    map_keys_by_col,
+                    map_proj_by_col,
                     &decoded_subs,
                 )?;
                 if !is_last {
@@ -2052,7 +2148,7 @@ impl StatamReader {
                 cidx,
                 &mask,
                 plan,
-                map_keys_by_col,
+                map_proj_by_col,
                 &decoded_subs,
                 dict.as_deref(),
                 read_block,
@@ -2090,7 +2186,7 @@ impl StatamReader {
         plan: &Arc<RgIoPlan>,
         proj_indices: &[usize],
         proj_schema: &Arc<Schema>,
-        empty_map_keys: &Arc<HashMap<usize, Vec<String>>>,
+        empty_map_proj: &Arc<HashMap<usize, MapReadMode>>,
         merged_ext_by_pack: BTreeMap<u16, BTreeSet<u32>>,
         read_block: &BlockCacheReader,
         threads: usize,
@@ -2138,7 +2234,7 @@ impl StatamReader {
 
         enum TakeStage1Out {
             PackChunks(u16, Vec<(u32, Bytes)>),
-            ShreddedSub(usize, usize, ShreddedSubCol),
+            ShreddedSub(usize, usize, DecodedSubCol),
             ShreddedResidual(usize, usize, FlatColumn),
             NonPayloadCol(usize, usize, Column),
         }
@@ -2156,7 +2252,7 @@ impl StatamReader {
             mask_opt: Option<Arc<Bitmap>>,
             payload_p1: HashMap<usize, DecodedPhase1>,
             mb_cols: HashMap<usize, Column>,
-            mb_subs: HashMap<usize, ShreddedSubCol>,
+            mb_subs: HashMap<usize, DecodedSubCol>,
             mb_residuals: HashMap<usize, FlatColumn>,
         }
 
@@ -2167,7 +2263,7 @@ impl StatamReader {
             plan: &RgIoPlan,
             proj_indices: &[usize],
             proj_schema: &Arc<Schema>,
-            empty_map_keys: &HashMap<usize, Vec<String>>,
+            empty_map_proj: &HashMap<usize, MapReadMode>,
             resolved_chunks: &ResolvedChunks,
             block_reader: &BlockCacheReader,
             mut job: FusedTakeMbJob,
@@ -2335,7 +2431,7 @@ impl StatamReader {
                         skip_residual,
                         residual_flat.as_deref(),
                         mask,
-                        empty_map_keys,
+                        empty_map_proj,
                         &job.mb_subs,
                     )?;
                     Column::Flat(full_col.take(u32_idx, None)?)
@@ -2597,7 +2693,11 @@ impl StatamReader {
                         } => {
                             let raw = ctx.block_reader.read_block(&blk)?;
                             let sub = decode_shredded_subcol_selected(&raw, mb_row_count, &mask)?;
-                            Ok(TakeStage1Out::ShreddedSub(mb_pos, sub_pidx, sub))
+                            Ok(TakeStage1Out::ShreddedSub(
+                                mb_pos,
+                                sub_pidx,
+                                DecodedSubCol::Full(sub),
+                            ))
                         }
                         TakeStage1Task::ShreddedResidual {
                             mb_pos,
@@ -2675,7 +2775,7 @@ impl StatamReader {
             let plan_arc = Arc::clone(plan);
             let proj_indices_arc = Arc::new(proj_indices.to_vec());
             let proj_schema_arc = Arc::clone(proj_schema);
-            let empty_map_keys_arc = Arc::clone(empty_map_keys);
+            let empty_map_proj_arc = Arc::clone(empty_map_proj);
             let resolved_arc = resolved_chunks;
             let block_reader_arc = read_block.clone();
             parallel_map_in_order_static(mb_jobs, step4_workers, move |job| {
@@ -2685,7 +2785,7 @@ impl StatamReader {
                     &plan_arc,
                     &proj_indices_arc,
                     &proj_schema_arc,
-                    &empty_map_keys_arc,
+                    &empty_map_proj_arc,
                     &resolved_arc,
                     &block_reader_arc,
                     job,
@@ -2701,7 +2801,7 @@ impl StatamReader {
                     plan,
                     proj_indices,
                     proj_schema,
-                    empty_map_keys,
+                    empty_map_proj,
                     &resolved_chunks,
                     read_block,
                     job,
@@ -3095,6 +3195,7 @@ impl StatamReader {
         l0_local: Option<&ParsedL0Payload>,
         read_threads: usize,
         retain: Option<&RetainedPackChunks>,
+        cancel: Option<&CancelToken>,
     ) -> Result<Bitmap, StatamError> {
         let mut out = self.eval_payload_refs_substring_batch(
             &[(refs, active_mask)],
@@ -3103,6 +3204,7 @@ impl StatamReader {
             l0_local,
             read_threads,
             retain,
+            cancel,
         )?;
         out.pop().ok_or(StatamError::Corrupt {
             reason: "missing single-mb payload substring result",
@@ -3118,7 +3220,11 @@ impl StatamReader {
         l0_local: Option<&ParsedL0Payload>,
         read_threads: usize,
         retain: Option<&RetainedPackChunks>,
+        cancel: Option<&CancelToken>,
     ) -> Result<Vec<Bitmap>, StatamError> {
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(StatamError::Cancelled);
+        }
         let mut results: Vec<Bitmap> = mb_inputs
             .iter()
             .map(|(refs, _)| Bitmap::new_zeroed(refs.len()))
@@ -3173,6 +3279,9 @@ impl StatamReader {
 
         let all_mb_refs: Vec<&FlatPayloadRefs> = mb_inputs.iter().map(|&(refs, _)| refs).collect();
         for pack_idx in external_pack_idxs {
+            if cancel.is_some_and(CancelToken::is_cancelled) {
+                return Err(StatamError::Cancelled);
+            }
             let pack_id = *self
                 .meta
                 .schema_meta
@@ -3239,6 +3348,7 @@ impl StatamReader {
                 case_insensitive,
                 read_threads,
                 retain.map(|r| (pack_id, r)),
+                cancel,
             )?;
             for (m, bm) in bms.into_iter().enumerate() {
                 for bit in bm.iter_ones() {
@@ -3285,6 +3395,9 @@ impl StatamReader {
                 // Stream single-chunk L0 rows one frame at a time (<= 1 frame in RAM),
                 // deduplicating repeated chunk IDs per frame to prevent aliased-chunk DoS.
                 for (fid, mut cid_rows) in single_by_frame {
+                    if cancel.is_some_and(CancelToken::is_cancelled) {
+                        return Err(StatamError::Cancelled);
+                    }
                     let decoded = l0.decompress_frame(fid)?;
                     cid_rows.sort_unstable_by_key(|&(cid, _)| cid);
                     let mut idx = 0usize;
@@ -3311,6 +3424,9 @@ impl StatamReader {
                     let mut cached_frame: Option<(u32, Vec<u8>)> = None;
                     let mut buf = Vec::new();
                     for r in multi_chunk_rows {
+                        if cancel.is_some_and(CancelToken::is_cancelled) {
+                            return Err(StatamError::Cancelled);
+                        }
                         let (_, cs) = refs.chunk_refs(r);
                         buf.clear();
                         for &cid in cs {
@@ -3393,18 +3509,16 @@ fn finish_payload_column(
     Ok(Column::Flat(FlatColumn::try_new(flat_data, nulls_opt)?))
 }
 
-fn build_reconstruct_shards<'a>(
+fn build_reconstruct_shard_ranges(
     row_count: usize,
     offsets: &[u32],
-    data_bytes: &'a mut [u8],
+    total_bytes: usize,
     read_threads: usize,
-) -> Vec<(usize, usize, &'a mut [u8])> {
+) -> Vec<(usize, usize, usize)> {
     let target_shards = read_threads.clamp(1, MAX_PARALLEL_THREADS).min(row_count);
-    let total_bytes = data_bytes.len();
     let target_bytes = total_bytes.div_ceil(target_shards).max(1);
 
     let mut shards = Vec::with_capacity(target_shards);
-    let mut rem = data_bytes;
     let mut r_lo = 0usize;
     let mut shard_idx = 0usize;
 
@@ -3421,15 +3535,12 @@ fn build_reconstruct_shards<'a>(
             hi
         };
         let shard_len = (offsets[r_hi] as usize) - base_off;
-        let (dst, rest) = rem.split_at_mut(shard_len);
-        rem = rest;
         if shard_len > 0 {
-            shards.push((r_lo, r_hi, dst));
+            shards.push((r_lo, r_hi, shard_len));
         }
         r_lo = r_hi;
         shard_idx += 1;
     }
-    debug_assert!(rem.is_empty());
     shards
 }
 
@@ -3501,33 +3612,6 @@ fn measure_payload_row(
             let _ = nulls.set(row_idx, true);
             *active_non_null_rows += 1;
             offsets.push(next_off);
-        }
-    }
-    Ok(())
-}
-
-fn copy_payload_row_into_slice(
-    row: &PayloadRefRow,
-    resolved_chunks: &ResolvedChunks,
-    dst: &mut [u8],
-    pos: &mut usize,
-) -> Result<(), StatamError> {
-    match row {
-        PayloadRefRow::Null => {}
-        PayloadRefRow::Inline(bytes) => {
-            let end = *pos + bytes.len();
-            dst[*pos..end].copy_from_slice(bytes);
-            *pos = end;
-        }
-        PayloadRefRow::Chunks(chunks) => {
-            for &(pidx, cid) in chunks {
-                let chunk = resolved_chunks.get(pidx, cid).ok_or(StatamError::Corrupt {
-                    reason: "missing resolved payload chunk",
-                })?;
-                let end = *pos + chunk.len();
-                dst[*pos..end].copy_from_slice(chunk);
-                *pos = end;
-            }
         }
     }
     Ok(())
@@ -3678,43 +3762,46 @@ pub(super) fn reconstruct_payload_column_from_flat(
         && active_non_null_rows >= 4
         && !in_parallel_scope()
     {
-        let mut buf = vec![0u8; total_decoded];
-        let shards = build_reconstruct_shards(row_count, &offsets, &mut buf, threads);
-        let _ = parallel_map_in_order(shards, threads, |(r_lo, r_hi, dst)| {
-            let mut pos = 0usize;
-            for r in r_lo..r_hi {
-                if !active_mask.get(r) {
-                    continue;
-                }
-                match refs.row_kind(r) {
-                    FLAT_REF_INLINE => {
-                        let bytes = refs.inline_bytes(r);
-                        let end = pos + bytes.len();
-                        dst[pos..end].copy_from_slice(bytes);
-                        pos = end;
+        let shards = build_reconstruct_shard_ranges(row_count, &offsets, total_decoded, threads);
+        let refs_arc = Arc::new(refs.clone());
+        let mask_arc = Arc::new(active_mask.clone());
+        let resolved_arc = resolved_chunks.clone();
+        let shard_bufs = parallel_map_in_order_static(
+            shards,
+            threads,
+            move |(r_lo, r_hi, shard_len)| {
+                let mut dst = Vec::with_capacity(shard_len);
+                for r in r_lo..r_hi {
+                    if !mask_arc.get(r) {
+                        continue;
                     }
-                    FLAT_REF_CHUNKS => {
-                        let (ps, cs) = refs.chunk_refs(r);
-                        for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
-                            let chunk =
-                                resolved_chunks.get(pidx, cid).ok_or(StatamError::Corrupt {
-                                    reason: "missing resolved payload chunk during column reconstruction",
-                                })?;
-                            let end = pos + chunk.len();
-                            dst[pos..end].copy_from_slice(chunk);
-                            pos = end;
+                    match refs_arc.row_kind(r) {
+                        FLAT_REF_INLINE => dst.extend_from_slice(refs_arc.inline_bytes(r)),
+                        FLAT_REF_CHUNKS => {
+                            let (ps, cs) = refs_arc.chunk_refs(r);
+                            for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                                let chunk =
+                                    resolved_arc.get(pidx, cid).ok_or(StatamError::Corrupt {
+                                        reason: "missing resolved payload chunk during column reconstruction",
+                                    })?;
+                                dst.extend_from_slice(chunk);
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
-            if pos != dst.len() {
-                return Err(StatamError::Corrupt {
-                    reason: "payload reconstruction shard length mismatch",
-                });
-            }
-            Ok(())
-        })?;
+                if dst.len() != shard_len {
+                    return Err(StatamError::Corrupt {
+                        reason: "payload reconstruction shard length mismatch",
+                    });
+                }
+                Ok(dst)
+            },
+        )?;
+        let mut buf = Vec::with_capacity(total_decoded);
+        for shard in shard_bufs {
+            buf.extend_from_slice(&shard);
+        }
         buf
     } else {
         let mut buf = Vec::with_capacity(total_decoded);
@@ -3795,28 +3882,35 @@ pub(super) fn reconstruct_payload_column_selected(
         && active_non_null_rows >= 4
         && !in_parallel_scope()
     {
-        let mut buf = vec![0u8; total_decoded];
-        let shards = build_reconstruct_shards(row_count, &offsets, &mut buf, threads);
-        let _ = parallel_map_in_order(shards, threads, |(r_lo, r_hi, dst)| {
-            let mut s_idx = selected.partition_point(|&(r, _)| r < r_lo);
-            let mut pos = 0usize;
-            let mut prev_r: Option<usize> = None;
-            while s_idx < selected.len() && selected[s_idx].0 < r_hi {
-                let (r, ref row) = selected[s_idx];
-                s_idx += 1;
-                if prev_r == Some(r) || !active_mask.get(r) {
-                    continue;
+        let shards = build_reconstruct_shard_ranges(row_count, &offsets, total_decoded, threads);
+        let selected_arc = Arc::new(selected.to_vec());
+        let mask_arc = Arc::new(active_mask.clone());
+        let resolved_arc = resolved_chunks.clone();
+        let shard_bufs =
+            parallel_map_in_order_static(shards, threads, move |(r_lo, r_hi, shard_len)| {
+                let mut dst = Vec::with_capacity(shard_len);
+                let mut s_idx = selected_arc.partition_point(|&(r, _)| r < r_lo);
+                let mut prev_r: Option<usize> = None;
+                while s_idx < selected_arc.len() && selected_arc[s_idx].0 < r_hi {
+                    let (r, ref row) = selected_arc[s_idx];
+                    s_idx += 1;
+                    if prev_r == Some(r) || !mask_arc.get(r) {
+                        continue;
+                    }
+                    prev_r = Some(r);
+                    extend_payload_row_into_vec(row, &resolved_arc, &mut dst)?;
                 }
-                prev_r = Some(r);
-                copy_payload_row_into_slice(row, resolved_chunks, dst, &mut pos)?;
-            }
-            if pos != dst.len() {
-                return Err(StatamError::Corrupt {
-                    reason: "payload reconstruction shard length mismatch",
-                });
-            }
-            Ok(())
-        })?;
+                if dst.len() != shard_len {
+                    return Err(StatamError::Corrupt {
+                        reason: "payload reconstruction shard length mismatch",
+                    });
+                }
+                Ok(dst)
+            })?;
+        let mut buf = Vec::with_capacity(total_decoded);
+        for shard in shard_bufs {
+            buf.extend_from_slice(&shard);
+        }
         buf
     } else {
         let mut buf = Vec::with_capacity(total_decoded);
@@ -3889,40 +3983,43 @@ pub(super) fn reconstruct_payload_column_take_from_flat(
         && active_non_null_rows >= 4
         && !in_parallel_scope()
     {
-        let mut buf = vec![0u8; total_decoded];
-        let shards = build_reconstruct_shards(out_len, &offsets, &mut buf, threads);
-        let _ = parallel_map_in_order(shards, threads, |(r_lo, r_hi, dst)| {
-            let mut pos = 0usize;
-            for &r in &local_indices[r_lo..r_hi] {
-                match refs.row_kind(r) {
-                    FLAT_REF_INLINE => {
-                        let bytes = refs.inline_bytes(r);
-                        let end = pos + bytes.len();
-                        dst[pos..end].copy_from_slice(bytes);
-                        pos = end;
-                    }
-                    FLAT_REF_CHUNKS => {
-                        let (ps, cs) = refs.chunk_refs(r);
-                        for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
-                            let chunk =
-                                resolved_chunks.get(pidx, cid).ok_or(StatamError::Corrupt {
-                                    reason: "missing resolved payload chunk during column reconstruction",
-                                })?;
-                            let end = pos + chunk.len();
-                            dst[pos..end].copy_from_slice(chunk);
-                            pos = end;
+        let shards = build_reconstruct_shard_ranges(out_len, &offsets, total_decoded, threads);
+        let refs_arc = Arc::new(refs.clone());
+        let indices_arc = Arc::new(local_indices.to_vec());
+        let resolved_arc = resolved_chunks.clone();
+        let shard_bufs = parallel_map_in_order_static(
+            shards,
+            threads,
+            move |(r_lo, r_hi, shard_len)| {
+                let mut dst = Vec::with_capacity(shard_len);
+                for &r in &indices_arc[r_lo..r_hi] {
+                    match refs_arc.row_kind(r) {
+                        FLAT_REF_INLINE => dst.extend_from_slice(refs_arc.inline_bytes(r)),
+                        FLAT_REF_CHUNKS => {
+                            let (ps, cs) = refs_arc.chunk_refs(r);
+                            for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                                let chunk =
+                                    resolved_arc.get(pidx, cid).ok_or(StatamError::Corrupt {
+                                        reason: "missing resolved payload chunk during column reconstruction",
+                                    })?;
+                                dst.extend_from_slice(chunk);
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
-            if pos != dst.len() {
-                return Err(StatamError::Corrupt {
-                    reason: "payload reconstruction shard length mismatch",
-                });
-            }
-            Ok(())
-        })?;
+                if dst.len() != shard_len {
+                    return Err(StatamError::Corrupt {
+                        reason: "payload reconstruction shard length mismatch",
+                    });
+                }
+                Ok(dst)
+            },
+        )?;
+        let mut buf = Vec::with_capacity(total_decoded);
+        for shard in shard_bufs {
+            buf.extend_from_slice(&shard);
+        }
         buf
     } else {
         let mut buf = Vec::with_capacity(total_decoded);
@@ -4021,24 +4118,43 @@ pub(super) fn reconstruct_payload_column_take_selected(
         && active_non_null_rows >= 4
         && !in_parallel_scope()
     {
-        let mut buf = vec![0u8; total_decoded];
-        let shards = build_reconstruct_shards(out_len, &offsets, &mut buf, threads);
-        let _ = parallel_map_in_order(shards, threads, |(r_lo, r_hi, dst)| {
-            let mut s_idx = 0usize;
-            let mut p_r = usize::MAX;
-            let mut pos = 0usize;
-            for &r in &local_indices[r_lo..r_hi] {
-                if let Some(row) = lookup_selected(r, &mut s_idx, &mut p_r) {
-                    copy_payload_row_into_slice(row, resolved_chunks, dst, &mut pos)?;
+        let shards = build_reconstruct_shard_ranges(out_len, &offsets, total_decoded, threads);
+        let selected_arc = Arc::new(selected.to_vec());
+        let indices_arc = Arc::new(local_indices.to_vec());
+        let resolved_arc = resolved_chunks.clone();
+        let shard_bufs =
+            parallel_map_in_order_static(shards, threads, move |(r_lo, r_hi, shard_len)| {
+                let mut dst = Vec::with_capacity(shard_len);
+                let mut s_idx = 0usize;
+                let mut p_r = usize::MAX;
+                for &r in &indices_arc[r_lo..r_hi] {
+                    if r < p_r {
+                        s_idx = selected_arc.partition_point(|&(sr, _)| sr < r);
+                    } else {
+                        while s_idx < selected_arc.len() && selected_arc[s_idx].0 < r {
+                            s_idx += 1;
+                        }
+                    }
+                    p_r = r;
+                    if s_idx < selected_arc.len() && selected_arc[s_idx].0 == r {
+                        extend_payload_row_into_vec(
+                            &selected_arc[s_idx].1,
+                            &resolved_arc,
+                            &mut dst,
+                        )?;
+                    }
                 }
-            }
-            if pos != dst.len() {
-                return Err(StatamError::Corrupt {
-                    reason: "payload reconstruction shard length mismatch",
-                });
-            }
-            Ok(())
-        })?;
+                if dst.len() != shard_len {
+                    return Err(StatamError::Corrupt {
+                        reason: "payload reconstruction shard length mismatch",
+                    });
+                }
+                Ok(dst)
+            })?;
+        let mut buf = Vec::with_capacity(total_decoded);
+        for shard in shard_bufs {
+            buf.extend_from_slice(&shard);
+        }
         buf
     } else {
         let mut buf = Vec::with_capacity(total_decoded);
