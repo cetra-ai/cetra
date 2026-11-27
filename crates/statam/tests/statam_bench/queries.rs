@@ -1362,7 +1362,7 @@ impl<'a> F64ColView<'a> {
 
 fn agg_statam_batch(b: &Batch, agg: &mut BTreeMap<(i64, String), (usize, f64, i64)>) {
     let ts_view = I64ColView::from_col(&b.columns()[0]);
-    let model_col = &b.columns()[1];
+    let model_col: &Column = &b.columns()[1];
     let tok_view = I64ColView::from_col(&b.columns()[2]);
     let cost_view = F64ColView::from_col(&b.columns()[3]);
 

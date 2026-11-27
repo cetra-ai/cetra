@@ -1,0 +1,231 @@
+import type { Dashboard, Widget, WidgetQuery } from "@/lib/dashboards/types";
+import type { StoryId } from "./projects";
+
+/**
+ * The homepage stories' dashboards (design §12, M14), one per story. Each widget carries its
+ * story's tag in `query.filter`, since a stored dashboard has no filter of its own; the scores
+ * widget cannot (scores have no tags). The widget titles are the ones the assistant's draft
+ * cards show. The browser mock stores them next to the fixture dashboard (`browser.ts`); the
+ * large mock answers every widget.
+ */
+
+/** A fixture user (`fixtures/api/static/dashboard.json`). */
+const AUTHOR = "01900000-0000-7000-8000-000000000100";
+const CREATED_AT = "2026-11-10T09:00:00.000000000Z";
+
+export const STORY_DASHBOARD_IDS = {
+  answerQuality: "01900000-0000-7000-8000-000000570401",
+  codeAgentHealth: "01900000-0000-7000-8000-000000570402",
+  voiceLatency: "01900000-0000-7000-8000-000000570403",
+  invoiceExtraction: "01900000-0000-7000-8000-000000570404",
+  codingAgents: "01900000-0000-7000-8000-000000570405",
+} as const;
+
+/** The story of each story dashboard, by dashboard id: the dashboard is served in that story's project only. */
+export const STORY_DASHBOARD_STORIES: Readonly<Record<string, StoryId>> = {
+  [STORY_DASHBOARD_IDS.answerQuality]: "support",
+  [STORY_DASHBOARD_IDS.codeAgentHealth]: "coding",
+  [STORY_DASHBOARD_IDS.voiceLatency]: "voice",
+  [STORY_DASHBOARD_IDS.invoiceExtraction]: "extraction",
+  [STORY_DASHBOARD_IDS.codingAgents]: "coding",
+};
+
+/** The 2x2 grid of a story dashboard: widgets 0 and 1 on the first row, 2 and 3 on the second. */
+const SLOTS = [
+  { x: 0, y: 0, w: 30, h: 6 },
+  { x: 30, y: 0, w: 30, h: 6 },
+  { x: 0, y: 6, w: 30, h: 6 },
+  { x: 30, y: 6, w: 30, h: 6 },
+] as const;
+
+function chart(
+  slot: 0 | 1 | 2 | 3,
+  id: string,
+  title: string,
+  type: "line" | "bar" | "bar_h" | "number" | "area",
+  query: WidgetQuery,
+  stacked = false,
+): Widget {
+  return {
+    id,
+    title,
+    layout: { ...SLOTS[slot] },
+    kind: "chart",
+    chart: stacked ? { type, stacked } : { type },
+    query,
+  };
+}
+
+function dashboard(id: string, name: string, description: string, widgets: Widget[]): Dashboard {
+  return {
+    id,
+    name,
+    description,
+    definition: { widgets },
+    version: 1,
+    created_by: AUTHOR,
+    updated_by: AUTHOR,
+    created_at: CREATED_AT,
+    updated_at: CREATED_AT,
+  };
+}
+
+const VOICE = "tags @> ['voice']";
+/** The runs `cetra agents setup` reported (spec 02 § Coding agents). */
+const REPOSITORY = "metadata['repository'] IS NOT NULL";
+const BILLING = "tags @> ['billing']";
+
+/** The story dashboards, in story order. Fresh objects on every call. */
+export function storyDashboards(): Dashboard[] {
+  return [
+    dashboard(
+      STORY_DASHBOARD_IDS.answerQuality,
+      "Prompt quality by version",
+      "Correctness, answers, cost and latency of each release of the support prompts.",
+      [
+        chart(0, "correctness-by-day", "Correctness by day", "line", {
+          source: "scores",
+          filter: "name = 'correctness'",
+          measures: [{ agg: "avg", field: "value_num", label: "Correctness" }],
+        }),
+        chart(1, "answers-by-release", "Answers by release", "bar_h", {
+          source: "traces",
+          measures: [{ agg: "count", label: "Answers" }],
+          breakdown: { field: "release", limit: 5 },
+        }),
+        chart(2, "cost-per-answer-by-release", "Cost per answer by release", "bar_h", {
+          source: "traces",
+          measures: [{ agg: "avg", field: "cost_total", label: "Cost per answer" }],
+          breakdown: { field: "release", limit: 5 },
+        }),
+        chart(3, "p95-latency-by-release", "p95 latency by release", "bar_h", {
+          source: "traces",
+          measures: [{ agg: "p95", field: "duration_ns", label: "p95 latency" }],
+          breakdown: { field: "release", limit: 5 },
+        }),
+      ],
+    ),
+    dashboard(
+      STORY_DASHBOARD_IDS.codeAgentHealth,
+      "Code agent health",
+      "Failed runs, cost and duration of the coding agent.",
+      [
+        chart(0, "failed-runs-per-day", "Failed runs per day", "bar", {
+          source: "traces",
+          measures: [{ agg: "count", where: "status = 'error'", label: "Failed runs" }],
+        }),
+        chart(1, "error-rate", "Error rate", "number", {
+          source: "traces",
+          measures: [{ agg: "rate", where: "error_count > 0", label: "Error rate" }],
+        }),
+        chart(2, "cost-per-run", "Cost per run", "line", {
+          source: "traces",
+          measures: [{ agg: "avg", field: "cost_total", label: "Cost per run" }],
+        }),
+        chart(3, "p95-duration", "p95 duration", "number", {
+          source: "traces",
+          measures: [{ agg: "p95", field: "duration_ns", label: "p95 duration" }],
+        }),
+      ],
+    ),
+    dashboard(
+      STORY_DASHBOARD_IDS.voiceLatency,
+      "Voice latency",
+      "How long callers wait for a reply.",
+      [
+        chart(0, "p95-reply-time", "p95 reply time", "number", {
+          source: "traces",
+          filter: VOICE,
+          measures: [{ agg: "p95", field: "duration_ns", label: "p95 reply time" }],
+        }),
+        chart(1, "reply-time-by-day", "Reply time by day", "line", {
+          source: "traces",
+          filter: VOICE,
+          measures: [{ agg: "p95", field: "duration_ns", label: "p95 reply time" }],
+        }),
+        chart(2, "calls-over-3-s", "Calls over 3 s", "number", {
+          source: "traces",
+          filter: VOICE,
+          measures: [{ agg: "rate", where: "duration_ns > 3000000000", label: "Over 3 s" }],
+        }),
+        chart(3, "calls-per-day", "Calls per day", "bar", {
+          source: "traces",
+          filter: VOICE,
+          measures: [{ agg: "count", label: "Calls" }],
+        }),
+      ],
+    ),
+    dashboard(
+      STORY_DASHBOARD_IDS.invoiceExtraction,
+      "Invoice extraction",
+      "Invoices read, schema-check failures and cost.",
+      [
+        chart(0, "invoices-per-day", "Invoices per day", "bar", {
+          source: "traces",
+          filter: BILLING,
+          measures: [{ agg: "count", label: "Invoices" }],
+        }),
+        chart(1, "schema-check-failures", "Schema check failures", "number", {
+          source: "traces",
+          filter: BILLING,
+          measures: [{ agg: "rate", where: "status = 'error'", label: "Failures" }],
+        }),
+        chart(2, "cost-per-invoice", "Cost per invoice", "line", {
+          source: "traces",
+          filter: BILLING,
+          measures: [{ agg: "avg", field: "cost_total", label: "Cost per invoice" }],
+        }),
+        chart(3, "invoices-by-model", "Invoices by model", "bar_h", {
+          source: "traces",
+          filter: BILLING,
+          measures: [{ agg: "count", label: "Invoices" }],
+          breakdown: { field: "models", limit: 5 },
+        }),
+      ],
+    ),
+    dashboard(
+      STORY_DASHBOARD_IDS.codingAgents,
+      "Coding agents",
+      "What the coding agents cost, by repository and by agent.",
+      [
+        // Two rows taller than a slot: its legend of five long repository names takes three lines.
+        {
+          ...chart(
+            0,
+            "cost-by-repository",
+            "Cost by repository",
+            "area",
+            {
+              source: "traces",
+              filter: REPOSITORY,
+              measures: [{ agg: "sum", field: "cost_total", label: "Cost" }],
+              breakdown: { field: "metadata['repository']", limit: 5, other: false },
+            },
+            true,
+          ),
+          layout: { x: 0, y: 0, w: 30, h: 8 },
+        },
+        chart(1, "cost-by-coding-agent", "Cost by coding agent", "bar_h", {
+          source: "traces",
+          filter: REPOSITORY,
+          measures: [{ agg: "sum", field: "cost_total", label: "Cost" }],
+          breakdown: { field: "metadata['coding_agent']", limit: 5, other: false },
+        }),
+        // Under the chart: each repository's cost over the range, with its share of the total.
+        {
+          id: "cost-per-repository",
+          title: "Cost per repository",
+          layout: { x: 0, y: 8, w: 30, h: 4 },
+          kind: "chart",
+          chart: { type: "table", share: true },
+          query: {
+            source: "traces",
+            filter: REPOSITORY,
+            measures: [{ agg: "sum", field: "cost_total", label: "Cost" }],
+            breakdown: { field: "metadata['repository']", limit: 5, other: false },
+          },
+        },
+      ],
+    ),
+  ];
+}

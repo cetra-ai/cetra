@@ -4,6 +4,7 @@
 //! Pure-Rust vectorized expressions, Filter DSL, and tombstone predicates for Cetra.
 
 pub mod bind;
+pub mod encode;
 pub mod error;
 pub mod eval;
 pub mod exec;
@@ -15,6 +16,7 @@ pub mod fn_time;
 #[doc(hidden)]
 pub mod fuzz_entry;
 pub mod ir;
+pub mod sql;
 pub mod text;
 pub mod tombstone;
 
@@ -25,7 +27,7 @@ pub use filter::{
     FilterView, MAX_SCORE_NAMES, ParsedFilter, filter_planning_schema, like_pattern,
     parse_filter_ast,
 };
-pub use ir::{BinaryOp, CastMode, EvalContext, Expr, ScalarFn, UnaryOp};
+pub use ir::{BinaryOp, CastMode, EvalCache, EvalContext, Expr, ScalarFn, UnaryOp};
 pub use text::{
     DENIED_FUNCTIONS, FILTER_LIMITS, PARSER_RECURSION_LIMIT, SQL_LIMITS, TextKind, TextLimits,
 };

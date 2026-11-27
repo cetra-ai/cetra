@@ -1,0 +1,162 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "python"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.45.2"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "openinference.instrumentation.google_genai",
+            "version": "1.5.0",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "3270cff170b370fa86a550c23daea40e",
+              "spanId": "7433a18cd0f5a1e4",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "GenerateContent",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590053000000",
+              "attributes": [
+                {
+                  "key": "llm.provider",
+                  "value": {
+                    "stringValue": "google"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.role",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.content",
+                  "value": {
+                    "stringValue": "What is the capital of France?"
+                  }
+                },
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"contents\": [{\"parts\": [{\"text\": \"What is the capital of France?\"}], \"role\": \"user\"}]}"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "{\"sdk_http_response\":{\"headers\":{\"content-type\":\"application/json\",\"date\":\"Thu, 01 Jan 2026 00:00:00 GMT\",\"content-length\":\"275\"}},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"The capital of France is Paris.\"}],\"role\":\"model\"},\"finish_reason\":\"STOP\",\"index\":0}],\"model_version\":\"gemini-2.5-flash\",\"response_id\":\"capture-1\",\"usage_metadata\":{\"candidates_token_count\":8,\"prompt_token_count\":14,\"total_token_count\":22},\"automatic_function_calling_history\":[]}"
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "llm.model_name",
+                  "value": {
+                    "stringValue": "gemini-2.5-flash"
+                  }
+                },
+                {
+                  "key": "llm.token_count.prompt",
+                  "value": {
+                    "intValue": "14"
+                  }
+                },
+                {
+                  "key": "llm.token_count.completion",
+                  "value": {
+                    "intValue": "8"
+                  }
+                },
+                {
+                  "key": "llm.token_count.total",
+                  "value": {
+                    "intValue": "22"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.content",
+                  "value": {
+                    "stringValue": "The capital of France is Paris."
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.role",
+                  "value": {
+                    "stringValue": "model"
+                  }
+                },
+                {
+                  "key": "llm.finish_reason",
+                  "value": {
+                    "stringValue": "STOP"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "LLM"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

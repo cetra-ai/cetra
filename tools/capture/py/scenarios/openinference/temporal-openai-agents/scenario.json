@@ -1,0 +1,59 @@
+{
+  "description": "Temporal workflow running an OpenAI Agents agent with one activity tool, on the dev server.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Normalization rules"
+  ],
+  "notes": "The pinned Temporal CLI runs the dev server headless (dev_server_existing_path avoids the SDK's runtime download). The tracer provider is temporalio's replay-safe one with a batch OTLP exporter reading the runner's OTEL_EXPORTER_OTLP_* environment, set globally before the plugin instruments. OpenAIAgentsPlugin(use_otel_instrumentation=True) instruments OpenAI Agents itself, so no OpenAIAgentsInstrumentor runs (a second one would double the spans), and OpenTelemetryPlugin(add_temporal_spans=True) adds Temporal's own spans. The model calls go through the Responses API to the mock. All 22 spans are kept: 14 from the plugin (the OpenAI Agents agent, chain, turn, LLM and tool spans plus temporal:startActivity/executeActivity chains) and 8 from Temporal itself (StartWorkflow, RunWorkflow, StartActivity and RunActivity, which stay untyped spans). temporalRunID is a UUID per run.",
+  "instrumentation": "openinference-instrumentation-openai-agents",
+  "libraries": [
+    "openai",
+    "openai-agents",
+    "openinference-instrumentation-openai-agents",
+    "opentelemetry-sdk",
+    "temporalio",
+    "temporalio-openai-agents",
+    "temporal-cli"
+  ],
+  "volatile_attributes": [
+    "temporalRunID"
+  ],
+  "turns": [
+    {
+      "api": "openai.responses",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_weather_1",
+            "name": "get_weather",
+            "arguments": {
+              "city": "Paris"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17
+      }
+    },
+    {
+      "api": "openai.responses",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "text": "It is 18 °C and sunny in Paris."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12,
+        "cache_read": 64
+      }
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+[project]
+name = "cetra-capture-env-vector"
+version = "0.0.0"
+requires-python = "==3.13.*"
+dependencies = [
+  # opentelemetry-instrumentation-milvus is 0.60.0: 0.63.1 cannot install (spike finding 3).
+  "chromadb==1.5.9",
+  "qdrant-client==1.20.0",
+  "pymilvus[milvus_lite]==3.0.3",
+  "opentelemetry-instrumentation-chromadb==0.63.1",
+  "opentelemetry-instrumentation-qdrant==0.63.1",
+  "opentelemetry-instrumentation-milvus==0.60.0",
+  # The capture harness, a package of its own (tools/capture/harness, module capture_py).
+  "cetra-capture-harness",
+]
+
+[dependency-groups]
+dev = ["ruff==0.17.3", "mypy==2.4.1"]
+
+[tool.uv]
+package = false
+exclude-newer = "7 days" # D74/D117: no release younger than 7 days
+
+[tool.uv.sources]
+cetra-capture-harness = { path = "../../harness", editable = true }
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PT", "ANN", "S", "BLE", "N"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["capture_py"]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+files = ["scenarios"]
+# Every scenario entry point is main.py. mypy maps those paths to one module.
+exclude = ["main\\.py$"]
+
+# These packages ship no py.typed marker, so their imports are Any.
+[[tool.mypy.overrides]]
+module = "pymilvus"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "pymilvus.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "opentelemetry.instrumentation.chromadb"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "opentelemetry.instrumentation.chromadb.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "opentelemetry.instrumentation.qdrant"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "opentelemetry.instrumentation.qdrant.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "opentelemetry.instrumentation.milvus"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "opentelemetry.instrumentation.milvus.*"
+ignore_missing_imports = true

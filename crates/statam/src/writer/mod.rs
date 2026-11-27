@@ -775,9 +775,9 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                     self.append_l1_payload_slice(col_idx, col, offset, take)?;
                 } else {
                     let piece = if offset == 0 && take == total {
-                        col.clone()
+                        (**col).clone()
                     } else {
-                        col.slice(offset, take)?
+                        col.slice(offset, take, None)?
                     };
                     let piece_mat_bytes = estimate_column_bytes(&piece);
                     self.rg_buf_est_non_payload_bytes = self
@@ -909,7 +909,7 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
 
     fn estimate_slice_local_payload_raw_bytes(
         &self,
-        cols: &[Column],
+        cols: &[Arc<Column>],
         offset: usize,
         len: usize,
     ) -> usize {
@@ -921,7 +921,7 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
             if self.logical_locality[cidx] != LocalityGroup::ExternalPayload {
                 continue;
             }
-            let col_bytes = match col {
+            let col_bytes = match col.as_ref() {
                 Column::Flat(f) => match f.data() {
                     FlatData::Utf8(u) => {
                         let offs = u.offsets();
@@ -1016,7 +1016,7 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
 
     fn estimate_slice_non_payload_bytes(
         &self,
-        cols: &[Column],
+        cols: &[Arc<Column>],
         offset: usize,
         len: usize,
     ) -> usize {
@@ -1035,7 +1035,7 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
 
     fn estimate_slice_non_payload_materialized_bytes(
         &self,
-        cols: &[Column],
+        cols: &[Arc<Column>],
         offset: usize,
         len: usize,
     ) -> usize {
@@ -1054,7 +1054,7 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
 
     fn slice_fits_mb_raw_cap(
         &self,
-        cols: &[Column],
+        cols: &[Arc<Column>],
         offset: usize,
         len: usize,
         aligned_to_rg_buf: bool,
@@ -1107,7 +1107,7 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
 
     fn estimate_slice_non_payload_stored(
         &self,
-        cols: &[Column],
+        cols: &[Arc<Column>],
         offset: usize,
         len: usize,
         probe_threshold: usize,
@@ -1482,9 +1482,9 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
             let take = (n - offset).min(self.options.row_group_size - self.rg_buf_rows);
             for (col_idx, col) in batch.columns().iter().enumerate() {
                 let piece = if offset == 0 && take == n {
-                    col.clone()
+                    (**col).clone()
                 } else {
-                    col.slice(offset, take)?
+                    col.slice(offset, take, None)?
                 };
                 self.rg_buf_cols[col_idx].push(piece);
             }
@@ -1879,11 +1879,11 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
         for (cidx, pieces) in self.rg_buf_cols.iter_mut().enumerate() {
             let dt = &self.schema.fields()[cidx].data_type;
             if pieces.is_empty() && self.logical_locality[cidx] == LocalityGroup::ExternalPayload {
-                rg_cols.push(Column::Flat(FlatColumn::empty(dt)));
+                rg_cols.push(Arc::new(Column::Flat(FlatColumn::empty(dt))));
             } else {
                 let combined = concat_rg_column(dt, pieces, rg_rows)?;
                 pieces.clear();
-                rg_cols.push(combined);
+                rg_cols.push(Arc::new(combined));
             }
         }
         self.rg_buf_rows = 0;

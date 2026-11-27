@@ -1,7 +1,6 @@
 //! Write-ahead log for one table.
 //!
 //! Spec 03 §1. Records, segment files, replay, and the writer task live here.
-#![allow(dead_code)]
 
 mod record;
 mod replay;
@@ -18,10 +17,6 @@ pub(crate) use record::{Decoded, decode_next, encode, push_framed, read_batch};
 
 use std::io;
 use std::path::{Path, PathBuf};
-
-use arrow::datatypes::SchemaRef;
-
-use cetra_core::schema::{scores_schema, spans_schema};
 
 use crate::fs;
 
@@ -43,12 +38,9 @@ impl Table {
         }
     }
 
-    /// Stored Arrow schema.
-    pub(crate) fn schema(self) -> SchemaRef {
-        match self {
-            Self::Spans => spans_schema(),
-            Self::Scores => scores_schema(),
-        }
+    /// Stored columnar schema, delegating to [`crate::catalog::FileTable::column_schema`].
+    pub(crate) fn column_schema(self) -> std::sync::Arc<cetra_column::Schema> {
+        crate::catalog::FileTable::from(self).column_schema()
     }
 
     /// Column whose UTC day partitions the memtable.
@@ -137,19 +129,19 @@ fn list_segment_files(dir: &Path) -> io::Result<Vec<(u64, PathBuf)>> {
 
 /// One span, for segment and replay tests.
 #[cfg(test)]
-pub(crate) fn sample_span_batch() -> arrow::array::RecordBatch {
+pub(crate) fn sample_span_batch() -> cetra_column::Batch {
     spans_at(&[1_700_000_000_000_000_000])
 }
 
 /// One span per start time, for memtable tests.
 #[cfg(test)]
-pub(crate) fn spans_at(starts: &[i64]) -> arrow::array::RecordBatch {
+pub(crate) fn spans_at(starts: &[i64]) -> cetra_column::Batch {
     spans_named(starts, "root")
 }
 
 /// [`spans_at`] with a chosen span name.
 #[cfg(test)]
-pub(crate) fn spans_named(starts: &[i64], name: &str) -> arrow::array::RecordBatch {
+pub(crate) fn spans_named(starts: &[i64], name: &str) -> cetra_column::Batch {
     spans_keyed(starts, name, 1)
 }
 
@@ -157,14 +149,10 @@ pub(crate) fn spans_named(starts: &[i64], name: &str) -> arrow::array::RecordBat
 /// that use the same ids share their `(trace_id, span_id)` keys, and a flush
 /// keeps only one row per key.
 #[cfg(test)]
-pub(crate) fn spans_keyed(
-    starts: &[i64],
-    name: &str,
-    first_span_id: u8,
-) -> arrow::array::RecordBatch {
+pub(crate) fn spans_keyed(starts: &[i64], name: &str, first_span_id: u8) -> cetra_column::Batch {
     use std::collections::BTreeMap;
 
-    use cetra_core::batch::spans_to_record_batch;
+    use cetra_core::batch::spans_to_batch;
     use cetra_core::enums::{SpanKind, SpanStatus};
     use cetra_core::ids::{ProjectId, SpanId, TraceId};
     use cetra_core::span::Span;
@@ -239,7 +227,7 @@ pub(crate) fn spans_keyed(
             }
         })
         .collect();
-    spans_to_record_batch(&spans).unwrap()
+    spans_to_batch(&spans).unwrap()
 }
 
 #[cfg(test)]

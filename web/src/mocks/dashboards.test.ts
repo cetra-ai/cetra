@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import type { Dashboard } from "@/lib/dashboards/types";
 import { dashboardHandlers, seedDashboards } from "@/mocks/dashboards";
 import { server } from "@/mocks/node";
+import { storyDashboards } from "@/mocks/story-dashboards";
 import dashboardDocument from "../../../fixtures/api/static/dashboard.json";
 import overviewDocument from "../../../fixtures/api/static/dashboard-overview.json";
 import staleDocument from "../../../fixtures/api/static/dashboard-stale.json";
@@ -209,4 +210,18 @@ it("serves a seeded Overview, and deletes it once it is reset", async () => {
   });
   expect((await send(OVERVIEW, "DELETE")).status).toBe(204);
   expect((await send(OVERVIEW, "GET")).status).toBe(404);
+});
+
+it("a story dashboard is listed in its project only", async () => {
+  server.use(...dashboardHandlers([...seedDashboards(), ...storyDashboards()]));
+  const idsIn = async (slug: string) => {
+    const url = `${window.location.origin}/api/v1/projects/acme%2F${slug}/dashboards`;
+    const body = (await (await send(url, "GET")).json()) as { data: { id: string }[] };
+    return body.data.map((dashboard) => dashboard.id).sort();
+  };
+  const invoice = "01900000-0000-7000-8000-000000570404";
+  const support = "01900000-0000-7000-8000-000000570401";
+  expect(await idsIn("invoice-pipeline")).toEqual([dashboardDocument.id, invoice].sort());
+  expect(await idsIn("support-bot")).toEqual([dashboardDocument.id, support].sort());
+  expect(await idsIn("playground")).toEqual([dashboardDocument.id]);
 });

@@ -1,7 +1,7 @@
 //! Alert rules and their event history (spec 09 § Evaluation & alerts, D-K-2, D-K-4, D-K-9,
 //! D-K-14).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use axum::extract::{Extension, State};
 use axum::http::{Method, StatusCode};
@@ -9,6 +9,7 @@ use axum::routing::{delete, get, patch, post};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cetra_core::ids::OrgId;
+use cetra_storage::TimeWindow;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -16,8 +17,8 @@ use uuid::Uuid;
 use crate::alerts::condition::normalize_condition;
 use crate::alerts::quota;
 use crate::api::alerts::{
-    AlertCondition, AlertDelivery, AlertEvent, AlertRule, CreateAlertRuleRequest,
-    UpdateAlertRuleRequest,
+    AlertCondition, AlertDelivery, AlertEvent, AlertRule, AlertWindow, CreateAlertRuleRequest,
+    IssueAlertPoint, IssueAlertPreview, IssueAlertPreviewParams, UpdateAlertRuleRequest,
 };
 use crate::api::common::{FieldError, Page, PageParams};
 use crate::audit::catalog::AlertRuleAction;
@@ -27,7 +28,9 @@ use crate::auth::roles::ProjectPerm;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
+use crate::issues::read::{name_counts, score_name};
 use crate::meta::alerts::{self, EventRow, NewRule, RulePatch, RuleRow};
+use crate::meta::issue_links::{issue_scope_ids, source_scope_ids};
 use crate::meta::issues;
 use crate::routes::read::open_query;
 
@@ -57,6 +60,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: post(create_rule),
+        },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/alert-rules/issue-preview",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(issue_preview),
         },
         RouteDef {
             method: Method::GET,
@@ -114,6 +127,94 @@ pub(crate) fn routes() -> Vec<RouteDef> {
 #[derive(Debug, Deserialize)]
 struct RulePath {
     id: Uuid,
+}
+
+const DAY_NS: i64 = 86_400_000_000_000;
+
+/// The preview range of a window (D-K-13): 24 h up to `1h`, 3 days for `6h`, 14 days for `24h`.
+fn preview_span_ns(window: AlertWindow) -> i64 {
+    match window {
+        // M1 | M5 are refused before this is called; listed so the match is exhaustive.
+        AlertWindow::M1 | AlertWindow::M5 | AlertWindow::M15 | AlertWindow::H1 => DAY_NS,
+        AlertWindow::H6 => 3 * DAY_NS,
+        AlertWindow::H24 => 14 * DAY_NS,
+    }
+}
+
+/// The scope of a preview: one issue, or a source's issues.
+enum PreviewScope {
+    Issue(Uuid),
+    Source(Uuid),
+}
+
+/// `GET …/alert-rules/issue-preview`: the live occurrences an `issue_occurrences` rule of the
+/// scope would count, per bucket as wide as the window, over the preview range ending now
+/// (D-K-22). The range starts at the window boundary at or before the span's start, so every
+/// bucket but the last is a full window. Names are resolved as the evaluator resolves them
+/// (D-IC-20).
+async fn issue_preview(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Query(params): error::Query<IssueAlertPreviewParams>,
+) -> Result<error::Json<IssueAlertPreview>, ApiError> {
+    let project = access.project.id;
+    let org = access.project.org_id;
+    let scope = match (params.issue_id, params.source_id) {
+        (Some(issue), None) => PreviewScope::Issue(issue),
+        (None, Some(source)) => PreviewScope::Source(source),
+        _ => {
+            return Err(field_error(
+                "issue_id",
+                "give exactly one of issue_id and source_id",
+            ));
+        }
+    };
+    if matches!(params.window, AlertWindow::M1 | AlertWindow::M5) {
+        return Err(field_error(
+            "window",
+            "issue occurrences need a window of 15m or more",
+        ));
+    }
+    let ids = match scope {
+        PreviewScope::Issue(issue) => issue_scope_ids(state.meta.reader(), project, issue)
+            .await?
+            .ok_or(ApiError::NotFound)?,
+        PreviewScope::Source(source) => source_scope_ids(state.meta.reader(), project, source)
+            .await?
+            .ok_or(ApiError::NotFound)?,
+    };
+    let to = state.clock.now_ns();
+    let width = params.window.ns();
+    let start = to - preview_span_ns(params.window);
+    let from = start - start.rem_euclid(width);
+    let window = TimeWindow::new(from, to)?;
+
+    let mut by_bucket: BTreeMap<i64, u64> = BTreeMap::new();
+    if !ids.is_empty() {
+        let names: Vec<String> = ids.iter().copied().map(score_name).collect();
+        let ctx = open_query(&state, org, project, None).await?;
+        for row in name_counts(&ctx, &names, window, Some(width)).await? {
+            let count = by_bucket.entry(row.bucket_start).or_default();
+            *count = count.saturating_add(row.count);
+        }
+    }
+
+    // Every bucket that overlaps `[from, to)`, oldest first; a bucket with no occurrence is 0.
+    let mut points = Vec::new();
+    let mut time = from;
+    while time < to {
+        points.push(IssueAlertPoint {
+            time,
+            count: by_bucket.get(&time).copied().unwrap_or(0),
+        });
+        time = time.saturating_add(width);
+    }
+    Ok(error::Json(IssueAlertPreview {
+        from,
+        to,
+        window: params.window,
+        points,
+    }))
 }
 
 /// Not paged: a project has at most 100 rules (D-K-5).
@@ -568,7 +669,7 @@ mod tests {
     use crate::auth::roles::OrgRole;
     use crate::meta::alerts::NewChannel;
     use crate::meta::issues::{IssueState, SourceKind};
-    use crate::test_support::issues::{issue_row, put_issue, put_source, source_row};
+    use crate::test_support::issues::{issue_row, occurrence, put_issue, put_source, source_row};
     use crate::test_support::{Seeded, TestApp, TestResponse, assert_logs_clean, set_limits};
 
     fn rules(seeded: &Seeded) -> String {
@@ -1782,5 +1883,356 @@ mod tests {
         .await;
         assert_eq!(second.status, 403);
         assert_eq!(second.problem().code, ProblemCode::PlanLimit);
+    }
+
+    const MINUTE_NS: i64 = 60_000_000_000;
+    const HOUR_NS: i64 = 3_600_000_000_000;
+
+    /// A 32-digit lowercase trace id for the `n`th occurrence of a test.
+    fn trace(n: u8) -> String {
+        format!("a1{n:030x}")
+    }
+
+    /// Checks the shape every preview answers: `from` is the window boundary the buckets start
+    /// at, buckets `width` wide up to the last one that starts before `to`, aligned to the epoch
+    /// and with no gap.
+    fn assert_buckets(preview: &IssueAlertPreview, width: i64) {
+        let first = preview.points.first().expect("a point").time;
+        assert_eq!(first, preview.from);
+        assert_eq!(preview.from % width, 0);
+        let last = preview.points.last().expect("a point").time;
+        assert!(last < preview.to && preview.to <= last + width);
+        assert!(preview.points.iter().all(|point| point.time % width == 0));
+        for pair in preview.points.windows(2) {
+            assert_eq!(pair[1].time - pair[0].time, width);
+        }
+    }
+
+    /// The preview of `query` (the parameters after `issue-preview?`) for the owner, expecting 200.
+    async fn preview_ok(app: &TestApp, seeded: &Seeded, query: &str) -> IssueAlertPreview {
+        let path = format!("{}/issue-preview?{query}", rules(seeded));
+        let response = send(app, Method::GET, &path, &seeded.cookie, None).await;
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        response.json()
+    }
+
+    #[tokio::test]
+    async fn issue_preview_counts_per_window() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (source, issue) = source_and_issue(&app, seeded.project.id).await;
+        let now = app.state.clock.now_ns();
+        let occurred = [30 * MINUTE_NS, 90 * MINUTE_NS, 100 * MINUTE_NS];
+        for (n, ago) in occurred.into_iter().enumerate() {
+            occurrence(
+                &app,
+                &seeded,
+                source,
+                issue,
+                &trace(n as u8 + 1),
+                now - ago,
+                None,
+                None,
+            )
+            .await;
+        }
+        let preview = preview_ok(&app, &seeded, &format!("issue_id={issue}&window=1h")).await;
+        assert_eq!(preview.window, AlertWindow::H1);
+        assert!(24 * HOUR_NS <= preview.to - preview.from);
+        assert!(preview.to - preview.from < 25 * HOUR_NS);
+        assert_buckets(&preview, HOUR_NS);
+        // The expected count of each bucket, from the occurrence times.
+        let mut expected: BTreeMap<i64, u64> = BTreeMap::new();
+        for ago in occurred {
+            let bucket = (now - ago) - (now - ago).rem_euclid(HOUR_NS);
+            *expected.entry(bucket).or_default() += 1;
+        }
+        for point in &preview.points {
+            assert_eq!(
+                point.count,
+                expected.get(&point.time).copied().unwrap_or(0),
+                "bucket {}",
+                point.time
+            );
+        }
+        let total: u64 = preview.points.iter().map(|point| point.count).sum();
+        assert_eq!(total, 3);
+    }
+
+    #[tokio::test]
+    async fn issue_preview_counts_the_first_bucket_in_full() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (source, issue) = source_and_issue(&app, seeded.project.id).await;
+        let now = app.state.clock.now_ns();
+        let start = now - 24 * HOUR_NS;
+        let from = start - start.rem_euclid(HOUR_NS);
+        // In the first bucket, at its start: counted.
+        occurrence(&app, &seeded, source, issue, &trace(1), from, None, None).await;
+        // Just before the range, and in the bucket before it: not counted.
+        occurrence(
+            &app,
+            &seeded,
+            source,
+            issue,
+            &trace(2),
+            from - 1,
+            None,
+            None,
+        )
+        .await;
+        occurrence(
+            &app,
+            &seeded,
+            source,
+            issue,
+            &trace(3),
+            from - HOUR_NS,
+            None,
+            None,
+        )
+        .await;
+
+        let preview = preview_ok(&app, &seeded, &format!("issue_id={issue}&window=1h")).await;
+        assert_eq!(preview.points.first().expect("a point").time, from);
+        assert_eq!(preview.points[0].count, 1);
+        let total: u64 = preview.points.iter().map(|point| point.count).sum();
+        assert_eq!(total, 1);
+    }
+
+    #[tokio::test]
+    async fn issue_preview_of_another_project_is_not_found() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let (source, issue) = source_and_issue(&app, other.id).await;
+
+        let by_issue = preview_query(&app, &seeded, &format!("issue_id={issue}&window=1h")).await;
+        assert_eq!(by_issue.status, 404);
+        let by_source =
+            preview_query(&app, &seeded, &format!("source_id={source}&window=1h")).await;
+        assert_eq!(by_source.status, 404);
+    }
+
+    #[tokio::test]
+    async fn issue_preview_counts_merged_issues() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (source, target) = source_and_issue(&app, seeded.project.id).await;
+        let now = app.state.clock.now_ns();
+        let merged = Uuid::now_v7();
+        let mut row = issue_row(
+            seeded.project.id,
+            source,
+            merged,
+            "Merged",
+            IssueState::Merged,
+            now,
+        );
+        row.merged_into = Some(target);
+        put_issue(&app, row).await;
+        occurrence(
+            &app,
+            &seeded,
+            source,
+            target,
+            &trace(1),
+            now - MINUTE_NS,
+            None,
+            None,
+        )
+        .await;
+        occurrence(
+            &app,
+            &seeded,
+            source,
+            merged,
+            &trace(2),
+            now - 2 * MINUTE_NS,
+            None,
+            None,
+        )
+        .await;
+
+        for id in [target, merged] {
+            let preview = preview_ok(&app, &seeded, &format!("issue_id={id}&window=15m")).await;
+            let total: u64 = preview.points.iter().map(|point| point.count).sum();
+            assert_eq!(total, 2, "issue {id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn issue_preview_of_a_source_skips_ignored_issues() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (source, open) = source_and_issue(&app, seeded.project.id).await;
+        let now = app.state.clock.now_ns();
+        let ignored = Uuid::now_v7();
+        put_issue(
+            &app,
+            issue_row(
+                seeded.project.id,
+                source,
+                ignored,
+                "Ignored",
+                IssueState::Ignored,
+                now,
+            ),
+        )
+        .await;
+        occurrence(
+            &app,
+            &seeded,
+            source,
+            open,
+            &trace(1),
+            now - MINUTE_NS,
+            None,
+            None,
+        )
+        .await;
+        occurrence(
+            &app,
+            &seeded,
+            source,
+            ignored,
+            &trace(2),
+            now - MINUTE_NS,
+            None,
+            None,
+        )
+        .await;
+
+        let preview = preview_ok(&app, &seeded, &format!("source_id={source}&window=15m")).await;
+        let total: u64 = preview.points.iter().map(|point| point.count).sum();
+        assert_eq!(total, 1);
+    }
+
+    #[tokio::test]
+    async fn issue_preview_of_an_empty_source_is_zero() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let source = source_row(seeded.project.id, "Empty", SourceKind::Error, true, now);
+        let source_id = source.id;
+        put_source(&app, source).await;
+
+        let preview = preview_ok(&app, &seeded, &format!("source_id={source_id}&window=1h")).await;
+        assert_buckets(&preview, HOUR_NS);
+        assert!(!preview.points.is_empty());
+        assert!(preview.points.iter().all(|point| point.count == 0));
+    }
+
+    /// The answer to `issue-preview?query` for the owner, whatever its status.
+    async fn preview_query(app: &TestApp, seeded: &Seeded, query: &str) -> TestResponse {
+        let path = format!("{}/issue-preview?{query}", rules(seeded));
+        send(app, Method::GET, &path, &seeded.cookie, None).await
+    }
+
+    #[tokio::test]
+    async fn issue_preview_refuses_bad_parameters() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (source, issue) = source_and_issue(&app, seeded.project.id).await;
+        let exactly_one = pairs(&[("issue_id", "give exactly one of issue_id and source_id")]);
+
+        let neither = preview_query(&app, &seeded, "window=1h").await;
+        assert_eq!(neither.status, 400);
+        assert_eq!(problem_of(&neither), exactly_one);
+
+        let both = preview_query(
+            &app,
+            &seeded,
+            &format!("issue_id={issue}&source_id={source}&window=1h"),
+        )
+        .await;
+        assert_eq!(both.status, 400);
+        assert_eq!(problem_of(&both), exactly_one);
+
+        let five = preview_query(&app, &seeded, &format!("issue_id={issue}&window=5m")).await;
+        assert_eq!(five.status, 400);
+        assert_eq!(
+            problem_of(&five),
+            pairs(&[("window", "issue occurrences need a window of 15m or more")])
+        );
+
+        let one = preview_query(&app, &seeded, &format!("issue_id={issue}&window=1m")).await;
+        assert_eq!(one.status, 400);
+
+        let two_hours = preview_query(&app, &seeded, &format!("issue_id={issue}&window=2h")).await;
+        assert_eq!(two_hours.status, 400);
+
+        let unknown_issue = preview_query(
+            &app,
+            &seeded,
+            &format!("issue_id={}&window=1h", Uuid::now_v7()),
+        )
+        .await;
+        assert_eq!(unknown_issue.status, 404);
+        let unknown_source = preview_query(
+            &app,
+            &seeded,
+            &format!("source_id={}&window=1h", Uuid::now_v7()),
+        )
+        .await;
+        assert_eq!(unknown_source.status, 404);
+    }
+
+    #[tokio::test]
+    async fn issue_preview_ranges() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (source, issue) = source_and_issue(&app, seeded.project.id).await;
+        let now = app.state.clock.now_ns();
+        occurrence(
+            &app,
+            &seeded,
+            source,
+            issue,
+            &trace(1),
+            now - MINUTE_NS,
+            None,
+            None,
+        )
+        .await;
+        let scope = format!("issue_id={issue}");
+
+        let short = preview_ok(&app, &seeded, &format!("{scope}&window=15m")).await;
+        assert!(DAY_NS <= short.to - short.from);
+        assert!(short.to - short.from < DAY_NS + 15 * MINUTE_NS);
+        assert_buckets(&short, 15 * MINUTE_NS);
+
+        let six = preview_ok(&app, &seeded, &format!("{scope}&window=6h")).await;
+        assert!(3 * DAY_NS <= six.to - six.from);
+        assert!(six.to - six.from < 3 * DAY_NS + 6 * HOUR_NS);
+        assert_buckets(&six, 6 * HOUR_NS);
+
+        // Daily buckets start at UTC midnights.
+        let day = preview_ok(&app, &seeded, &format!("{scope}&window=24h")).await;
+        assert!(14 * DAY_NS <= day.to - day.from);
+        assert!(day.to - day.from < 14 * DAY_NS + DAY_NS);
+        assert_buckets(&day, DAY_NS);
+        assert!(day.points.iter().all(|point| point.time % DAY_NS == 0));
+    }
+
+    #[tokio::test]
+    async fn issue_preview_is_readable_by_a_viewer() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (_, issue) = source_and_issue(&app, seeded.project.id).await;
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
+        let path = format!(
+            "{}/issue-preview?issue_id={issue}&window=1h",
+            rules(&seeded)
+        );
+        let response = send(&app, Method::GET, &path, &viewer.cookie, None).await;
+        assert_eq!(response.status, 200);
     }
 }

@@ -9,7 +9,7 @@ use super::online_rules::present;
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentContextBody {
-    /// `claude-code`, `codex`, `gemini-cli` or `copilot`.
+    /// `claude-code`, `codex`, `gemini-cli`, `copilot` or `qwen-code`.
     pub agent: String,
     /// The id the agent puts on its spans, 1 to 256 characters.
     pub session_id: String,

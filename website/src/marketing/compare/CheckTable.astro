@@ -1,0 +1,98 @@
+---
+import { AREAS, type loadProduct } from "../data/compare.mjs";
+import StatusMark from "./StatusMark.astro";
+
+type Product = ReturnType<typeof loadProduct>;
+interface Props {
+  them: Product;
+  cetra: Product;
+}
+const { them, cetra } = Astro.props;
+const rows = AREAS.map(([key, label]) => ({
+  label,
+  ours: cetra.facts[key],
+  theirs: them.facts[key],
+}));
+---
+
+<div class="table-wrap" role="region" aria-label={`cetra and ${them.name} at a glance`} tabindex="0">
+  <table class="check-table">
+    <caption class="visually-hidden">cetra and {them.name} at a glance</caption>
+    <thead>
+      <tr>
+        <th scope="col"><span class="visually-hidden">Area</span></th>
+        <th scope="col">cetra</th>
+        <th scope="col">{them.name}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {
+        rows.map((row) => (
+          <tr>
+            <th scope="row">{row.label}</th>
+            <td class="ours">
+              <span class="cell">
+                <StatusMark status={row.ours.status} />
+                {row.ours.short}
+              </span>
+            </td>
+            <td>
+              <span class="cell">
+                <StatusMark status={row.theirs.status} />
+                {row.theirs.short}
+              </span>
+            </td>
+          </tr>
+        ))
+      }
+    </tbody>
+  </table>
+</div>
+
+<style>
+  /* Positioned, so the cells' screen-reader labels (absolute) scroll inside it instead of widening the page. */
+  .table-wrap {
+    position: relative;
+    overflow-x: auto;
+    margin-top: var(--space-7);
+  }
+  .check-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+  }
+  th,
+  td {
+    padding: var(--space-3) var(--space-3);
+    border-top: 1px solid var(--line);
+    text-align: left;
+    vertical-align: top;
+  }
+  thead th {
+    border-top: 0;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    font-weight: 500;
+  }
+  tbody th {
+    width: 34%;
+    font-weight: 500;
+  }
+  td {
+    width: 33%;
+    color: var(--fg-muted);
+  }
+  td.ours {
+    color: var(--fg);
+  }
+  .cell {
+    display: flex;
+    gap: var(--space-2);
+  }
+  @media (max-width: 720px) {
+    .check-table {
+      min-width: 560px;
+    }
+  }
+</style>

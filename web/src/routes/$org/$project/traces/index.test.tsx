@@ -381,6 +381,18 @@ it("opens a trace beside the list and follows span, escape, and j", async () => 
   expect(router.state.location.search.span).toBeUndefined();
 });
 
+/** The tool line button whose text starts with `prefix`. */
+function toolLine(container: HTMLElement, prefix: string): HTMLElement {
+  const lines = within(container)
+    .getAllByRole("button")
+    .filter((button) => button.textContent?.startsWith(prefix));
+  const [line] = lines;
+  if (lines.length !== 1 || !line) {
+    throw new Error(`expected one line starting with ${prefix}, got ${lines.length}`);
+  }
+  return line;
+}
+
 it("shows the trace summary in transcript mode until a block is picked, and goes back to it", async () => {
   const { router, user } = await renderApp(
     `/acme/support-bot/traces?trace=${TRACE_1}&mode=transcript`,
@@ -388,7 +400,12 @@ it("shows the trace summary in transcript mode until a block is picked, and goes
   expect(await screen.findByRole("region", { name: "Trace summary" })).toBeInTheDocument();
 
   const transcript = await screen.findByRole("region", { name: "Transcript" });
-  await user.click(within(transcript).getByRole("button", { name: /get_order_status/ }));
+  const row = await waitFor(() => {
+    const found = transcript.querySelector('[data-turn="b100000000000013"]');
+    if (!(found instanceof HTMLElement)) throw new Error("no tool row");
+    return found;
+  });
+  await user.click(await waitFor(() => toolLine(row, "get_order_status(")));
   await waitFor(() => {
     expect(router.state.location.search).toMatchObject({ span: TOOL_SPAN, mode: "transcript" });
   });
@@ -652,6 +669,7 @@ it("shows the plain empty state when the default filter matches nothing", async 
   expect(screen.getByRole("button", { name: "Clear filters" })).toBeInTheDocument();
   expect(screen.queryByRole("tab", { name: "OTel env vars" })).not.toBeInTheDocument();
   expect(screen.getByText("0 loaded")).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Totals" })).not.toBeInTheDocument();
 });
 
 it("the saved views menu sits in the breadcrumb", async () => {
@@ -2007,4 +2025,70 @@ it("a return restores the first visible row", async () => {
   await waitFor(() => {
     expect(tracesScroller().scrollTop).toBe(2 * ROW_HEIGHT);
   });
+});
+
+it("shows the list totals under the table", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/traces/totals", () =>
+      HttpResponse.json({ trace_count: 203, error_trace_count: 3, cost_total: 4.12 }),
+    ),
+  );
+  const recording = recordUrls();
+  try {
+    await renderApp("/acme/support-bot/traces?filter=status%20%3D%20'error'&search=order");
+    await waitFor(() => {
+      expect(screen.getByRole("region", { name: "Totals" }).textContent).toBe(
+        "203 traces · 3 errors · $4.12",
+      );
+    });
+    const totalsUrl = recording.urls.find((url) => url.pathname.endsWith("/traces/totals"));
+    const listUrl = recording.urls.find(isListRequest);
+    expect(totalsUrl?.searchParams.get("filter")).toBe("status = 'error'");
+    expect(totalsUrl?.searchParams.get("search")).toBe("order");
+    expect(totalsUrl?.searchParams.get("from")).toBe(listUrl?.searchParams.get("from"));
+    expect(totalsUrl?.searchParams.get("to")).toBe(listUrl?.searchParams.get("to"));
+  } finally {
+    recording.stop();
+  }
+});
+
+it("totals the checked rows", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/traces/totals", () =>
+      HttpResponse.json({ trace_count: 203, error_trace_count: 3, cost_total: 4.12 }),
+    ),
+  );
+  const { user } = await renderApp("/acme/support-bot/traces");
+  await waitFor(() => {
+    expect(screen.getByRole("region", { name: "Totals" }).textContent).toBe(
+      "203 traces · 3 errors · $4.12",
+    );
+  });
+  await user.click(await rowBox(0));
+  await user.click(await rowBox(2));
+  await waitFor(() => {
+    expect(screen.getByRole("region", { name: "Totals" }).textContent).toBe(
+      "2 of 203 selected · 1 error · $0.0027",
+    );
+  });
+  await user.click(await rowBox(0));
+  await user.click(await rowBox(2));
+  await waitFor(() => {
+    expect(screen.getByRole("region", { name: "Totals" }).textContent).toBe(
+      "203 traces · 3 errors · $4.12",
+    );
+  });
+});
+
+it("says when the totals are unavailable", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/traces/totals", () =>
+      problemResponse(500, "internal", { detail: "totals failed" }),
+    ),
+  );
+  await renderApp("/acme/support-bot/traces");
+  await waitFor(() => {
+    expect(screen.getByRole("region", { name: "Totals" }).textContent).toBe("Totals unavailable");
+  });
+  expect(screen.getByRole("grid", { name: "Traces" })).toBeInTheDocument();
 });

@@ -1,5 +1,6 @@
 //! Versioned, CRC-32C-checksummed, LZ4-compressed, DoS-bounded binary batch framing.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::ops::Range;
 
@@ -107,67 +108,754 @@ fn validate_header_fields(hdr: &[u8; FRAME_HEADER_LEN]) -> Result<ParsedHeader, 
     })
 }
 
+struct ReservedVecWriter<'a> {
+    buf: Vec<u8>,
+    pool: Option<&'a mut Reservation>,
+    err: Option<ColumnError>,
+}
+
+impl Write for ReservedVecWriter<'_> {
+    fn write(&mut self, src: &[u8]) -> std::io::Result<usize> {
+        if let Some(res) = self.pool.as_deref_mut()
+            && let Err(e) = res.try_grow(src.len())
+        {
+            self.err = Some(e);
+            return Err(std::io::Error::other("reservation memory limit exceeded"));
+        }
+        self.buf.extend_from_slice(src);
+        Ok(src.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn data_type_wire_len(dt: &DataType) -> usize {
+    match dt {
+        DataType::Decimal128 { .. } => 3,
+        DataType::TimestampNs { .. } => 2,
+        DataType::List(inner) => 1 + data_type_wire_len(inner),
+        _ => 1,
+    }
+}
+
+fn optional_bitmap_wire_len(bm: Option<&Bitmap>) -> usize {
+    bm.map_or(1, |b| 1 + b.len().div_ceil(8))
+}
+
+fn utf8_wire_len(u: &Utf8Data) -> Result<usize, ColumnError> {
+    u.offsets()
+        .len()
+        .checked_mul(4)
+        .and_then(|s| s.checked_add(4))
+        .and_then(|s| s.checked_add(u.bytes().len()))
+        .ok_or(ColumnError::Overflow {
+            reason: "utf8 wire length overflow",
+        })
+}
+
+fn binary_wire_len(b: &BinaryData) -> Result<usize, ColumnError> {
+    b.offsets()
+        .len()
+        .checked_mul(4)
+        .and_then(|s| s.checked_add(4))
+        .and_then(|s| s.checked_add(b.bytes().len()))
+        .ok_or(ColumnError::Overflow {
+            reason: "binary wire length overflow",
+        })
+}
+
+fn flat_data_wire_len(data: &FlatData, max_decoded: u32) -> Result<usize, ColumnError> {
+    match data {
+        FlatData::Null(_) => Ok(0),
+        FlatData::Bool(bm) => Ok(bm.len().div_ceil(8)),
+        FlatData::I64(v) | FlatData::TimestampNs { values: v, .. } => {
+            v.len().checked_mul(8).ok_or(ColumnError::Overflow {
+                reason: "wire length overflow",
+            })
+        }
+        FlatData::F64(v) => v.len().checked_mul(8).ok_or(ColumnError::Overflow {
+            reason: "wire length overflow",
+        }),
+        FlatData::FixedBytes8(v) => v.len().checked_mul(8).ok_or(ColumnError::Overflow {
+            reason: "wire length overflow",
+        }),
+        FlatData::Decimal128 { values, .. } => {
+            values.len().checked_mul(16).ok_or(ColumnError::Overflow {
+                reason: "wire length overflow",
+            })
+        }
+        FlatData::Interval(values) => values.len().checked_mul(16).ok_or(ColumnError::Overflow {
+            reason: "wire length overflow",
+        }),
+        FlatData::FixedBytes16(values) => {
+            values.len().checked_mul(16).ok_or(ColumnError::Overflow {
+                reason: "wire length overflow",
+            })
+        }
+        FlatData::Date(v) => v.len().checked_mul(4).ok_or(ColumnError::Overflow {
+            reason: "wire length overflow",
+        }),
+        FlatData::Utf8(u) => utf8_wire_len(u),
+        FlatData::Binary(b) => binary_wire_len(b),
+        FlatData::List {
+            offsets, values, ..
+        } => {
+            let off_bytes = offsets.len().checked_mul(4).ok_or(ColumnError::Overflow {
+                reason: "list wire length overflow",
+            })?;
+            let child_bytes = column_wire_len(values, max_decoded)?;
+            off_bytes
+                .checked_add(4)
+                .and_then(|s| s.checked_add(child_bytes))
+                .ok_or(ColumnError::Overflow {
+                    reason: "list wire length overflow",
+                })
+        }
+        FlatData::MapUtf8(m) => {
+            let off_bytes = m
+                .offsets()
+                .len()
+                .checked_mul(4)
+                .ok_or(ColumnError::Overflow {
+                    reason: "map wire length overflow",
+                })?;
+            let k_bytes = utf8_wire_len(m.keys())?;
+            let v_bytes = utf8_wire_len(m.values())?;
+            off_bytes
+                .checked_add(4)
+                .and_then(|s| s.checked_add(k_bytes))
+                .and_then(|s| s.checked_add(v_bytes))
+                .and_then(|s| s.checked_add(optional_bitmap_wire_len(m.value_nulls())))
+                .ok_or(ColumnError::Overflow {
+                    reason: "map wire length overflow",
+                })
+        }
+        FlatData::Events(e) => {
+            let off_bytes = e
+                .offsets()
+                .len()
+                .checked_mul(4)
+                .ok_or(ColumnError::Overflow {
+                    reason: "events wire length overflow",
+                })?;
+            let times_bytes = e
+                .times()
+                .len()
+                .checked_mul(8)
+                .ok_or(ColumnError::Overflow {
+                    reason: "events wire length overflow",
+                })?;
+            let n_bytes = utf8_wire_len(e.names())?;
+            let a_bytes = utf8_wire_len(e.attributes())?;
+            off_bytes
+                .checked_add(4)
+                .and_then(|s| s.checked_add(times_bytes))
+                .and_then(|s| s.checked_add(n_bytes))
+                .and_then(|s| s.checked_add(a_bytes))
+                .and_then(|s| s.checked_add(optional_bitmap_wire_len(e.attribute_nulls())))
+                .ok_or(ColumnError::Overflow {
+                    reason: "events wire length overflow",
+                })
+        }
+        FlatData::Links(l) => {
+            let off_bytes = l
+                .offsets()
+                .len()
+                .checked_mul(4)
+                .ok_or(ColumnError::Overflow {
+                    reason: "links wire length overflow",
+                })?;
+            let tid_bytes = l
+                .trace_ids()
+                .len()
+                .checked_mul(16)
+                .ok_or(ColumnError::Overflow {
+                    reason: "links wire length overflow",
+                })?;
+            let sid_bytes = l
+                .span_ids()
+                .len()
+                .checked_mul(8)
+                .ok_or(ColumnError::Overflow {
+                    reason: "links wire length overflow",
+                })?;
+            let a_bytes = utf8_wire_len(l.attributes())?;
+            off_bytes
+                .checked_add(4)
+                .and_then(|s| s.checked_add(tid_bytes))
+                .and_then(|s| s.checked_add(sid_bytes))
+                .and_then(|s| s.checked_add(a_bytes))
+                .and_then(|s| s.checked_add(optional_bitmap_wire_len(l.attribute_nulls())))
+                .ok_or(ColumnError::Overflow {
+                    reason: "links wire length overflow",
+                })
+        }
+    }
+}
+
+fn flat_column_wire_len(fc: &FlatColumn, max_decoded: u32) -> Result<usize, ColumnError> {
+    optional_bitmap_wire_len(fc.nulls())
+        .checked_add(flat_data_wire_len(fc.data(), max_decoded)?)
+        .ok_or(ColumnError::Overflow {
+            reason: "flat column wire length overflow",
+        })
+}
+
+fn scalar_groups_flat_data_wire_len(
+    dt: &DataType,
+    groups: &[&[ScalarValue]],
+    max_decoded: u32,
+) -> Result<usize, ColumnError> {
+    let mut count = 0usize;
+    for g in groups {
+        count = count.checked_add(g.len()).ok_or(ColumnError::Overflow {
+            reason: "const scalar length overflow",
+        })?;
+    }
+    let len = match dt {
+        DataType::Null => Ok(0),
+        DataType::Bool => Ok(count.div_ceil(8)),
+        DataType::I64 | DataType::TimestampNs { .. } | DataType::F64 | DataType::FixedBytes8 => {
+            count.checked_mul(8).ok_or(ColumnError::Overflow {
+                reason: "const column wire length overflow",
+            })
+        }
+        DataType::Decimal128 { .. } | DataType::Interval | DataType::FixedBytes16 => {
+            count.checked_mul(16).ok_or(ColumnError::Overflow {
+                reason: "const column wire length overflow",
+            })
+        }
+        DataType::Date => count.checked_mul(4).ok_or(ColumnError::Overflow {
+            reason: "const column wire length overflow",
+        }),
+        DataType::Utf8 => {
+            let mut str_bytes = 0usize;
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Utf8(s) = v {
+                        str_bytes =
+                            str_bytes
+                                .checked_add(s.len())
+                                .ok_or(ColumnError::Overflow {
+                                    reason: "utf8 wire length overflow",
+                                })?;
+                    }
+                }
+            }
+            let _ = checked_u32(str_bytes, "utf8 bytes length exceeds u32::MAX")?;
+            count
+                .checked_add(1)
+                .and_then(|s| s.checked_mul(4))
+                .and_then(|s| s.checked_add(4))
+                .and_then(|s| s.checked_add(str_bytes))
+                .ok_or(ColumnError::Overflow {
+                    reason: "utf8 wire length overflow",
+                })
+        }
+        DataType::Binary => {
+            let mut bin_bytes = 0usize;
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Binary(b) = v {
+                        bin_bytes =
+                            bin_bytes
+                                .checked_add(b.len())
+                                .ok_or(ColumnError::Overflow {
+                                    reason: "binary wire length overflow",
+                                })?;
+                    }
+                }
+            }
+            let _ = checked_u32(bin_bytes, "binary bytes length exceeds u32::MAX")?;
+            count
+                .checked_add(1)
+                .and_then(|s| s.checked_mul(4))
+                .and_then(|s| s.checked_add(4))
+                .and_then(|s| s.checked_add(bin_bytes))
+                .ok_or(ColumnError::Overflow {
+                    reason: "binary wire length overflow",
+                })
+        }
+        DataType::List(inner) => {
+            let off_bytes = count.checked_add(1).and_then(|s| s.checked_mul(4)).ok_or(
+                ColumnError::Overflow {
+                    reason: "list wire length overflow",
+                },
+            )?;
+            let mut child_groups: Vec<&[ScalarValue]> = Vec::new();
+            let mut child_len = 0usize;
+            let mut has_nulls = false;
+            let check_nulls = !matches!(inner.as_ref(), DataType::Null);
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::List { values, .. } = v {
+                        child_len =
+                            child_len
+                                .checked_add(values.len())
+                                .ok_or(ColumnError::Overflow {
+                                    reason: "list scalar length exceeds u32::MAX",
+                                })?;
+                        if check_nulls && !has_nulls && values.iter().any(ScalarValue::is_null) {
+                            has_nulls = true;
+                        }
+                        child_groups.push(values.as_slice());
+                    }
+                }
+            }
+            let _ = checked_u32(child_len, "list scalar length exceeds u32::MAX")?;
+            let null_wire = if has_nulls {
+                1usize
+                    .checked_add(child_len.div_ceil(8))
+                    .ok_or(ColumnError::Overflow {
+                        reason: "list wire length overflow",
+                    })?
+            } else {
+                1
+            };
+            let child_data_wire =
+                scalar_groups_flat_data_wire_len(inner, &child_groups, max_decoded)?;
+            off_bytes
+                .checked_add(4)
+                .and_then(|s| s.checked_add(1))
+                .and_then(|s| s.checked_add(null_wire))
+                .and_then(|s| s.checked_add(child_data_wire))
+                .ok_or(ColumnError::Overflow {
+                    reason: "list wire length overflow",
+                })
+        }
+        DataType::MapUtf8 => {
+            let row_off = count.checked_add(1).and_then(|s| s.checked_mul(4)).ok_or(
+                ColumnError::Overflow {
+                    reason: "map wire length overflow",
+                },
+            )?;
+            let mut entry_count = 0usize;
+            let mut k_bytes = 0usize;
+            let mut v_bytes = 0usize;
+            let mut has_nulls = false;
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::MapUtf8(entries) = v {
+                        entry_count = entry_count.checked_add(entries.len()).ok_or(
+                            ColumnError::Overflow {
+                                reason: "map scalar entries exceed u32::MAX",
+                            },
+                        )?;
+                        for (k, mv) in entries {
+                            k_bytes =
+                                k_bytes.checked_add(k.len()).ok_or(ColumnError::Overflow {
+                                    reason: "map wire length overflow",
+                                })?;
+                            if let Some(val) = mv {
+                                v_bytes = v_bytes.checked_add(val.len()).ok_or(
+                                    ColumnError::Overflow {
+                                        reason: "map wire length overflow",
+                                    },
+                                )?;
+                            } else {
+                                has_nulls = true;
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = checked_u32(entry_count, "map entry count exceeds u32::MAX")?;
+            let _ = checked_u32(k_bytes, "utf8 bytes length exceeds u32::MAX")?;
+            let _ = checked_u32(v_bytes, "utf8 bytes length exceeds u32::MAX")?;
+            let entry_off = entry_count
+                .checked_add(1)
+                .and_then(|s| s.checked_mul(4))
+                .ok_or(ColumnError::Overflow {
+                    reason: "map wire length overflow",
+                })?;
+            let null_wire = if has_nulls {
+                1usize
+                    .checked_add(entry_count.div_ceil(8))
+                    .ok_or(ColumnError::Overflow {
+                        reason: "map wire length overflow",
+                    })?
+            } else {
+                1
+            };
+            row_off
+                .checked_add(4)
+                .and_then(|s| s.checked_add(entry_off))
+                .and_then(|s| s.checked_add(4))
+                .and_then(|s| s.checked_add(k_bytes))
+                .and_then(|s| s.checked_add(entry_off))
+                .and_then(|s| s.checked_add(4))
+                .and_then(|s| s.checked_add(v_bytes))
+                .and_then(|s| s.checked_add(null_wire))
+                .ok_or(ColumnError::Overflow {
+                    reason: "map wire length overflow",
+                })
+        }
+        DataType::Events => {
+            let row_off = count.checked_add(1).and_then(|s| s.checked_mul(4)).ok_or(
+                ColumnError::Overflow {
+                    reason: "events wire length overflow",
+                },
+            )?;
+            let mut ev_count = 0usize;
+            let mut name_bytes = 0usize;
+            let mut attr_bytes = 0usize;
+            let mut has_nulls = false;
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Events(evs) = v {
+                        ev_count =
+                            ev_count
+                                .checked_add(evs.len())
+                                .ok_or(ColumnError::Overflow {
+                                    reason: "events scalar count exceeds u32::MAX",
+                                })?;
+                        for ev in evs {
+                            name_bytes = name_bytes.checked_add(ev.name.len()).ok_or(
+                                ColumnError::Overflow {
+                                    reason: "events wire length overflow",
+                                },
+                            )?;
+                            if let Some(attr) = &ev.attributes {
+                                attr_bytes = attr_bytes.checked_add(attr.len()).ok_or(
+                                    ColumnError::Overflow {
+                                        reason: "events wire length overflow",
+                                    },
+                                )?;
+                            } else {
+                                has_nulls = true;
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = checked_u32(ev_count, "events count exceeds u32::MAX")?;
+            let _ = checked_u32(name_bytes, "utf8 bytes length exceeds u32::MAX")?;
+            let _ = checked_u32(attr_bytes, "utf8 bytes length exceeds u32::MAX")?;
+            let times_bytes = ev_count.checked_mul(8).ok_or(ColumnError::Overflow {
+                reason: "events wire length overflow",
+            })?;
+            let entry_off = ev_count
+                .checked_add(1)
+                .and_then(|s| s.checked_mul(4))
+                .ok_or(ColumnError::Overflow {
+                    reason: "events wire length overflow",
+                })?;
+            let null_wire = if has_nulls {
+                1usize
+                    .checked_add(ev_count.div_ceil(8))
+                    .ok_or(ColumnError::Overflow {
+                        reason: "events wire length overflow",
+                    })?
+            } else {
+                1
+            };
+            row_off
+                .checked_add(4)
+                .and_then(|s| s.checked_add(times_bytes))
+                .and_then(|s| s.checked_add(entry_off))
+                .and_then(|s| s.checked_add(4))
+                .and_then(|s| s.checked_add(name_bytes))
+                .and_then(|s| s.checked_add(entry_off))
+                .and_then(|s| s.checked_add(4))
+                .and_then(|s| s.checked_add(attr_bytes))
+                .and_then(|s| s.checked_add(null_wire))
+                .ok_or(ColumnError::Overflow {
+                    reason: "events wire length overflow",
+                })
+        }
+        DataType::Links => {
+            let row_off = count.checked_add(1).and_then(|s| s.checked_mul(4)).ok_or(
+                ColumnError::Overflow {
+                    reason: "links wire length overflow",
+                },
+            )?;
+            let mut lk_count = 0usize;
+            let mut attr_bytes = 0usize;
+            let mut has_nulls = false;
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Links(lks) = v {
+                        lk_count =
+                            lk_count
+                                .checked_add(lks.len())
+                                .ok_or(ColumnError::Overflow {
+                                    reason: "links scalar count exceeds u32::MAX",
+                                })?;
+                        for lk in lks {
+                            if let Some(attr) = &lk.attributes {
+                                attr_bytes = attr_bytes.checked_add(attr.len()).ok_or(
+                                    ColumnError::Overflow {
+                                        reason: "links wire length overflow",
+                                    },
+                                )?;
+                            } else {
+                                has_nulls = true;
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = checked_u32(lk_count, "links count exceeds u32::MAX")?;
+            let _ = checked_u32(attr_bytes, "utf8 bytes length exceeds u32::MAX")?;
+            let ids_bytes = lk_count.checked_mul(24).ok_or(ColumnError::Overflow {
+                reason: "links wire length overflow",
+            })?;
+            let entry_off = lk_count
+                .checked_add(1)
+                .and_then(|s| s.checked_mul(4))
+                .ok_or(ColumnError::Overflow {
+                    reason: "links wire length overflow",
+                })?;
+            let null_wire = if has_nulls {
+                1usize
+                    .checked_add(lk_count.div_ceil(8))
+                    .ok_or(ColumnError::Overflow {
+                        reason: "links wire length overflow",
+                    })?
+            } else {
+                1
+            };
+            row_off
+                .checked_add(4)
+                .and_then(|s| s.checked_add(ids_bytes))
+                .and_then(|s| s.checked_add(entry_off))
+                .and_then(|s| s.checked_add(4))
+                .and_then(|s| s.checked_add(attr_bytes))
+                .and_then(|s| s.checked_add(null_wire))
+                .ok_or(ColumnError::Overflow {
+                    reason: "links wire length overflow",
+                })
+        }
+    }?;
+    if len > max_decoded as usize {
+        return Err(ColumnError::InvalidFrame {
+            reason: "uncompressed body exceeds maximum decoded bytes",
+        });
+    }
+    Ok(len)
+}
+
+fn column_wire_len(col: &Column, max_decoded: u32) -> Result<usize, ColumnError> {
+    match col {
+        Column::Flat(fc) => 1usize
+            .checked_add(flat_column_wire_len(fc, max_decoded)?)
+            .ok_or(ColumnError::Overflow {
+                reason: "column wire length overflow",
+            }),
+        Column::Const { value, .. } => {
+            if value.is_null() {
+                Ok(2)
+            } else {
+                let dt = value.data_type();
+                let data_wire = scalar_groups_flat_data_wire_len(
+                    &dt,
+                    &[std::slice::from_ref(value)],
+                    max_decoded,
+                )?;
+                2usize.checked_add(data_wire).ok_or(ColumnError::Overflow {
+                    reason: "const column wire length overflow",
+                })
+            }
+        }
+        Column::Dict(d) => {
+            let val_bytes = flat_column_wire_len(d.values(), max_decoded)?;
+            let code_bytes = d
+                .codes()
+                .len()
+                .checked_mul(4)
+                .ok_or(ColumnError::Overflow {
+                    reason: "dict codes wire length overflow",
+                })?;
+            5usize
+                .checked_add(val_bytes)
+                .and_then(|s| s.checked_add(code_bytes))
+                .and_then(|s| s.checked_add(optional_bitmap_wire_len(d.nulls())))
+                .ok_or(ColumnError::Overflow {
+                    reason: "dict column wire length overflow",
+                })
+        }
+        Column::Rle(r) => {
+            let val_bytes = flat_column_wire_len(r.values(), max_decoded)?;
+            let end_bytes = r
+                .run_ends()
+                .len()
+                .checked_mul(4)
+                .ok_or(ColumnError::Overflow {
+                    reason: "rle run_ends wire length overflow",
+                })?;
+            5usize
+                .checked_add(val_bytes)
+                .and_then(|s| s.checked_add(end_bytes))
+                .ok_or(ColumnError::Overflow {
+                    reason: "rle column wire length overflow",
+                })
+        }
+    }
+}
+
+fn estimate_body_len(batch: &Batch, max_decoded: u32) -> Result<usize, ColumnError> {
+    let mut total = 8usize;
+    for field in batch.schema().fields() {
+        total = total
+            .checked_add(4)
+            .and_then(|s| s.checked_add(field.name.len()))
+            .and_then(|s| s.checked_add(1))
+            .and_then(|s| s.checked_add(data_type_wire_len(&field.data_type)))
+            .ok_or(ColumnError::Overflow {
+                reason: "schema wire length overflow",
+            })?;
+    }
+    for col in batch.columns() {
+        total = total
+            .checked_add(column_wire_len(col, max_decoded)?)
+            .ok_or(ColumnError::Overflow {
+                reason: "batch body wire length overflow",
+            })?;
+    }
+    Ok(total)
+}
+
 /// Encodes `batch` (compacting active rows first if `!selection.is_all(raw_len)`, preserving column encodings
-/// when all rows are active) and appends one frame to `out`. On error, `out` is left unchanged.
-pub fn encode_batch(batch: &Batch, out: &mut Vec<u8>) -> Result<(), ColumnError> {
-    encode_batch_with_limit(batch, out, MAX_DECODED_BYTES)
+/// when all rows are active) and appends one frame to `out`.
+///
+/// Postcondition: reserves peak temporary scratch (`compacted`, `body`, `compressed`) and `out` growth inside
+/// `pool` while encoding (dropping and shrinking intermediate buffers as soon as no longer needed), and
+/// restores `pool` to its pre-call `size()` on both `Ok` and `Err`. On error, `out` is left unchanged.
+pub fn encode_batch(
+    batch: &Batch,
+    out: &mut Vec<u8>,
+    pool: Option<&mut Reservation>,
+) -> Result<(), ColumnError> {
+    encode_batch_with_limit(batch, out, pool, MAX_DECODED_BYTES)
 }
 
 /// [`encode_batch`] with a custom decoded-byte cap (for testing small caps).
+///
+/// Postcondition: reserves peak temporary scratch and `out` growth inside `pool` during encoding and restores
+/// `pool` to its pre-call `size()` on both `Ok` and `Err`. On error, `out` is left unchanged.
 pub fn encode_batch_with_limit(
     batch: &Batch,
     out: &mut Vec<u8>,
+    mut pool: Option<&mut Reservation>,
     max_decoded: u32,
 ) -> Result<(), ColumnError> {
+    let before = pool.as_ref().map_or(0, |p| p.size());
+    let res = encode_batch_inner(batch, out, pool.as_deref_mut(), max_decoded, before);
+    rollback_reservation(pool, before);
+    res
+}
+
+fn encode_batch_inner(
+    batch: &Batch,
+    out: &mut Vec<u8>,
+    mut pool: Option<&mut Reservation>,
+    max_decoded: u32,
+    before: usize,
+) -> Result<(), ColumnError> {
+    let effective_max = max_decoded.min(MAX_DECODED_BYTES);
     if batch.schema().len() > MAX_COLUMNS as usize {
         return Err(ColumnError::InvalidFrame {
             reason: "column count exceeds MAX_COLUMNS",
         });
     }
-    if batch.num_rows() > u32::MAX as usize {
+    let num_rows = batch.num_rows();
+    if num_rows > u32::MAX as usize {
         return Err(ColumnError::Overflow {
             reason: "batch row count exceeds u32::MAX",
         });
     }
-
-    let compacted_owner;
-    let target = if batch.selection().is_all(batch.raw_len()) {
-        batch
-    } else {
-        compacted_owner = batch.compact(None)?;
-        &compacted_owner
-    };
-
-    let mut body = Vec::new();
-    write_body(target, &mut body)?;
-
-    if body.len() > max_decoded as usize || body.len() > MAX_DECODED_BYTES as usize {
+    if num_rows > effective_max as usize {
         return Err(ColumnError::InvalidFrame {
-            reason: "uncompressed body exceeds maximum decoded bytes",
+            reason: "batch raw_len exceeds max_decoded",
         });
     }
-    let uncompressed_len = u32::try_from(body.len()).map_err(|_| ColumnError::Overflow {
+
+    let mut body = Vec::new();
+    let body_len = {
+        let compacted_owner;
+        let target = if batch.selection().is_all(batch.raw_len()) {
+            batch
+        } else {
+            compacted_owner = batch.compact(pool.as_deref_mut())?;
+            &compacted_owner
+        };
+        let est = estimate_body_len(target, effective_max)?;
+        if est > effective_max as usize {
+            return Err(ColumnError::InvalidFrame {
+                reason: "uncompressed body exceeds maximum decoded bytes",
+            });
+        }
+        validate_batch_decode_limits(target, effective_max, pool.as_deref_mut())?;
+        let compacted_bytes = pool.as_ref().map_or(0, |p| p.size().saturating_sub(before));
+        let peak_body = compacted_bytes
+            .checked_add(est)
+            .ok_or(ColumnError::Overflow {
+                reason: "encode scratch reservation overflow",
+            })?;
+        reconcile_reservation(pool.as_deref_mut(), before, peak_body)?;
+        body.reserve_exact(est);
+        write_body(target, &mut body)?;
+        debug_assert_eq!(body.len(), est);
+        body.len()
+    };
+    reconcile_reservation(pool.as_deref_mut(), before, body_len)?;
+
+    let uncompressed_len = u32::try_from(body_len).map_err(|_| ColumnError::Overflow {
         reason: "uncompressed body length exceeds u32::MAX",
     })?;
 
-    let compressed;
-    let (flags, payload): (u8, &[u8]) = if body.len() >= LZ4_MIN_COMPRESS_LEN {
-        let mut encoder = FrameEncoder::new(Vec::new());
-        encoder
-            .write_all(&body)
-            .map_err(|_| ColumnError::InvalidFrame {
+    let mut compressed_owner: Option<Vec<u8>> = None;
+    let flags: u8 = if body_len >= LZ4_MIN_COMPRESS_LEN {
+        let writer = ReservedVecWriter {
+            buf: Vec::new(),
+            pool: pool.as_deref_mut(),
+            err: None,
+        };
+        let mut encoder = FrameEncoder::new(writer);
+        if encoder.write_all(&body).is_err() {
+            let mut inner = encoder.into_inner();
+            if let Some(col_err) = inner.err.take() {
+                return Err(col_err);
+            }
+            return Err(ColumnError::InvalidFrame {
                 reason: "lz4 compression failed",
-            })?;
-        compressed = encoder.finish().map_err(|_| ColumnError::InvalidFrame {
-            reason: "lz4 compression finish failed",
-        })?;
-        if compressed.len() < body.len() {
-            (FLAG_LZ4, &compressed)
+            });
+        }
+        if encoder.try_finish().is_err() {
+            let mut inner = encoder.into_inner();
+            if let Some(col_err) = inner.err.take() {
+                return Err(col_err);
+            }
+            return Err(ColumnError::InvalidFrame {
+                reason: "lz4 compression finish failed",
+            });
+        }
+        let mut writer = encoder.into_inner();
+        if let Some(col_err) = writer.err.take() {
+            return Err(col_err);
+        }
+        if writer.buf.len() < body_len {
+            compressed_owner = Some(writer.buf);
+            FLAG_LZ4
         } else {
-            (0, &body)
+            0
         }
     } else {
-        (0, &body)
+        0
+    };
+
+    if flags == FLAG_LZ4 {
+        drop(body);
+        body = Vec::new();
+    }
+    let payload: &[u8] = if let Some(ref comp) = compressed_owner {
+        reconcile_reservation(pool.as_deref_mut(), before, comp.len())?;
+        comp
+    } else {
+        reconcile_reservation(pool.as_deref_mut(), before, body_len)?;
+        &body
     };
 
     let payload_len = u32::try_from(payload.len()).map_err(|_| ColumnError::Overflow {
@@ -177,6 +865,11 @@ pub fn encode_batch_with_limit(
         return Err(ColumnError::InvalidFrame {
             reason: "encoded payload exceeds MAX_PAYLOAD",
         });
+    }
+
+    let frame_len = FRAME_HEADER_LEN + payload.len();
+    if let Some(res) = pool {
+        res.try_grow(frame_len)?;
     }
 
     let mut header = [0u8; FRAME_HEADER_LEN];
@@ -189,7 +882,7 @@ pub fn encode_batch_with_limit(
     let crc = crc32c::crc32c_append(crc32c::crc32c(&header[0..16]), payload);
     header[16..20].copy_from_slice(&crc.to_le_bytes());
 
-    out.reserve(FRAME_HEADER_LEN + payload.len());
+    out.reserve(frame_len);
     out.extend_from_slice(&header);
     out.extend_from_slice(payload);
     Ok(())
@@ -260,6 +953,27 @@ pub fn decode_batch_with_limit(
     }
 }
 
+struct EofTrackingSlice<'a> {
+    slice: &'a [u8],
+    hit_eof: bool,
+}
+
+impl Read for EofTrackingSlice<'_> {
+    fn read(&mut self, dst: &mut [u8]) -> std::io::Result<usize> {
+        if dst.is_empty() {
+            return Ok(0);
+        }
+        if self.slice.is_empty() {
+            self.hit_eof = true;
+            return Ok(0);
+        }
+        let n = self.slice.len().min(dst.len());
+        dst[..n].copy_from_slice(&self.slice[..n]);
+        self.slice = &self.slice[n..];
+        Ok(n)
+    }
+}
+
 fn decode_batch_inner(
     frame: &[u8],
     expected_schema: Option<&Schema>,
@@ -309,16 +1023,31 @@ fn decode_batch_inner(
             res.try_grow(scratch_len)?;
         }
         let limit = u64::from(parsed.uncompressed_len) + 1;
-        let mut decoder = FrameDecoder::new(payload).take(limit);
+        let mut cursor = EofTrackingSlice {
+            slice: payload,
+            hit_eof: false,
+        };
+        let mut decoder = FrameDecoder::new(&mut cursor).take(limit);
         let mut buf = Vec::new();
         decoder
             .read_to_end(&mut buf)
             .map_err(|_| ColumnError::InvalidFrame {
                 reason: "lz4 decompression failed",
             })?;
+        drop(decoder);
         if buf.len() != scratch_len {
             return Err(ColumnError::InvalidFrame {
                 reason: "lz4 decoded length does not match header",
+            });
+        }
+        if cursor.hit_eof {
+            return Err(ColumnError::InvalidFrame {
+                reason: "truncated lz4 frame endmark",
+            });
+        }
+        if !cursor.slice.is_empty() {
+            return Err(ColumnError::InvalidFrame {
+                reason: "trailing bytes after lz4 frame",
             });
         }
         decoded_owner = buf;
@@ -328,7 +1057,14 @@ fn decode_batch_inner(
     };
 
     let mut reader = BodyReader::new(body);
-    let raw_len = reader.read_u32()? as usize;
+    let raw_len_u32 = reader.read_u32()?;
+    if raw_len_u32 > max_decoded {
+        return Err(ColumnError::InvalidFrame {
+            reason: "batch raw_len exceeds max_decoded",
+        });
+    }
+    let raw_len = raw_len_u32 as usize;
+    let mut logical_elements = u64::from(raw_len_u32);
     let col_count = reader.read_u32()?;
     if col_count > MAX_COLUMNS {
         return Err(ColumnError::InvalidFrame {
@@ -363,6 +1099,8 @@ fn decode_batch_inner(
         });
     }
 
+    let max_decoded_usize = max_decoded as usize;
+    let mut materialized_bytes = 0usize;
     let mut columns = Vec::with_capacity(col_count);
     for field in schema.fields() {
         let col = read_column(
@@ -372,7 +1110,14 @@ fn decode_batch_inner(
             0,
             pool.as_deref_mut(),
             max_decoded,
+            &mut logical_elements,
         )?;
+        let col_bytes = estimate_column_materialized_bytes(
+            &col,
+            max_decoded_usize - materialized_bytes,
+            pool.as_deref_mut(),
+        )?;
+        materialized_bytes += col_bytes;
         columns.push(col);
     }
 
@@ -560,6 +1305,485 @@ fn write_flat_column(out: &mut Vec<u8>, fc: &FlatColumn) -> Result<(), ColumnErr
     write_flat_data(out, fc.data())
 }
 
+fn write_scalar_groups_flat_data(
+    out: &mut Vec<u8>,
+    dt: &DataType,
+    groups: &[&[ScalarValue]],
+) -> Result<(), ColumnError> {
+    let count: usize = groups.iter().map(|g| g.len()).sum();
+    match dt {
+        DataType::Null => {}
+        DataType::Bool => {
+            let start = out.len();
+            out.resize(start + count.div_ceil(8), 0);
+            let mut i = 0usize;
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Bool(true) = v {
+                        out[start + i / 8] |= 1u8 << (i % 8);
+                    }
+                    i += 1;
+                }
+            }
+        }
+        DataType::I64 | DataType::TimestampNs { .. } => {
+            for g in groups {
+                for v in *g {
+                    let x = match v {
+                        ScalarValue::I64(x) | ScalarValue::TimestampNs { value: x, .. } => *x,
+                        _ => 0,
+                    };
+                    out.extend_from_slice(&x.to_le_bytes());
+                }
+            }
+        }
+        DataType::F64 => {
+            for g in groups {
+                for v in *g {
+                    let x = match v {
+                        ScalarValue::F64(x) => *x,
+                        _ => 0.0,
+                    };
+                    out.extend_from_slice(&x.to_bits().to_le_bytes());
+                }
+            }
+        }
+        DataType::Decimal128 { .. } => {
+            for g in groups {
+                for v in *g {
+                    let x = match v {
+                        ScalarValue::Decimal128 { value, .. } => *value,
+                        _ => 0,
+                    };
+                    out.extend_from_slice(&x.to_le_bytes());
+                }
+            }
+        }
+        DataType::Date => {
+            for g in groups {
+                for v in *g {
+                    let x = match v {
+                        ScalarValue::Date(x) => *x,
+                        _ => 0,
+                    };
+                    out.extend_from_slice(&x.to_le_bytes());
+                }
+            }
+        }
+        DataType::Interval => {
+            for g in groups {
+                for v in *g {
+                    let iv = match v {
+                        ScalarValue::Interval(iv) => *iv,
+                        _ => Interval::default(),
+                    };
+                    out.extend_from_slice(&iv.months.to_le_bytes());
+                    out.extend_from_slice(&iv.days.to_le_bytes());
+                    out.extend_from_slice(&iv.nanos.to_le_bytes());
+                }
+            }
+        }
+        DataType::FixedBytes8 => {
+            for g in groups {
+                for v in *g {
+                    let b = match v {
+                        ScalarValue::FixedBytes8(b) => *b,
+                        _ => [0u8; 8],
+                    };
+                    out.extend_from_slice(&b);
+                }
+            }
+        }
+        DataType::FixedBytes16 => {
+            for g in groups {
+                for v in *g {
+                    let b = match v {
+                        ScalarValue::FixedBytes16(b) => *b,
+                        _ => [0u8; 16],
+                    };
+                    out.extend_from_slice(&b);
+                }
+            }
+        }
+        DataType::Utf8 => {
+            let mut off = 0usize;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Utf8(s) = v {
+                        off += s.len();
+                    }
+                    let u = checked_u32(off, "utf8 bytes length exceeds u32::MAX")?;
+                    out.extend_from_slice(&u.to_le_bytes());
+                }
+            }
+            let bytes_len = checked_u32(off, "utf8 bytes length exceeds u32::MAX")?;
+            out.extend_from_slice(&bytes_len.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Utf8(s) = v {
+                        out.extend_from_slice(s.as_bytes());
+                    }
+                }
+            }
+        }
+        DataType::Binary => {
+            let mut off = 0usize;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Binary(b) = v {
+                        off += b.len();
+                    }
+                    let u = checked_u32(off, "binary bytes length exceeds u32::MAX")?;
+                    out.extend_from_slice(&u.to_le_bytes());
+                }
+            }
+            let bytes_len = checked_u32(off, "binary bytes length exceeds u32::MAX")?;
+            out.extend_from_slice(&bytes_len.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Binary(b) = v {
+                        out.extend_from_slice(b);
+                    }
+                }
+            }
+        }
+        DataType::List(inner) => {
+            let mut off = 0usize;
+            let mut child_groups: Vec<&[ScalarValue]> = Vec::new();
+            let mut has_nulls = false;
+            let check_nulls = !matches!(inner.as_ref(), DataType::Null);
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::List { values, .. } = v {
+                        off += values.len();
+                        if check_nulls && !has_nulls && values.iter().any(ScalarValue::is_null) {
+                            has_nulls = true;
+                        }
+                        child_groups.push(values.as_slice());
+                    }
+                    let u = checked_u32(off, "list child length exceeds u32::MAX")?;
+                    out.extend_from_slice(&u.to_le_bytes());
+                }
+            }
+            let child_len = checked_u32(off, "list child length exceeds u32::MAX")?;
+            out.extend_from_slice(&child_len.to_le_bytes());
+            out.push(0); // Column::Flat
+            if has_nulls {
+                out.push(1);
+                let bm_start = out.len();
+                out.resize(bm_start + off.div_ceil(8), 0);
+                let mut i = 0usize;
+                for cg in &child_groups {
+                    for cv in *cg {
+                        if !cv.is_null() {
+                            out[bm_start + i / 8] |= 1u8 << (i % 8);
+                        }
+                        i += 1;
+                    }
+                }
+            } else {
+                out.push(0);
+            }
+            write_scalar_groups_flat_data(out, inner, &child_groups)?;
+        }
+        DataType::MapUtf8 => {
+            let mut entry_count = 0usize;
+            let mut has_nulls = false;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::MapUtf8(entries) = v {
+                        entry_count += entries.len();
+                        if !has_nulls && entries.iter().any(|(_, mv)| mv.is_none()) {
+                            has_nulls = true;
+                        }
+                    }
+                    let u = checked_u32(entry_count, "map entry count exceeds u32::MAX")?;
+                    out.extend_from_slice(&u.to_le_bytes());
+                }
+            }
+            let ec_u32 = checked_u32(entry_count, "map entry count exceeds u32::MAX")?;
+            out.extend_from_slice(&ec_u32.to_le_bytes());
+
+            // keys
+            let mut k_off = 0usize;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::MapUtf8(entries) = v {
+                        for (k, _) in entries {
+                            k_off += k.len();
+                            let u = checked_u32(k_off, "utf8 bytes length exceeds u32::MAX")?;
+                            out.extend_from_slice(&u.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            let k_len = checked_u32(k_off, "utf8 bytes length exceeds u32::MAX")?;
+            out.extend_from_slice(&k_len.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::MapUtf8(entries) = v {
+                        for (k, _) in entries {
+                            out.extend_from_slice(k.as_bytes());
+                        }
+                    }
+                }
+            }
+
+            // values
+            let mut v_off = 0usize;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::MapUtf8(entries) = v {
+                        for (_, mv) in entries {
+                            if let Some(val) = mv {
+                                v_off += val.len();
+                            }
+                            let u = checked_u32(v_off, "utf8 bytes length exceeds u32::MAX")?;
+                            out.extend_from_slice(&u.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            let v_len = checked_u32(v_off, "utf8 bytes length exceeds u32::MAX")?;
+            out.extend_from_slice(&v_len.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::MapUtf8(entries) = v {
+                        for (_, mv) in entries {
+                            if let Some(val) = mv {
+                                out.extend_from_slice(val.as_bytes());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if has_nulls {
+                out.push(1);
+                let bm_start = out.len();
+                out.resize(bm_start + entry_count.div_ceil(8), 0);
+                let mut i = 0usize;
+                for g in groups {
+                    for v in *g {
+                        if let ScalarValue::MapUtf8(entries) = v {
+                            for (_, mv) in entries {
+                                if mv.is_some() {
+                                    out[bm_start + i / 8] |= 1u8 << (i % 8);
+                                }
+                                i += 1;
+                            }
+                        }
+                    }
+                }
+            } else {
+                out.push(0);
+            }
+        }
+        DataType::Events => {
+            let mut ev_count = 0usize;
+            let mut has_nulls = false;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Events(evs) = v {
+                        ev_count += evs.len();
+                        if !has_nulls && evs.iter().any(|ev| ev.attributes.is_none()) {
+                            has_nulls = true;
+                        }
+                    }
+                    let u = checked_u32(ev_count, "events count exceeds u32::MAX")?;
+                    out.extend_from_slice(&u.to_le_bytes());
+                }
+            }
+            let ev_u32 = checked_u32(ev_count, "events count exceeds u32::MAX")?;
+            out.extend_from_slice(&ev_u32.to_le_bytes());
+
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Events(evs) = v {
+                        for ev in evs {
+                            out.extend_from_slice(&ev.time.to_le_bytes());
+                        }
+                    }
+                }
+            }
+
+            // names
+            let mut n_off = 0usize;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Events(evs) = v {
+                        for ev in evs {
+                            n_off += ev.name.len();
+                            let u = checked_u32(n_off, "utf8 bytes length exceeds u32::MAX")?;
+                            out.extend_from_slice(&u.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            let n_len = checked_u32(n_off, "utf8 bytes length exceeds u32::MAX")?;
+            out.extend_from_slice(&n_len.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Events(evs) = v {
+                        for ev in evs {
+                            out.extend_from_slice(ev.name.as_bytes());
+                        }
+                    }
+                }
+            }
+
+            // attributes
+            let mut a_off = 0usize;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Events(evs) = v {
+                        for ev in evs {
+                            if let Some(attr) = &ev.attributes {
+                                a_off += attr.len();
+                            }
+                            let u = checked_u32(a_off, "utf8 bytes length exceeds u32::MAX")?;
+                            out.extend_from_slice(&u.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            let a_len = checked_u32(a_off, "utf8 bytes length exceeds u32::MAX")?;
+            out.extend_from_slice(&a_len.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Events(evs) = v {
+                        for ev in evs {
+                            if let Some(attr) = &ev.attributes {
+                                out.extend_from_slice(attr.as_bytes());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if has_nulls {
+                out.push(1);
+                let bm_start = out.len();
+                out.resize(bm_start + ev_count.div_ceil(8), 0);
+                let mut i = 0usize;
+                for g in groups {
+                    for v in *g {
+                        if let ScalarValue::Events(evs) = v {
+                            for ev in evs {
+                                if ev.attributes.is_some() {
+                                    out[bm_start + i / 8] |= 1u8 << (i % 8);
+                                }
+                                i += 1;
+                            }
+                        }
+                    }
+                }
+            } else {
+                out.push(0);
+            }
+        }
+        DataType::Links => {
+            let mut lk_count = 0usize;
+            let mut has_nulls = false;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Links(lks) = v {
+                        lk_count += lks.len();
+                        if !has_nulls && lks.iter().any(|lk| lk.attributes.is_none()) {
+                            has_nulls = true;
+                        }
+                    }
+                    let u = checked_u32(lk_count, "links count exceeds u32::MAX")?;
+                    out.extend_from_slice(&u.to_le_bytes());
+                }
+            }
+            let lk_u32 = checked_u32(lk_count, "links count exceeds u32::MAX")?;
+            out.extend_from_slice(&lk_u32.to_le_bytes());
+
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Links(lks) = v {
+                        for lk in lks {
+                            out.extend_from_slice(&lk.trace_id);
+                        }
+                    }
+                }
+            }
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Links(lks) = v {
+                        for lk in lks {
+                            out.extend_from_slice(&lk.span_id);
+                        }
+                    }
+                }
+            }
+
+            // attributes
+            let mut a_off = 0usize;
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Links(lks) = v {
+                        for lk in lks {
+                            if let Some(attr) = &lk.attributes {
+                                a_off += attr.len();
+                            }
+                            let u = checked_u32(a_off, "utf8 bytes length exceeds u32::MAX")?;
+                            out.extend_from_slice(&u.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            let a_len = checked_u32(a_off, "utf8 bytes length exceeds u32::MAX")?;
+            out.extend_from_slice(&a_len.to_le_bytes());
+            for g in groups {
+                for v in *g {
+                    if let ScalarValue::Links(lks) = v {
+                        for lk in lks {
+                            if let Some(attr) = &lk.attributes {
+                                out.extend_from_slice(attr.as_bytes());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if has_nulls {
+                out.push(1);
+                let bm_start = out.len();
+                out.resize(bm_start + lk_count.div_ceil(8), 0);
+                let mut i = 0usize;
+                for g in groups {
+                    for v in *g {
+                        if let ScalarValue::Links(lks) = v {
+                            for lk in lks {
+                                if lk.attributes.is_some() {
+                                    out[bm_start + i / 8] |= 1u8 << (i % 8);
+                                }
+                                i += 1;
+                            }
+                        }
+                    }
+                }
+            } else {
+                out.push(0);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn write_column(out: &mut Vec<u8>, col: &Column) -> Result<(), ColumnError> {
     match col {
         Column::Flat(fc) => {
@@ -572,8 +1796,11 @@ fn write_column(out: &mut Vec<u8>, col: &Column) -> Result<(), ColumnError> {
                 out.push(1);
             } else {
                 out.push(0);
-                let one = Column::try_new_const(value.clone(), 1)?.materialize(None)?;
-                write_flat_data(out, one.data())?;
+                write_scalar_groups_flat_data(
+                    out,
+                    &value.data_type(),
+                    &[std::slice::from_ref(value)],
+                )?;
             }
         }
         Column::Dict(d) => {
@@ -1138,6 +2365,658 @@ fn estimate_flat_row_heap_bytes(
     }
 }
 
+fn check_mat_add(acc: usize, add: usize, budget: usize) -> Result<usize, ColumnError> {
+    acc.checked_add(add)
+        .filter(|&sum| sum <= budget)
+        .ok_or(ColumnError::InvalidFrame {
+            reason: "decoded materialized size exceeds max_decoded",
+        })
+}
+
+fn check_mat_mul(count: usize, elem: usize, budget: usize) -> Result<usize, ColumnError> {
+    count
+        .checked_mul(elem)
+        .filter(|&prod| prod <= budget)
+        .ok_or(ColumnError::InvalidFrame {
+            reason: "decoded materialized size exceeds max_decoded",
+        })
+}
+
+fn scalar_materialized_bytes(value: &ScalarValue, budget: usize) -> Result<usize, ColumnError> {
+    let bytes = match value {
+        ScalarValue::Null(_) | ScalarValue::Bool(_) => 1,
+        ScalarValue::Date(_) => 4,
+        ScalarValue::I64(_)
+        | ScalarValue::F64(_)
+        | ScalarValue::TimestampNs { .. }
+        | ScalarValue::FixedBytes8(_) => 8,
+        ScalarValue::Decimal128 { .. }
+        | ScalarValue::Interval(_)
+        | ScalarValue::FixedBytes16(_) => 16,
+        ScalarValue::Utf8(s) => check_mat_add(4, s.len(), budget)?,
+        ScalarValue::Binary(b) => check_mat_add(4, b.len(), budget)?,
+        ScalarValue::List { values, .. } => {
+            let mut total = 4usize;
+            if total > budget {
+                return Err(ColumnError::InvalidFrame {
+                    reason: "decoded materialized size exceeds max_decoded",
+                });
+            }
+            for v in values {
+                let elem = scalar_materialized_bytes(v, budget - total)?;
+                total += elem;
+            }
+            total
+        }
+        ScalarValue::MapUtf8(entries) => {
+            let mut total = 4usize;
+            if total > budget {
+                return Err(ColumnError::InvalidFrame {
+                    reason: "decoded materialized size exceeds max_decoded",
+                });
+            }
+            for (k, v) in entries {
+                let entry_bytes = 8usize
+                    .checked_add(k.len())
+                    .and_then(|s| s.checked_add(v.as_ref().map_or(0, String::len)))
+                    .ok_or(ColumnError::InvalidFrame {
+                        reason: "decoded materialized size exceeds max_decoded",
+                    })?;
+                total = check_mat_add(total, entry_bytes, budget)?;
+            }
+            total
+        }
+        ScalarValue::Events(evs) => {
+            let mut total = 4usize;
+            if total > budget {
+                return Err(ColumnError::InvalidFrame {
+                    reason: "decoded materialized size exceeds max_decoded",
+                });
+            }
+            for ev in evs {
+                let ev_bytes = 16usize
+                    .checked_add(ev.name.len())
+                    .and_then(|s| s.checked_add(ev.attributes.as_ref().map_or(0, String::len)))
+                    .ok_or(ColumnError::InvalidFrame {
+                        reason: "decoded materialized size exceeds max_decoded",
+                    })?;
+                total = check_mat_add(total, ev_bytes, budget)?;
+            }
+            total
+        }
+        ScalarValue::Links(lks) => {
+            let mut total = 4usize;
+            if total > budget {
+                return Err(ColumnError::InvalidFrame {
+                    reason: "decoded materialized size exceeds max_decoded",
+                });
+            }
+            for lk in lks {
+                let lk_bytes = 28usize
+                    .checked_add(lk.attributes.as_ref().map_or(0, String::len))
+                    .ok_or(ColumnError::InvalidFrame {
+                        reason: "decoded materialized size exceeds max_decoded",
+                    })?;
+                total = check_mat_add(total, lk_bytes, budget)?;
+            }
+            total
+        }
+    };
+    if bytes > budget {
+        return Err(ColumnError::InvalidFrame {
+            reason: "decoded materialized size exceeds max_decoded",
+        });
+    }
+    Ok(bytes)
+}
+
+fn fixed_width_slot_bytes(data: &FlatData) -> Option<usize> {
+    match data {
+        FlatData::Null(_) | FlatData::Bool(_) => Some(1),
+        FlatData::Date(_) => Some(4),
+        FlatData::I64(_)
+        | FlatData::F64(_)
+        | FlatData::TimestampNs { .. }
+        | FlatData::FixedBytes8(_) => Some(8),
+        FlatData::Decimal128 { .. } | FlatData::Interval(_) | FlatData::FixedBytes16(_) => Some(16),
+        FlatData::Utf8(_)
+        | FlatData::Binary(_)
+        | FlatData::List { .. }
+        | FlatData::MapUtf8(_)
+        | FlatData::Events(_)
+        | FlatData::Links(_) => None,
+    }
+}
+
+fn flat_data_non_list_range_bytes(
+    data: &FlatData,
+    start: usize,
+    end: usize,
+    budget: usize,
+) -> Result<usize, ColumnError> {
+    let count = end - start;
+    if count == 0 {
+        return Ok(0);
+    }
+    match data {
+        FlatData::Null(_) | FlatData::Bool(_) => check_mat_mul(count, 1, budget),
+        FlatData::Date(_) => check_mat_mul(count, 4, budget),
+        FlatData::I64(_)
+        | FlatData::F64(_)
+        | FlatData::TimestampNs { .. }
+        | FlatData::FixedBytes8(_) => check_mat_mul(count, 8, budget),
+        FlatData::Decimal128 { .. } | FlatData::Interval(_) | FlatData::FixedBytes16(_) => {
+            check_mat_mul(count, 16, budget)
+        }
+        FlatData::Utf8(u) => {
+            let off_bytes = check_mat_mul(count, 4, budget)?;
+            let str_bytes = (u.offsets()[end] - u.offsets()[start]) as usize;
+            check_mat_add(off_bytes, str_bytes, budget)
+        }
+        FlatData::Binary(b) => {
+            let off_bytes = check_mat_mul(count, 4, budget)?;
+            let bin_bytes = (b.offsets()[end] - b.offsets()[start]) as usize;
+            check_mat_add(off_bytes, bin_bytes, budget)
+        }
+        FlatData::MapUtf8(m) => {
+            let row_off = check_mat_mul(count, 4, budget)?;
+            let e_start = m.offsets()[start] as usize;
+            let e_end = m.offsets()[end] as usize;
+            let entries = e_end - e_start;
+            let entry_off = check_mat_mul(entries, 8, budget)?;
+            let key_bytes = (m.keys().offsets()[e_end] - m.keys().offsets()[e_start]) as usize;
+            let val_bytes = (m.values().offsets()[e_end] - m.values().offsets()[e_start]) as usize;
+            let total = check_mat_add(row_off, entry_off, budget)?;
+            let total = check_mat_add(total, key_bytes, budget)?;
+            check_mat_add(total, val_bytes, budget)
+        }
+        FlatData::Events(e) => {
+            let row_off = check_mat_mul(count, 4, budget)?;
+            let e_start = e.offsets()[start] as usize;
+            let e_end = e.offsets()[end] as usize;
+            let entries = e_end - e_start;
+            let entry_fixed = check_mat_mul(entries, 16, budget)?;
+            let name_bytes = (e.names().offsets()[e_end] - e.names().offsets()[e_start]) as usize;
+            let attr_bytes =
+                (e.attributes().offsets()[e_end] - e.attributes().offsets()[e_start]) as usize;
+            let total = check_mat_add(row_off, entry_fixed, budget)?;
+            let total = check_mat_add(total, name_bytes, budget)?;
+            check_mat_add(total, attr_bytes, budget)
+        }
+        FlatData::Links(l) => {
+            let row_off = check_mat_mul(count, 4, budget)?;
+            let e_start = l.offsets()[start] as usize;
+            let e_end = l.offsets()[end] as usize;
+            let entries = e_end - e_start;
+            let entry_fixed = check_mat_mul(entries, 28, budget)?;
+            let attr_bytes =
+                (l.attributes().offsets()[e_end] - l.attributes().offsets()[e_start]) as usize;
+            let total = check_mat_add(row_off, entry_fixed, budget)?;
+            check_mat_add(total, attr_bytes, budget)
+        }
+        FlatData::List { .. } => unreachable!(),
+    }
+}
+
+const MEMO_ENTRY_BYTES: usize = 24;
+
+struct MaterializedEstimator<'a> {
+    const_cache: [Option<usize>; MAX_NESTING_DEPTH + 1],
+    memo: [HashMap<u32, usize>; MAX_NESTING_DEPTH],
+    cap_charged: [usize; MAX_NESTING_DEPTH],
+    reserved_bytes: usize,
+    pool: Option<&'a mut Reservation>,
+}
+
+impl Drop for MaterializedEstimator<'_> {
+    fn drop(&mut self) {
+        if self.reserved_bytes > 0
+            && let Some(res) = self.pool.as_deref_mut()
+        {
+            res.shrink(self.reserved_bytes);
+            self.reserved_bytes = 0;
+        }
+    }
+}
+
+impl<'a> MaterializedEstimator<'a> {
+    fn new(pool: Option<&'a mut Reservation>) -> Self {
+        Self {
+            const_cache: [None; MAX_NESTING_DEPTH + 1],
+            memo: std::array::from_fn(|_| HashMap::new()),
+            cap_charged: [0; MAX_NESTING_DEPTH],
+            reserved_bytes: 0,
+            pool,
+        }
+    }
+
+    fn cache_insert(&mut self, depth: usize, key: u32, val: usize) -> Result<(), ColumnError> {
+        if depth >= MAX_NESTING_DEPTH {
+            return Err(ColumnError::InvalidFrame {
+                reason: "list nesting depth exceeds maximum",
+            });
+        }
+        if let std::collections::hash_map::Entry::Occupied(mut e) = self.memo[depth].entry(key) {
+            e.insert(val);
+            return Ok(());
+        }
+        if self.memo[depth].len() == self.memo[depth].capacity() {
+            let old_cap = self.memo[depth].capacity();
+            let next_cap = if old_cap == 0 {
+                4
+            } else {
+                old_cap.saturating_mul(2).saturating_add(1)
+            };
+            let target_charged =
+                next_cap
+                    .checked_mul(MEMO_ENTRY_BYTES)
+                    .ok_or(ColumnError::Overflow {
+                        reason: "materialized estimator memo reservation overflow",
+                    })?;
+            let prev_charged = self.cap_charged[depth];
+            if target_charged > prev_charged {
+                let delta = target_charged - prev_charged;
+                if let Some(res) = self.pool.as_deref_mut() {
+                    res.try_grow(delta)?;
+                }
+                self.cap_charged[depth] = target_charged;
+                self.reserved_bytes = self.reserved_bytes.saturating_add(delta);
+            }
+            self.memo[depth].reserve(1);
+        }
+        self.memo[depth].insert(key, val);
+        let actual_cap = self.memo[depth].capacity();
+        let actual_charged =
+            actual_cap
+                .checked_mul(MEMO_ENTRY_BYTES)
+                .ok_or(ColumnError::Overflow {
+                    reason: "materialized estimator memo reservation overflow",
+                })?;
+        let cur_charged = self.cap_charged[depth];
+        if actual_charged < cur_charged {
+            let excess = cur_charged - actual_charged;
+            if let Some(res) = self.pool.as_deref_mut() {
+                res.shrink(excess);
+            }
+            self.cap_charged[depth] = actual_charged;
+            self.reserved_bytes = self.reserved_bytes.saturating_sub(excess);
+        } else if actual_charged > cur_charged {
+            let extra = actual_charged - cur_charged;
+            if let Some(res) = self.pool.as_deref_mut() {
+                res.try_grow(extra)?;
+            }
+            self.cap_charged[depth] = actual_charged;
+            self.reserved_bytes = self.reserved_bytes.saturating_add(extra);
+        }
+        Ok(())
+    }
+
+    fn estimate_column_range(
+        &mut self,
+        col: &Column,
+        range: Range<usize>,
+        depth: usize,
+        remaining_budget: usize,
+    ) -> Result<usize, ColumnError> {
+        if range.start >= range.end {
+            return Ok(0);
+        }
+        if depth > MAX_NESTING_DEPTH {
+            return Err(ColumnError::InvalidFrame {
+                reason: "list nesting depth exceeds maximum",
+            });
+        }
+        match col {
+            Column::Flat(fc) => match fc.data() {
+                FlatData::List {
+                    offsets, values, ..
+                } => {
+                    if depth >= MAX_NESTING_DEPTH {
+                        return Err(ColumnError::InvalidFrame {
+                            reason: "list nesting depth exceeds maximum",
+                        });
+                    }
+                    let row_off = check_mat_mul(range.end - range.start, 4, remaining_budget)?;
+                    let child_start = offsets[range.start] as usize;
+                    let child_end = offsets[range.end] as usize;
+                    let child_sz = self.estimate_column_range(
+                        values,
+                        child_start..child_end,
+                        depth + 1,
+                        remaining_budget - row_off,
+                    )?;
+                    Ok(row_off + child_sz)
+                }
+                data => {
+                    flat_data_non_list_range_bytes(data, range.start, range.end, remaining_budget)
+                }
+            },
+            Column::Const { value, .. } => {
+                let count = range.end - range.start;
+                let elem_bytes = match self.const_cache[depth] {
+                    Some(sz) => sz,
+                    None => {
+                        let sz = scalar_materialized_bytes(value, remaining_budget / count)?;
+                        self.const_cache[depth] = Some(sz);
+                        sz
+                    }
+                };
+                check_mat_mul(count, elem_bytes, remaining_budget)
+            }
+            Column::Dict(d) => {
+                let data = d.values().data();
+                if let Some(slot) = fixed_width_slot_bytes(data) {
+                    return check_mat_mul(range.end - range.start, slot, remaining_budget);
+                }
+                let codes = d.codes();
+                let nulls = d.nulls();
+                let mut range_sum = 0usize;
+                if let FlatData::List {
+                    offsets, values, ..
+                } = data
+                {
+                    if depth >= MAX_NESTING_DEPTH {
+                        return Err(ColumnError::InvalidFrame {
+                            reason: "list nesting depth exceeds maximum",
+                        });
+                    }
+                    let should_memo = depth > 0 || (range.end - range.start) > 1;
+                    for row in range {
+                        if nulls.is_some_and(|bm| !bm.get(row)) {
+                            range_sum = check_mat_add(range_sum, 4, remaining_budget)?;
+                            continue;
+                        }
+                        let code = codes[row];
+                        let elem = if let Some(&cached) = self.memo[depth].get(&code) {
+                            cached
+                        } else {
+                            let code_idx = code as usize;
+                            let entry_budget = remaining_budget - range_sum;
+                            let row_off = check_mat_add(0, 4, entry_budget)?;
+                            let child_start = offsets[code_idx] as usize;
+                            let child_end = offsets[code_idx + 1] as usize;
+                            let child_sz = self.estimate_column_range(
+                                values,
+                                child_start..child_end,
+                                depth + 1,
+                                entry_budget - row_off,
+                            )?;
+                            let sz = row_off + child_sz;
+                            if should_memo {
+                                self.cache_insert(depth, code, sz)?;
+                            }
+                            sz
+                        };
+                        range_sum = check_mat_add(range_sum, elem, remaining_budget)?;
+                    }
+                } else {
+                    for row in range {
+                        if nulls.is_some_and(|bm| !bm.get(row)) {
+                            range_sum = check_mat_add(range_sum, 4, remaining_budget)?;
+                        } else {
+                            let code_idx = codes[row] as usize;
+                            let elem = flat_data_non_list_range_bytes(
+                                data,
+                                code_idx,
+                                code_idx + 1,
+                                remaining_budget - range_sum,
+                            )?;
+                            range_sum += elem;
+                        }
+                    }
+                }
+                Ok(range_sum)
+            }
+            Column::Rle(r) => {
+                let data = r.values().data();
+                if let Some(slot) = fixed_width_slot_bytes(data) {
+                    return check_mat_mul(range.end - range.start, slot, remaining_budget);
+                }
+                let run_ends = r.run_ends();
+                let mut run_idx = run_ends.partition_point(|&e| (e as usize) <= range.start);
+                let mut cur = range.start;
+                let mut range_sum = 0usize;
+                if let FlatData::List {
+                    offsets, values, ..
+                } = data
+                {
+                    if depth >= MAX_NESTING_DEPTH {
+                        return Err(ColumnError::InvalidFrame {
+                            reason: "list nesting depth exceeds maximum",
+                        });
+                    }
+                    while cur < range.end {
+                        if run_idx >= run_ends.len() {
+                            return Err(ColumnError::InvalidFrame {
+                                reason: "rle run_ends does not cover column range",
+                            });
+                        }
+                        let run_end = (run_ends[run_idx] as usize).min(range.end);
+                        if run_end <= cur {
+                            return Err(ColumnError::InvalidFrame {
+                                reason: "rle run_ends not strictly increasing",
+                            });
+                        }
+                        let count = run_end - cur;
+                        let run_key =
+                            u32::try_from(run_idx).map_err(|_| ColumnError::Overflow {
+                                reason: "rle run index exceeds u32::MAX",
+                            })?;
+                        let elem = if depth > 0
+                            && let Some(&cached) = self.memo[depth].get(&run_key)
+                        {
+                            cached
+                        } else {
+                            let per_row_budget = (remaining_budget - range_sum) / count;
+                            let row_off = check_mat_add(0, 4, per_row_budget)?;
+                            let child_start = offsets[run_idx] as usize;
+                            let child_end = offsets[run_idx + 1] as usize;
+                            let child_sz = self.estimate_column_range(
+                                values,
+                                child_start..child_end,
+                                depth + 1,
+                                per_row_budget - row_off,
+                            )?;
+                            let sz = row_off + child_sz;
+                            if depth > 0 {
+                                self.cache_insert(depth, run_key, sz)?;
+                            }
+                            sz
+                        };
+                        let part = check_mat_mul(count, elem, remaining_budget - range_sum)?;
+                        range_sum += part;
+                        cur = run_end;
+                        run_idx += 1;
+                    }
+                } else {
+                    while cur < range.end {
+                        if run_idx >= run_ends.len() {
+                            return Err(ColumnError::InvalidFrame {
+                                reason: "rle run_ends does not cover column range",
+                            });
+                        }
+                        let run_end = (run_ends[run_idx] as usize).min(range.end);
+                        if run_end <= cur {
+                            return Err(ColumnError::InvalidFrame {
+                                reason: "rle run_ends not strictly increasing",
+                            });
+                        }
+                        let count = run_end - cur;
+                        let per_row_budget = (remaining_budget - range_sum) / count;
+                        let elem = flat_data_non_list_range_bytes(
+                            data,
+                            run_idx,
+                            run_idx + 1,
+                            per_row_budget,
+                        )?;
+                        let part = check_mat_mul(count, elem, remaining_budget - range_sum)?;
+                        range_sum += part;
+                        cur = run_end;
+                        run_idx += 1;
+                    }
+                }
+                Ok(range_sum)
+            }
+        }
+    }
+}
+
+fn estimate_column_materialized_bytes(
+    col: &Column,
+    remaining_budget: usize,
+    pool: Option<&mut Reservation>,
+) -> Result<usize, ColumnError> {
+    let mut estimator = MaterializedEstimator::new(pool);
+    estimator.estimate_column_range(col, 0..col.len(), 0, remaining_budget)
+}
+
+fn validate_scalar_logical_elements(
+    value: &ScalarValue,
+    depth: usize,
+    max_decoded: u32,
+    logical_elements: &mut u64,
+) -> Result<(), ColumnError> {
+    if let ScalarValue::List { values, .. } = value {
+        if depth >= MAX_NESTING_DEPTH {
+            return Err(ColumnError::InvalidFrame {
+                reason: "list nesting depth exceeds maximum",
+            });
+        }
+        let child_len = checked_u32(values.len(), "list child length exceeds u32::MAX")?;
+        let _ = add_logical_elements(
+            logical_elements,
+            child_len,
+            max_decoded,
+            "list child length exceeds max_decoded",
+        )?;
+        for elem in values {
+            validate_scalar_logical_elements(elem, depth + 1, max_decoded, logical_elements)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_flat_column_encode_limits(
+    fc: &FlatColumn,
+    depth: usize,
+    max_decoded: u32,
+    logical_elements: &mut u64,
+) -> Result<(), ColumnError> {
+    if let FlatData::List { values, .. } = fc.data() {
+        if depth >= MAX_NESTING_DEPTH {
+            return Err(ColumnError::InvalidFrame {
+                reason: "list nesting depth exceeds maximum",
+            });
+        }
+        let child_len = checked_u32(values.len(), "list child length exceeds u32::MAX")?;
+        let _ = add_logical_elements(
+            logical_elements,
+            child_len,
+            max_decoded,
+            "list child length exceeds max_decoded",
+        )?;
+        validate_column_encode_limits(values, depth + 1, max_decoded, logical_elements)?;
+    }
+    Ok(())
+}
+
+fn validate_column_encode_limits(
+    col: &Column,
+    depth: usize,
+    max_decoded: u32,
+    logical_elements: &mut u64,
+) -> Result<(), ColumnError> {
+    match col {
+        Column::Flat(fc) => {
+            validate_flat_column_encode_limits(fc, depth, max_decoded, logical_elements)
+        }
+        Column::Const { value, .. } => {
+            if !value.is_null() {
+                if value.heap_bytes() > max_decoded as usize {
+                    return Err(ColumnError::InvalidFrame {
+                        reason: "const scalar exceeds decoded size limit",
+                    });
+                }
+                validate_scalar_logical_elements(value, depth, max_decoded, logical_elements)?;
+            }
+            Ok(())
+        }
+        Column::Dict(d) => {
+            let dict_len = checked_u32(d.values().len(), "dict length exceeds u32::MAX")?;
+            let _ = add_logical_elements(
+                logical_elements,
+                dict_len,
+                max_decoded,
+                "dictionary length exceeds max_decoded",
+            )?;
+            validate_flat_column_encode_limits(d.values(), depth, max_decoded, logical_elements)
+        }
+        Column::Rle(r) => {
+            let run_count = r.values().len();
+            if run_count > r.len() {
+                return Err(ColumnError::InvalidFrame {
+                    reason: "rle run_count exceeds column length",
+                });
+            }
+            if !r.is_empty() && run_count == 0 {
+                return Err(ColumnError::InvalidFrame {
+                    reason: "non-empty rle column has zero runs",
+                });
+            }
+            let run_count_u32 = checked_u32(run_count, "rle run count exceeds u32::MAX")?;
+            let _ = add_logical_elements(
+                logical_elements,
+                run_count_u32,
+                max_decoded,
+                "rle run_count exceeds max_decoded",
+            )?;
+            validate_flat_column_encode_limits(r.values(), depth, max_decoded, logical_elements)
+        }
+    }
+}
+
+fn validate_batch_decode_limits(
+    batch: &Batch,
+    max_decoded: u32,
+    mut pool: Option<&mut Reservation>,
+) -> Result<(), ColumnError> {
+    let raw_len_u32 = checked_u32(batch.raw_len(), "batch row count exceeds u32::MAX")?;
+    if raw_len_u32 > max_decoded {
+        return Err(ColumnError::InvalidFrame {
+            reason: "batch raw_len exceeds max_decoded",
+        });
+    }
+    let mut logical_elements = u64::from(raw_len_u32);
+    let max_decoded_usize = max_decoded as usize;
+    let mut materialized_bytes = 0usize;
+    for col in batch.columns() {
+        validate_column_encode_limits(col, 0, max_decoded, &mut logical_elements)?;
+        let col_bytes = estimate_column_materialized_bytes(
+            col,
+            max_decoded_usize - materialized_bytes,
+            pool.as_deref_mut(),
+        )?;
+        materialized_bytes += col_bytes;
+    }
+    Ok(())
+}
+
+fn add_logical_elements(
+    logical_elements: &mut u64,
+    add: u32,
+    max_decoded: u32,
+    reason: &'static str,
+) -> Result<usize, ColumnError> {
+    let next = logical_elements
+        .checked_add(u64::from(add))
+        .ok_or(ColumnError::InvalidFrame { reason })?;
+    if next > u64::from(max_decoded) {
+        return Err(ColumnError::InvalidFrame { reason });
+    }
+    *logical_elements = next;
+    Ok(add as usize)
+}
+
 fn read_flat_data(
     reader: &mut BodyReader<'_>,
     data_type: &DataType,
@@ -1145,6 +3024,7 @@ fn read_flat_data(
     depth: usize,
     mut pool: Option<&mut Reservation>,
     max_decoded: u32,
+    logical_elements: &mut u64,
 ) -> Result<FlatData, ColumnError> {
     let data = match data_type {
         DataType::Null => FlatData::Null(len),
@@ -1173,8 +3053,22 @@ fn read_flat_data(
                 });
             }
             let offsets = reader.read_offsets(len, pool.as_deref_mut())?;
-            let child_len = reader.read_u32()? as usize;
-            let values = read_column(reader, inner, child_len, depth + 1, pool, max_decoded)?;
+            let child_len_u32 = reader.read_u32()?;
+            let child_len = add_logical_elements(
+                logical_elements,
+                child_len_u32,
+                max_decoded,
+                "list child length exceeds max_decoded",
+            )?;
+            let values = read_column(
+                reader,
+                inner,
+                child_len,
+                depth + 1,
+                pool,
+                max_decoded,
+                logical_elements,
+            )?;
             FlatData::List {
                 item_type: (**inner).clone(),
                 offsets,
@@ -1235,6 +3129,7 @@ fn read_flat_column(
     depth: usize,
     mut pool: Option<&mut Reservation>,
     max_decoded: u32,
+    logical_elements: &mut u64,
 ) -> Result<FlatColumn, ColumnError> {
     let has_nulls = reader.read_bool_u8()?;
     if has_nulls && matches!(data_type, DataType::Null) {
@@ -1247,7 +3142,15 @@ fn read_flat_column(
     } else {
         None
     };
-    let data = read_flat_data(reader, data_type, len, depth, pool, max_decoded)?;
+    let data = read_flat_data(
+        reader,
+        data_type,
+        len,
+        depth,
+        pool,
+        max_decoded,
+        logical_elements,
+    )?;
     FlatColumn::try_new(data, nulls)
 }
 
@@ -1258,6 +3161,7 @@ fn read_column(
     depth: usize,
     mut pool: Option<&mut Reservation>,
     max_decoded: u32,
+    logical_elements: &mut u64,
 ) -> Result<Column, ColumnError> {
     let encoding_tag = reader.read_u8()?;
     match encoding_tag {
@@ -1268,6 +3172,7 @@ fn read_column(
             depth,
             pool,
             max_decoded,
+            logical_elements,
         )?)),
         1 => {
             let is_null = reader.read_bool_u8()?;
@@ -1279,6 +3184,7 @@ fn read_column(
                         reason: "const column with DataType::Null must have is_null = 1",
                     });
                 }
+                let before_const = pool.as_ref().map_or(0, |p| p.size());
                 let data = read_flat_data(
                     reader,
                     data_type,
@@ -1286,21 +3192,62 @@ fn read_column(
                     depth,
                     pool.as_deref_mut(),
                     max_decoded,
+                    logical_elements,
                 )?;
-                let flat = FlatColumn::try_new(data, None)?;
-                let estimated_heap = estimate_flat_row_heap_bytes(&flat, 0, max_decoded as usize)?;
-                let flat_bytes = flat.memory_bytes();
-                if estimated_heap > flat_bytes
-                    && let Some(res) = pool
-                {
-                    res.try_grow(estimated_heap - flat_bytes)?;
-                }
-                let scalar = flat.get_scalar(0)?;
+                let scalar = match data {
+                    FlatData::Utf8(u) => {
+                        if u.len() != 1 {
+                            return Err(ColumnError::InvalidFrame {
+                                reason: "const utf8 column length mismatch",
+                            });
+                        }
+                        let bytes = u.into_bytes();
+                        if bytes.len() > max_decoded as usize {
+                            return Err(ColumnError::InvalidFrame {
+                                reason: "const scalar exceeds decoded size limit",
+                            });
+                        }
+                        let s = String::from_utf8(bytes).map_err(|_| ColumnError::InvalidUtf8)?;
+                        ScalarValue::Utf8(s)
+                    }
+                    FlatData::Binary(b) => {
+                        if b.len() != 1 {
+                            return Err(ColumnError::InvalidFrame {
+                                reason: "const binary column length mismatch",
+                            });
+                        }
+                        let bytes = b.into_bytes();
+                        if bytes.len() > max_decoded as usize {
+                            return Err(ColumnError::InvalidFrame {
+                                reason: "const scalar exceeds decoded size limit",
+                            });
+                        }
+                        ScalarValue::Binary(bytes)
+                    }
+                    other => {
+                        let flat = FlatColumn::try_new(other, None)?;
+                        let estimated_heap =
+                            estimate_flat_row_heap_bytes(&flat, 0, max_decoded as usize)?;
+                        if let Some(res) = pool.as_deref_mut() {
+                            res.try_grow(estimated_heap)?;
+                        }
+                        let scalar = flat.get_scalar(0)?;
+                        drop(flat);
+                        scalar
+                    }
+                };
+                reconcile_reservation(pool, before_const, scalar.heap_bytes())?;
                 Column::try_new_const(scalar, len)
             }
         }
         2 => {
-            let dict_len = reader.read_u32()? as usize;
+            let dict_len_u32 = reader.read_u32()?;
+            let dict_len = add_logical_elements(
+                logical_elements,
+                dict_len_u32,
+                max_decoded,
+                "dictionary length exceeds max_decoded",
+            )?;
             let values = read_flat_column(
                 reader,
                 data_type,
@@ -1308,13 +3255,30 @@ fn read_column(
                 depth,
                 pool.as_deref_mut(),
                 max_decoded,
+                logical_elements,
             )?;
             let codes = reader.read_u32_vec(len, pool.as_deref_mut())?;
             let nulls = reader.read_optional_bitmap(len, pool)?;
             Ok(Column::Dict(DictColumn::try_new(values, codes, nulls)?))
         }
         3 => {
-            let run_count = reader.read_u32()? as usize;
+            let run_count_u32 = reader.read_u32()?;
+            if (run_count_u32 as usize) > len {
+                return Err(ColumnError::InvalidFrame {
+                    reason: "rle run_count exceeds column length",
+                });
+            }
+            if len > 0 && run_count_u32 == 0 {
+                return Err(ColumnError::InvalidFrame {
+                    reason: "non-empty rle column has zero runs",
+                });
+            }
+            let run_count = add_logical_elements(
+                logical_elements,
+                run_count_u32,
+                max_decoded,
+                "rle run_count exceeds max_decoded",
+            )?;
             let values = read_flat_column(
                 reader,
                 data_type,
@@ -1322,6 +3286,7 @@ fn read_column(
                 depth,
                 pool.as_deref_mut(),
                 max_decoded,
+                logical_elements,
             )?;
             let run_ends = reader.read_u32_vec(run_count, pool)?;
             let rle = RleColumn::try_new(values, run_ends)?;
@@ -1649,20 +3614,20 @@ mod tests {
 
         // Full batch round-trip preserves encodings
         let mut buf = Vec::new();
-        encode_batch(&batch, &mut buf).unwrap();
+        encode_batch(&batch, &mut buf, None).unwrap();
         let decoded = decode_batch(&buf, Some(batch.schema()), None).unwrap();
         assert!(batch.semantic_eq(&decoded));
-        assert!(matches!(decoded.columns()[17], Column::Const { .. }));
-        assert!(matches!(decoded.columns()[18], Column::Const { .. }));
-        assert!(matches!(decoded.columns()[19], Column::Dict(_)));
-        assert!(matches!(decoded.columns()[20], Column::Rle(_)));
+        assert!(matches!(*decoded.columns()[17], Column::Const { .. }));
+        assert!(matches!(*decoded.columns()[18], Column::Const { .. }));
+        assert!(matches!(*decoded.columns()[19], Column::Dict(_)));
+        assert!(matches!(*decoded.columns()[20], Column::Rle(_)));
 
         // Active Selection::Mask is compacted on encode
         let filtered = batch
             .filter_mask(&Bitmap::from_bools(&[true, false, true, false]))
             .unwrap();
         let mut f_buf = Vec::new();
-        encode_batch(&filtered, &mut f_buf).unwrap();
+        encode_batch(&filtered, &mut f_buf, None).unwrap();
         let f_decoded = decode_batch(&f_buf, Some(filtered.schema()), None).unwrap();
         assert_eq!(f_decoded.num_rows(), 2);
         assert_eq!(f_decoded.raw_len(), 2);
@@ -1672,7 +3637,7 @@ mod tests {
         // Empty batch (0 rows) round-trip
         let empty = Batch::empty(all_types_schema());
         let mut e_buf = Vec::new();
-        encode_batch(&empty, &mut e_buf).unwrap();
+        encode_batch(&empty, &mut e_buf, None).unwrap();
         let e_decoded = decode_batch(&e_buf, Some(empty.schema()), None).unwrap();
         assert!(empty.semantic_eq(&e_decoded));
     }
@@ -1680,15 +3645,15 @@ mod tests {
     #[test]
     fn multi_frame_stream_and_torn_tail() {
         let b1 = all_types_batch();
-        let b2 = b1.slice(1, 2).unwrap();
+        let b2 = b1.slice(1, 2, None).unwrap();
         let b3 = Batch::empty(all_types_schema());
 
         let mut stream = Vec::new();
-        encode_batch(&b1, &mut stream).unwrap();
+        encode_batch(&b1, &mut stream, None).unwrap();
         let f1_end = stream.len();
-        encode_batch(&b2, &mut stream).unwrap();
+        encode_batch(&b2, &mut stream, None).unwrap();
         let f2_end = stream.len();
-        encode_batch(&b3, &mut stream).unwrap();
+        encode_batch(&b3, &mut stream, None).unwrap();
         let f3_end = stream.len();
 
         let mut offset = 0;
@@ -1736,7 +3701,7 @@ mod tests {
     fn corrupt_header_and_crc_rejected() {
         let batch = all_types_batch();
         let mut frame = Vec::new();
-        encode_batch(&batch, &mut frame).unwrap();
+        encode_batch(&batch, &mut frame, None).unwrap();
 
         // 1. Bad magic
         let mut bad = frame.clone();
@@ -1930,12 +3895,12 @@ mod tests {
         let batch = all_types_batch();
         let mut out = Vec::new();
         assert!(matches!(
-            encode_batch_with_limit(&batch, &mut out, 16),
+            encode_batch_with_limit(&batch, &mut out, None, 16),
             Err(ColumnError::InvalidFrame { .. })
         ));
         assert!(out.is_empty());
 
-        encode_batch(&batch, &mut out).unwrap();
+        encode_batch(&batch, &mut out, None).unwrap();
         assert!(matches!(
             decode_batch_with_limit(&out, None, None, 16),
             Err(ColumnError::InvalidFrame {
@@ -1973,7 +3938,7 @@ mod tests {
     fn expected_schema_mismatch_rejected() {
         let batch = all_types_batch();
         let mut buf = Vec::new();
-        encode_batch(&batch, &mut buf).unwrap();
+        encode_batch(&batch, &mut buf, None).unwrap();
 
         let wrong_schema =
             Schema::try_new(vec![Field::new("other", DataType::I64, false)]).unwrap();
@@ -1994,7 +3959,7 @@ mod tests {
     fn decode_reservation_accounting_and_rollback() {
         let batch = all_types_batch();
         let mut frame = Vec::new();
-        encode_batch(&batch, &mut frame).unwrap();
+        encode_batch(&batch, &mut frame, None).unwrap();
 
         let scope = GlobalPool::standalone(10 * 1024 * 1024);
         let mut res = scope.register("decode", true);
@@ -2272,7 +4237,7 @@ mod tests {
             garbage in prop::collection::vec(any::<u8>(), 0..=256),
         ) {
             let mut framed = Vec::new();
-            encode_batch(&batch, &mut framed).unwrap();
+            encode_batch(&batch, &mut framed, None).unwrap();
 
             let scope = GlobalPool::standalone(64 * 1024 * 1024);
             let mut res = scope.register("prop", true);
@@ -2353,7 +4318,7 @@ mod tests {
         assert!(matches!(
             err,
             ColumnError::InvalidFrame {
-                reason: "const scalar exceeds decoded size limit"
+                reason: "list child length exceeds max_decoded"
             }
         ));
         assert_eq!(res.size(), 0);
@@ -2381,7 +4346,7 @@ mod tests {
         assert!(matches!(
             err,
             ColumnError::InvalidFrame {
-                reason: "const scalar exceeds decoded size limit"
+                reason: "list child length exceeds max_decoded"
             }
         ));
         assert_eq!(res.size(), 0);
@@ -2406,7 +4371,7 @@ mod tests {
         assert!(matches!(
             err,
             ColumnError::InvalidFrame {
-                reason: "const scalar exceeds decoded size limit"
+                reason: "list child length exceeds max_decoded"
             }
         ));
         assert_eq!(res_rle.size(), 0);
@@ -2563,5 +4528,1103 @@ mod tests {
         assert!(!decoded.columns()[0].has_nulls());
         assert_eq!(decoded.memory_bytes(), 8 * 8);
         assert_eq!(res.size(), 24 + decoded.memory_bytes());
+    }
+
+    #[test]
+    fn flat_list_and_top_level_raw_len_logical_bombs_rejected() {
+        let scope = GlobalPool::standalone(1024 * 1024);
+
+        // 1. 50-byte Flat(List(I64)) over Const(I64) with child_len = u32::MAX
+        let dt_i64_list = DataType::List(Box::new(DataType::I64));
+        let mut body_flat_const = Vec::new();
+        write_body_header(&mut body_flat_const, 1, "a", &dt_i64_list);
+        body_flat_const.push(0); // Flat
+        body_flat_const.push(0); // has_nulls = false
+        body_flat_const.extend_from_slice(&0u32.to_le_bytes());
+        body_flat_const.extend_from_slice(&u32::MAX.to_le_bytes());
+        body_flat_const.extend_from_slice(&u32::MAX.to_le_bytes()); // child_len = u32::MAX
+        body_flat_const.push(1); // child encoding = Const
+        body_flat_const.push(0); // child is_null = false
+        body_flat_const.extend_from_slice(&7i64.to_le_bytes());
+        let frame_flat_const = wrap_uncompressed_body(&body_flat_const);
+        assert!(frame_flat_const.len() <= 64);
+
+        let mut res1 = scope.register("flat_const_bomb", true);
+        let err1 = decode_batch(&frame_flat_const, None, Some(&mut res1)).unwrap_err();
+        assert!(matches!(
+            err1,
+            ColumnError::InvalidFrame {
+                reason: "list child length exceeds max_decoded"
+            }
+        ));
+        assert_eq!(res1.size(), 0);
+
+        // 2. Flat(List(I64)) over Rle with child_len = u32::MAX
+        let mut body_flat_rle = Vec::new();
+        write_body_header(&mut body_flat_rle, 1, "a", &dt_i64_list);
+        body_flat_rle.push(0); // Flat
+        body_flat_rle.push(0); // has_nulls = false
+        body_flat_rle.extend_from_slice(&0u32.to_le_bytes());
+        body_flat_rle.extend_from_slice(&u32::MAX.to_le_bytes());
+        body_flat_rle.extend_from_slice(&u32::MAX.to_le_bytes()); // child_len = u32::MAX
+        body_flat_rle.push(3); // child encoding = Rle
+        body_flat_rle.extend_from_slice(&1u32.to_le_bytes());
+        body_flat_rle.push(0);
+        body_flat_rle.extend_from_slice(&7i64.to_le_bytes());
+        body_flat_rle.extend_from_slice(&u32::MAX.to_le_bytes());
+        let frame_flat_rle = wrap_uncompressed_body(&body_flat_rle);
+        assert!(frame_flat_rle.len() <= 80);
+
+        let err2 = decode_batch(&frame_flat_rle, None, None).unwrap_err();
+        assert!(matches!(
+            err2,
+            ColumnError::InvalidFrame {
+                reason: "list child length exceeds max_decoded"
+            }
+        ));
+
+        // 3. Flat(List(Null)) with child_len = u32::MAX
+        let dt_null_list = DataType::List(Box::new(DataType::Null));
+        let mut body_flat_null = Vec::new();
+        write_body_header(&mut body_flat_null, 1, "a", &dt_null_list);
+        body_flat_null.push(0); // Flat
+        body_flat_null.push(0); // has_nulls = false
+        body_flat_null.extend_from_slice(&0u32.to_le_bytes());
+        body_flat_null.extend_from_slice(&u32::MAX.to_le_bytes());
+        body_flat_null.extend_from_slice(&u32::MAX.to_le_bytes()); // child_len = u32::MAX
+        body_flat_null.push(0); // child encoding = Flat(Null)
+        body_flat_null.push(0); // child has_nulls = false
+        let frame_flat_null = wrap_uncompressed_body(&body_flat_null);
+        assert!(frame_flat_null.len() <= 64);
+
+        let err3 = decode_batch(&frame_flat_null, None, None).unwrap_err();
+        assert!(matches!(
+            err3,
+            ColumnError::InvalidFrame {
+                reason: "list child length exceeds max_decoded"
+            }
+        ));
+
+        // 4. 40-byte frame with top-level raw_len = u32::MAX over Const / Flat(Null)
+        let mut body_raw_const = Vec::new();
+        write_body_header(&mut body_raw_const, u32::MAX, "a", &DataType::I64);
+        body_raw_const.push(1); // Const
+        body_raw_const.push(0);
+        body_raw_const.extend_from_slice(&9i64.to_le_bytes());
+        let frame_raw_const = wrap_uncompressed_body(&body_raw_const);
+        assert!(frame_raw_const.len() <= 48);
+
+        let err4 = decode_batch(&frame_raw_const, None, None).unwrap_err();
+        assert!(matches!(
+            err4,
+            ColumnError::InvalidFrame {
+                reason: "batch raw_len exceeds max_decoded"
+            }
+        ));
+
+        let mut body_raw_null = Vec::new();
+        write_body_header(&mut body_raw_null, u32::MAX, "a", &DataType::Null);
+        body_raw_null.push(0); // Flat(Null)
+        body_raw_null.push(0);
+        let frame_raw_null = wrap_uncompressed_body(&body_raw_null);
+        assert!(frame_raw_null.len() <= 40);
+
+        let err5 = decode_batch(&frame_raw_null, None, None).unwrap_err();
+        assert!(matches!(
+            err5,
+            ColumnError::InvalidFrame {
+                reason: "batch raw_len exceeds max_decoded"
+            }
+        ));
+
+        // 5. Small max_decoded still accepts valid tiny Flat(Null) / Const batches
+        let mut body_tiny = Vec::new();
+        write_body_header(&mut body_tiny, 10, "a", &DataType::Null);
+        body_tiny.push(0);
+        body_tiny.push(0);
+        let frame_tiny = wrap_uncompressed_body(&body_tiny);
+        let decoded_tiny = decode_batch_with_limit(&frame_tiny, None, None, 64).unwrap();
+        assert_eq!(decoded_tiny.num_rows(), 10);
+    }
+
+    #[test]
+    fn lz4_trailing_bytes_after_eof_rejected() {
+        let real_body = vec![7u8; 128];
+        let mut enc = FrameEncoder::new(Vec::new());
+        enc.write_all(&real_body).unwrap();
+        let mut payload = enc.finish().unwrap();
+        // Append trailing garbage after the LZ4 end-of-frame marker.
+        payload.extend_from_slice(b"junk");
+
+        let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + payload.len());
+        let mut hdr = [0u8; FRAME_HEADER_LEN];
+        hdr[0..4].copy_from_slice(&FRAME_MAGIC);
+        hdr[4] = FRAME_VERSION;
+        hdr[5] = FLAG_LZ4;
+        hdr[8..12].copy_from_slice(&(real_body.len() as u32).to_le_bytes());
+        hdr[12..16].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        let crc = crc32c::crc32c_append(crc32c::crc32c(&hdr[0..16]), &payload);
+        hdr[16..20].copy_from_slice(&crc.to_le_bytes());
+        frame.extend_from_slice(&hdr);
+        frame.extend_from_slice(&payload);
+
+        let err = decode_batch(&frame, None, None).unwrap_err();
+        assert!(matches!(
+            err,
+            ColumnError::InvalidFrame {
+                reason: "trailing bytes after lz4 frame"
+            }
+        ));
+    }
+
+    #[test]
+    fn encode_batch_reservation_accounting_and_rollback() {
+        let batch = all_types_batch();
+        let mut out = Vec::new();
+
+        // Ample pool accounts during encoding and restores to pre-call size on Ok.
+        let ample = GlobalPool::standalone(1024 * 1024);
+        let mut res = ample.register("encode_ample", true);
+        res.try_grow(64).unwrap();
+        encode_batch(&batch, &mut out, Some(&mut res)).unwrap();
+        assert_eq!(res.size(), 64);
+        assert!(!out.is_empty());
+
+        // Tight pool rejects with MemoryLimit, leaves `out` unchanged, and restores `pool`.
+        let tight = GlobalPool::standalone(128);
+        let mut tight_res = tight.register("encode_tight", true);
+        tight_res.try_grow(32).unwrap();
+        let mut out_err = vec![1, 2, 3];
+        let err = encode_batch(&batch, &mut out_err, Some(&mut tight_res)).unwrap_err();
+        assert!(matches!(err, ColumnError::MemoryLimit { .. }));
+        assert_eq!(tight_res.size(), 32);
+        assert_eq!(out_err, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn multiplicative_list_rle_dict_const_and_wide_bombs_rejected() {
+        let scope = GlobalPool::standalone(1024 * 1024);
+
+        // 1. 8-level nested List + Rle (~230-byte frame expanding to 10^24 elements) -> rejected!
+        let mut nested_dt = DataType::I64;
+        for _ in 0..MAX_NESTING_DEPTH {
+            nested_dt = DataType::List(Box::new(nested_dt));
+        }
+        let mut body_rle = Vec::new();
+        write_body_header(&mut body_rle, 1000, "a", &nested_dt);
+        for _ in 0..MAX_NESTING_DEPTH {
+            body_rle.push(3); // Rle
+            body_rle.extend_from_slice(&1u32.to_le_bytes()); // run_count = 1
+            body_rle.push(0); // values has_nulls = false
+            body_rle.extend_from_slice(&0u32.to_le_bytes()); // offsets[0]
+            body_rle.extend_from_slice(&1000u32.to_le_bytes()); // offsets[1]
+            body_rle.extend_from_slice(&1000u32.to_le_bytes()); // child_len = 1000
+        }
+        body_rle.push(3); // leaf Rle(I64)
+        body_rle.extend_from_slice(&1u32.to_le_bytes()); // run_count = 1
+        body_rle.push(0); // has_nulls = false
+        body_rle.extend_from_slice(&42i64.to_le_bytes());
+        body_rle.extend_from_slice(&1000u32.to_le_bytes()); // run_ends = [1000]
+        // Close the 8 outer Rle run_ends vectors
+        for _ in 0..MAX_NESTING_DEPTH {
+            body_rle.extend_from_slice(&1000u32.to_le_bytes());
+        }
+        let frame_rle = wrap_uncompressed_body(&body_rle);
+        assert!(
+            frame_rle.len() <= 260,
+            "8-level Rle bomb frame should stay tiny, got {}",
+            frame_rle.len()
+        );
+        let mut res_rle = scope.register("rle_bomb", true);
+        let err_rle = decode_batch(&frame_rle, None, Some(&mut res_rle)).unwrap_err();
+        assert!(matches!(
+            err_rle,
+            ColumnError::InvalidFrame {
+                reason: "decoded materialized size exceeds max_decoded"
+            }
+        ));
+        assert_eq!(res_rle.size(), 0);
+
+        // 2. 8-level nested List + Dict (dict_len = 1, codes = [0; 100]) -> rejected on both encode & decode!
+        let mut col_dict = Column::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(FlatData::I64(vec![7]), None).unwrap(),
+                vec![0u32; 100],
+                None,
+            )
+            .unwrap(),
+        );
+        let mut cur_dt = DataType::I64;
+        for _ in 0..MAX_NESTING_DEPTH {
+            let list_fc = FlatColumn::try_new(
+                FlatData::List {
+                    item_type: cur_dt.clone(),
+                    offsets: vec![0, 100],
+                    values: Box::new(col_dict),
+                },
+                None,
+            )
+            .unwrap();
+            col_dict = Column::Dict(DictColumn::try_new(list_fc, vec![0u32; 100], None).unwrap());
+            cur_dt = DataType::List(Box::new(cur_dt));
+        }
+        let schema_dict = Schema::try_new_arc(vec![Field::new("d", cur_dt, false)]).unwrap();
+        let batch_dict = Batch::try_new_all(schema_dict, vec![col_dict], 100).unwrap();
+        let mut enc_out_dict = vec![0xEE];
+        let mut res_enc_dict = scope.register("dict_enc_bomb", true);
+        res_enc_dict.try_grow(16).unwrap();
+        let err_enc_dict =
+            encode_batch(&batch_dict, &mut enc_out_dict, Some(&mut res_enc_dict)).unwrap_err();
+        assert!(matches!(
+            err_enc_dict,
+            ColumnError::InvalidFrame {
+                reason: "decoded materialized size exceeds max_decoded"
+            }
+        ));
+        assert_eq!(enc_out_dict, vec![0xEE]);
+        assert_eq!(res_enc_dict.size(), 16);
+
+        let mut body_dict = Vec::new();
+        write_body(&batch_dict, &mut body_dict).unwrap();
+        let frame_dict = wrap_uncompressed_body(&body_dict);
+
+        let mut res_dict = scope.register("dict_bomb", true);
+        let err_dict = decode_batch(&frame_dict, None, Some(&mut res_dict)).unwrap_err();
+        assert!(matches!(
+            err_dict,
+            ColumnError::InvalidFrame {
+                reason: "decoded materialized size exceeds max_decoded"
+            }
+        ));
+        assert_eq!(res_dict.size(), 0);
+
+        // 3. Flat(List(Utf8)) with offsets = [0, 1_000_000] over Const(Utf8("x" * 100_000)) -> rejected on both encode & decode!
+        let big_str = "x".repeat(100_000);
+        let list_const_utf8 = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets: vec![0, 1_000_000],
+                    values: Box::new(
+                        Column::try_new_const(ScalarValue::Utf8(big_str), 1_000_000).unwrap(),
+                    ),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let schema_list_const = Schema::try_new_arc(vec![Field::new(
+            "l",
+            DataType::List(Box::new(DataType::Utf8)),
+            false,
+        )])
+        .unwrap();
+        let batch_list_const =
+            Batch::try_new_all(schema_list_const, vec![list_const_utf8], 1).unwrap();
+        let mut enc_out_lc = vec![0xCC];
+        let mut res_enc_lc = scope.register("list_const_enc_bomb", true);
+        res_enc_lc.try_grow(24).unwrap();
+        let err_enc_lc =
+            encode_batch(&batch_list_const, &mut enc_out_lc, Some(&mut res_enc_lc)).unwrap_err();
+        assert!(matches!(
+            err_enc_lc,
+            ColumnError::InvalidFrame {
+                reason: "decoded materialized size exceeds max_decoded"
+            }
+        ));
+        assert_eq!(enc_out_lc, vec![0xCC]);
+        assert_eq!(res_enc_lc.size(), 24);
+
+        let mut body_list_const = Vec::new();
+        write_body(&batch_list_const, &mut body_list_const).unwrap();
+        let frame_list_const = wrap_uncompressed_body(&body_list_const);
+
+        let mut res_list_const = scope.register("list_const_bomb", true);
+        let err_list_const =
+            decode_batch(&frame_list_const, None, Some(&mut res_list_const)).unwrap_err();
+        assert!(matches!(
+            err_list_const,
+            ColumnError::InvalidFrame {
+                reason: "decoded materialized size exceeds max_decoded"
+            }
+        ));
+        assert_eq!(res_list_const.size(), 0);
+
+        // 4. Wide Const(I64) (raw_len = 1 << 20, 200 columns -> 1600 MiB > 1 GiB) -> rejected on both encode & decode!
+        let wide_raw_len = 1usize << 20;
+        let wide_fields: Vec<Field> = (0..200)
+            .map(|i| Field::new(format!("c{i}"), DataType::I64, false))
+            .collect();
+        let wide_cols: Vec<Column> = (0..200)
+            .map(|i| Column::try_new_const(ScalarValue::I64(i), wide_raw_len).unwrap())
+            .collect();
+        let wide_schema = Schema::try_new_arc(wide_fields).unwrap();
+        let wide_batch = Batch::try_new_all(wide_schema, wide_cols, wide_raw_len).unwrap();
+        let mut enc_out_wide = vec![0xDD];
+        let mut res_enc_wide = scope.register("wide_const_enc_bomb", true);
+        res_enc_wide.try_grow(32).unwrap();
+        let err_enc_wide =
+            encode_batch(&wide_batch, &mut enc_out_wide, Some(&mut res_enc_wide)).unwrap_err();
+        assert!(matches!(
+            err_enc_wide,
+            ColumnError::InvalidFrame {
+                reason: "decoded materialized size exceeds max_decoded"
+            }
+        ));
+        assert_eq!(enc_out_wide, vec![0xDD]);
+        assert_eq!(res_enc_wide.size(), 32);
+
+        let mut body_wide = Vec::new();
+        write_body(&wide_batch, &mut body_wide).unwrap();
+        let wide_frame = wrap_uncompressed_body(&body_wide);
+
+        let mut res_wide = scope.register("wide_const_bomb", true);
+        let err_wide = decode_batch(&wide_frame, None, Some(&mut res_wide)).unwrap_err();
+        assert!(matches!(
+            err_wide,
+            ColumnError::InvalidFrame {
+                reason: "decoded materialized size exceeds max_decoded"
+            }
+        ));
+        assert_eq!(res_wide.size(), 0);
+    }
+
+    #[test]
+    fn lz4_truncated_endmark_and_trailing_garbage_rejected() {
+        let real_body = vec![9u8; 256];
+        let mut enc = FrameEncoder::new(Vec::new());
+        enc.write_all(&real_body).unwrap();
+        let valid_payload = enc.finish().unwrap();
+        assert!(valid_payload.ends_with(&[0, 0, 0, 0]));
+
+        let frame_with_lz4_payload = |payload: &[u8]| -> Vec<u8> {
+            let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + payload.len());
+            let mut hdr = [0u8; FRAME_HEADER_LEN];
+            hdr[0..4].copy_from_slice(&FRAME_MAGIC);
+            hdr[4] = FRAME_VERSION;
+            hdr[5] = FLAG_LZ4;
+            hdr[8..12].copy_from_slice(&(real_body.len() as u32).to_le_bytes());
+            hdr[12..16].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+            let crc = crc32c::crc32c_append(crc32c::crc32c(&hdr[0..16]), payload);
+            hdr[16..20].copy_from_slice(&crc.to_le_bytes());
+            frame.extend_from_slice(&hdr);
+            frame.extend_from_slice(payload);
+            frame
+        };
+
+        // (a) Stripping the 4-byte LZ4 EndMark (00 00 00 00) is rejected.
+        let stripped = &valid_payload[..valid_payload.len() - 4];
+        let err_stripped = decode_batch(&frame_with_lz4_payload(stripped), None, None).unwrap_err();
+        assert!(matches!(err_stripped, ColumnError::InvalidFrame { .. }));
+
+        // (b) Replacing EndMark with 1, 2, or 3 arbitrary garbage bytes is rejected.
+        for suffix in [&b"a"[..], &b"ab"[..], &b"abc"[..]] {
+            let mut replaced = stripped.to_vec();
+            replaced.extend_from_slice(suffix);
+            let err_rep = decode_batch(&frame_with_lz4_payload(&replaced), None, None).unwrap_err();
+            assert!(matches!(err_rep, ColumnError::InvalidFrame { .. }));
+        }
+
+        // (c) Appending 1..=4 trailing bytes after a valid EndMark is rejected.
+        for extra in 1..=4usize {
+            let mut trailing = valid_payload.clone();
+            trailing.extend(std::iter::repeat_n(0x55, extra));
+            let err_trail =
+                decode_batch(&frame_with_lz4_payload(&trailing), None, None).unwrap_err();
+            assert!(matches!(
+                err_trail,
+                ColumnError::InvalidFrame {
+                    reason: "trailing bytes after lz4 frame"
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn encode_const_large_utf8_and_list_under_tight_reservation() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("big_s", DataType::Utf8, false),
+            Field::new("big_l", DataType::List(Box::new(DataType::I64)), false),
+        ])
+        .unwrap();
+        let big_str = "z".repeat(16 * 1024);
+        let big_list = ScalarValue::List {
+            item_type: DataType::I64,
+            values: (0..1024).map(ScalarValue::I64).collect(),
+        };
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::try_new_const(ScalarValue::Utf8(big_str), 4).unwrap(),
+                Column::try_new_const(big_list, 4).unwrap(),
+            ],
+            4,
+        )
+        .unwrap();
+
+        // Tight reservation smaller than uncompressed body is rejected before write_body with MemoryLimit.
+        let tight = GlobalPool::standalone(4096);
+        let mut tight_res = tight.register("const_encode_tight", true);
+        let mut out_err = Vec::new();
+        let err = encode_batch(&batch, &mut out_err, Some(&mut tight_res)).unwrap_err();
+        assert!(matches!(err, ColumnError::MemoryLimit { .. }));
+        assert_eq!(tight_res.size(), 0);
+        assert!(out_err.is_empty());
+
+        // Ample reservation encodes cleanly, restores size, and round-trips semantically.
+        let ample = GlobalPool::standalone(1024 * 1024);
+        let mut res = ample.register("const_encode_ample", true);
+        res.try_grow(16).unwrap();
+        let mut frame = Vec::new();
+        encode_batch(&batch, &mut frame, Some(&mut res)).unwrap();
+        assert_eq!(res.size(), 16);
+
+        let decoded = decode_batch(&frame, Some(&schema), None).unwrap();
+        assert!(batch.semantic_eq(&decoded));
+    }
+
+    #[test]
+    fn dict_and_rle_huge_unused_or_bool_does_not_oom_or_bypass_pool() {
+        // 1. 42-byte Dict(Null) with raw_len = 0, dict_len = 1_000_000_000 + fuzz_entry replay.
+        let mut body_zero = Vec::new();
+        write_body_header(&mut body_zero, 0, "a", &DataType::Null);
+        body_zero.push(2); // encoding = Dict
+        body_zero.extend_from_slice(&1_000_000_000u32.to_le_bytes()); // dict_len = 1e9
+        body_zero.push(0); // values has_nulls = false (FlatData::Null writes 0 bytes)
+        body_zero.push(0); // dict nulls = None
+        let frame_zero = wrap_uncompressed_body(&body_zero);
+        assert_eq!(frame_zero.len(), 42);
+
+        let scope = GlobalPool::standalone(1024 * 1024);
+        let mut res = scope.register("dict_null_0", true);
+        let decoded = decode_batch(&frame_zero, None, Some(&mut res)).unwrap();
+        assert_eq!(decoded.num_rows(), 0);
+        assert_eq!(res.size(), decoded.memory_bytes());
+        crate::fuzz_entry::column_frame(&frame_zero);
+
+        // 2. 46-byte Dict(Null) with raw_len = 1, dict_len = 1_000_000_000.
+        let mut body_one = Vec::new();
+        write_body_header(&mut body_one, 1, "a", &DataType::Null);
+        body_one.push(2); // encoding = Dict
+        body_one.extend_from_slice(&1_000_000_000u32.to_le_bytes()); // dict_len = 1e9
+        body_one.push(0); // values has_nulls = false
+        body_one.extend_from_slice(&0u32.to_le_bytes()); // codes = [0]
+        body_one.push(0); // dict nulls = None
+        let frame_one = wrap_uncompressed_body(&body_one);
+        assert_eq!(frame_one.len(), 46);
+
+        let mut res_one = scope.register("dict_null_1", true);
+        let decoded_one = decode_batch(&frame_one, None, Some(&mut res_one)).unwrap();
+        assert_eq!(decoded_one.num_rows(), 1);
+        assert_eq!(res_one.size(), decoded_one.memory_bytes());
+        crate::fuzz_entry::column_frame(&frame_one);
+
+        // 3. High-cardinality Dict(Bool) under a tight pool (32 KiB) takes fixed-width O(1) fast path.
+        let dict_bool_vals =
+            FlatColumn::try_new(FlatData::Bool(Bitmap::new_ones(80_000)), None).unwrap();
+        let dict_bool_col =
+            Column::Dict(DictColumn::try_new(dict_bool_vals, vec![0], None).unwrap());
+        let schema_bool =
+            Schema::try_new_arc(vec![Field::new("b", DataType::Bool, false)]).unwrap();
+        let batch_bool = Batch::try_new_all(schema_bool, vec![dict_bool_col], 1).unwrap();
+        let mut body_bool = Vec::new();
+        write_body(&batch_bool, &mut body_bool).unwrap();
+        let frame_bool = wrap_uncompressed_body(&body_bool);
+
+        let tight_bool = GlobalPool::standalone(32 * 1024);
+        let mut res_bool = tight_bool.register("dict_bool", true);
+        let decoded_bool = decode_batch(&frame_bool, None, Some(&mut res_bool)).unwrap();
+        assert!(batch_bool.semantic_eq(&decoded_bool));
+        assert_eq!(res_bool.size(), decoded_bool.memory_bytes());
+
+        // 3b. High-cardinality Dict(List(I64)) memo map respects tight pool (never bypasses Reservation).
+        let n_entries = 256usize;
+        let leaf_i64 =
+            FlatColumn::try_new(FlatData::I64((0..n_entries as i64).collect()), None).unwrap();
+        let list_offsets: Vec<u32> = (0..=n_entries as u32).collect();
+        let list_fc = FlatColumn::try_new(
+            FlatData::List {
+                item_type: DataType::I64,
+                offsets: list_offsets,
+                values: Box::new(Column::Flat(leaf_i64)),
+            },
+            None,
+        )
+        .unwrap();
+        let dict_list_col = Column::Dict(
+            DictColumn::try_new(list_fc, (0..n_entries as u32).collect(), None).unwrap(),
+        );
+        let schema_dl = Schema::try_new_arc(vec![Field::new(
+            "dl",
+            DataType::List(Box::new(DataType::I64)),
+            false,
+        )])
+        .unwrap();
+        let batch_dl = Batch::try_new_all(schema_dl, vec![dict_list_col], n_entries).unwrap();
+        let mut body_dl = Vec::new();
+        write_body(&batch_dl, &mut body_dl).unwrap();
+        let frame_dl = wrap_uncompressed_body(&body_dl);
+
+        // Pool fits decoded batch + 512B, but NOT the 256-entry memo map (>= 6 KiB).
+        let tight_dl = GlobalPool::standalone(batch_dl.memory_bytes() + 512);
+        let mut res_dl_tight = tight_dl.register("dict_list_tight", true);
+        let err_dl = decode_batch(&frame_dl, None, Some(&mut res_dl_tight)).unwrap_err();
+        assert!(matches!(err_dl, ColumnError::MemoryLimit { .. }));
+        assert_eq!(res_dl_tight.size(), 0);
+
+        // Ample pool decodes and shrinks memo reservation back on Drop.
+        let mut res_dl_ok = scope.register("dict_list_ok", true);
+        let decoded_dl = decode_batch(&frame_dl, None, Some(&mut res_dl_ok)).unwrap();
+        assert!(batch_dl.semantic_eq(&decoded_dl));
+        assert_eq!(res_dl_ok.size(), decoded_dl.memory_bytes());
+
+        // 4. Dict(List(Const(List(I64)))) quadratic CPU guard via const_cache.
+        let inner_list_scalar = ScalarValue::List {
+            item_type: DataType::I64,
+            values: (0..256).map(ScalarValue::I64).collect(),
+        };
+        let n_dict = 1_000usize;
+        let inner_const = Column::try_new_const(inner_list_scalar, n_dict).unwrap();
+        let outer_list_fc = FlatColumn::try_new(
+            FlatData::List {
+                item_type: DataType::List(Box::new(DataType::I64)),
+                offsets: (0..=n_dict as u32).collect(),
+                values: Box::new(inner_const),
+            },
+            None,
+        )
+        .unwrap();
+        let quad_col = Column::Dict(
+            DictColumn::try_new(outer_list_fc, (0..n_dict as u32).collect(), None).unwrap(),
+        );
+        let quad_schema = Schema::try_new_arc(vec![Field::new(
+            "q",
+            DataType::List(Box::new(DataType::List(Box::new(DataType::I64)))),
+            false,
+        )])
+        .unwrap();
+        let quad_batch = Batch::try_new_all(quad_schema, vec![quad_col], n_dict).unwrap();
+        let mut quad_frame = Vec::new();
+        encode_batch(&quad_batch, &mut quad_frame, None).unwrap();
+
+        let ample = GlobalPool::standalone(16 * 1024 * 1024);
+        let mut res_quad_ok = ample.register("quad_ok", true);
+        let quad_decoded = decode_batch(&quad_frame, None, Some(&mut res_quad_ok)).unwrap();
+        assert!(quad_batch.semantic_eq(&quad_decoded));
+        assert_eq!(res_quad_ok.size(), quad_decoded.memory_bytes());
+
+        // Under smaller max_decoded (< ~2 MiB materialized), rejected quickly via const_cache.
+        let mut res_quad_err = ample.register("quad_err", true);
+        let err_quad =
+            decode_batch_with_limit(&quad_frame, None, Some(&mut res_quad_err), 1_000_000)
+                .unwrap_err();
+        assert!(matches!(
+            err_quad,
+            ColumnError::InvalidFrame {
+                reason: "decoded materialized size exceeds max_decoded"
+            }
+        ));
+        assert_eq!(res_quad_err.size(), 0);
+
+        // 5. 8-level alternating Rle(List(Dict(List(...)))) — both valid and explosive.
+        let build_alternating = |fanout: usize| -> Batch {
+            let mut col =
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![7i64; fanout]), None).unwrap());
+            let mut dt = DataType::I64;
+            for level in 0..MAX_NESTING_DEPTH {
+                let list_fc = FlatColumn::try_new(
+                    FlatData::List {
+                        item_type: dt.clone(),
+                        offsets: vec![0, fanout as u32],
+                        values: Box::new(col),
+                    },
+                    None,
+                )
+                .unwrap();
+                col = if level % 2 == 0 {
+                    Column::Dict(DictColumn::try_new(list_fc, vec![0u32; fanout], None).unwrap())
+                } else {
+                    Column::Rle(RleColumn::try_new(list_fc, vec![fanout as u32]).unwrap())
+                };
+                dt = DataType::List(Box::new(dt));
+            }
+            let schema = Schema::try_new_arc(vec![Field::new("alt", dt, false)]).unwrap();
+            Batch::try_new_all(schema, vec![col], fanout).unwrap()
+        };
+
+        let alt_small = build_alternating(2);
+        let mut alt_small_frame = Vec::new();
+        encode_batch(&alt_small, &mut alt_small_frame, None).unwrap();
+        let mut res_alt_ok = scope.register("alt_ok", true);
+        let alt_small_dec = decode_batch(&alt_small_frame, None, Some(&mut res_alt_ok)).unwrap();
+        assert!(alt_small.semantic_eq(&alt_small_dec));
+        assert_eq!(res_alt_ok.size(), alt_small_dec.memory_bytes());
+
+        let alt_bomb = build_alternating(16);
+        let mut enc_alt_out = Vec::new();
+        let err_alt_enc = encode_batch(&alt_bomb, &mut enc_alt_out, None).unwrap_err();
+        assert!(matches!(
+            err_alt_enc,
+            ColumnError::InvalidFrame {
+                reason: "decoded materialized size exceeds max_decoded"
+            }
+        ));
+        assert!(enc_alt_out.is_empty());
+
+        let mut alt_bomb_body = Vec::new();
+        write_body(&alt_bomb, &mut alt_bomb_body).unwrap();
+        let alt_bomb_frame = wrap_uncompressed_body(&alt_bomb_body);
+        let mut res_alt_err = scope.register("alt_err", true);
+        let err_alt_dec = decode_batch(&alt_bomb_frame, None, Some(&mut res_alt_err)).unwrap_err();
+        assert!(matches!(
+            err_alt_dec,
+            ColumnError::InvalidFrame {
+                reason: "decoded materialized size exceeds max_decoded"
+            }
+        ));
+        assert_eq!(res_alt_err.size(), 0);
+    }
+
+    #[test]
+    fn encode_batch_rejects_frames_exceeding_decode_limits() {
+        let scope = GlobalPool::standalone(4 * 1024 * 1024);
+
+        // 1. 8192 x 132 KiB Utf8 via Const, Dict, and Rle -> > 1 GiB materialized, rejected on encode.
+        let rows = 8192usize;
+        let payload_str = "a".repeat(132 * 1024);
+        let utf8_schema =
+            Schema::try_new_arc(vec![Field::new("s", DataType::Utf8, false)]).unwrap();
+        let dict_vals = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices([payload_str.as_str()]).unwrap()),
+            None,
+        )
+        .unwrap();
+        let rle_vals = dict_vals.clone();
+
+        let bomb_batches = [
+            Batch::try_new_all(
+                Arc::clone(&utf8_schema),
+                vec![Column::try_new_const(ScalarValue::Utf8(payload_str), rows).unwrap()],
+                rows,
+            )
+            .unwrap(),
+            Batch::try_new_all(
+                Arc::clone(&utf8_schema),
+                vec![Column::Dict(
+                    DictColumn::try_new(dict_vals, vec![0u32; rows], None).unwrap(),
+                )],
+                rows,
+            )
+            .unwrap(),
+            Batch::try_new_all(
+                Arc::clone(&utf8_schema),
+                vec![Column::Rle(
+                    RleColumn::try_new(rle_vals, vec![rows as u32]).unwrap(),
+                )],
+                rows,
+            )
+            .unwrap(),
+        ];
+
+        for (idx, bomb) in bomb_batches.iter().enumerate() {
+            let mut out = vec![0xAB];
+            let mut res = scope.register("enc_mat_bomb", true);
+            res.try_grow(32).unwrap();
+            let err = encode_batch(bomb, &mut out, Some(&mut res)).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ColumnError::InvalidFrame {
+                        reason: "decoded materialized size exceeds max_decoded"
+                    }
+                ),
+                "case {idx}: unexpected err {err:?}"
+            );
+            assert_eq!(out, vec![0xAB]);
+            assert_eq!(res.size(), 32);
+        }
+
+        // 2. raw_len > max_decoded rejected before compaction; compacted selection within limit accepted.
+        let i64_schema = Schema::try_new_arc(vec![Field::new("x", DataType::I64, false)]).unwrap();
+        let big_const = Batch::try_new_all(
+            Arc::clone(&i64_schema),
+            vec![Column::try_new_const(ScalarValue::I64(1), 1000).unwrap()],
+            1000,
+        )
+        .unwrap();
+        let mut out = vec![0x11];
+        let mut res = scope.register("raw_len_limit", true);
+        res.try_grow(16).unwrap();
+        let err = encode_batch_with_limit(&big_const, &mut out, Some(&mut res), 500).unwrap_err();
+        assert!(matches!(
+            err,
+            ColumnError::InvalidFrame {
+                reason: "batch raw_len exceeds max_decoded"
+            }
+        ));
+        assert_eq!(out, vec![0x11]);
+        assert_eq!(res.size(), 16);
+
+        let sel_expand = Batch::try_new(
+            Arc::clone(&i64_schema),
+            vec![Column::try_new_const(ScalarValue::I64(1), 1).unwrap()],
+            1,
+            Selection::Indices(vec![0u32; 1000]),
+        )
+        .unwrap();
+        let err_sel =
+            encode_batch_with_limit(&sel_expand, &mut out, Some(&mut res), 500).unwrap_err();
+        assert!(matches!(
+            err_sel,
+            ColumnError::InvalidFrame {
+                reason: "batch raw_len exceeds max_decoded"
+            }
+        ));
+        assert_eq!(out, vec![0x11]);
+        assert_eq!(res.size(), 16);
+
+        let sel_shrink = Batch::try_new(
+            Arc::clone(&i64_schema),
+            vec![Column::try_new_const(ScalarValue::I64(7), 1000).unwrap()],
+            1000,
+            Selection::Indices(vec![0]),
+        )
+        .unwrap();
+        let mut shrink_frame = Vec::new();
+        encode_batch_with_limit(&sel_shrink, &mut shrink_frame, Some(&mut res), 500).unwrap();
+        assert_eq!(res.size(), 16);
+        let shrink_dec = decode_batch_with_limit(&shrink_frame, None, None, 500).unwrap();
+        assert_eq!(shrink_dec.num_rows(), 1);
+        assert!(sel_shrink.semantic_eq(&shrink_dec));
+
+        // 3. logical_elements limits on List, Dict, and Rle.
+        let list_null_schema = Schema::try_new_arc(vec![Field::new(
+            "ln",
+            DataType::List(Box::new(DataType::Null)),
+            true,
+        )])
+        .unwrap();
+        let list_logical_bomb = Batch::try_new_all(
+            list_null_schema,
+            vec![Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::List {
+                        item_type: DataType::Null,
+                        offsets: vec![0, 300],
+                        values: Box::new(
+                            Column::try_new_const(ScalarValue::Null(DataType::Null), 300).unwrap(),
+                        ),
+                    },
+                    None,
+                )
+                .unwrap(),
+            )],
+            1,
+        )
+        .unwrap();
+        let err_ll = encode_batch_with_limit(&list_logical_bomb, &mut out, None, 256).unwrap_err();
+        assert!(matches!(
+            err_ll,
+            ColumnError::InvalidFrame {
+                reason: "list child length exceeds max_decoded"
+            }
+        ));
+
+        let null_schema = Schema::try_new_arc(vec![Field::new("n", DataType::Null, true)]).unwrap();
+        let dict_logical_bomb = Batch::try_new_all(
+            null_schema,
+            vec![Column::Dict(
+                DictColumn::try_new(
+                    FlatColumn::try_new(FlatData::Null(300), None).unwrap(),
+                    vec![],
+                    None,
+                )
+                .unwrap(),
+            )],
+            0,
+        )
+        .unwrap();
+        let err_dl = encode_batch_with_limit(&dict_logical_bomb, &mut out, None, 256).unwrap_err();
+        assert!(matches!(
+            err_dl,
+            ColumnError::InvalidFrame {
+                reason: "dictionary length exceeds max_decoded"
+            }
+        ));
+
+        let rle_null_schema =
+            Schema::try_new_arc(vec![Field::new("a", DataType::Null, true)]).unwrap();
+        let mut rle_run_ends: Vec<u32> = (1..=19u32).collect();
+        rle_run_ends.push(200);
+        let rle_logical_bomb = Batch::try_new_all(
+            rle_null_schema,
+            vec![Column::Rle(
+                RleColumn::try_new(
+                    FlatColumn::try_new(FlatData::Null(20), None).unwrap(),
+                    rle_run_ends,
+                )
+                .unwrap(),
+            )],
+            200,
+        )
+        .unwrap();
+        // wire_len (~101B) <= 210 and raw_len(200) <= 210, but raw_len(200) + run_count(20) = 220 > 210.
+        let err_rl = encode_batch_with_limit(&rle_logical_bomb, &mut out, None, 210).unwrap_err();
+        assert!(matches!(
+            err_rl,
+            ColumnError::InvalidFrame {
+                reason: "rle run_count exceeds max_decoded"
+            }
+        ));
+
+        // 4. Nested Const heap exceeding max_decoded even when len == 0 (wire size fits limit, heap does not).
+        let big_const_list_scalar = ScalarValue::List {
+            item_type: DataType::I64,
+            values: (0..100).map(ScalarValue::I64).collect(),
+        };
+        let scalar_heap = big_const_list_scalar.heap_bytes();
+        let nested_const_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::List(Box::new(DataType::I64)),
+                    offsets: vec![0],
+                    values: Box::new(
+                        Column::try_new_const(big_const_list_scalar.clone(), 0).unwrap(),
+                    ),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let nested_zero_schema = Schema::try_new_arc(vec![Field::new(
+            "nl",
+            DataType::List(Box::new(DataType::List(Box::new(DataType::I64)))),
+            false,
+        )])
+        .unwrap();
+        let nested_zero_batch =
+            Batch::try_new_all(nested_zero_schema, vec![nested_const_col], 0).unwrap();
+        let wire_len = estimate_body_len(&nested_zero_batch, MAX_DECODED_BYTES).unwrap();
+        let cap = u32::try_from(wire_len + 64).unwrap();
+        assert!((cap as usize) < scalar_heap);
+
+        let err_nested_zero =
+            encode_batch_with_limit(&nested_zero_batch, &mut out, Some(&mut res), cap).unwrap_err();
+        assert!(matches!(
+            err_nested_zero,
+            ColumnError::InvalidFrame {
+                reason: "const scalar exceeds decoded size limit"
+            }
+        ));
+        assert_eq!(out, vec![0x11]);
+        assert_eq!(res.size(), 16);
+
+        // Top-level Const at len == 0 with heap_bytes > max_decoded also rejected.
+        let top_zero_schema = Schema::try_new_arc(vec![Field::new(
+            "tl",
+            DataType::List(Box::new(DataType::I64)),
+            false,
+        )])
+        .unwrap();
+        let top_zero_batch = Batch::try_new_all(
+            top_zero_schema,
+            vec![Column::try_new_const(big_const_list_scalar, 0).unwrap()],
+            0,
+        )
+        .unwrap();
+        let err_top_zero =
+            encode_batch_with_limit(&top_zero_batch, &mut out, Some(&mut res), cap).unwrap_err();
+        assert!(matches!(
+            err_top_zero,
+            ColumnError::InvalidFrame {
+                reason: "const scalar exceeds decoded size limit"
+            }
+        ));
+        assert_eq!(out, vec![0x11]);
+        assert_eq!(res.size(), 16);
+    }
+
+    #[test]
+    fn rle_run_count_exceeding_len_or_max_decoded_rejected_before_alloc() {
+        let tiny_scope = GlobalPool::standalone(64);
+
+        // 1. Rle(Null) with raw_len = 4 and run_count = 1_000_000 rejected before any allocation.
+        let mut body_exceeds = Vec::new();
+        write_body_header(&mut body_exceeds, 4, "r", &DataType::Null);
+        body_exceeds.push(3); // Rle
+        body_exceeds.extend_from_slice(&1_000_000u32.to_le_bytes()); // run_count > len
+        let frame_exceeds = wrap_uncompressed_body(&body_exceeds);
+
+        let mut res1 = tiny_scope.register("rle_exceeds_len", true);
+        let err1 = decode_batch(&frame_exceeds, None, Some(&mut res1)).unwrap_err();
+        assert!(matches!(
+            err1,
+            ColumnError::InvalidFrame {
+                reason: "rle run_count exceeds column length"
+            }
+        ));
+        assert_eq!(res1.size(), 0);
+
+        // 2. Non-empty Rle with run_count = 0 rejected immediately.
+        let mut body_zero = Vec::new();
+        write_body_header(&mut body_zero, 4, "r", &DataType::I64);
+        body_zero.push(3); // Rle
+        body_zero.extend_from_slice(&0u32.to_le_bytes()); // run_count = 0 for len = 4
+        let frame_zero = wrap_uncompressed_body(&body_zero);
+
+        let mut res2 = tiny_scope.register("rle_zero_runs", true);
+        let err2 = decode_batch(&frame_zero, None, Some(&mut res2)).unwrap_err();
+        assert!(matches!(
+            err2,
+            ColumnError::InvalidFrame {
+                reason: "non-empty rle column has zero runs"
+            }
+        ));
+        assert_eq!(res2.size(), 0);
+
+        // 3. Cumulative logical_elements (raw_len + rle run_count) exceeding max_decoded rejected before alloc.
+        let mut body_multi = Vec::new();
+        body_multi.extend_from_slice(&100u32.to_le_bytes()); // raw_len = 100
+        body_multi.extend_from_slice(&2u32.to_le_bytes()); // col_count = 2
+        for name in ["a", "b"] {
+            body_multi.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            body_multi.extend_from_slice(name.as_bytes());
+            body_multi.push(1);
+            write_data_type(&mut body_multi, &DataType::Null);
+        }
+        // Column 0: Flat(Null) (2 bytes on wire; logical_elements remains 100).
+        body_multi.push(0); // Flat
+        body_multi.push(0); // has_nulls = false
+        // Column 1: Rle(Null) with run_count = 60 <= len(100), but 100 + 60 = 160 > 150 — rejected before reading values/run_ends.
+        body_multi.push(3); // Rle
+        body_multi.extend_from_slice(&60u32.to_le_bytes());
+        let frame_multi = wrap_uncompressed_body(&body_multi);
+        assert!(body_multi.len() < 150);
+
+        let scope_multi = GlobalPool::standalone(1024);
+        let mut res3 = scope_multi.register("rle_max_decoded", true);
+        let err3 = decode_batch_with_limit(&frame_multi, None, Some(&mut res3), 150).unwrap_err();
+        assert!(matches!(
+            err3,
+            ColumnError::InvalidFrame {
+                reason: "rle run_count exceeds max_decoded"
+            }
+        ));
+        assert_eq!(res3.size(), 0);
+    }
+
+    #[test]
+    fn const_decode_peak_reservation_and_utf8_zero_clone() {
+        // 1. Const(Utf8) moves bytes without 2x clone: fits 1x pool (bytes + 8B offsets).
+        let payload_len = 8192usize;
+        let utf8_schema =
+            Schema::try_new_arc(vec![Field::new("s", DataType::Utf8, false)]).unwrap();
+        let utf8_batch = Batch::try_new_all(
+            Arc::clone(&utf8_schema),
+            vec![Column::try_new_const(ScalarValue::Utf8("a".repeat(payload_len)), 4).unwrap()],
+            4,
+        )
+        .unwrap();
+        let mut utf8_body = Vec::new();
+        write_body(&utf8_batch, &mut utf8_body).unwrap();
+        let utf8_frame = wrap_uncompressed_body(&utf8_body);
+
+        let exact_utf8_peak = payload_len + 8; // 2 u32 offsets + payload bytes
+        let scope_utf8 = GlobalPool::standalone(exact_utf8_peak);
+        let mut res_utf8 = scope_utf8.register("const_utf8_1x", true);
+        let dec_utf8 = decode_batch(&utf8_frame, Some(&utf8_schema), Some(&mut res_utf8)).unwrap();
+        assert!(utf8_batch.semantic_eq(&dec_utf8));
+        assert_eq!(res_utf8.size(), payload_len);
+        assert_eq!(res_utf8.size(), dec_utf8.memory_bytes());
+
+        let under_utf8 = GlobalPool::standalone(exact_utf8_peak - 1);
+        let mut res_utf8_err = under_utf8.register("const_utf8_under", true);
+        let err_utf8 = decode_batch(&utf8_frame, None, Some(&mut res_utf8_err)).unwrap_err();
+        assert!(matches!(err_utf8, ColumnError::MemoryLimit { .. }));
+        assert_eq!(res_utf8_err.size(), 0);
+
+        // 2. Const(Binary) moves bytes without 2x clone: fits 1x pool (bytes + 8B offsets).
+        let bin_schema =
+            Schema::try_new_arc(vec![Field::new("b", DataType::Binary, false)]).unwrap();
+        let bin_batch = Batch::try_new_all(
+            Arc::clone(&bin_schema),
+            vec![Column::try_new_const(ScalarValue::Binary(vec![0x5A; payload_len]), 4).unwrap()],
+            4,
+        )
+        .unwrap();
+        let mut bin_body = Vec::new();
+        write_body(&bin_batch, &mut bin_body).unwrap();
+        let bin_frame = wrap_uncompressed_body(&bin_body);
+
+        let scope_bin = GlobalPool::standalone(exact_utf8_peak);
+        let mut res_bin = scope_bin.register("const_bin_1x", true);
+        let dec_bin = decode_batch(&bin_frame, Some(&bin_schema), Some(&mut res_bin)).unwrap();
+        assert!(bin_batch.semantic_eq(&dec_bin));
+        assert_eq!(res_bin.size(), payload_len);
+        assert_eq!(res_bin.size(), dec_bin.memory_bytes());
+
+        // 3. Const(List(I64)) enforces true 2x peak (flat + scalar) and releases flat scratch between columns.
+        let list_col = Column::try_new_const(
+            ScalarValue::List {
+                item_type: DataType::I64,
+                values: (0..128).map(ScalarValue::I64).collect(),
+            },
+            4,
+        )
+        .unwrap();
+        let flat_bytes = 2 * 4 + 128 * 8; // offsets(8) + i64 values(1024)
+        let scalar_bytes = list_col.memory_bytes();
+
+        let one_schema = Schema::try_new_arc(vec![Field::new(
+            "l0",
+            DataType::List(Box::new(DataType::I64)),
+            false,
+        )])
+        .unwrap();
+        let one_batch =
+            Batch::try_new_all(Arc::clone(&one_schema), vec![list_col.clone()], 4).unwrap();
+        let mut one_body = Vec::new();
+        write_body(&one_batch, &mut one_body).unwrap();
+        let one_frame = wrap_uncompressed_body(&one_body);
+
+        let under_one = GlobalPool::standalone(flat_bytes + scalar_bytes - 1);
+        let mut res_one_err = under_one.register("const_list_under", true);
+        let err_one = decode_batch(&one_frame, None, Some(&mut res_one_err)).unwrap_err();
+        assert!(matches!(err_one, ColumnError::MemoryLimit { .. }));
+        assert_eq!(res_one_err.size(), 0);
+
+        let exact_one = GlobalPool::standalone(flat_bytes + scalar_bytes);
+        let mut res_one_ok = exact_one.register("const_list_exact", true);
+        let dec_one = decode_batch(&one_frame, Some(&one_schema), Some(&mut res_one_ok)).unwrap();
+        assert!(one_batch.semantic_eq(&dec_one));
+        assert_eq!(res_one_ok.size(), scalar_bytes);
+
+        // Two Const(List(I64)) columns: col 0's flat scratch is released before col 1 decodes,
+        // so peak is 2 * scalar_bytes + flat_bytes (strictly less than 2 * (scalar_bytes + flat_bytes)).
+        let two_schema = Schema::try_new_arc(vec![
+            Field::new("l0", DataType::List(Box::new(DataType::I64)), false),
+            Field::new("l1", DataType::List(Box::new(DataType::I64)), false),
+        ])
+        .unwrap();
+        let two_batch =
+            Batch::try_new_all(Arc::clone(&two_schema), vec![list_col.clone(), list_col], 4)
+                .unwrap();
+        let mut two_body = Vec::new();
+        write_body(&two_batch, &mut two_body).unwrap();
+        let two_frame = wrap_uncompressed_body(&two_body);
+
+        let two_peak = 2 * scalar_bytes + flat_bytes;
+        let exact_two = GlobalPool::standalone(two_peak);
+        let mut res_two_ok = exact_two.register("const_list_two_ok", true);
+        let dec_two = decode_batch(&two_frame, Some(&two_schema), Some(&mut res_two_ok)).unwrap();
+        assert!(two_batch.semantic_eq(&dec_two));
+        assert_eq!(res_two_ok.size(), 2 * scalar_bytes);
+        assert_eq!(res_two_ok.size(), dec_two.memory_bytes());
+
+        let under_two = GlobalPool::standalone(two_peak - 1);
+        let mut res_two_err = under_two.register("const_list_two_err", true);
+        let err_two = decode_batch(&two_frame, None, Some(&mut res_two_err)).unwrap_err();
+        assert!(matches!(err_two, ColumnError::MemoryLimit { .. }));
+        assert_eq!(res_two_err.size(), 0);
     }
 }

@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use bytesize::ByteSize;
-use datafusion::execution::context::{SessionConfig, SessionContext};
 use object_store::memory::InMemory;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
@@ -515,18 +514,11 @@ pub(super) fn visible_span_rows(harness: &Harness, project: ProjectId) -> usize 
             .query(project, crate::QueryOptions::new(None, None))
             .await
             .expect("query on the project");
-        let ctx =
-            SessionContext::new_with_config_rt(SessionConfig::new(), Arc::clone(&query.runtime));
-        ctx.register_table("spans_t", Arc::clone(&query.spans))
-            .expect("register spans of the project");
-        let batches = ctx
-            .sql("SELECT trace_id FROM spans_t")
-            .await
-            .expect("plan spans read of the project")
-            .collect()
+        let batches = query
+            .collect_raw_spans()
             .await
             .expect("run spans read of the project");
-        batches.iter().map(|batch| batch.num_rows()).sum()
+        batches.iter().map(cetra_column::Batch::num_rows).sum()
     })
 }
 

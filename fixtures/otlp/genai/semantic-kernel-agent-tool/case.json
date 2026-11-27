@@ -1,0 +1,21 @@
+{
+  "description": "Semantic Kernel ChatCompletionAgent run with one plugin function, traced by Semantic Kernel's own diagnostics with the sensitive switch on.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "semantic-kernel",
+    "instrumentation_version": "1.47.0",
+    "language": "python",
+    "libraries": {
+      "opentelemetry-sdk": "1.45.2",
+      "semantic-kernel": "1.47.0"
+    },
+    "captured_at": "2026-11-23T20:01:56Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Mapping tables / Input / output"
+  ],
+  "notes": "Semantic Kernel's OpenTelemetry diagnostics are on, with the sensitive switch and gen_ai_latest_experimental, as the M4 spike sets them. The spans carry tool arguments and results and the invoke_agent output, but no chat span has input or output: Semantic Kernel sends message content only as OTel log records, which cetra drops (D-IN-23 item 4). The model is OpenAIChatCompletion pointed at the mock. gen_ai.agent.id is a UUID per run and is volatile."
+}

@@ -46,6 +46,7 @@ K4 still checks that `crates/server/src/crypto.rs` has `pub(crate) struct Secret
 | [10-web-channels.md](10-web-channels.md) | K10 API helpers and the Channels settings page |
 | [11-web-alerts.md](11-web-alerts.md) | K11 Alerts nav entry, rules list, rule detail with history |
 | [12-web-editor.md](12-web-editor.md) | K12 rule editor with the preview chart, dev write mocks, closeout |
+| [k13-issue-preview.md](k13-issue-preview.md) | K13 preview of issue occurrence rules |
 
 ## Design
 

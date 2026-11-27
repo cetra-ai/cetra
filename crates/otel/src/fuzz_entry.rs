@@ -3,7 +3,7 @@
 
 use std::sync::OnceLock;
 
-use cetra_core::batch::spans_to_record_batch;
+use cetra_core::batch::spans_to_batch;
 use cetra_core::ids::ProjectId;
 use prost::Message;
 
@@ -45,8 +45,8 @@ fn normalize_and_convert(request: &ExportTraceServiceRequest) {
         &crate::AgentContexts::default(),
     );
     assert!(
-        spans_to_record_batch(&normalized.spans).is_ok(),
-        "every span normalize accepts converts to a record batch"
+        spans_to_batch(&normalized.spans).is_ok(),
+        "every span normalize accepts converts to a columnar batch"
     );
 }
 

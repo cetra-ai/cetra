@@ -91,6 +91,12 @@ pub(crate) struct ReadContext<'a, 'b> {
     pub bag: &'a mut AttrBag<'b>,
     pub events: &'a [Event],
     pub kind: SpanKind,
+    /// Instrumentation scope name, `""` when absent. The GenAI reader gates
+    /// its Pydantic AI, Mirascope and Strands rules on it.
+    pub scope: &'a str,
+    /// Conventions detected on the span, in precedence order. The VoltAgent
+    /// reader gates every one of its rules on it.
+    pub conventions: &'a [Convention],
     pub warnings: &'a mut Warnings,
 }
 
@@ -201,10 +207,17 @@ pub(crate) fn error_attribute(errors: &[&str]) -> Option<String> {
 
 /// First value per field, in the readers' order. Then drop lower-precedence
 /// payload keys for each field that has a winner (rule 2).
+///
+/// `scope` (the span's instrumentation scope name, `""` when absent) and
+/// `conventions` (the conventions detected on it) reach the readers through
+/// [`ReadContext`].
+#[allow(clippy::too_many_arguments)] // the span's bag, events, kind, scope and conventions, the warnings, and the readers with their registries
 pub(crate) fn assemble(
     bag: &mut AttrBag<'_>,
     events: &[Event],
     kind: SpanKind,
+    scope: &str,
+    conventions: &[Convention],
     warnings: &mut Warnings,
     readers: &[ConventionPayload],
     registries: &[PayloadKeys],
@@ -217,6 +230,8 @@ pub(crate) fn assemble(
             bag,
             events,
             kind,
+            scope,
+            conventions,
             warnings,
         });
         keep(&mut io.input, &mut winners[0], got.input, reader.convention);
@@ -241,6 +256,23 @@ pub(crate) fn assemble(
         );
         dropped.extend(got.events);
         io.errors.extend(got.errors);
+    }
+    let scoped = crate::conventions::scoped::read(
+        &mut ReadContext {
+            bag,
+            events,
+            kind,
+            scope,
+            conventions,
+            warnings,
+        },
+        &io,
+    );
+    if io.input.is_none() {
+        io.input = scoped.input;
+    }
+    if io.output.is_none() {
+        io.output = scoped.output;
     }
     for (index, field) in FIELDS.iter().enumerate() {
         dropped.extend(drop_lower_payloads(
@@ -313,6 +345,8 @@ fn input_message(messages: &[Message]) -> Option<&Message> {
         .or_else(|| messages.last())
 }
 
+/// Spec 02 rule 9: the text parts. A message with none previews its media
+/// transcripts instead (non-empty ones, in part order).
 fn message_preview(message: &Message) -> Option<String> {
     let texts: Vec<&str> = message
         .parts
@@ -322,10 +356,22 @@ fn message_preview(message: &Message) -> Option<String> {
             _ => None,
         })
         .collect();
-    if texts.is_empty() {
+    if !texts.is_empty() {
+        return Some(cut_preview(&texts.join("\n")));
+    }
+    let transcripts: Vec<&str> = message
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Uri { transcript, .. } | Part::Blob { transcript, .. } => transcript.as_deref(),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect();
+    if transcripts.is_empty() {
         None
     } else {
-        Some(cut_preview(&texts.join("\n")))
+        Some(cut_preview(&transcripts.join("\n")))
     }
 }
 
@@ -385,12 +431,13 @@ fn rank(convention: Convention) -> usize {
     match convention {
         Convention::Cetra => 0,
         Convention::Genai => 1,
-        Convention::Openinference => 2,
-        Convention::Vercel => 3,
-        Convention::Openllmetry => 4,
-        Convention::Langfuse => 5,
-        Convention::Laminar => 6,
-        Convention::GoogleAdk => 7,
+        Convention::Voltagent => 2,
+        Convention::Openinference => 3,
+        Convention::Vercel => 4,
+        Convention::Openllmetry => 5,
+        Convention::Langfuse => 6,
+        Convention::Laminar => 7,
+        Convention::GoogleAdk => 8,
     }
 }
 
@@ -585,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn message_previews_use_text_parts_only() {
+    fn message_previews_use_text_parts_first() {
         let messages = vec![
             message("system", vec![text_part("sys")]),
             message("user", vec![text_part("first")]),
@@ -606,6 +653,44 @@ mod tests {
         let payload = Payload::Messages(messages);
         assert_eq!(preview_input(&payload).as_deref(), Some("last-a\nlast-b"));
         assert_eq!(preview_output(&payload).as_deref(), Some("tail"));
+    }
+
+    fn audio_part(transcript: Option<&str>) -> Part {
+        Part::Blob {
+            modality: Some(cetra_core::message::Modality::Audio),
+            mime_type: None,
+            transcript: transcript.map(str::to_owned),
+            content: "AAAA".to_owned(),
+            extra: Map::new(),
+        }
+    }
+
+    #[test]
+    fn a_voice_only_message_previews_its_transcripts() {
+        let payload = Payload::Messages(vec![message(
+            "assistant",
+            vec![
+                audio_part(Some("first")),
+                audio_part(None),
+                audio_part(Some("second")),
+            ],
+        )]);
+        assert_eq!(preview_output(&payload).as_deref(), Some("first\nsecond"));
+    }
+
+    #[test]
+    fn text_wins_over_transcripts() {
+        let payload = Payload::Messages(vec![message(
+            "assistant",
+            vec![audio_part(Some("spoken")), text_part("written")],
+        )]);
+        assert_eq!(preview_output(&payload).as_deref(), Some("written"));
+    }
+
+    #[test]
+    fn an_empty_transcript_gives_no_preview() {
+        let payload = Payload::Messages(vec![message("assistant", vec![audio_part(Some(""))])]);
+        assert_eq!(preview_output(&payload), None);
     }
 
     #[test]
@@ -823,6 +908,8 @@ mod tests {
             &mut bag,
             &events,
             SpanKind::Llm,
+            "",
+            &[],
             &mut warnings,
             &readers,
             &registries,
@@ -929,6 +1016,8 @@ mod tests {
             &mut bag,
             &[],
             SpanKind::Llm,
+            "",
+            &[],
             &mut warnings,
             &readers,
             &registries,

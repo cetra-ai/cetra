@@ -1,6 +1,6 @@
 # 03 — Storage engine
 
-The columnar store holds three tables: `spans`, `traces` (derived partial summaries) and `scores` (01). It is a small LSM-style engine: **WAL → memtable → L0 Parquet files → L1 Parquet files**, with a catalog in its own SQLite file and DataFusion as the query engine.
+The columnar store holds three tables: `spans`, `traces` (derived partial summaries) and `scores` (01). It is a small LSM-style engine: **WAL → memtable → L0 Parquet files → L1 Parquet files**, with a catalog in its own SQLite file and `cetra-query` as the query engine over `cetra-column` batches.
 
 Configuration keys named in this spec (`wal.sync`, `flush.max_bytes`, …) live under the `[storage]` section of the server config (12, D90).
 
@@ -58,18 +58,18 @@ One WAL per table (`spans`, `scores`), each a sequence of segment files. A segme
 
 Each segment starts with an 8-byte header (§ 12): the magic `LWAL`, the format version as a `u16`, and a `u16` of flags that must be 0. The header is written and fsynced when the segment is created, before any record, so no crash leaves a record behind a torn header. Records follow it; offsets in errors count from the start of the file.
 
-Record format. Every integer is little-endian. The checksum covers `seq` as 8 little-endian bytes, then `kind` as 1 byte, then the payload. A payload longer than 256 MiB is rejected. The writer rejects a batch whose decoded size exceeds 1 GiB. Before decoding, a reader checks that every IPC buffer lies inside its message body, that the codec is LZ4 frame (any other codec is corrupt), and each LZ4 buffer's size prefix: -1 is stored raw, 0 is empty, and any other size must be at most 256 times its compressed length plus 64 bytes and must equal what its LZ4 frame decodes to. The decoded size of a record, stored-raw buffers included, is at most 1 GiB; a record that breaks any of these is corrupt.
+Record format. Every integer is little-endian. The outer WAL checksum covers `seq` as 8 little-endian bytes, then `kind` as 1 byte, then the payload. The payload is one `cetra-column` binary batch frame (`CBM1`, `FRAME_VERSION = 1`), carrying a 20-byte frame header (`magic(4) + version(1) + flags(1) + reserved(2) + uncompressed_len(4) + payload_len(4) + crc32c(4)`) and optional LZ4-frame body compression (`FLAG_LZ4 = 0x01`). Both the outer WAL record and inner `CBM1` frame reject payloads longer than `256 MiB` (`MAX_PAYLOAD`) and decoded sizes exceeding `1 GiB` (`MAX_DECODED_BYTES`) symmetrically on encode and decode. Before decoding, the frame reader checks magic, version, flags (`0` or `FLAG_LZ4`), zero reserved bytes, frame CRC-32C, column count (`≤ 1024`), schema/length validity (including `RLE` `run_count ≤ len` and cumulative logical element caps), and the LZ4 expansion-ratio bomb limit (`uncompressed_len ≤ 256 × payload_len + 64`). Decoding never panics on corrupt or truncated frames; any violation is corrupt.
 
 ```
 u32  payload_len
 u32  crc32c(seq || kind || payload)
 u64  seq            monotonically increasing per table
 u8   kind           1 = row batch; any other value, including the reserved 2, is invalid
-[..] payload        Arrow IPC stream (one RecordBatch, table schema, already normalized),
-                    with LZ4-frame body compression
+[..] payload        cetra-column CBM1 binary batch frame (one Batch, table schema, already normalized),
+                    with optional LZ4-frame compression
 ```
 
-**Group commit.** Ingest tasks send `(RecordBatch, oneshot ack)` to a single WAL writer task per table over a bounded channel. The writer:
+**Group commit.** Ingest tasks send `(Batch, oneshot ack)` to a single WAL writer task per table over a bounded channel. The writer:
 1. drains everything available (up to 8 MiB or 2 ms after the first item);
 2. writes all records with one `write_all` and calls `fdatasync`;
 3. inserts the batches into the active memtable in `seq` order and publishes a new read state (§4);
@@ -96,9 +96,9 @@ A segment is fsynced before a newer one is created, at rotation and at open, so 
 
 ## 2. Memtable
 
-Per table: `active` (accepting inserts) and at most one `frozen` (being flushed). Each is a map `partition → Vec<RecordBatch>` plus byte accounting. Inserts append the WAL'd batch (split by partition) — no row-by-row building, so inserts are cheap.
+Per table: `active` (accepting inserts) and at most one `frozen` (being flushed). Each is a map `partition → Vec<MemBatch>` (holding `Arc<cetra_column::Batch>`, time bounds, and lazily cached trace partials) plus byte accounting. Inserts append the WAL'd `Batch` (split by partition) — no row-by-row building, so inserts are cheap.
 
-- **Accounting** uses the Arrow buffers' real memory size (`get_array_memory_size`), not the encoded size: small OTLP batches carry a large fixed overhead per column.
+- **Accounting** uses `Batch::memory_bytes()` (the real memory footprint of the `cetra-column` buffers), not the encoded size: small OTLP batches carry a fixed overhead per column.
 - **Coalescing:** when a partition holds more than 64 batches smaller than 1 MiB, they are concatenated into one batch.
 
 **Flush triggers:** active size ≥ `flush.max_bytes` (default 256 MiB), oldest row age ≥ `flush.max_age` (default 120 s), or shutdown.
@@ -138,12 +138,12 @@ A failure in steps 2–5 keeps `frozen` and retries that same view under new fil
 | Setting | Value |
 |---|---|
 | Compression | zstd level 3 |
-| Row group | closed when in-progress size ≥ 64 MiB or 100 000 rows (manual `flush()` on `ArrowWriter`) |
+| Row group | closed when in-progress size ≥ 64 MiB or 100 000 rows (manual `flush()` on `BatchFileWriter` inside `file_format/`) |
 | Data page | 1 MiB, max 20 000 rows/page; page index on |
 | Statistics | page-level for all scalar columns |
 | Dictionary | on for dictionary-typed columns; off for `input`, `output`, `attributes` |
 | Bloom filters | `trace_id`, `session_id`, `user_id` (fpp 0.01) on `spans`; `trace_id`, `session_id`, `user_id` on `traces`; `trace_id`, `score_id` on `scores` |
-| Sort order (within a file) | `spans`: `trace_id, start_time` · `traces`: `start_time, trace_id` (the `trace_id` tie-break makes files byte-identical across runs) · `scores`: `created_at` (declared in file metadata so DataFusion can exploit it; declared only because the writer sorted) |
+| Sort order (within a file) | `spans`: `trace_id, start_time` · `traces`: `start_time, trace_id` (the `trace_id` tie-break makes files byte-identical across runs) · `scores`: `created_at` (declared in file metadata; declared only because the writer sorted) |
 | Time slicing (across files) | every file covers a contiguous `[min_time, max_time]` slice; see below |
 | KV metadata | `cetra.table`, `cetra.schema_version`, `cetra.format_version`, `cetra.level`, `cetra.min_time`, `cetra.max_time`, `cetra.min_ingest_time`, `cetra.max_ingest_time`. `cetra.schema_version` is the row normalization version; `cetra.format_version` is the file format (§ 12). |
 
@@ -155,7 +155,7 @@ A failure in steps 2–5 keeps `frozen` and retries that same view under new fil
 
 **`traces` files are derived from `spans` files** (D88). Every `traces` file is computed from a set of `spans` files of the same partition, recorded in `file_sources`. The sets of the active `traces` files are disjoint and together cover every active `spans` file of the partition. Whatever replaces `spans` files (compaction, deletion rewrite, retention) replaces the `traces` files derived from them in the same commit, recomputing their partials from the new `spans` files. Duplicate spans therefore stop counting twice once their spans files are merged, and `traces` needs no deletion logic of its own.
 
-**Schema evolution:** only adding nullable columns. Each file carries its own schema; the reader uses DataFusion's schema adapter to fill missing columns with nulls. Renames or type changes need a new column.
+**Schema evolution:** only adding nullable columns. Each file carries its own schema; `ParquetSource` fills missing nullable columns with `Const(Null)` columns matching the target `cetra-column` schema. Renames or type changes need a new column. All Parquet read/write and `arrow` usage in `cetra-storage` is isolated inside `file_format/` (write-only Arrow path until a future native format replaces Parquet) and `engine/parquet_*.rs` (low-level zero-Arrow readers/exporters).
 
 ## 4. Catalog
 
@@ -236,7 +236,7 @@ FileMeta { id, path, level, size, footer_size, rows, min_time, max_time,
            min_ingest_time, max_ingest_time, fully_merged, deletions_applied_seq }
 ```
 
-**Read state.** Readers load one `ReadState` (an `Arc` behind a `std::sync::RwLock`, held only to clone the `Arc`): the in-memory catalog, the memtable batches (`active` and `frozen` of both tables, as `Arc<RecordBatch>` lists), the tombstone sets (§7) and the project states (retention watermarks §8, dropped projects §7), all from the same publish. A row is therefore seen exactly once, in a memtable or in a file.
+**Read state.** Readers load one `ReadState` (an `Arc` behind a `std::sync::RwLock`, held only to clone the `Arc`): the in-memory catalog, the memtable batches (`active` and `frozen` of both tables, as `MemBatch` lists holding `Arc<cetra_column::Batch>`), the tombstone sets (§7) and the project states (retention watermarks §8, dropped projects §7), all from the same publish. A row is therefore seen exactly once, in a memtable or in a file.
 
 **Committer.** Every change to the set of files is a catalog edit applied by one committer, which runs the SQLite transaction and publishes the new `ReadState` under one mutex, so commits and snapshots are totally ordered. This covers flush, compaction, deletion rewrite, retention, project drop and GC. An edit has:
 - the files to add, whose paths must be in `staged_objects`;
@@ -253,7 +253,7 @@ A commit that fails with a SQLite I/O error (`SQLITE_IOERR`, `_READ`, `_WRITE`, 
 
 **Claims.** Background jobs claim their input files in memory before reading them, so compaction and the deletion rewriter never work on the same file. Claims don't survive a restart and need not: an interrupted job is simply redone.
 
-**Metadata cache.** One process-wide DataFusion `RuntimeEnv` is built at open; each `Storage::query` derives its own from it with a different memory pool (§6), sharing the caches, the object store and the spill directory. `query.metadata_cache_bytes` (default 512 MiB; zero disables it) is `CacheManagerConfig`'s file-metadata cache limit. The cache stores decoded Parquet footers. With a cache configured, DataFusion also loads column and offset indexes into that metadata. Bloom-filter bitsets are not part of it: the footer records their offsets, and a pruning read fetches the bitset from the object. Files are immutable, so entries never go stale. There is no custom `ParquetFileReaderFactory`.
+**Metadata cache.** One process-wide `MetadataCache` (a bounded LRU cache of decoded `ParquetMetaData`, weighted by `ParquetMetaData::memory_size()`) is built at open in `QeRuntime`, shared across queries, compaction, and maintenance. `query.metadata_cache_bytes` (default 512 MiB; zero disables it) caps it. The cache stores decoded Parquet footers along with column and offset page indexes. Bloom-filter bitsets are not part of it: the footer records their offsets, and `ParquetSource` fetches the bitset from the object on demand. Files are immutable, so entries never go stale.
 
 ## 5. Compaction
 
@@ -278,7 +278,7 @@ Times below are wall-clock nanoseconds (`now`). A file's age is `now` minus its 
 - Tombstones (§7): the deletions pending when the job starts are applied to `spans` and `scores` rows before the dedup, and every output (`traces` included) records the highest `deletion_seq` known when the job started. A slice left with no row produces no output.
 
 **Resources:**
-- A merge streams its inputs (one batch per input at a time) instead of sorting a whole slice in memory. Merge memory across running jobs is capped by `compaction.max_memory` (default 1 GiB), a DataFusion memory pool of its own. A batch holds at most 8,192 rows, fewer for large rows: a job sizes its batches so that four batches of every input fit in its share of the pool (`compaction.max_memory / compaction.threads`), estimating a row at 8 times its stored bytes per row, and never below 64 rows.
+- A merge streams its inputs (one batch per input at a time via `ParquetSource`) instead of sorting a whole slice in memory. Merge memory across running jobs is capped by `compaction.max_memory` (default 1 GiB), a standalone `GlobalPool` of its own. A batch holds at most 8,192 rows, fewer for large rows: a job sizes its batches so that four batches of every input fit in its share of the pool (`compaction.max_memory / compaction.threads`), estimating a row at 8 times its stored bytes per row, and never below 64 rows.
 - Each `spans` and `scores` output is written while it is merged, into a temp file, then published durably. On local disk the temp file sits in the target directory and is synced and renamed like any object write. With S3 it is `<data_dir>/tmp/compaction/<uuidv7>.parquet`, uploaded, then removed. A failed upload is aborted as at flush (§2). `traces` outputs are small and are built in memory (D-A1-2).
 - Before it reads anything, every job (merges and rewrites, local and S3 mode alike, since outputs stream through a local temp file in both) reserves the sum of its `spans`/`scores` input sizes against free disk minus the other running jobs' reservations. A job that doesn't fit fails as deferred and a later pass retries it (§10, D-A1-9).
 
@@ -292,35 +292,33 @@ A server in restore mode opens the storage with object deletion off (`StorageCon
 
 ## 6. Query path
 
-For each request, `Storage::query` returns a `ProjectQuery`: the project's `TableProvider`s, all bound to one `ReadState` (catalog, memtable and tombstones, §4), plus a `RuntimeEnv` of the query's own, built from the process one at open (object store, metadata cache and spill directory) with a memory pool of its own (§ Resource limits, D-A1-8), `target_partitions`, and the physical optimizer rules the session appends (the trace list fast path, D153). `Storage::query` takes `QueryOptions::new(around, visible_from)`: `around` (D154), and `visible_from`, the org's data-window bound, which the base views of 05 apply to `start_time` (`spans`, `traces`) and `created_at` (`scores`) (D-P-21, D-P-47); the providers themselves are unfiltered, for storage's own reads. The query layer (05, D91) builds the DataFusion session from it. The providers expose the stored Arrow schemas of 01 (binary IDs, `project_id`). They don't register themselves: the query layer (05) registers the user-facing views over them (hex IDs, hidden `project_id`, `sessions`, default exclusions, D89). Because each provider is constructed for a single project, the user cannot name another project's data. A dropped project (§7) gets empty tables.
+For each request, `Storage::query` admits a `ScopedPool` from `QeRuntime`'s `AsyncAdmissionPool` (§ Resource limits, D-A1-8) and returns a `ProjectQuery`: the project's `ScanSource`s (`spans`, `traces`, `scores`) bound to one `ReadState` (catalog, memtable and tombstones, §4), together with the shared `QeRuntime` (`MetadataCache`, `WorkerPool`, `SpillManager`, `target_partitions`), `around` (D154), and `visible_from` (the org's data-window bound, which 05's base views and reads apply to `start_time` on `spans`/`traces` and `created_at` on `scores`, D-P-21, D-P-47). `QueryContext` wraps `ProjectQuery` with an optional SQL `TimeWindow` and registers server-owned SQLite views as `BatchSource` tables (05, D91). Product reads (`cetra_storage::reads`) build direct `cetra-query` push pipelines over `ScanSource` without SQL planning; the SQL console and MCP run through `cetra-query::sql` (05). The sources expose the stored `cetra-column` schemas of 01 (binary IDs, `project_id`), while views expose hex IDs, hide `project_id`, add `sessions`, and apply default exclusions (D89). Because each source is constructed for a single project, the user cannot name another project's data. A dropped project (§7) gets empty sources.
 
-### `SpansProvider::scan(projection, filters, limit)`
+### `ParquetSource` & `MemtableSource` (`spans` and `scores` scans)
 
-1. Extract a time range from the filters on `start_time`:
+1. Extract a time range from the `ScanSpec` filters on `start_time` (or `created_at` for `scores`):
    - the comparisons `=, <, <=, >, >=, BETWEEN`;
    - an `OR` gives the union of its sides' ranges; a side that is `start_time IS NULL` on the non-null column is dropped.
 
-   Prune file partitions by `day`, widened by one day on each side (§ Trace anchor), and files by `min_time`/`max_time`. A `trace_id` lookup (equality or `IN` with 16-byte literals) without a time range, with `QueryOptions::around` set, reads only the `spans` and `traces` files that overlap `around ± 1 day` (D154); `scores` files are never pruned by `around`.
-2. Build a `ParquetExec` (DataFusion's Parquet scan) over the remaining files, with filter pushdown on, page-index pruning, bloom-filter pruning (equality on `trace_id`, `session_id`, `user_id`) and the metadata cache.
-3. Build a `MemoryExec` (in-memory scan) over the `active` and `frozen` batches of the same partitions. Same filters, applied in-memory.
-4. Combine both with a `UnionExec`. Files and batches that a pending deletion may cover go through the **tombstone filter** (§7) first.
+   Prune file partitions by `day`, widened by one day on each side for `spans` and `traces` (§ Trace anchor), and files by `min_time`/`max_time`. A `trace_id` lookup (equality or `IN` with 16-byte literals) without a time range, with `QueryOptions::around` set, reads only the `spans` and `traces` files that overlap `around ± 1 day` (D154); `scores` files are never pruned by `around`.
+2. `ParquetSource` scans the remaining files with `ScanSpec` column and map-key projection, page-index pruning, bloom-filter pruning (equality/`IN` on `trace_id`, `session_id`, `user_id`, `score_id`), late materialization (filtering light columns before reading heavy payload columns), `DictColumn` preservation, and `MetadataCache` (with Tokio prefetching ranged reads through `read_cache` into the `WorkerPool`).
+3. `MemtableSource` scans the `active` and `frozen` `Batch`es of the same partitions, evaluating filters in-memory into `Selection` masks without copying column buffers.
+4. Combined as a `PartitionStream` union (`UnionSource`). Files and batches that a pending deletion may cover apply the **tombstone predicate** (§7) inline via `filter_uncovered`.
 
-### `TracesProvider` (exposed as the logical view `traces`)
+### `TracesSource` (exposed as the logical view `traces`)
 
-A `TracesExec` reads (a) the partial rows from `traces` files and (b) partials computed from the memtable span batches, hash-partitions them by `trace_id`, sorts each partition by `trace_id`, and merges each trace's run of partials with the merge operator: spec 01's rules, written once in Rust and shared with the flush and compaction (D152). Merged rows stream out as each run ends (D-A1-13). The order rules of spec 01 § Order make results independent of flush order. A SQL `GROUP BY trace_id` is not used: its ordered `first_value` and list-union aggregates cost several microseconds per trace (`docs/research/storage/traces-benchmark.md`).
+`TracesSource` reads (a) the partial rows from `traces` Parquet files (`ParquetSource`) and (b) partials computed from `spans` memtable batches (`MemtableSource`, computed once per batch and cached in `OnceLock`), sorts partitions by `trace_id` via spillable `ExternalSort`, and merges each trace's run of partials with `NativeTraceMerger`: spec 01's rules, written once in Rust and shared with the flush and compaction (D152). Merged rows stream out in bounded chunks as each run ends (D-A1-13). The order rules of spec 01 § Order make results independent of flush order. A SQL `GROUP BY trace_id` is not used: its ordered `first_value` and list-union aggregates cost several microseconds per trace (`docs/research/storage/traces-benchmark.md`).
 
 - *Columns:* only the columns the query projects or filters on are merged, plus the order keys (`trace_id`, `start_time`, `has_root`, `root_span_id`).
-- *Pushdown:* the provider accepts every filter as exact, so DataFusion keeps no filter above it. Only `start_time` ranges and `trace_id` equality / `IN` prune the partial scans. Every filter is evaluated on merged rows: a non-root partial usually has no session or user, and `cost_total > 0.1` can fail on every partial and pass on the merged row.
-- *Time window:* when the filter bounds `start_time` to `[a, b]`, partials are scanned on `[a − trace_lookback, b + trace_lookback]` (default `trace_lookback` = 1 h), merged, and the merged `start_time` is then filtered to `[a, b]`. Memtable partials come from every memtable span batch of the project whose time range overlaps that padded window; each batch's partials are computed once and cached with the batch. A trace with partials more than 1 h apart may show up with a late start time; this is documented as a known limit.
-- *Memory:* the sort holds the partials and spills to `tmp/query/` past its share of the query's memory (§ Resource limits). The merge holds the traces of at most 1,024 sorted partials at a time and reserves their size, unspillable. A range query's memory therefore doesn't grow with the traces in its window; its time and spill volume do. It needs about `partitions × (2 × input batch + 10 MiB)` (DataFusion's per-sort merge reservation) and fails as too large below that (D-A1-13).
+- *Pushdown:* only `start_time` ranges and `trace_id` equality / `IN` prune the partial scans. Every other filter evaluates on merged rows after `NativeTraceMerger`: a non-root partial usually has no session or user, and `cost_total > 0.1` can fail on every partial and pass on the merged row.
+- *Time window:* when the filter bounds `start_time` to `[a, b]`, partials are scanned on `[a − trace_lookback, b + trace_lookback]` (default `trace_lookback` = 1 h), merged, and the merged `start_time` is then filtered to `[a, b]`. Memtable partials come from every memtable span batch of the project whose time range overlaps that padded window. A trace with partials more than 1 h apart may show up with a late start time; this is documented as a known limit.
+- *Memory:* `ExternalSort` holds partials and spills runs to `tmp/query/` past its `FairSpill` share (§ Resource limits). `NativeTraceMerger` bounds its in-flight trace chunk (`max_traces_per_chunk = (pool.cap() / 4096).clamp(8, 1024)`), reserving input, merger, and scratch buffers from the `ScopedPool` and failing with `422 query_too_large` if insufficient (D-A1-13). A range query's memory therefore does not grow with the traces in its window; its time and spill volume do.
 - *Duplicates:* a span retried by a client and stored in two flushes is counted twice by the merge until compaction merges the two files (≈ 10 min, §5). Documented.
-- *Fast path for "latest N traces"* (trace list, D153):
-  - **Recognising it.** A physical optimizer rule, which `ProjectQuery.optimizer_rules` hands to the query layer's session, matches `ORDER BY start_time DESC, trace_id DESC LIMIT k` over the `traces` scan. Projections may sit in between, including the view's hex-encoded `trace_id`.
-  - **Other queries.** A query with another sort, or with a filter DataFusion keeps above the scan (a score-function join), runs the full merge.
-  - **Phase 1, rank.** The scan reads disjoint slices back from `b`, or from the newest data when `b` is open: 15 min, then up to 1 h, 6 h, 24 h, then the rest of the range. Each slice is padded by `trace_lookback`. In each slice, it merges only the filter's columns and collects the matching `(start_time, trace_id)`. It stops after the first slice that brings the total to `k`.
-  - **Phase 2, fetch.** It merges all requested columns for the best `k` traces, each within its own slice's padded window, so their values are the ones phase 1 filtered on.
-  - **Result.** The first `k` rows of the full merge, except for traces with partials more than `trace_lookback` apart: the known limit above.
-  - TopK over a full `GROUP BY trace_id` does not bound the aggregate, which is why the rule exists.
+- *Fast path for "latest N traces" and non-time trace lists* (`TraceListMode`, D153):
+  - **Widening (`TraceListMode::Widening`, `ORDER BY start_time DESC, trace_id DESC LIMIT k`).** Phase 1 (rank) reads disjoint slices back from `b`, or from the newest data when `b` is open: 15 min, then up to 1 h, 6 h, 24 h, then the rest of the range (each slice padded by `trace_lookback`). In each slice it merges only the filter's columns, collects matching `(start_time, trace_id)`, and stops after the first slice reaching `k`. Phase 2 (fetch) merges all requested columns for the top `k` traces within their slice windows.
+  - **Two-phase rank→fetch (`TraceListMode::TwoPhase`).** For non-time sorts (`cost_total`, `duration_ns`, `total_tokens`), Phase 1 ranks on narrow sort/filter columns only before Phase 2 fetches full columns for the selected page of traces.
+  - **Other queries.** Queries with arbitrary expressions, score-function joins, or range-mode overrides run the full merge.
+  - **Result.** Exact match with the full merge, except for traces with partials more than `trace_lookback` apart: the known limit above.
 - *Single-trace lookup* (`trace_id = X`), in order of preference:
   1. a time hint (`?around=<ts>`, always present in links generated by the UI, API list responses and SDK helpers; passed as `QueryOptions::around`, D154) narrows the search to files overlapping ±1 day;
   2. otherwise, trace-ID bloom filters select candidate files across all of the project's partitions — a few microseconds per file. The bitsets are not in the metadata cache (§4): a pruning read fetches each one from the object;
@@ -328,16 +326,16 @@ A `TracesExec` reads (a) the partial rows from `traces` files and (b) partials c
 
   Within each candidate file, the `trace_id` sort order means the page index locates the trace's rows directly.
 
-### `ScoresProvider` (logical view `scores`)
+### `ScoresSource` (logical view `scores`)
 
-Scan, then `ROW_NUMBER() OVER (PARTITION BY score_id ORDER BY updated_at DESC) = 1`, then filter out `deleted`. Once a day has been closed, its files are already de-duplicated, and the plan skips the window step for them (a `fully_merged` flag per file).
+`ParquetSource` + `MemtableSource` (`created_at`-only pushdown and inline tombstones), then spillable `ExternalSort` by `(score_id ASC, updated_at DESC NULLS FIRST, ingest_time DESC NULLS FIRST)` for per-`score_id` last-writer-wins deduplication (breaking ties by `ingest_time`), then filter out `deleted`. Once a day has been closed (`fully_merged = true` on every file and no memtable batches), `ScoresSource` skips the LWW sort/dedup step.
 
 ### Resource limits
 
-- **Memory:** one process-wide pool of `query.max_memory_total` (default 50% of RAM or of the memory limit of the process's cgroup (its systemd unit or container), at most 8 GiB). Each query has a DataFusion memory pool of its own over it, capped at `query.max_memory` (default 2 GiB). Sorts, repartitions and spillable aggregates spill to `tmp/query/`; an operator that can't spill fails the query as too large (422). Within a query, each operator that can spill holds at most `(query.max_memory − memory held by operators that can't spill) / number of operators that can spill`, as DataFusion's `FairSpillPool`, and spills past it; operators that can't spill take what is left, first come first served (D-A1-13). Compaction has its own pool (§5) and is not counted here.
-- **Admission:** `Storage::query` first takes `query.initial_memory` (default 64 MiB) from the process-wide pool, waiting up to `query.admission_wait` (default 5 s) for it, then fails as busy (503). The query's pool uses those bytes first and takes more as it grows; everything goes back when the query's runtime is dropped (D-A1-8).
-- **Spill:** spill files in `tmp/query/` may use the free disk above `storage.min_free_bytes` and no more, all queries together. At every measurement (§10) the disk monitor sets the limit to the bytes spilled now plus `free − min_free_bytes`. The limit can be too high by at most the bytes spilled during one measurement interval (one second): spill written between the `statvfs` and the read of the spilled total is counted in the total but not in the free space measured before it. Under the threshold no query spills further. A query whose spill would pass the limit, or that gets `ENOSPC` while spilling, fails as too large (422).
-- **Parallelism:** `target_partitions = cores`.
+- **Memory:** one process-wide `GlobalPool` of `query.max_memory_total` (default 50% of RAM or of the memory limit of the process's cgroup (its systemd unit or container), at most 8 GiB). Each query has a `ScopedPool` over it, capped at `query.max_memory` (default 2 GiB). Buffering operators (`ExternalSort`, `HashAgg`, `HashJoin`, `NativeTraceMerger` sort) spill to `tmp/query/` via `SpillManager`; an operator that cannot spill (or an allocation above the query cap) fails with `422 query_too_large`. Within a query, `FairSpill` gives each spillable consumer at most `(query.max_memory − unspillable_held) / spillable_consumers` and spills past it; unspillable allocations take what remains up to `query.max_memory`, first come first served (D-A1-13). Compaction has its own standalone `GlobalPool` (§5) and is not counted here.
+- **Admission:** `AsyncAdmissionPool` (`Storage::query`) atomically takes `query.initial_memory` (default 64 MiB) from `GlobalPool`, waiting asynchronously (`tokio::sync::Notify`) up to `query.admission_wait` (default 5 s) for it, then fails as busy (503). The `ScopedPool` uses those bytes first and grows up to `query.max_memory`; dropping `ProjectQuery` / `QueryContext` (and any streaming export holding `Arc<ScopedPool>`) cancels/drains in-flight CPU workers via `CancelToken` and returns every byte immediately (D-A1-8).
+- **Spill:** `SpillManager` writes `cetra-column` LZ4+CRC-32C binary frames to `tmp/query/`, bounded by `Disk`'s `engine_spill_cap` (free disk above `storage.min_free_bytes`, all queries together) and `MAX_MERGE_WAY = 32` open spill FDs per merge pass. At every measurement (§10) the disk monitor sets the limit to the bytes spilled now plus `free − min_free_bytes`. The limit can be too high by at most the bytes spilled during one measurement interval (one second): spill written between the `statvfs` and the read of the spilled total is counted in the total but not in the free space measured before it. Under the threshold no query spills further. A query whose spill would pass the limit, or that gets `ENOSPC`/`EDQUOT` while spilling, fails as too large (422).
+- **Parallelism:** process-wide `WorkerPool` with `target_partitions` (default = CPU cores) worker threads and 8 MiB worker stacks (`D-QE-5`), keeping Tokio dedicated to disk/S3/network I/O.
 - **Timeouts:** UI 30 s, SQL console 60 s, MCP 30 s.
 
 ### S3 read cache
@@ -353,7 +351,7 @@ With an S3 object store, every page read is a ranged GET. The S3 store is wrappe
 - it writes nothing while free disk is under `2 × storage.min_free_bytes`, and gives blocks back while free disk is under `storage.min_free_bytes` (§10);
 - verification of a suspect file (§10) reads the S3 store directly, never the cache, and a file found healthy has its cached blocks dropped, so a bad block cannot outlive the check.
 
-There is no custom `ParquetFileReaderFactory`; the metadata cache is DataFusion's built-in one (§4). With a local object store there is no cache.
+There is no custom `ParquetFileReaderFactory`; `MetadataCache` is cetra's bounded LRU cache (§4). With a local object store there is no read cache.
 
 The cache is not a durable format (§ 12): a layout change must either make old entries fail their checks or wipe `cache/` at open. The block size is pinned by a test.
 
@@ -384,7 +382,7 @@ Rows stay visible until step 3, normally seconds after the request (D13 as amend
 
 ### Making data invisible immediately
 
-Pending `traces` and `user` deletions are kept in memory per project as the **tombstone set**: each deletion's `deletion_seq`, cut-off, trace IDs, user and sessions. One function turns a set of deletions into a DataFusion physical predicate "this row is covered" (D-A1-3); queries, flush and compaction all use it, so the rule exists once:
+Pending `traces` and `user` deletions are kept in memory per project as the **tombstone set**: each deletion's `deletion_seq`, cut-off, trace IDs, user and sessions. One function (`cetra_query::tombstone::covered_predicate`) turns a set of deletions into a `cetra_query::Expr` predicate "this row is covered" (D-A1-3); queries, flush and compaction all use it, so the rule exists once:
 - `spans`: `ingest_time ≤ cut-off AND (trace_id IN … OR user_id IN …)`;
 - `scores`: the same, `OR session_id IN …`;
 - `traces` partials: `trace_id IN …` only. A partial carries no per-row ingest time, so a query hides a covered trace's partials whole; the files rewritten by the rewriter recompute their partials from the remaining spans.
@@ -399,7 +397,7 @@ Known limits:
 A deletion may cover rows of a `spans` or `scores` file only when its `deletion_seq` is above the file's `deletions_applied_seq` and its cut-off is at or after the file's `min_ingest_time`; of a `traces` file, only when its `deletion_seq` is above the file's `deletions_applied_seq` (a `traces` file's `min_ingest_time` is the smallest per-trace *latest* ingest time, so it can't bound a cut-off); of a memtable batch, only when its cut-off is at or after the batch's `min_ingest_time`. The query path filters only those files and batches:
 - a `traces` file's gate is built from the deletions with `deletion_seq` above its `deletions_applied_seq`; an applied deletion never hides a later partial;
 - memtable batches are filtered in memory when the read is planned (with fresh `traces` partials computed from what remains);
-- files are scanned with the predicate's columns added to the projection, then a `FilterExec` keeps the rows not covered, then a projection restores the requested columns. Other files are scanned as usual.
+- files are scanned with the predicate's columns added to the projection, and `ParquetSource` / `MemtableSource` evaluates `filter_uncovered` inline via `Selection` (updating the active-row mask without copying column buffers), before restoring the requested columns. Other files are scanned as usual.
 
 `project` and `org` deletions are immediate: `drop_project` marks the project dropped in `catalog.db` and removes it from every new read state in the same commit; the server returns 404 for it.
 
@@ -421,7 +419,7 @@ Every file records `deletions_applied_seq`: no row in scope of any deletion with
 After each compaction pass, the compaction task runs a **deletion pass** (D-A1-5):
 
 1. **Candidates:** the active `spans` and `scores` files that a pending deletion may cover (rule above), skipping files claimed by a running job. The pass claims them.
-2. **Check:** a scan of the file's key columns with the predicate pushed down (statistics, and the bloom filters on `trace_id`, plus `user_id` and `session_id` for `spans`, skip row groups) and `LIMIT 1`.
+2. **Check:** a scan of the file's key columns through `ParquetSource` with the tombstone predicate and early exit after 1 match (`ControlFlow::Stop` / `Limit(1)`), so statistics and bloom filters (`trace_id`, plus `user_id` and `session_id` for `spans`) skip row groups.
    - A covered row: the file is **rewritten** without its covered rows by a compaction job of kind `rewrite`: same level, same `fully_merged`, the `traces` file derived from it recomputed (§3), committed like a compaction (§4). A file left with no row is removed with its `traces` file and nothing replaces it.
    - No covered row: its `deletions_applied_seq` is raised to the known sequence in one catalog edit, without a rewrite.
    - **Quarantined files** (§10) can't be rewritten: the quarantined `spans` and `scores` files of the project that a pending deletion may cover (same rule) are marked `obsolete`, with the quarantined `traces` files derived from them, and GC deletes them.
@@ -475,7 +473,7 @@ A dropped project's media is deleted by `drop_project` (§7).
 | Object store errors at open | The anchor rebuild reads recent `traces` files; a store error, after the client's retries, fails the open. A later open retries. Acknowledged data stays in the WAL |
 | Ambiguous upload (error reported, object may exist) | retried under a new name; the old one is collected from `staged_objects` (§2); a failed multipart upload is aborted (§2). Uploads no abort reached are left to the bucket's lifecycle rule (`https://cetra.sh/docs/self-hosting/s3/`) |
 | Crash | WAL replay before ingestion opens; staged objects are GC'd |
-| Corrupted Parquet file | A panic in the Parquet or Arrow decoder during any of these reads is caught at our scan (`src/unwind.rs`) and handled as a decode error. A read that fails with a decode error makes the files it read **suspects**: compaction and rewrite jobs (their inputs), the deletion pass's check scan, the anchor rebuild at open (which skips the file instead of failing), the media GC and queries (every file the query scanned). After each deletion pass, a verify pass reads each suspect again, whole, from the object store (never the read cache). A store error puts it back in the queue; a file read whole with the catalog's row count is healthy and isn't re-verified for an hour; a decode error, a wrong size or row count, or a missing object makes it **corrupt**, logged as an error. A corrupt `spans` file is quarantined with its `traces` file, a corrupt `scores` file alone: state `quarantined`, out of every snapshot, object kept for inspection, its rows lost. A corrupt `traces` file is rebuilt from its `spans` file by a rewrite job instead; nothing is lost. Quarantined files become `obsolete` (and GC deletes them) when retention drops their day, when their project is dropped, or when a pending deletion may cover them (§7). There is no periodic scrub (D-A1-10) |
+| Corrupted Parquet file | A panic in the Parquet decoder during any of these reads is caught at our scan (`src/unwind.rs`) and handled as a decode error. A read that fails with a decode error makes the files it read **suspects**: compaction and rewrite jobs (their inputs), the deletion pass's check scan, the anchor rebuild at open (which skips the file instead of failing), the media GC and queries (every file the query scanned). After each deletion pass, a verify pass reads each suspect again, whole, from the object store (never the read cache). A store error puts it back in the queue; a file read whole with the catalog's row count is healthy and isn't re-verified for an hour; a decode error, a wrong size or row count, or a missing object makes it **corrupt**, logged as an error. A corrupt `spans` file is quarantined with its `traces` file, a corrupt `scores` file alone: state `quarantined`, out of every snapshot, object kept for inspection, its rows lost. A corrupt `traces` file is rebuilt from its `spans` file by a rewrite job instead; nothing is lost. Quarantined files become `obsolete` (and GC deletes them) when retention drops their day, when their project is dropped, or when a pending deletion may cover them (§7). There is no periodic scrub (D-A1-10) |
 | The disk fills before the monitor sees it (`ENOSPC`) | WAL: `WalFailed`, final (§1). Flush: retried with backoff (§2). Compaction: the job fails, and a later pass redoes it. `put_media`: the call fails, and GC collects the staged row (§9). Read cache: the block is not cached. Query spill: too large (422). A failed write removes its temp file. Once space is free, the next attempt succeeds. Inodes are not monitored: running out of them behaves the same way |
 | Out of file descriptors (`EMFILE`) | The step that opened the file fails as for an I/O error: a query fails, and a flush or compaction is retried. *(Provisional, pending the coordinator's decision on WAL rotation: until it is recorded, an append is refused when a WAL segment cannot be created, then `WalFailed`, §1. Once it is recorded, the writer keeps the current segment instead.)* Nothing is quarantined |
 | Memory limit | Below the documented minimum (§ Resource needs) the kernel can kill the process. At or above it, the budgets refuse work instead: `Backpressure` (503), `Busy` (503), too large (422) |
@@ -495,7 +493,7 @@ The model test (`crates/storage/src/model_tests/`, track R M1) checks every read
   - plus the query pool (`query.max_memory_total`, by default half the limit);
   - plus about 200 MiB of base.
 
-  *Measured (R5.8):* the defaults profile passes at 8 GiB (peak RSS 7.40 GiB) and is killed below it, between 7.75 and 8 GiB. The small-machine profile is `memtable.hard_limit` 128 MiB; `flush.max_bytes` 32 MiB with `upload_concurrency` 2; `compaction.max_memory` 128 MiB with `compaction.threads` 1; `query.max_memory_total` 256 MiB, `query.max_memory` 128 MiB, `query.initial_memory` 16 MiB; `query.metadata_cache_bytes` 64 MiB; `query.target_partitions` 2. The small profile needs between 2 and 4 GiB with the glibc allocator: it passes at 4 GiB and is killed at 2 GiB. Allocator tuning (`MALLOC_ARENA_MAX=2`, 1 MiB trim and mmap thresholds) lowers the minimum to at most 2 GiB. The accounted budgets are a small part of that: the memtable stays at or below 130 MiB and the query pool at about 170 MiB. Most resident memory is outside every budget and grows with ingest. The shipped binary uses mimalloc, which is not measured on this workload (provisional). The unaccounted memory is not located yet (M5-7, `docs/research/storage/hardening.md`). With 8 partitions, DataFusion's 10 MiB sort reservation per partition exceeds a 16 MiB pool, so even a tiny trace list is refused (M5-4). The budgets are not sized from the machine: `Storage::open` logs a warning when they add up to more than the memory limit it detects. The server adds `ingest.max_inflight_bytes` and its own needs (spec 12).
+  *Measured (R5.8, pre-QE):* the defaults profile passes at 8 GiB (peak RSS 7.40 GiB) and is killed below it, between 7.75 and 8 GiB. The small-machine profile is `memtable.hard_limit` 128 MiB; `flush.max_bytes` 32 MiB with `upload_concurrency` 2; `compaction.max_memory` 128 MiB with `compaction.threads` 1; `query.max_memory_total` 256 MiB, `query.max_memory` 128 MiB, `query.initial_memory` 16 MiB; `query.metadata_cache_bytes` 64 MiB; `query.target_partitions` 2. The small profile needs about 4 to 4.5 GiB with the glibc allocator: it passed at 4 GiB and was killed at 2 GiB in the first runs, and a rerun on the VM (2026-11-22) was killed at 4 GiB and passed at 4.25 GiB (peak RSS 4.45 GB). Allocator tuning (`MALLOC_ARENA_MAX=2`, 1 MiB trim and mmap thresholds) lowers the minimum to at most 2 GiB. The accounted budgets are a small part of that: the memtable stays at or below 130 MiB and the query pool at about 170 MiB. Most resident memory is outside every budget and grows with ingest. The shipped binary uses mimalloc, which is not measured on this workload (provisional). The unaccounted memory is not located yet (M5-7, `docs/research/storage/hardening.md`). In `cetra-query`, `ExternalSort` participates in `FairSpill` sharing and spills cleanly without a fixed 10 MiB-per-partition reservation. The budgets are not sized from the machine: `Storage::open` logs a warning when they add up to more than the memory limit it detects. The server adds `ingest.max_inflight_bytes` and its own needs (spec 12).
 - **File descriptors:** the engine holds one descriptor for `LOCK`, three for `catalog.db` (the database, `-wal`, `-shm`), one open segment per WAL table (plus one for a moment when a segment is created), and, while they run, up to `flush.upload_concurrency` temp files per table and one per compaction job. A query holds a descriptor per spill file while it is written, and a spill merge opens all of a sort's spill files at once. *Measured (R5.8, soft limit 65,536):* the baseline is 16 to 17 descriptors and the peak under load is 189, with a 128 MiB query cap; 166 of them are spill files, since a merge opens all of a sort's spill files at once. Limits of 256, 128, 64 and 32 run without a panic or a wedge, with clean query and compaction errors; at 32 the WAL fails and a reopen recovers. Opening fails cleanly at 8. The recommended soft limit for the storage is at least 4,096, or the measured peak × 4, whichever is larger. The server's sockets come on top.
 - **Tested by** `just resources` and `just resources-memory` (track R M5).
 
@@ -520,7 +518,7 @@ Every write path, what it syncs and in what order. "fsync dir" is an fsync of th
 | `catalog.db` | `catalog/committer.rs`, `catalog/db.rs` | SQLite in WAL mode, `synchronous=FULL`. Every commit point goes through `commit_point` | the committer stops until restart (D-R-6) | `every_commit_point_stops_the_committer_on_an_fsync_error`, `fatal_io_codes_stop_the_committer_and_the_rest_stay_retryable`, `an_fsync_error_stops_the_committer_until_reopen`; LazyFS (pending) |
 | S3 objects | `objects.rs` remote writes | the PUT or `complete` returned → catalog commit | n/a: no local fsync | `tests/it/s3.rs` (a real S3-compatible server, `CETRA_TEST_S3_ENDPOINT`) |
 | Read cache | `read_cache.rs` | no fsync. Blocks and `size` carry a CRC-32C; a bad one is dropped and fetched again | n/a | `a_torn_size_file_never_serves_short_ranges`, `a_corrupt_block_is_fetched_again` |
-| Scratch: query spill, compaction temp | DataFusion spill; `create_output` | no fsync; spill directories are removed at open | n/a | `open_removes_leftover_spill_directories` |
+| Scratch: query spill, compaction temp | `SpillManager` (`tmp/query/`); `create_output` | no fsync; leftover spill files are removed at open | n/a | `open_removes_leftover_spill_directories` |
 | Catalog snapshot (N B3) | `snapshot_catalog` (`snapshot.rs`) | `VACUUM INTO` (SQLite) | the backup fails | N's tests |
 | Backup object copies (N B4) | `copy_objects` (`snapshot.rs`; calls `crate::fs`, unrecorded in lossy mode because `dest` is outside the data directory) | hard link, or copy → fsync file; at the end, fsync every directory of `dest` | the backup fails | N's tests |
 | Pre-migration copy (N B9) | `catalog/db.rs` | `VACUUM INTO <tmp>` → fsync the copy → rename → fsync dir (all through `crate::fs`) → migrations | open fails | none yet: `a_pre_migration_copy_survives_a_lossy_crash` is not written |
@@ -529,14 +527,14 @@ The N rows (backups, pre-migration copy) merged with their file calls routed thr
 
 **Why a failed WAL truncation is retried, not fatal.** Truncation deletes only segments whose every record is at or below `flushed_seq`, and the catalog has already advanced `flushed_seq` when it runs (§1). If the directory fsync fails, the segments may come back after a power loss. They then hold only records that replay skips, and every non-last segment was fsynced before its successor was created (§1), so it is intact. The next flush retries the truncation, and nothing is lost. The retry is not covered by a test.
 
-The WAL reader treats a panic of Arrow's IPC decoder as a corrupt record (§1). The decoders are fuzzed (track R M3, `fuzz/`).
+The WAL reader rejects any corrupt `CBM1` frame or torn tail without panicking (§1). Both the WAL framing and `cetra-column::frame` decoders are fuzzed (track R M3, D-QE-7, `fuzz/`).
 
 ## 11. Toward multi-node
 
 Nothing here assumes a single node, apart from the WAL and memtable living in the same process as the querier. The planned split:
 
 - **Ingesters** own the WAL and memtable, sharded by project.
-- **Queriers** are stateless; they read files from S3 and ask ingesters for their memtable snapshot over Arrow Flight.
+- **Queriers** are stateless; they read files from S3 and ask ingesters for their memtable snapshot as `cetra-column` `CBM1` frames over streaming RPC.
 - **The catalog** moves to Postgres.
 
 File formats and paths stay unchanged.
@@ -544,7 +542,7 @@ File formats and paths stay unchanged.
 ## Capacity sanity check
 
 At 50k spans/s with an average normalized span of about 3 KiB (LLM spans 10–50 KiB, others under 1 KiB):
-- Ingest is about 150 MiB/s of uncompressed Arrow; with LZ4 bodies the WAL writes roughly a third of that, which fits easily on NVMe.
+- Ingest is about 150 MiB/s of uncompressed `cetra-column` batches; with LZ4 `CBM1` framing the WAL writes roughly a third of that, which fits easily on NVMe.
 - The memtable flushes every ~1.7 s at 256 MiB. With that rate, raise `flush.max_bytes` to 1–2 GiB to get bigger L0 files.
 - With zstd at roughly 5–8× on JSON-heavy text, compressed output is about 20–30 MiB/s, or 2–2.5 TiB/day.
 

@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use arrow::array::RecordBatch;
 use bytesize::ByteSize;
+use cetra_column::Batch;
 
 use super::super::check::check_full;
 use super::super::harness::{Harness, HarnessOptions};
@@ -386,7 +386,7 @@ pub(super) async fn until_stopped<T>(
 }
 
 /// The next filler batch: `counter % 60_000` numbers it, and `counter % days` picks its day.
-fn next_batch(counter: &AtomicU32, days: u32) -> RecordBatch {
+fn next_batch(counter: &AtomicU32, days: u32) -> Batch {
     let number = counter.fetch_add(1, Ordering::SeqCst);
     let batch = u16::try_from(number % 60_000).expect("a batch number below 60 000 fits in u16");
     let day_offset = u8::try_from(number % days).expect("a day offset below 60 fits in u8");
@@ -414,7 +414,7 @@ async fn appender(
     let mut counts = Counts::default();
     while !stop.load(Ordering::SeqCst) && bytes.load(Ordering::SeqCst) < LOAD_BYTES {
         let batch = next_batch(counter, days);
-        let size = batch.get_array_memory_size() as u64;
+        let size = batch.memory_bytes() as u64;
         match storage.append_spans(filler(), batch).await {
             Ok(_) => {
                 counts.appends_ok += 1;
@@ -511,7 +511,7 @@ async fn query_loop(storage: &Storage, which: usize, stop: &AtomicBool) -> Count
         match tokio::time::timeout(QUERY_TIMEOUT, run_query(storage, which)).await {
             Err(_elapsed) => counts.timeout += 1,
             Ok(Ok(())) => counts.queries_ok += 1,
-            Ok(Err(QueryFailure::Busy)) => counts.busy += 1,
+            Ok(Err(QueryFailure::Busy | QueryFailure::Run(RunError::Busy))) => counts.busy += 1,
             Ok(Err(QueryFailure::Run(RunError::TooLarge))) => counts.too_large += 1,
             Ok(Err(QueryFailure::Run(RunError::Timeout))) => counts.timeout += 1,
             Ok(Err(QueryFailure::Run(other))) => {

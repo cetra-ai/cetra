@@ -1,0 +1,41 @@
+---
+title: Augment Code
+description: "Turn on the OpenTelemetry extension of Augment Code's Auggie CLI to send its traces to cetra. Setup only: not run, because it needs an Augment login."
+---
+
+Auggie, the command-line agent of Augment Code, has a bundled OpenTelemetry extension. This page shows the environment variables that turn it on and send its traces to cetra. It is setup only: it was not run, because Auggie needs an Augment login.
+
+## Set up
+
+Auggie starts the extension only when telemetry is on and an OTLP endpoint is set. Set these variables in the shell where you start Auggie. Replace `<CETRA_URL>` with your server, and `<SK_CETRA_KEY>` with a key that has the `ingest` scope, from the project's [API keys](/docs/platform/api-keys/) page. The header value is percent-encoded, so the space after `Bearer` is `%20`:
+
+{/* untested: the variables are set in the user's shell, and Auggie needs an Augment login to run */}
+```bash
+export AUGGIE_ENABLE_TELEMETRY=1
+export OTEL_EXPORTER_OTLP_ENDPOINT=<CETRA_URL>
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer%20<SK_CETRA_KEY>"
+```
+
+Run Auggie as usual. Its traces then go to cetra.
+
+## Content
+
+Message content is off by default. To send the prompts and the model's messages on the spans, also set:
+
+{/* untested: a shell setting for the user's own Auggie session; not run */}
+```bash
+export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
+```
+
+`OTEL_LOG_USER_PROMPTS` is a separate switch. This page does not use it.
+
+## Limits
+
+- Not run. The variable names and the span attributes come from the extension's bundled code, not from a trace recorded from Auggie.
+- The extension's resource carries your email when `AUGGIE_USER_EMAIL` or `AUGMENT_USER_EMAIL` is set. Leave both unset if your email must not reach cetra.
+- The extension also sends logs and metrics. cetra accepts them and drops them.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read a trace as a tree and a timeline.
+- [API keys](/docs/platform/api-keys/): create the `ingest` key that Auggie sends.

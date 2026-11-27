@@ -1,0 +1,473 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "36f7187547ac6395d5ab5002fd96f46e",
+      "span_id": "17c068ac6831cbbf",
+      "name": "create_agent <volatile>",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.462000000Z",
+      "status": "ok",
+      "service_name": "ai.koog",
+      "release": "1.3.0",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "operation": "create_agent",
+      "attributes": {
+        "gen_ai.agent.id": "capture-volatile-1",
+        "gen_ai.operation.name": "create_agent",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "koog.event.id": "capture-volatile-1",
+        "system_instructions": "[{\"type\":\"text\",\"content\":\"You are a helpful assistant.\"}]"
+      },
+      "resource_attributes": {
+        "os.arch": "amd64",
+        "os.type": "Linux",
+        "service.version": "1.3.0",
+        "telemetry.sdk.language": "kotlin",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.3.0"
+      },
+      "scope_name": "ai.koog",
+      "scope_version": "1.3.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "36f7187547ac6395d5ab5002fd96f46e",
+      "span_id": "61d714e93608ecd9",
+      "parent_span_id": "17c068ac6831cbbf",
+      "name": "invoke_agent <volatile>",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.006000000Z",
+      "end_time": "2025-12-31T23:59:50.461000000Z",
+      "status": "ok",
+      "service_name": "ai.koog",
+      "session_id": "capture-volatile-2",
+      "release": "1.3.0",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "response_model": "gpt-4o-mini",
+      "operation": "invoke_agent",
+      "input": "[{\"role\":\"System\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a helpful assistant.\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"System\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a helpful assistant.\"}]}]",
+      "output_format": "messages",
+      "input_preview": "You are a helpful assistant.",
+      "output_preview": "You are a helpful assistant.",
+      "tool_definitions": "[{\"type\":\"function\",\"name\":\"get_weather\",\"description\":\"Get the current weather for a city\"}]",
+      "attributes": {
+        "gen_ai.agent.id": "capture-volatile-1",
+        "gen_ai.conversation.id": "capture-volatile-2",
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.output.type": "text",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.response.finish_reasons": "[stop]",
+        "gen_ai.response.model": "gpt-4o-mini",
+        "gen_ai.usage.input_tokens": "0",
+        "gen_ai.usage.output_tokens": "0",
+        "koog.event.id": "capture-volatile-2",
+        "system_instructions": "[{\"type\":\"text\",\"content\":\"You are a helpful assistant.\"}]"
+      },
+      "resource_attributes": {
+        "os.arch": "amd64",
+        "os.type": "Linux",
+        "service.version": "1.3.0",
+        "telemetry.sdk.language": "kotlin",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.3.0"
+      },
+      "scope_name": "ai.koog",
+      "scope_version": "1.3.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "36f7187547ac6395d5ab5002fd96f46e",
+      "span_id": "1a20595bd1a99f36",
+      "parent_span_id": "61d714e93608ecd9",
+      "name": "strategy single_run",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.008000000Z",
+      "end_time": "2025-12-31T23:59:50.460000000Z",
+      "status": "ok",
+      "service_name": "ai.koog",
+      "session_id": "capture-volatile-2",
+      "release": "1.3.0",
+      "attributes": {
+        "gen_ai.conversation.id": "capture-volatile-2",
+        "koog.event.id": "capture-volatile-3",
+        "koog.strategy.name": "single_run"
+      },
+      "resource_attributes": {
+        "os.arch": "amd64",
+        "os.type": "Linux",
+        "service.version": "1.3.0",
+        "telemetry.sdk.language": "kotlin",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.3.0"
+      },
+      "scope_name": "ai.koog",
+      "scope_version": "1.3.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "36f7187547ac6395d5ab5002fd96f46e",
+      "span_id": "774feb71132a594d",
+      "parent_span_id": "1a20595bd1a99f36",
+      "name": "node __start__",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.028000000Z",
+      "end_time": "2025-12-31T23:59:50.030000000Z",
+      "status": "ok",
+      "service_name": "ai.koog",
+      "session_id": "capture-volatile-2",
+      "release": "1.3.0",
+      "attributes": {
+        "gen_ai.conversation.id": "capture-volatile-2",
+        "koog.event.id": "capture-volatile-4",
+        "koog.node.id": "__start__",
+        "koog.node.input": "\"What is the weather in Lyon? Use the tool.\"",
+        "koog.node.output": "\"What is the weather in Lyon? Use the tool.\""
+      },
+      "resource_attributes": {
+        "os.arch": "amd64",
+        "os.type": "Linux",
+        "service.version": "1.3.0",
+        "telemetry.sdk.language": "kotlin",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.3.0"
+      },
+      "scope_name": "ai.koog",
+      "scope_version": "1.3.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "36f7187547ac6395d5ab5002fd96f46e",
+      "span_id": "9b655a193d77b77b",
+      "parent_span_id": "1a20595bd1a99f36",
+      "name": "node nodeCallLLM",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.035000000Z",
+      "end_time": "2025-12-31T23:59:50.403000000Z",
+      "status": "ok",
+      "service_name": "ai.koog",
+      "session_id": "capture-volatile-2",
+      "release": "1.3.0",
+      "attributes": {
+        "gen_ai.conversation.id": "capture-volatile-2",
+        "koog.event.id": "capture-volatile-5",
+        "koog.node.id": "nodeCallLLM",
+        "koog.node.input": "\"What is the weather in Lyon? Use the tool.\"",
+        "koog.node.output": "{\"parts\":[{\"type\":\"ai.koog.prompt.message.MessagePart.Tool.Call\",\"id\":\"call_capture_1\",\"tool\":\"get_weather\",\"args\":\"{\\\"city\\\":\\\"Lyon\\\"}\"}],\"metaInfo\":{\"timestamp\":\"2026-11-24T17:49:37.905465886Z\",\"totalTokensCount\":99,\"inputTokensCount\":82,\"outputTokensCount\":17},\"finishReason\":\"tool_calls\"}"
+      },
+      "resource_attributes": {
+        "os.arch": "amd64",
+        "os.type": "Linux",
+        "service.version": "1.3.0",
+        "telemetry.sdk.language": "kotlin",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.3.0"
+      },
+      "scope_name": "ai.koog",
+      "scope_version": "1.3.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "36f7187547ac6395d5ab5002fd96f46e",
+      "span_id": "8ca13688df9df3ff",
+      "parent_span_id": "9b655a193d77b77b",
+      "name": "chat gpt-4o-mini",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.042000000Z",
+      "end_time": "2025-12-31T23:59:50.397000000Z",
+      "status": "ok",
+      "service_name": "ai.koog",
+      "session_id": "capture-volatile-2",
+      "release": "1.3.0",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "response_model": "gpt-4o-mini",
+      "operation": "chat",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "total_tokens": 99,
+      "cost_input": 0.000082,
+      "cost_output": 0.000068,
+      "cost_total": 0.00015000000000000001,
+      "cost_source": "computed",
+      "input": "[{\"role\":\"System\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a helpful assistant.\"}]},{\"role\":\"tool\",\"parts\":[]},{\"role\":\"User\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather in Lyon? Use the tool.\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"Assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_capture_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lyon\"}}]}]",
+      "output_format": "messages",
+      "input_preview": "What is the weather in Lyon? Use the tool.",
+      "tool_definitions": "[{\"type\":\"function\",\"name\":\"get_weather\",\"description\":\"Get the current weather for a city\"}]",
+      "attributes": {
+        "gen_ai.conversation.id": "capture-volatile-2",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.output.type": "text",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.response.finish_reasons": "[tool_calls]",
+        "gen_ai.response.model": "gpt-4o-mini",
+        "gen_ai.usage.input_tokens": "82",
+        "gen_ai.usage.output_tokens": "17",
+        "koog.event.id": "capture-volatile-6",
+        "system_instructions": "[{\"type\":\"text\",\"content\":\"You are a helpful assistant.\"}]"
+      },
+      "resource_attributes": {
+        "os.arch": "amd64",
+        "os.type": "Linux",
+        "service.version": "1.3.0",
+        "telemetry.sdk.language": "kotlin",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.3.0"
+      },
+      "scope_name": "ai.koog",
+      "scope_version": "1.3.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "36f7187547ac6395d5ab5002fd96f46e",
+      "span_id": "d4d59a860c31b2d1",
+      "parent_span_id": "1a20595bd1a99f36",
+      "name": "node nodeExecuteTool",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.404000000Z",
+      "end_time": "2025-12-31T23:59:50.418000000Z",
+      "status": "ok",
+      "service_name": "ai.koog",
+      "session_id": "capture-volatile-2",
+      "release": "1.3.0",
+      "attributes": {
+        "gen_ai.conversation.id": "capture-volatile-2",
+        "koog.event.id": "capture-volatile-7",
+        "koog.node.id": "nodeExecuteTool",
+        "koog.node.input": "{\"toolCalls\":[{\"id\":\"call_capture_1\",\"tool\":\"get_weather\",\"args\":\"{\\\"city\\\":\\\"Lyon\\\"}\"}]}",
+        "koog.node.output": "{\"toolResults\":[{\"id\":\"call_capture_1\",\"tool\":\"get_weather\",\"toolArgs\":{\"city\":\"Lyon\"},\"toolDescription\":\"Get the current weather for a city\",\"output\":\"Sunny in Lyon, 21 C\",\"resultKind\":{\"type\":\"ai.koog.agents.core.environment.ToolResultKind.Success\"},\"result\":\"Sunny in Lyon, 21 C\",\"parts\":[{\"type\":\"ai.koog.prompt.message.MessagePart.Text\",\"text\":\"Sunny in Lyon, 21 C\"}]}]}"
+      },
+      "resource_attributes": {
+        "os.arch": "amd64",
+        "os.type": "Linux",
+        "service.version": "1.3.0",
+        "telemetry.sdk.language": "kotlin",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.3.0"
+      },
+      "scope_name": "ai.koog",
+      "scope_version": "1.3.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "36f7187547ac6395d5ab5002fd96f46e",
+      "span_id": "78eb6c101ce4687a",
+      "parent_span_id": "d4d59a860c31b2d1",
+      "name": "execute_tool get_weather",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.408000000Z",
+      "end_time": "2025-12-31T23:59:50.414000000Z",
+      "status": "ok",
+      "service_name": "ai.koog",
+      "release": "1.3.0",
+      "operation": "execute_tool",
+      "input": "{\"city\":\"Lyon\"}",
+      "input_format": "json",
+      "output": "\"Sunny in Lyon, 21 C\"",
+      "output_format": "text",
+      "input_preview": "{\"city\":\"Lyon\"}",
+      "output_preview": "\"Sunny in Lyon, 21 C\"",
+      "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.provider.name": "koog",
+        "gen_ai.tool.call.id": "call_capture_1",
+        "gen_ai.tool.description": "Get the current weather for a city",
+        "gen_ai.tool.name": "get_weather",
+        "koog.event.id": "capture-volatile-8"
+      },
+      "resource_attributes": {
+        "os.arch": "amd64",
+        "os.type": "Linux",
+        "service.version": "1.3.0",
+        "telemetry.sdk.language": "kotlin",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.3.0"
+      },
+      "scope_name": "ai.koog",
+      "scope_version": "1.3.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "36f7187547ac6395d5ab5002fd96f46e",
+      "span_id": "550c2126e8150fc9",
+      "parent_span_id": "1a20595bd1a99f36",
+      "name": "node nodeSendToolResult",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.418000000Z",
+      "end_time": "2025-12-31T23:59:50.458000000Z",
+      "status": "ok",
+      "service_name": "ai.koog",
+      "session_id": "capture-volatile-2",
+      "release": "1.3.0",
+      "attributes": {
+        "gen_ai.conversation.id": "capture-volatile-2",
+        "koog.event.id": "capture-volatile-9",
+        "koog.node.id": "nodeSendToolResult",
+        "koog.node.input": "{\"toolResults\":[{\"id\":\"call_capture_1\",\"tool\":\"get_weather\",\"toolArgs\":{\"city\":\"Lyon\"},\"toolDescription\":\"Get the current weather for a city\",\"output\":\"Sunny in Lyon, 21 C\",\"resultKind\":{\"type\":\"ai.koog.agents.core.environment.ToolResultKind.Success\"},\"result\":\"Sunny in Lyon, 21 C\",\"parts\":[{\"type\":\"ai.koog.prompt.message.MessagePart.Text\",\"text\":\"Sunny in Lyon, 21 C\"}]}]}",
+        "koog.node.output": "{\"parts\":[{\"type\":\"ai.koog.prompt.message.MessagePart.Text\",\"text\":\"It is sunny in Lyon.\"}],\"metaInfo\":{\"timestamp\":\"2026-11-24T17:49:37.969021462Z\",\"totalTokensCount\":143,\"inputTokensCount\":131,\"outputTokensCount\":12},\"finishReason\":\"stop\"}"
+      },
+      "resource_attributes": {
+        "os.arch": "amd64",
+        "os.type": "Linux",
+        "service.version": "1.3.0",
+        "telemetry.sdk.language": "kotlin",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.3.0"
+      },
+      "scope_name": "ai.koog",
+      "scope_version": "1.3.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "36f7187547ac6395d5ab5002fd96f46e",
+      "span_id": "1cdd34104d3072cb",
+      "parent_span_id": "550c2126e8150fc9",
+      "name": "chat gpt-4o-mini",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.420000000Z",
+      "end_time": "2025-12-31T23:59:50.457000000Z",
+      "status": "ok",
+      "service_name": "ai.koog",
+      "session_id": "capture-volatile-2",
+      "release": "1.3.0",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "response_model": "gpt-4o-mini",
+      "operation": "chat",
+      "input_tokens": 131,
+      "output_tokens": 12,
+      "total_tokens": 143,
+      "cost_input": 0.000131,
+      "cost_output": 0.000048,
+      "cost_total": 0.00017900000000000001,
+      "cost_source": "computed",
+      "input": "[{\"role\":\"System\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a helpful assistant.\"}]},{\"role\":\"tool\",\"parts\":[]},{\"role\":\"User\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the weather in Lyon? Use the tool.\"}]},{\"role\":\"Assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_capture_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Lyon\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_capture_1\",\"response\":\"Sunny in Lyon, 21 C\"}]},{\"role\":\"User\",\"parts\":[]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"Assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"It is sunny in Lyon.\"}]}]",
+      "output_format": "messages",
+      "output_preview": "It is sunny in Lyon.",
+      "tool_definitions": "[{\"type\":\"function\",\"name\":\"get_weather\",\"description\":\"Get the current weather for a city\"}]",
+      "attributes": {
+        "gen_ai.conversation.id": "capture-volatile-2",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.output.type": "text",
+        "gen_ai.provider.name": "openai",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.response.finish_reasons": "[stop]",
+        "gen_ai.response.model": "gpt-4o-mini",
+        "gen_ai.usage.input_tokens": "131",
+        "gen_ai.usage.output_tokens": "12",
+        "koog.event.id": "capture-volatile-10",
+        "system_instructions": "[{\"type\":\"text\",\"content\":\"You are a helpful assistant.\"}]"
+      },
+      "resource_attributes": {
+        "os.arch": "amd64",
+        "os.type": "Linux",
+        "service.version": "1.3.0",
+        "telemetry.sdk.language": "kotlin",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.3.0"
+      },
+      "scope_name": "ai.koog",
+      "scope_version": "1.3.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "36f7187547ac6395d5ab5002fd96f46e",
+      "span_id": "c9755693b74fbc03",
+      "parent_span_id": "1a20595bd1a99f36",
+      "name": "node __finish__",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.459000000Z",
+      "end_time": "2025-12-31T23:59:50.459000000Z",
+      "status": "ok",
+      "service_name": "ai.koog",
+      "session_id": "capture-volatile-2",
+      "release": "1.3.0",
+      "attributes": {
+        "gen_ai.conversation.id": "capture-volatile-2",
+        "koog.event.id": "capture-volatile-11",
+        "koog.node.id": "__finish__",
+        "koog.node.input": "\"It is sunny in Lyon.\"",
+        "koog.node.output": "\"It is sunny in Lyon.\""
+      },
+      "resource_attributes": {
+        "os.arch": "amd64",
+        "os.type": "Linux",
+        "service.version": "1.3.0",
+        "telemetry.sdk.language": "kotlin",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.3.0"
+      },
+      "scope_name": "ai.koog",
+      "scope_version": "1.3.0",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

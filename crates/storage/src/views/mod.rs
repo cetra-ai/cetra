@@ -1,70 +1,103 @@
-//! User-facing views over the stored providers (D91, D101).
+//! User-facing views over the stored snapshots (D91, D101).
 
 mod catalog;
-pub(crate) mod guard;
-mod hex;
-mod scores;
-mod session;
-mod sessions;
 
-pub(crate) use sessions::{exact_cost_sum, sessions_from_traces};
-mod spans;
-mod traces;
+use std::collections::HashMap;
+use std::fmt::{self, Write as _};
+use std::sync::{Arc, PoisonError, RwLock};
+use std::time::Duration;
 
-use std::collections::{HashMap, HashSet};
-use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use cetra_column::{Batch, Schema};
+use cetra_query::exec::{
+    BatchSource, CollectSink, ScanSource, ScanSpec, run_pipeline as exec_run_pipeline,
+};
+use cetra_query::sql::TimeWindow as QueryTimeWindow;
 
-use arrow::datatypes::{DataType, Schema};
-use datafusion::common::{DFSchema, DFSchemaRef};
-use datafusion::datasource::{TableProvider, ViewTable, provider_as_source};
-use datafusion::error::DataFusionError;
-use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder, col, lit};
-use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use datafusion::prelude::{SessionContext, cast, encode};
-
-use crate::query_error::{RunError, classify};
-use crate::verify::Suspects;
-
-// Q6 reads this limit when it tokenizes caller text.
 pub use catalog::{
     ColumnInfo, ColumnKind, FunctionInfo, ViewColumns, function_catalog, view_catalog,
 };
-#[allow(unused_imports)]
-pub(crate) use session::PARSER_RECURSION_LIMIT;
 
-const DURATION_NS: &str = "duration_ns";
-const DURATION_MS: &str = "duration_ms";
+use crate::EngineContext;
+use crate::error::EngineError;
+use crate::query_error::RunError;
+use crate::sql::SqlEngineContext;
 
 /// What `Storage::query` hands the query layer (D91).
 ///
-/// A1 builds this. A2 never looks inside a provider.
-#[derive(Debug)]
+/// Holds the admitted memory pool and snapshot sources for one project read.
+#[derive(Debug, Clone)]
 pub struct ProjectQuery {
-    /// Stored `spans` schema, binary ids, `project_id` included.
-    pub spans: Arc<dyn TableProvider>,
-    /// Stored `traces` schema, binary ids, merge bookkeeping included.
-    pub traces: Arc<dyn TableProvider>,
-    /// Stored `scores` schema. Live rows only: last writer wins, tombstones dropped.
-    pub scores: Arc<dyn TableProvider>,
-    /// This query's runtime: its own memory pool over the process-wide one, and
-    /// the shared spill directory and caches.
-    pub runtime: Arc<RuntimeEnv>,
-    /// DataFusion `target_partitions` for this query.
-    pub target_partitions: NonZeroUsize,
-    /// Physical optimizer rules the session must append: the trace list fast path (D153).
-    pub optimizer_rules: Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
-    /// Files this query's scans read; a decode failure queues them for verification (spec 03 §10).
-    pub suspects: Suspects,
-    /// Rows before this instant are hidden from the views (D-P-21, D-P-47). The providers
-    /// above stay unfiltered: storage's own reads (compaction, media GC, retention) build
-    /// their options with `None`.
-    pub visible_from: Option<i64>,
+    pub(crate) inner: EngineContext,
+}
+
+impl ProjectQuery {
+    /// Wraps an admitted [`EngineContext`] in [`ProjectQuery`].
+    pub(crate) fn from_engine(inner: EngineContext) -> Self {
+        Self { inner }
+    }
+
+    /// Borrows the underlying [`EngineContext`].
+    #[cfg(test)]
+    pub(crate) fn engine(&self) -> &EngineContext {
+        &self.inner
+    }
+
+    /// Returns a copy with `visible_from` overridden for visibility tests.
+    #[cfg(test)]
+    pub(crate) fn with_visible_from(mut self, visible_from: Option<i64>) -> Self {
+        self.inner = self.inner.with_visible_from(visible_from);
+        self
+    }
+
+    /// Collects raw stored `spans` rows across Parquet and memtable sources for this query.
+    #[doc(hidden)]
+    pub async fn collect_raw_spans(&self) -> Result<Vec<Batch>, RunError> {
+        let source = Arc::clone(&self.inner.spans);
+        collect_scan_source(&self.inner, source).await
+    }
+
+    /// Collects raw stored `traces` rows across Parquet and memtable sources for this query.
+    #[cfg(test)]
+    pub(crate) async fn collect_raw_traces(&self) -> Result<Vec<Batch>, RunError> {
+        let source: Arc<dyn ScanSource> = self.inner.traces.clone();
+        collect_scan_source(&self.inner, source).await
+    }
+}
+
+async fn collect_scan_source(
+    engine: &EngineContext,
+    source: Arc<dyn ScanSource>,
+) -> Result<Vec<Batch>, RunError> {
+    let (batches, _) = engine
+        .run_with_ctx(Duration::from_secs(30), move |exec_ctx| {
+            let spec = ScanSpec::default();
+            let streams = source.open_partitions(&spec, exec_ctx)?;
+            if streams.is_empty() {
+                return Ok(Vec::new());
+            }
+            let pool = Arc::clone(&exec_ctx.pool);
+            let sinks = exec_run_pipeline(
+                exec_ctx,
+                streams,
+                |_| Ok(Vec::new()),
+                move |_| Ok(CollectSink::new(&pool)),
+            )?;
+            let mut out = Vec::new();
+            for sink in sinks {
+                for batch in sink.into_batches() {
+                    if batch.num_rows() > 0 {
+                        out.push(batch);
+                    }
+                }
+            }
+            Ok(out)
+        })
+        .await?;
+    Ok(batches)
 }
 
 /// Inclusive `from`, exclusive `to`, nanoseconds since the Unix epoch, UTC (D101).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TimeWindow {
     from: i64,
     to: i64,
@@ -95,29 +128,16 @@ impl TimeWindow {
     pub fn to(&self) -> i64 {
         self.to
     }
-
-    /// `column >= from AND column < to`, with timestamp-nanosecond literals.
-    pub(crate) fn predicate(&self, column: &str) -> Expr {
-        let lower = datafusion::common::ScalarValue::TimestampNanosecond(
-            Some(self.from),
-            Some("UTC".into()),
-        );
-        let upper =
-            datafusion::common::ScalarValue::TimestampNanosecond(Some(self.to), Some("UTC".into()));
-        col(column)
-            .gt_eq(Expr::Literal(lower, None))
-            .and(col(column).lt(Expr::Literal(upper, None)))
-    }
 }
 
-/// A view the SQL sandbox can name.
+/// A view the SQL sandbox and read queries can name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ViewName {
     /// Merged traces.
     Traces,
     /// One row per span.
     Spans,
-    /// One row per session. Registered by the sessions view.
+    /// One row per session.
     Sessions,
     /// Live scores.
     Scores,
@@ -125,24 +145,6 @@ pub enum ViewName {
     ExperimentItems,
     /// Server-built dataset rows.
     DatasetItems,
-}
-
-/// A server-owned table the SQL console can name (D93).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SqliteView {
-    /// Experiment item rows.
-    ExperimentItems,
-    /// Dataset item rows.
-    DatasetItems,
-}
-
-impl SqliteView {
-    fn view_name(self) -> ViewName {
-        match self {
-            Self::ExperimentItems => ViewName::ExperimentItems,
-            Self::DatasetItems => ViewName::DatasetItems,
-        }
-    }
 }
 
 impl ViewName {
@@ -159,269 +161,279 @@ impl ViewName {
     }
 }
 
-/// Sandboxed session with the base views registered.
-pub struct QueryContext {
-    /// Later modules plan against this session. Tests read it too.
-    #[allow(dead_code)] // filter, SQL and read queries use this from Q7 on
-    session: SessionContext,
-    /// Unqualified schema of each registered view, taken from its logical plan.
-    #[allow(dead_code)] // parse_filter reads this
-    schemas: HashMap<ViewName, DFSchemaRef>,
-    /// View names the SQL console may reference. SQLite views join this set.
-    registered: Mutex<HashSet<ViewName>>,
-    /// Files this query's scans read, reported when execution fails on a corrupt one.
-    suspects: Suspects,
+/// A server-owned table the SQL console can name (D93).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SqliteView {
+    /// Experiment item rows.
+    ExperimentItems,
+    /// Dataset item rows.
+    DatasetItems,
 }
 
-impl std::fmt::Debug for QueryContext {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl SqliteView {
+    /// Returns the matching [`ViewName`].
+    fn view_name(self) -> ViewName {
+        match self {
+            Self::ExperimentItems => ViewName::ExperimentItems,
+            Self::DatasetItems => ViewName::DatasetItems,
+        }
+    }
+
+    /// Unqualified table name.
+    pub fn as_str(self) -> &'static str {
+        self.view_name().as_str()
+    }
+}
+
+/// Sandboxed query context over a snapshot of project data.
+///
+/// Shares the [`ProjectQuery`]'s admitted memory pool across both typed read
+/// endpoints (`crate::reads`) and sandboxed SQL queries (`sql_json` / `sql_export`).
+pub struct QueryContext {
+    engine: EngineContext,
+    window: Option<TimeWindow>,
+    extra_tables: RwLock<HashMap<SqliteView, Arc<BatchSource>>>,
+}
+
+impl fmt::Debug for QueryContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let extra_count = self
+            .extra_tables
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
         formatter
             .debug_struct("QueryContext")
+            .field("window", &self.window)
+            .field("extra_tables", &extra_count)
+            .field("engine", &self.engine)
             .finish_non_exhaustive()
     }
 }
 
 impl QueryContext {
-    /// Builds the session and registers `spans`, `traces`, `sessions` and `scores`.
+    /// Wraps `source` with an optional SQL console scan `window`.
     ///
-    /// `window`, when set, is written into each base view's scan (D101). `sessions`
-    /// is aggregated from the windowed `traces` view. `source.visible_from`, when set,
-    /// hides older rows from every base view the same way (D-P-21).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RunError::Internal`] when a view cannot be planned or registered.
+    /// `window`, when set, restricts every SQL base table scan (`spans`, `traces`,
+    /// `scores`, and derived `sessions`) to `[from, to)`. `source`'s `visible_from`,
+    /// when set, hides older rows across both SQL and read queries (D-P-21).
     pub fn new(source: ProjectQuery, window: Option<TimeWindow>) -> Result<Self, RunError> {
-        let suspects = source.suspects;
-        let visible_from = source.visible_from;
-        let state = session::session_state(
-            source.runtime,
-            source.target_partitions,
-            source.optimizer_rules,
-        );
-        let session = SessionContext::new_with_state(state);
-        let mut schemas = HashMap::new();
-        schemas.insert(
-            ViewName::Spans,
-            register(
-                &session,
-                ViewName::Spans,
-                spans::spans_view(source.spans, window, visible_from)?,
-            )?,
-        );
-        let traces_plan = traces::traces_view(source.traces, window, visible_from)?;
-        schemas.insert(
-            ViewName::Sessions,
-            register(
-                &session,
-                ViewName::Sessions,
-                map_plan(sessions_from_traces(traces_plan.clone()))?,
-            )?,
-        );
-        schemas.insert(
-            ViewName::Traces,
-            register(&session, ViewName::Traces, traces_plan)?,
-        );
-        schemas.insert(
-            ViewName::Scores,
-            register(
-                &session,
-                ViewName::Scores,
-                scores::scores_view(source.scores, window, visible_from)?,
-            )?,
-        );
         Ok(Self {
-            session,
-            schemas,
-            registered: Mutex::new(HashSet::from([
-                ViewName::Spans,
-                ViewName::Traces,
-                ViewName::Sessions,
-                ViewName::Scores,
-            ])),
-            suspects,
+            engine: source.inner,
+            window,
+            extra_tables: RwLock::new(HashMap::new()),
         })
     }
 
-    /// The suspects of this query, for a stream that outlives the call.
-    pub(crate) fn suspects(&self) -> Suspects {
-        self.suspects.clone()
+    /// Wraps an [`EngineContext`] directly for internal read tests.
+    #[cfg(test)]
+    pub(crate) fn from_engine(engine: EngineContext) -> Self {
+        Self {
+            engine,
+            window: None,
+            extra_tables: RwLock::new(HashMap::new()),
+        }
     }
 
-    /// [`classify`], after queueing this query's files when `error` may come
-    /// from a corrupt file (spec 03 §10). Use it for errors of DataFusion
-    /// execution calls; planning errors read no file and keep `classify`.
-    pub(crate) fn fail(&self, error: DataFusionError) -> RunError {
-        self.suspects.report(&error);
-        classify(error)
+    /// Borrows the underlying execution context used by read endpoints.
+    pub(crate) fn engine(&self) -> &EngineContext {
+        &self.engine
     }
 
-    /// Register a server-built table under its view name.
+    /// Registers a server-built SQLite-backed view table under its view name.
     ///
     /// # Errors
     ///
-    /// [`RunError::InvalidRequest`] when `view` is already registered.
-    /// [`RunError::Internal`] when DataFusion rejects the table.
+    /// Returns [`RunError::InvalidRequest`] when `view` is already registered, or
+    /// [`RunError::Internal`] when a batch fails schema validation.
     pub fn register_sqlite_view(
         &self,
         view: SqliteView,
-        table: Arc<dyn TableProvider>,
+        schema: Arc<Schema>,
+        batches: Vec<Batch>,
     ) -> Result<(), RunError> {
-        let name = view.view_name();
-        let mut registered = self
-            .registered
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !registered.insert(name) {
+        let source = Arc::new(
+            BatchSource::new(schema, batches)
+                .map_err(|e| RunError::Internal(EngineError::from_query(&e)))?,
+        );
+        let mut guard = self
+            .extra_tables
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        if guard.contains_key(&view) {
             return Err(RunError::InvalidRequest(format!(
                 "{} is already registered",
-                name.as_str()
+                view.as_str()
             )));
         }
-        if let Err(error) = self.session.register_table(name.as_str(), table) {
-            registered.remove(&name);
-            return Err(RunError::Internal(error));
-        }
+        guard.insert(view, source);
         Ok(())
     }
 
-    /// Names a SQL statement may use as tables, before CTE names.
-    pub(crate) fn registered_view_names(&self) -> HashSet<String> {
-        self.registered
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .map(|name| name.as_str().to_owned())
-            .collect()
-    }
-
-    /// The session with the views registered.
-    ///
-    /// **Trusted in-process capability (D168).** Reads and the SQL console go
-    /// through `sql_json` / `sql_export` and the read endpoints, which apply the
-    /// D96 SQL sandbox. This accessor bypasses that sandbox: it exists only for
-    /// the M3 benchmark (`tests/trace_bench.rs`) to run raw SQL and
-    /// `EXPLAIN ANALYZE`. Never expose it to untrusted SQL.
-    pub fn session(&self) -> &SessionContext {
-        &self.session
-    }
-
-    /// Schema captured when `view` was registered.
-    ///
-    /// `new` registers spans, traces, sessions and scores. Those are the only
-    /// views the filter compiler asks for.
-    #[allow(dead_code, clippy::expect_used)]
-    pub(crate) fn view_schema(&self, view: ViewName) -> &DFSchemaRef {
-        self.schemas
-            .get(&view)
-            .expect("query views are registered with their schemas")
-    }
-}
-
-fn register(
-    session: &SessionContext,
-    name: ViewName,
-    plan: LogicalPlan,
-) -> Result<DFSchemaRef, RunError> {
-    // The plan qualifies columns with the hidden scan name (`raw_spans`, …).
-    // Filters name the view's columns without that qualifier.
-    let schema = DFSchema::from_unqualified_fields(
-        plan.schema().fields().clone(),
-        plan.schema().metadata().clone(),
-    )
-    .map(Arc::new)
-    .map_err(RunError::Internal)?;
-    session
-        .register_table(name.as_str(), Arc::new(ViewTable::new(plan, None)))
-        .map_err(RunError::Internal)?;
-    Ok(schema)
-}
-
-/// `CAST(duration_ns AS DOUBLE) / 1e6`.
-pub(crate) fn duration_ms(duration_ns: Expr) -> Expr {
-    cast(duration_ns, DataType::Float64) / lit(1_000_000.0_f64)
-}
-
-/// `CAST(end_time AS BIGINT) - CAST(start_time AS BIGINT)`.
-pub(crate) fn duration_ns_from_bounds() -> Expr {
-    cast(col(cetra_core::schema::traces::END_TIME), DataType::Int64)
-        - cast(col(cetra_core::schema::traces::START_TIME), DataType::Int64)
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct ViewProjection<'a> {
-    pub(crate) raw_name: &'a str,
-    pub(crate) schema: &'a Schema,
-    pub(crate) window_column: &'a str,
-    pub(crate) skip: &'a [&'a str],
-    pub(crate) hex: &'a [&'a str],
-}
-
-pub(crate) fn view_plan(
-    provider: Arc<dyn TableProvider>,
-    window: Option<TimeWindow>,
-    visible_from: Option<i64>,
-    projection: ViewProjection<'_>,
-    extra_after: impl Fn(&str) -> Vec<Expr>,
-) -> Result<LogicalPlan, DataFusionError> {
-    let mut exprs = Vec::new();
-    for field in projection.schema.fields() {
-        let name = field.name().as_str();
-        if projection.skip.contains(&name) {
-            continue;
-        }
-        let expr = if projection.hex.contains(&name) {
-            encode(col(name), lit("hex")).alias(name)
-        } else {
-            col(name)
+    /// Builds a [`SqlEngineContext`] sharing this query's admitted memory pool and extra views.
+    pub(crate) fn sql_engine(&self) -> Result<SqlEngineContext, RunError> {
+        let sql_window = self
+            .window
+            .map(|w| {
+                QueryTimeWindow::new(w.from(), w.to())
+                    .map_err(|e| RunError::Internal(EngineError::from_query(&e)))
+            })
+            .transpose()?;
+        let extras = {
+            let guard = self
+                .extra_tables
+                .read()
+                .unwrap_or_else(PoisonError::into_inner);
+            guard
+                .iter()
+                .map(|(view, src)| (view.as_str().to_owned(), Arc::clone(src)))
+                .collect::<HashMap<_, _>>()
         };
-        exprs.push(expr);
-        exprs.extend(extra_after(name));
+        let workers = self
+            .engine
+            .runtime
+            .workers()
+            .map_err(|e| RunError::Internal(EngineError::from_query(&e)))?;
+        Ok(SqlEngineContext::new(
+            Arc::clone(&self.engine.spans),
+            Arc::clone(&self.engine.traces),
+            Arc::clone(&self.engine.scores),
+            Arc::clone(&self.engine.runtime.admission),
+            workers,
+            Arc::clone(&self.engine.runtime.spill),
+            self.engine.visible_from,
+            sql_window,
+            extras,
+        )
+        .with_pool(Some(Arc::clone(self.engine.pool())))
+        .with_suspects(self.engine.suspects.clone())
+        .with_coordinator_slots(Arc::clone(&self.engine.runtime.coordinator_slots))
+        .with_target_partitions(self.engine.runtime.target_partitions))
     }
-    let mut builder =
-        LogicalPlanBuilder::scan(projection.raw_name, provider_as_source(provider), None)?;
-    if let Some(window) = window {
-        builder = builder.filter(window.predicate(projection.window_column))?;
-    }
-    if let Some(from) = visible_from {
-        let bound =
-            datafusion::common::ScalarValue::TimestampNanosecond(Some(from), Some("UTC".into()));
-        builder =
-            builder.filter(col(projection.window_column).gt_eq(Expr::Literal(bound, None)))?;
-    }
-    builder.project(exprs)?.build()
-}
 
-pub(crate) fn map_plan(
-    plan: Result<LogicalPlan, DataFusionError>,
-) -> Result<LogicalPlan, RunError> {
-    plan.map_err(RunError::Internal)
+    /// Forces range-mode execution on `trace_list` (disabling list-mode optimizations).
+    #[doc(hidden)]
+    pub fn set_force_range_mode(&mut self, force: bool) {
+        self.engine.set_force_range_mode(force);
+    }
+
+    /// Formats the operator metrics from the most recent read query executed on this context.
+    #[doc(hidden)]
+    pub fn format_last_metrics(&self) -> Option<String> {
+        let metrics = self.engine.last_metrics()?;
+        let profiles = metrics.snapshot();
+        if profiles.is_empty() {
+            return None;
+        }
+        let mut out = String::new();
+        for p in profiles {
+            let _ = writeln!(
+                out,
+                "  {}: batches={} rows={} elapsed_ns={}",
+                p.name, p.batches_out, p.rows_out, p.elapsed_ns
+            );
+        }
+        Some(out)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    use std::time::Duration;
 
-    use arrow::array::{Array, AsArray, RecordBatch};
+    use cetra_column::Schema;
     use cetra_core::time_serde::parse_rfc3339;
-    use chrono::{DateTime, SecondsFormat, Utc};
-    use serde_json::{Value, json};
+    use cetra_query::QueryError;
+    use cetra_query::exec::{ExecContext, PartitionStream, ScanSource, ScanSpec};
+    use serde_json::{Map, Value};
 
     use super::*;
-    use crate::test_support::{
-        RecordingTable, dataset_scores, dataset_spans, example_query, live_scores, rows,
-    };
+    use crate::sql::{SQL_MAX_ROWS, SqlRequest};
+    use crate::test_support::{dataset_scores, dataset_spans, example_query, live_scores};
 
-    fn rfc3339(ns: i64) -> String {
-        let secs = ns.div_euclid(1_000_000_000);
-        let nanos = ns.rem_euclid(1_000_000_000) as u32;
-        DateTime::<Utc>::from_timestamp(secs, nanos)
-            .expect("fixture timestamps fit chrono")
-            .to_rfc3339_opts(SecondsFormat::Nanos, true)
+    const TIMEOUT: Duration = Duration::from_secs(30);
+
+    #[derive(Debug)]
+    struct RecordingScanSource {
+        inner: Arc<dyn ScanSource>,
+        specs: Mutex<Vec<ScanSpec>>,
+    }
+
+    impl RecordingScanSource {
+        fn new(inner: Arc<dyn ScanSource>) -> Self {
+            Self {
+                inner,
+                specs: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn specs(&self) -> Vec<ScanSpec> {
+            self.specs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
+        fn clear(&self) {
+            self.specs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
+        }
+    }
+
+    impl ScanSource for RecordingScanSource {
+        fn schema(&self) -> Arc<Schema> {
+            self.inner.schema()
+        }
+
+        fn projected_schema(&self, spec: &ScanSpec) -> Result<Arc<Schema>, QueryError> {
+            self.inner.projected_schema(spec)
+        }
+
+        fn open_partitions(
+            &self,
+            spec: &ScanSpec,
+            ctx: &ExecContext,
+        ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+            self.specs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(spec.clone());
+            self.inner.open_partitions(spec, ctx)
+        }
+
+        fn explain_summary(&self, spec: &ScanSpec) -> String {
+            self.inner.explain_summary(spec)
+        }
     }
 
     fn context() -> QueryContext {
         QueryContext::new(example_query(), None).expect("example context")
+    }
+
+    async fn sql_rows(ctx: &QueryContext, query: &str) -> Vec<Map<String, Value>> {
+        ctx.sql_json(SqlRequest {
+            query,
+            params: &Map::new(),
+            limit: SQL_MAX_ROWS,
+            timeout: TIMEOUT,
+        })
+        .await
+        .expect(query)
+        .rows
+    }
+
+    async fn field_names(ctx: &QueryContext, table: &str) -> Vec<String> {
+        let query = format!("SELECT * FROM {table}");
+        ctx.sql_check(&query, &Map::new())
+            .await
+            .expect(table)
+            .into_iter()
+            .map(|c| c.name)
+            .collect()
     }
 
     fn same_columns(actual: &[String], expected: &[&str]) {
@@ -429,89 +441,16 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    async fn field_names(ctx: &QueryContext, table: &str) -> Vec<String> {
-        let frame = ctx.session().table(table).await.expect(table);
-        frame
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().to_owned())
-            .collect()
-    }
-
-    fn string_cell(batch: &RecordBatch, row: usize, name: &str) -> Option<String> {
-        let column = batch.column_by_name(name).expect(name);
-        if column.is_null(row) {
-            return None;
-        }
-        Some(column.as_string::<i32>().value(row).to_owned())
-    }
-
-    fn i64_cell(batch: &RecordBatch, row: usize, name: &str) -> Option<i64> {
-        let column = batch.column_by_name(name).expect(name);
-        if column.is_null(row) {
-            return None;
-        }
-        if let Some(values) = column.as_primitive_opt::<arrow::datatypes::Int64Type>() {
-            return values.value(row).into();
-        }
-        let values = column.as_primitive::<arrow::datatypes::TimestampNanosecondType>();
-        Some(values.value(row))
-    }
-
-    fn f64_cell(batch: &RecordBatch, row: usize, name: &str) -> Option<f64> {
-        let column = batch.column_by_name(name).expect(name);
-        if column.is_null(row) {
-            return None;
-        }
-        Some(
-            column
-                .as_primitive::<arrow::datatypes::Float64Type>()
-                .value(row),
-        )
-    }
-
-    fn list_cell(batch: &RecordBatch, row: usize, name: &str) -> Value {
-        let column = batch.column_by_name(name).expect(name).as_list::<i32>();
-        if column.is_null(row) {
-            return Value::Null;
-        }
-        let values = column.value(row);
-        let strings = values.as_string::<i32>();
-        Value::Array(
-            (0..strings.len())
-                .map(|index| Value::String(strings.value(index).to_owned()))
-                .collect(),
-        )
-    }
-
-    fn trace_rows(batches: &[RecordBatch]) -> BTreeMap<String, Value> {
-        let mut rows = BTreeMap::new();
-        for batch in batches {
-            for row in 0..batch.num_rows() {
-                let id = string_cell(batch, row, "trace_id").expect("trace_id");
-                let value = json!({
-                    "start_time": rfc3339(i64_cell(batch, row, "start_time").expect("start")),
-                    "end_time": rfc3339(i64_cell(batch, row, "end_time").expect("end")),
-                    "name": string_cell(batch, row, "name"),
-                    "status": string_cell(batch, row, "status"),
-                    "span_count": i64_cell(batch, row, "span_count"),
-                    "error_count": i64_cell(batch, row, "error_count"),
-                    "total_tokens": i64_cell(batch, row, "total_tokens"),
-                    "cost_total": f64_cell(batch, row, "cost_total"),
-                    "tags": list_cell(batch, row, "tags"),
-                    "models": list_cell(batch, row, "models"),
-                });
-                rows.insert(id, value);
-            }
-        }
-        rows
-    }
-
     #[tokio::test]
     async fn traces_table_agrees_with_the_fixture() {
         let ctx = context();
-        let actual = trace_rows(&rows(&ctx, "SELECT * FROM traces").await);
+        let rows = sql_rows(&ctx, "SELECT * FROM traces").await;
+        let mut actual = BTreeMap::new();
+        for row in rows {
+            let id = row["trace_id"].as_str().expect("trace_id").to_owned();
+            actual.insert(id, Value::Object(row));
+        }
+
         let fixture: Value = serde_json::from_str(include_str!(
             "../../../../fixtures/api/responses/traces-include-eval.json"
         ))
@@ -521,9 +460,12 @@ mod tests {
         for trace in expected {
             let id = trace["trace_id"].as_str().expect("id");
             let row = actual.get(id).unwrap_or_else(|| panic!("missing {id}"));
+            for field in ["start_time", "end_time"] {
+                let got_ns = parse_rfc3339(row[field].as_str().expect("ts")).expect("ns");
+                let exp_ns = parse_rfc3339(trace[field].as_str().expect("ts")).expect("ns");
+                assert_eq!(got_ns, exp_ns, "{id} {field}");
+            }
             for field in [
-                "start_time",
-                "end_time",
                 "name",
                 "status",
                 "span_count",
@@ -703,57 +645,44 @@ mod tests {
     #[tokio::test]
     async fn trace_one_ids_and_duration() {
         let ctx = context();
-        let batches = rows(
+        let rows = sql_rows(
             &ctx,
             "SELECT trace_id, root_span_id, duration_ns, duration_ms FROM traces WHERE name = 'support-agent'",
         )
         .await;
-        let mut found = false;
-        for batch in &batches {
-            for row in 0..batch.num_rows() {
-                if string_cell(batch, row, "trace_id").as_deref()
-                    != Some("a1000000000000000000000000000001")
-                {
-                    continue;
-                }
-                found = true;
-                assert_eq!(
-                    string_cell(batch, row, "root_span_id").as_deref(),
-                    Some("b100000000000011")
-                );
-                let duration_ns = i64_cell(batch, row, "duration_ns").expect("duration_ns");
-                assert_eq!(duration_ns, 4_200_000_000);
-                let duration_ms = f64_cell(batch, row, "duration_ms").expect("duration_ms");
-                assert!((duration_ms - (duration_ns as f64 / 1e6)).abs() < 1e-9);
-            }
-        }
-        assert!(found, "trace 1 is named support-agent");
+        let row = rows
+            .iter()
+            .find(|r| r["trace_id"] == "a1000000000000000000000000000001")
+            .expect("trace 1 is named support-agent");
+        assert_eq!(row["root_span_id"], "b100000000000011");
+        let duration_ns = row["duration_ns"].as_i64().expect("duration_ns");
+        assert_eq!(duration_ns, 4_200_000_000);
+        let duration_ms = row["duration_ms"].as_f64().expect("duration_ms");
+        assert!((duration_ms - (duration_ns as f64 / 1e6)).abs() < 1e-9);
     }
 
     #[tokio::test]
     async fn span_ids_are_lowercase_hex() {
         let ctx = context();
-        let batches = rows(&ctx, "SELECT span_id, parent_span_id FROM spans").await;
+        let rows = sql_rows(&ctx, "SELECT span_id, parent_span_id FROM spans").await;
         let mut saw_null_parent = false;
-        for batch in &batches {
-            for row in 0..batch.num_rows() {
-                let span_id = string_cell(batch, row, "span_id").expect("span_id");
-                assert_eq!(span_id.len(), 16, "{span_id}");
-                assert!(
-                    span_id
-                        .chars()
-                        .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
-                );
-                match string_cell(batch, row, "parent_span_id") {
-                    None => saw_null_parent = true,
-                    Some(parent) => {
-                        assert_eq!(parent.len(), 16, "{parent}");
-                        assert!(
-                            parent
-                                .chars()
-                                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
-                        );
-                    }
+        for row in rows {
+            let span_id = row["span_id"].as_str().expect("span_id");
+            assert_eq!(span_id.len(), 16, "{span_id}");
+            assert!(
+                span_id
+                    .chars()
+                    .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+            );
+            match row["parent_span_id"].as_str() {
+                None => saw_null_parent = true,
+                Some(parent) => {
+                    assert_eq!(parent.len(), 16, "{parent}");
+                    assert!(
+                        parent
+                            .chars()
+                            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+                    );
                 }
             }
         }
@@ -763,9 +692,9 @@ mod tests {
     #[tokio::test]
     async fn score_count_matches_live_rows() {
         let ctx = context();
-        let live = live_scores(&dataset_scores()).len();
-        let batches = rows(&ctx, "SELECT count(*) AS n FROM scores").await;
-        assert_eq!(i64_cell(&batches[0], 0, "n"), Some(live as i64));
+        let live = live_scores(&dataset_scores()).len() as i64;
+        let rows = sql_rows(&ctx, "SELECT count(*) AS n FROM scores").await;
+        assert_eq!(rows[0]["n"].as_i64(), Some(live));
     }
 
     #[tokio::test]
@@ -775,20 +704,18 @@ mod tests {
         let window = TimeWindow::new(from, to).expect("window");
         let ctx = QueryContext::new(example_query(), Some(window)).expect("windowed");
 
-        let traces = rows(&ctx, "SELECT trace_id, start_time FROM traces").await;
+        let traces = sql_rows(&ctx, "SELECT trace_id, start_time FROM traces").await;
         let mut ids = Vec::new();
-        for batch in &traces {
-            for row in 0..batch.num_rows() {
-                let start = i64_cell(batch, row, "start_time").expect("start");
-                assert!((from..to).contains(&start), "{start}");
-                ids.push(string_cell(batch, row, "trace_id").expect("id"));
-            }
+        for row in &traces {
+            let start = parse_rfc3339(row["start_time"].as_str().expect("start")).expect("ns");
+            assert!((from..to).contains(&start), "{start}");
+            ids.push(row["trace_id"].as_str().expect("id").to_owned());
         }
         let fixture: Value = serde_json::from_str(include_str!(
             "../../../../fixtures/api/responses/traces-include-eval.json"
         ))
         .expect("fixture");
-        let expected: Vec<_> = fixture["data"]
+        let mut expected: Vec<_> = fixture["data"]
             .as_array()
             .expect("data")
             .iter()
@@ -800,7 +727,6 @@ mod tests {
             .map(|trace| trace["trace_id"].as_str().expect("id").to_owned())
             .collect();
         ids.sort();
-        let mut expected = expected;
         expected.sort();
         assert_eq!(ids, expected);
         assert!(
@@ -813,75 +739,64 @@ mod tests {
         let span_count = spans
             .iter()
             .filter(|span| (from..to).contains(&span.start_time))
-            .count();
-        let counted = rows(&ctx, "SELECT count(*) AS n FROM spans").await;
-        assert_eq!(i64_cell(&counted[0], 0, "n"), Some(span_count as i64));
+            .count() as i64;
+        let counted = sql_rows(&ctx, "SELECT count(*) AS n FROM spans").await;
+        assert_eq!(counted[0]["n"].as_i64(), Some(span_count));
 
         let scores = live_scores(&dataset_scores());
         let score_count = scores
             .iter()
             .filter(|score| (from..to).contains(&score.created_at))
-            .count();
-        let counted = rows(&ctx, "SELECT count(*) AS n FROM scores").await;
-        assert_eq!(i64_cell(&counted[0], 0, "n"), Some(score_count as i64));
+            .count() as i64;
+        let counted = sql_rows(&ctx, "SELECT count(*) AS n FROM scores").await;
+        assert_eq!(counted[0]["n"].as_i64(), Some(score_count));
 
-        let spans_log = RecordingTable::new(crate::test_support::spans_table(&spans));
-        let traces_table = crate::test_support::traces_table(&spans);
-        let traces_log = RecordingTable::new(traces_table);
-        let scores_table = crate::test_support::live_scores_table(&scores);
-        let recorded = QueryContext::new(
-            ProjectQuery {
-                spans: spans_log.provider(),
-                traces: traces_log.provider(),
-                scores: scores_table,
-                runtime: Arc::new(RuntimeEnv::default()),
-                target_partitions: NonZeroUsize::new(2).expect("partitions"),
-                optimizer_rules: Vec::new(),
+        // Verify scan-spec time-range bounds reach the underlying source on self-joins, subqueries, and CTEs.
+        let base = example_query();
+        let recorded_spans = Arc::new(RecordingScanSource::new(Arc::clone(&base.inner.spans)));
+        let mut recorded_engine = base.inner.clone();
+        recorded_engine.spans = Arc::clone(&recorded_spans) as Arc<dyn ScanSource>;
+        let recorded = QueryContext::new(ProjectQuery::from_engine(recorded_engine), Some(window))
+            .expect("recorded");
 
-                suspects: Suspects::detached(),
-                visible_from: None,
-            },
-            Some(window),
-        )
-        .expect("recorded");
-        let from_text = from.to_string();
-        let to_text = to.to_string();
-        // DataFusion pushes the two comparisons as separate filters.
-        let assert_bounds = |filters: &[String], scans: usize| {
-            let lowers = filters
+        let assert_bounds = |specs: &[ScanSpec], min_scans: usize| {
+            let matching = specs
                 .iter()
-                .filter(|filter| filter.contains(&from_text))
+                .filter(|s| {
+                    s.time_range.min_ns == Some(from) && s.time_range.max_ns == Some(to - 1)
+                })
                 .count();
-            let uppers = filters
-                .iter()
-                .filter(|filter| filter.contains(&to_text))
-                .count();
-            assert!(lowers >= scans && uppers >= scans, "{filters:?}");
+            assert!(
+                matching >= min_scans,
+                "expected at least {min_scans} windowed scans, got {specs:?}"
+            );
         };
 
-        rows(
+        let self_join = sql_rows(
             &recorded,
-            "SELECT count(*) FROM spans a JOIN spans b ON a.span_id = b.span_id",
+            "SELECT count(*) AS n FROM spans a JOIN spans b ON a.span_id = b.span_id",
         )
         .await;
-        assert_bounds(&spans_log.filters(), 2);
+        assert_eq!(self_join[0]["n"].as_i64(), Some(span_count));
+        assert_bounds(&recorded_spans.specs(), 2);
 
-        spans_log.clear();
-        rows(
+        recorded_spans.clear();
+        let sub = sql_rows(
             &recorded,
-            "SELECT count(*) FROM traces WHERE trace_id IN (SELECT trace_id FROM spans)",
+            "SELECT count(*) AS n FROM traces WHERE trace_id IN (SELECT trace_id FROM spans)",
         )
         .await;
-        assert_bounds(&spans_log.filters(), 1);
-        assert_bounds(&traces_log.filters(), 1);
+        assert_eq!(sub[0]["n"].as_i64(), Some(expected.len() as i64));
+        assert_bounds(&recorded_spans.specs(), 1);
 
-        spans_log.clear();
-        rows(
+        recorded_spans.clear();
+        let cte = sql_rows(
             &recorded,
-            "WITH x AS (SELECT * FROM spans) SELECT count(*) FROM x",
+            "WITH x AS (SELECT * FROM spans) SELECT count(*) AS n FROM x",
         )
         .await;
-        assert_bounds(&spans_log.filters(), 1);
+        assert_eq!(cte[0]["n"].as_i64(), Some(span_count));
+        assert_bounds(&recorded_spans.specs(), 1);
 
         assert!(matches!(
             TimeWindow::new(5, 5),
@@ -912,10 +827,7 @@ mod tests {
         let bound = trace_starts()[2];
         let spans = dataset_spans();
         let live = live_scores(&dataset_scores());
-        let query = ProjectQuery {
-            visible_from: Some(bound),
-            ..example_query()
-        };
+        let query = example_query().with_visible_from(Some(bound));
         let ctx = QueryContext::new(query, None).expect("bounded context");
 
         let visible_spans = spans.iter().filter(|s| s.start_time >= bound).count() as i64;
@@ -925,23 +837,23 @@ mod tests {
             visible_spans < spans.len() as i64,
             "the bound must hide something"
         );
-        let count = |batches: &[RecordBatch]| i64_cell(&batches[0], 0, "n");
+        let count = |rows: Vec<Map<String, Value>>| rows[0]["n"].as_i64();
         assert_eq!(
-            count(&rows(&ctx, "SELECT count(*) AS n FROM spans").await),
+            count(sql_rows(&ctx, "SELECT count(*) AS n FROM spans").await),
             Some(visible_spans)
         );
         assert_eq!(
-            count(&rows(&ctx, "SELECT count(*) AS n FROM traces").await),
+            count(sql_rows(&ctx, "SELECT count(*) AS n FROM traces").await),
             Some(visible_traces)
         );
         assert_eq!(
-            count(&rows(&ctx, "SELECT count(*) AS n FROM scores").await),
+            count(sql_rows(&ctx, "SELECT count(*) AS n FROM scores").await),
             Some(visible_scores)
         );
-        let sessions = rows(&ctx, "SELECT count(*) AS n FROM sessions").await;
+        let sessions = sql_rows(&ctx, "SELECT count(*) AS n FROM sessions").await;
         let unbounded = QueryContext::new(example_query(), None).expect("context");
-        let all_sessions = rows(&unbounded, "SELECT count(*) AS n FROM sessions").await;
-        assert!(count(&sessions).expect("n") <= count(&all_sessions).expect("n"));
+        let all_sessions = sql_rows(&unbounded, "SELECT count(*) AS n FROM sessions").await;
+        assert!(count(sessions).expect("n") <= count(all_sessions).expect("n"));
     }
 
     #[tokio::test]
@@ -949,35 +861,25 @@ mod tests {
         let bound = trace_starts()[2];
         let hour = 3_600_000_000_000_i64;
         let window = TimeWindow::new(bound - 24 * hour, bound + hour).expect("window");
-        let query = ProjectQuery {
-            visible_from: Some(bound),
-            ..example_query()
-        };
+        let query = example_query().with_visible_from(Some(bound));
         let ctx = QueryContext::new(query, Some(window)).expect("bounded context");
 
         let expected = dataset_spans()
             .iter()
             .filter(|s| (bound..bound + hour).contains(&s.start_time))
-            .count() as i64;
-        let batches = rows(&ctx, "SELECT start_time FROM spans").await;
-        let mut seen = 0_i64;
-        for batch in &batches {
-            for row in 0..batch.num_rows() {
-                let start = i64_cell(batch, row, "start_time").expect("start");
-                assert!((bound..bound + hour).contains(&start), "{start}");
-                seen += 1;
-            }
+            .count();
+        let rows = sql_rows(&ctx, "SELECT start_time FROM spans").await;
+        for row in &rows {
+            let start = parse_rfc3339(row["start_time"].as_str().expect("start")).expect("ns");
+            assert!((bound..bound + hour).contains(&start), "{start}");
         }
-        assert_eq!(seen, expected);
+        assert_eq!(rows.len(), expected);
     }
 
     #[tokio::test]
     async fn no_visible_from_changes_nothing() {
         let ctx = QueryContext::new(example_query(), None).expect("context");
-        let batches = rows(&ctx, "SELECT count(*) AS n FROM spans").await;
-        assert_eq!(
-            i64_cell(&batches[0], 0, "n"),
-            Some(dataset_spans().len() as i64)
-        );
+        let rows = sql_rows(&ctx, "SELECT count(*) AS n FROM spans").await;
+        assert_eq!(rows[0]["n"].as_i64(), Some(dataset_spans().len() as i64));
     }
 }

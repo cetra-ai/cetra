@@ -97,8 +97,8 @@ pub enum CaptureError {
         source: std::io::Error,
     },
 
-    /// The same `group/case` is under both scenario trees.
-    #[error("case {case} is in both the Python and TypeScript scenarios")]
+    /// The same `group/case` is under more than one scenario root.
+    #[error("case {case} is defined in more than one scenario root")]
     DuplicateCase {
         /// `group/case`.
         case: String,
@@ -115,6 +115,14 @@ pub enum CaptureError {
     #[error("program command is empty")]
     ProgramCommand,
 
+    /// The toolchain or build output a Java or .NET scenario runs on was never
+    /// fetched or built.
+    #[error("{} is missing: run just capture-tools", path.display())]
+    ToolMissing {
+        /// Path of the missing tool or build output.
+        path: PathBuf,
+    },
+
     /// The program was still running after 120 s and was killed.
     #[error("program exceeded 120s")]
     ProgramTimeout,
@@ -125,6 +133,11 @@ pub enum CaptureError {
         /// Exit status, or `None` when the process ended on a signal.
         code: Option<i32>,
     },
+
+    /// Ctrl-C stopped the run while the program was running; the program's
+    /// whole process group was killed first.
+    #[error("interrupted")]
+    Interrupted,
 
     /// Binding a port, spawning, or waiting on the program failed.
     #[error("failed to {step}: {source}")]
@@ -201,5 +214,23 @@ fn exit_status(code: &Option<i32>) -> String {
     match code {
         Some(code) => format!("status {code}"),
         None => "no status".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::CaptureError;
+
+    #[test]
+    fn a_missing_tool_names_the_path_and_the_recipe() {
+        let error = CaptureError::ToolMissing {
+            path: PathBuf::from("/repo/target/capture-tools/jdk/21.0.13+9/bin/java"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "/repo/target/capture-tools/jdk/21.0.13+9/bin/java is missing: run just capture-tools"
+        );
     }
 }

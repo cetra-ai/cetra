@@ -39,6 +39,8 @@ A window with fewer samples than `min_count` has too little data to judge. cetra
 
 An issue occurrences rule has no filter, no minimum samples and no trace exclusions. Its window must be `15m` or more, because cetra records an occurrence only after its trace completes, and a shorter window can miss it. cetra refuses `1m` and `5m` for this metric.
 
+The preview next to the form counts the occurrences per window over the last day (3 days for a 6-hour window, 14 days for a 24-hour window), as the rule would count them now: an issue with the issues merged into it, or a source's issues except the ignored and merged ones.
+
 ## Alert on an issue
 
 Use an issue occurrences rule to hear when an issue keeps happening.

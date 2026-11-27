@@ -1,7 +1,8 @@
 """The OpenInference instrumentor registry and its wiring (D-F-7).
 
 ``instrument=["openai", ...]`` names come from ``REGISTRY``; each maps to an
-OpenInference instrumentor class and the extra that installs it. The
+OpenInference instrumentor class and the extra that installs it — or, for a row
+without an extra, the distribution the user installs instead (D-IN-24). The
 ``openinference`` and ``opentelemetry.instrumentation`` imports live inside
 :func:`enable_for`: without an extra none of it is installed, and an empty
 ``instrument`` list must import nothing.
@@ -21,12 +22,17 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class Instrumentor:
-    """One registry row: a name, the extra that installs it, and its class."""
+    """One registry row: a name, the extra that installs it, and its class.
+
+    A row with no extra names in ``package`` the distribution to install
+    instead; cetra never depends on it (D-IN-24).
+    """
 
     name: str
-    extra: str
+    extra: str | None
     module: str
     cls: str
+    package: str | None = None
 
 
 # Fixed by § Python instrumentors (plan F). A plain dict so tests can patch a
@@ -94,6 +100,79 @@ REGISTRY: dict[str, Instrumentor] = {
             module="openinference.instrumentation.dspy",
             cls="DSPyInstrumentor",
         ),
+        Instrumentor(
+            name="groq",
+            extra="groq",
+            module="openinference.instrumentation.groq",
+            cls="GroqInstrumentor",
+        ),
+        Instrumentor(
+            name="mistralai",
+            extra="mistralai",
+            module="openinference.instrumentation.mistralai",
+            cls="MistralAIInstrumentor",
+        ),
+        Instrumentor(
+            name="cohere",
+            extra="cohere",
+            module="openinference.instrumentation.cohere",
+            cls="CohereInstrumentor",
+        ),
+        Instrumentor(
+            name="ollama",
+            extra="ollama",
+            module="openinference.instrumentation.ollama",
+            cls="OllamaInstrumentor",
+        ),
+        Instrumentor(
+            name="together",
+            extra="together",
+            module="openinference.instrumentation.together",
+            cls="TogetherInstrumentor",
+        ),
+        Instrumentor(
+            name="instructor",
+            extra="instructor",
+            module="openinference.instrumentation.instructor",
+            cls="InstructorInstrumentor",
+        ),
+        Instrumentor(
+            name="agno",
+            extra="agno",
+            module="openinference.instrumentation.agno",
+            cls="AgnoInstrumentor",
+        ),
+        Instrumentor(
+            name="smolagents",
+            extra="smolagents",
+            module="openinference.instrumentation.smolagents",
+            cls="SmolagentsInstrumentor",
+        ),
+        Instrumentor(
+            name="haystack",
+            extra="haystack",
+            module="openinference.instrumentation.haystack",
+            cls="HaystackInstrumentor",
+        ),
+        Instrumentor(
+            name="beeai",
+            extra="beeai",
+            module="openinference.instrumentation.beeai",
+            cls="BeeAIInstrumentor",
+        ),
+        Instrumentor(
+            name="mcp",
+            extra="mcp",
+            module="openinference.instrumentation.mcp",
+            cls="MCPInstrumentor",
+        ),
+        Instrumentor(
+            name="autogen-agentchat",
+            extra=None,
+            module="openinference.instrumentation.autogen_agentchat",
+            cls="AutogenAgentChatInstrumentor",
+            package="openinference-instrumentation-autogen-agentchat",
+        ),
     )
 }
 
@@ -140,25 +219,46 @@ def enable_for(runtime: "Runtime", classes: Sequence[type]) -> None:
         hide_inputs=True if hide else None,
         hide_outputs=True if hide else None,
     )
+    stamped = False
     for cls in classes:
         entry = _entry_of(cls)
         instance: Any = cls()
         if instance.is_instrumented_by_opentelemetry:
             # The app instrumented this library itself; leave it alone.
             logger.debug("cetra: instrumentor %s already active; skipped", entry.name)
-            continue
-        try:
-            instance.instrument(
-                tracer_provider=runtime.provider,
-                config=config,
-                raise_exception_on_conflict=True,
-            )
-        except (DependencyConflictError, ImportError):
-            raise ConfigError(_extra_hint(entry)) from None
-        runtime.instrumentors.append(instance)
+        else:
+            try:
+                instance.instrument(
+                    tracer_provider=runtime.provider,
+                    config=config,
+                    raise_exception_on_conflict=True,
+                )
+            except (DependencyConflictError, ImportError):
+                raise ConfigError(_extra_hint(entry)) from None
+            runtime.instrumentors.append(instance)
+        if entry.name == "openai" and not stamped:
+            # The host stamp (D-IN-18) belongs to the openai name, whoever instrumented it.
+            _stamp_host(runtime)
+            stamped = True
+
+
+def _stamp_host(runtime: "Runtime") -> None:
+    """Wrap the OpenAI client methods with the host stamp; shutdown restores them.
+
+    ``HostStamp`` is only created when ``openai`` is instrumented, so an empty
+    or non-OpenAI ``instrument`` list never creates one.
+    """
+    from cetra._host import HostStamp
+
+    stamp = HostStamp()
+    stamp.instrument()
+    runtime.instrumentors.append(stamp)
 
 
 def _extra_hint(entry: Instrumentor) -> str:
+    if entry.extra is None:
+        # Every registry row without an extra names a package (see Instrumentor).
+        return f"instrument: {entry.name!r} needs `pip install {entry.package}`"
     return f"instrument: {entry.name!r} needs `pip install cetra-sdk[{entry.extra}]`"
 
 

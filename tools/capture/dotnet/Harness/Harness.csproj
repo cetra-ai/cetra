@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The shared .NET capture harness: endpoints, mock key and meta writing.
+       No package references (IN8.1); scenario projects reference it with
+       <ProjectReference Include="../../../Harness/Harness.csproj" />. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Cetra.Capture</RootNamespace>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

@@ -1153,7 +1153,7 @@ async fn rows_until(api: &Api, path: &str, count: usize, wait: Duration) -> (Val
 #[tokio::test(flavor = "multi_thread")]
 async fn online_rules_and_backfill_end_to_end() {
     // The mock provider answers the judge twice: once for the live trace, once for the backfill.
-    let mock = cetra_capture::Mock::new(vec![judge_turn(), judge_turn()]);
+    let mock = cetra_capture::Mock::new(vec![judge_turn(), judge_turn()], Vec::new());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let provider_addr = listener.local_addr().unwrap();
     let router = mock.router();
@@ -1521,19 +1521,22 @@ async fn error_issues_end_to_end() {
 /// `cetra-playground`, which the default trace list leaves out.
 #[tokio::test(flavor = "multi_thread")]
 async fn playground_run_end_to_end() {
-    let mock = cetra_capture::Mock::new(vec![
-        serde_json::from_value(json!({
-            "api": "openai.chat",
-            "model": "gpt-test",
-            "message": {"text": "Hello from cetra."},
-            "finish": "stop",
-            "usage": {"input": 12, "output": 4},
-            "chunks": 3,
-            "ttft_ms": 0,
-            "chunk_delay_ms": 5
-        }))
-        .unwrap(),
-    ]);
+    let mock = cetra_capture::Mock::new(
+        vec![
+            serde_json::from_value(json!({
+                "api": "openai.chat",
+                "model": "gpt-test",
+                "message": {"text": "Hello from cetra."},
+                "finish": "stop",
+                "usage": {"input": 12, "output": 4},
+                "chunks": 3,
+                "ttft_ms": 0,
+                "chunk_delay_ms": 5
+            }))
+            .unwrap(),
+        ],
+        Vec::new(),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let provider_addr = listener.local_addr().unwrap();
     let router = mock.router();
@@ -1705,7 +1708,7 @@ async fn assistant_turn_end_to_end() {
             "chunk_delay_ms": 0
         }))
         .unwrap(),
-    ]);
+    ], Vec::new());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let provider_addr = listener.local_addr().unwrap();
     let router = mock.router();

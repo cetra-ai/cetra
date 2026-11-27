@@ -3118,7 +3118,7 @@ fn estimate_batch_bytes(batch: &Batch) -> usize {
     batch
         .columns()
         .iter()
-        .map(estimate_column_bytes)
+        .map(|c| estimate_column_bytes(c))
         .fold(0usize, usize::saturating_add)
 }
 

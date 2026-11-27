@@ -10,7 +10,9 @@
       "sources": [
         "https://langfuse.com/self-hosting",
         "https://github.com/langfuse/langfuse/blob/main/docker-compose.yml"
-      ]
+      ],
+      "status": "yes",
+      "short": "6 services incl. ClickHouse"
     },
     "selfHostLicence": {
       "value": "MIT except ee/ (commercial licence); docs mark org creators, instance management API, UI customization as EE",
@@ -18,71 +20,103 @@
         "https://github.com/langfuse/langfuse/blob/main/LICENSE",
         "https://github.com/langfuse/langfuse/blob/main/ee/LICENSE",
         "https://langfuse.com/self-hosting"
-      ]
+      ],
+      "status": "partial",
+      "short": "MIT, ee/ is commercial"
     },
     "cloudFree": {
       "value": "Hobby: free, 50k units/month, 30 days data access, 2 users, 2 alerts",
-      "sources": ["https://langfuse.com/pricing"]
+      "sources": ["https://langfuse.com/pricing"],
+      "status": "yes",
+      "short": "Free: 50k units/mo"
     },
     "cloudPaidFrom": {
       "value": "Core: $29/month incl. 100k units, then $8 per 100k units (traces, observations and scores count as units)",
-      "sources": ["https://langfuse.com/pricing"]
+      "sources": ["https://langfuse.com/pricing"],
+      "status": "yes",
+      "short": "$29/mo incl. 100k units"
     },
     "otel": {
       "value": "OTLP over HTTP (JSON, protobuf) at /api/public/otel; no gRPC; aims for OTel GenAI conventions, maps others",
-      "sources": ["https://langfuse.com/docs/opentelemetry/get-started"]
+      "sources": ["https://langfuse.com/docs/opentelemetry/get-started"],
+      "status": "partial",
+      "short": "HTTP only, no gRPC"
     },
     "sql": {
       "value": "Not documented: docs describe a JSON Metrics API, SDK query access and blob storage export",
       "sources": [
         "https://langfuse.com/docs/api-and-data-platform/features/query-via-sdk",
         "https://langfuse.com/docs/metrics/features/metrics-api"
-      ]
+      ],
+      "status": "no",
+      "short": "Metrics API only"
     },
     "mcp": {
       "value": "Native MCP server (Streamable HTTP, Basic auth with project keys); read and write tools, e.g. prompts and observations",
-      "sources": ["https://langfuse.com/docs/api-and-data-platform/features/mcp-server"]
+      "sources": ["https://langfuse.com/docs/api-and-data-platform/features/mcp-server"],
+      "status": "yes",
+      "short": "MCP: read and write tools"
     },
     "onlineEvals": {
       "value": "Yes: rules run LLM-as-a-judge evaluators on incoming observations; self-hosted worker runs them",
-      "sources": ["https://langfuse.com/docs/evaluation/evaluation-methods/llm-as-a-judge"]
+      "sources": ["https://langfuse.com/docs/evaluation/evaluation-methods/llm-as-a-judge"],
+      "status": "yes",
+      "short": "LLM-judge rules on observations"
     },
     "datasetsExperiments": {
       "value": "Yes: datasets and experiments via UI, SDKs or OpenTelemetry",
-      "sources": ["https://langfuse.com/docs/evaluation/experiments/datasets"]
+      "sources": ["https://langfuse.com/docs/evaluation/experiments/datasets"],
+      "status": "yes",
+      "short": "Datasets and experiments"
     },
     "promptManagement": {
       "value": "Yes: prompt versioning with labels and client-side caching",
-      "sources": ["https://langfuse.com/docs/prompt-management/overview"]
+      "sources": ["https://langfuse.com/docs/prompt-management/overview"],
+      "status": "yes",
+      "short": "Versions, labels, client cache"
     },
     "gateway": {
       "value": "AI Gateway in public beta: proxy for OpenAI and Anthropic calls with tracing, cost tracking, budgets",
-      "sources": ["https://langfuse.com/docs/ai-gateway"]
+      "sources": ["https://langfuse.com/docs/ai-gateway"],
+      "status": "partial",
+      "short": "AI Gateway, public beta"
     },
     "alerts": {
       "value": "Slack, PagerDuty, signed webhooks and GitHub Actions; no email listed; self-hosted v4+ has no alert limit",
-      "sources": ["https://langfuse.com/docs/observability/features/alerts"]
+      "sources": ["https://langfuse.com/docs/observability/features/alerts"],
+      "status": "partial",
+      "short": "Slack, PagerDuty, webhook; no email"
     },
     "issueDetection": {
       "value": "Unknown",
-      "sources": ["https://langfuse.com/llms.txt"]
+      "sources": ["https://langfuse.com/llms.txt"],
+      "status": "unknown",
+      "short": "Not documented"
     },
     "annotationQueues": {
       "value": "Yes: queues of traces, observations or sessions; reviewers add scores with required score configs; optional assignees",
-      "sources": ["https://langfuse.com/docs/evaluation/evaluation-methods/annotation-queues"]
+      "sources": ["https://langfuse.com/docs/evaluation/evaluation-methods/annotation-queues"],
+      "status": "yes",
+      "short": "Queues, score configs, assignees"
     },
     "assistant": {
       "value": "Halo: chat in the app that queries traces and metrics and edits datasets, dashboards and prompts with approval",
-      "sources": ["https://langfuse.com/docs/halo"]
+      "sources": ["https://langfuse.com/docs/halo"],
+      "status": "yes",
+      "short": "Halo chat, edits with approval"
     },
     "codingAgents": {
       "value": "Tracing guides for Claude Code (via hooks), OpenAI Codex, GitHub Copilot and Cursor, among others",
       "sources": [
         "https://langfuse.com/llms.txt",
         "https://langfuse.com/integrations/developer-tools/claude-code.md"
-      ]
+      ],
+      "status": "yes",
+      "short": "Claude Code, Codex, Copilot, Cursor"
     }
   },
+  "stack": ["Web", "Worker", "PostgreSQL", "ClickHouse", "Redis/Valkey", "S3-compatible storage"],
+  "strengths": ["selfHostStack", "sql", "otel"],
   "chooseThem": [
     "Large set of framework integrations and a documented feature set",
     "Self-hosting documented for Docker Compose and Kubernetes, using ClickHouse for analytics"

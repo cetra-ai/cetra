@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { Schema } from "@/api/types";
 import { JsonView } from "@/components/payload/json-view";
 import { MessageView } from "@/components/payload/message-view";
-import type { ToolLinks } from "@/components/payload/part-view";
+import { foldedMessage, type ToolLinks, type ToolSpanMatch, toolLinks } from "@/lib/tool-calls";
 
 export function ChatView({
   input,
@@ -10,15 +10,18 @@ export function ChatView({
   systemInstructions,
   toolDefinitions,
   projectRef,
+  toolSpans,
 }: {
   input: readonly Schema<"Message">[];
   output: readonly Schema<"Message">[];
   systemInstructions?: unknown;
   toolDefinitions?: unknown;
   projectRef?: string;
+  /** The tool span each tool call of `input` and `output` ran as, by part (D-C-32). */
+  toolSpans?: Map<Schema<"Part">, ToolSpanMatch>;
 }) {
   const messages = [...input, ...output];
-  const links = toolLinks(messages);
+  const links = toolLinks(messages, [], toolSpans);
   const tools = toolDefs(toolDefinitions);
   return (
     <div className="flex flex-col gap-3">
@@ -45,9 +48,10 @@ function MessageList({
   links: ToolLinks;
 }) {
   const seen = new Map<string, number>();
+  const shown = messages.filter((message) => !foldedMessage(message, links));
   return (
     <div className="flex flex-col gap-2">
-      {messages.map((message) => (
+      {shown.map((message) => (
         <MessageView
           key={messageKey(message, seen)}
           message={message}
@@ -126,26 +130,6 @@ function Tools({ tools, called }: { tools: ToolDef[]; called: Set<string> }) {
 }
 
 type ToolDef = { name: string; description?: string; schema?: unknown };
-
-export function toolLinks(messages: readonly Schema<"Message">[]): ToolLinks {
-  const callNames = new Map<string, string>();
-  const responseIds = new Set<string>();
-  for (const message of messages) {
-    for (const part of message.parts) {
-      if (
-        part.type === "tool_call" &&
-        typeof part.id === "string" &&
-        typeof part.name === "string"
-      ) {
-        callNames.set(part.id, part.name);
-      }
-      if (part.type === "tool_call_response" && typeof part.id === "string") {
-        responseIds.add(part.id);
-      }
-    }
-  }
-  return { callNames, responseIds };
-}
 
 function calledNames(messages: readonly Schema<"Message">[]): Set<string> {
   const names = new Set<string>();

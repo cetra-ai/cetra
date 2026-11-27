@@ -15,7 +15,7 @@ The list has a search box and **Kind** chips (**LLM judge**, **Check**, **Webhoo
 An evaluator page has three tabs:
 
 - **Overview** shows the last 7 days: runs (done, failed and skipped), error rate, judge cost, latency p50 and p95, and the result. Below are the online rules that use the evaluator, the score distribution, the recent jobs, and the experiments that have a score with the evaluator's score name in the last 30 days. Its **Create a rule** button starts an [online rule](/docs/evaluation/online-rules/).
-- **Configuration** is the form, with the **Test** section at the bottom.
+- **Configuration** is the form, with the **Test** section beside it, or below it in a narrow window.
 - **History** lists every version, newest first. Select a version to see what changed from the one before: a line diff of the prompt and a **Field**, **Before**, **After** table for the other fields. A webhook's URL, headers and secret are write-only, so changes to them do not show.
 
 <Image src={evaluators} alt="The evaluators page: the list of evaluators in the project." />
@@ -82,7 +82,7 @@ An LLM judge names a connection and a model. The model must exist at that provid
 
 Before you use an evaluator in a rule, run it once on a stored trace.
 
-1. Open the evaluator and go to the **Configuration** tab. The **Test** section is at the bottom.
+1. Open the evaluator and go to the **Configuration** tab. The **Test** section is beside the form, or below it in a narrow window.
 2. On the **Trace** tab, enter a **Trace ID**, and optionally a **Span ID** to target one span. Fill in the mapping. Or use the **Variables** tab and type literal values for the variables.
 3. Select **Run test**.
 

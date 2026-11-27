@@ -1,0 +1,127 @@
+---
+title: Atomic Agents
+description: "Trace Atomic Agents agents with cetra from Python: agent runs, model calls and tool calls, from the framework's own instrumentor."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces Atomic Agents agents from Python, with Atomic Agents' own instrumentor: the agent run, the model call and the tool calls.
+
+<Backing fixtures={["genai/atomic-agents-agent-tool"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install atomic-agents instructor openai opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+The instrumentor writes its spans to the tracer provider you pass it. Point an OTLP exporter at cetra and pass the provider when you instrument. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenAI through Atomic Agents and needs CETRA_API_KEY and OPENAI_API_KEY */}
+```python
+import os
+
+# Set before the framework loads: message capture is off by default.
+os.environ["ATOMIC_AGENTS_TRACE_CAPTURE_MESSAGES"] = "true"
+
+import instructor
+import openai
+from atomic_agents import (
+    AgentConfig,
+    AtomicAgent,
+    BaseIOSchema,
+    BaseTool,
+    BasicChatInputSchema,
+    BasicChatOutputSchema,
+)
+from atomic_agents.observability import AtomicAgentsInstrumentor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from pydantic import Field
+
+provider = TracerProvider()
+provider.add_span_processor(
+    BatchSpanProcessor(
+        OTLPSpanExporter(
+            endpoint="http://<HOST>:8080/v1/traces",
+            headers={"Authorization": f"Bearer {os.environ['CETRA_API_KEY']}"},
+        )
+    )
+)
+AtomicAgentsInstrumentor().instrument(tracer_provider=provider)
+
+client = instructor.from_openai(openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"]))
+agent = AtomicAgent[BasicChatInputSchema, BasicChatOutputSchema](
+    config=AgentConfig(client=client, model="gpt-4o-mini")
+)
+
+
+class ReadFileInput(BaseIOSchema):
+    """Path of a file to read from the working directory."""
+
+    path: str = Field(..., description="The path of the file to read.")
+
+
+class ReadFileOutput(BaseIOSchema):
+    """Text the file contained."""
+
+    result: str = Field(..., description="The text the file contained.")
+
+
+class ReadFileTool(BaseTool[ReadFileInput, ReadFileOutput]):
+    def run(self, params: ReadFileInput) -> ReadFileOutput:
+        """Read the file at `path` and return its text."""
+        with open(params.path, encoding="utf-8") as file:
+            return ReadFileOutput(result=file.read())
+
+
+tracer = provider.get_tracer("my-app")
+with tracer.start_as_current_span("turn"):
+    response = agent.run(
+        BasicChatInputSchema(chat_message="Read hello.txt and tell me what it says.")
+    )
+    print(response.chat_message)
+    print(ReadFileTool().run(ReadFileInput(path="hello.txt")).result)
+
+provider.shutdown()  # flushes the spans before the script ends
+```
+
+  </TabItem>
+</Tabs>
+
+One `run` makes one model call, through instructor's forced tool call: the model answers with the output schema. Your code calls the tools itself, here inside the `turn` span, so the tool span nests under it.
+
+## What you get
+
+- An `agent` span named `invoke_agent AtomicAgent`, with the model and the run's token counts as attributes.
+- An `llm` span named `chat gpt-4o-mini` for the model call, with the provider `openai`, the token counts, the cost computed from the built-in prices, and the messages when message capture is on.
+- A `tool` span named `execute_tool ReadFileInput` for the tool call, with the arguments as its input and the result as its output.
+
+The agent span repeats the model call's token counts; cetra counts tokens on model calls only, so nothing is counted twice.
+
+## Limits
+
+- The tool span is named after the tool's input schema class (`ReadFileInput`), not the tool class; the tool class stays in the `atomic_agents.tool.class` attribute.
+- With a provider instrumentor also on, such as OpenInference's `openai`, set `ATOMIC_AGENTS_TRACE_LLM_SPANS=false`, or each model call is recorded and counted twice.
+- Message capture is off by default: set `ATOMIC_AGENTS_TRACE_CAPTURE_MESSAGES=true` before the framework loads, or the model calls carry no messages.
+- The fixture was captured with atomic-agents 2.16.0 and instructor 1.17.0, without the `[phoenix]` extra (the spans keep the GenAI attributes without it).
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

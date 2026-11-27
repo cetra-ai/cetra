@@ -1,0 +1,50 @@
+{
+  "description": "LangChain4j 1.23.0 AiServices with one tool, traced by OpenInference Java's model listener only: one llm span per model call, no agent or tool spans.",
+  "spec_refs": [
+    "02 § Mapping tables / Input / output"
+  ],
+  "instrumentation": "openinference-instrumentation-langchain4j",
+  "libraries": [
+    "openinference-instrumentation-langchain4j",
+    "langchain4j",
+    "langchain4j-open-ai"
+  ],
+  "env": {
+    "OTEL_METRICS_EXPORTER": "none",
+    "OTEL_LOGS_EXPORTER": "none"
+  },
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_capture_1",
+            "name": "get_weather",
+            "arguments": {
+              "city": "Lyon"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": "It is sunny in Lyon."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12
+      }
+    }
+  ]
+}

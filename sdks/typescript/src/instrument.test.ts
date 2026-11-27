@@ -225,6 +225,46 @@ describe("anthropic helper", () => {
     expect(llm?.attributes["llm.model_name"]).toBe("claude-sonnet-4-5");
     expect(String(llm?.attributes["input.value"])).toContain("hello");
   });
+
+  it("records one model span when the Anthropic SDK's own spans reach cetra", async () => {
+    const { exporter } = startMemory({
+      useGlobalProvider: true,
+      instrument: [anthropic(Anthropic)],
+    });
+    const client = new Anthropic({
+      apiKey: "test",
+      baseURL: "http://127.0.0.1:9/v1",
+      fetch: () => Promise.resolve(jsonResponse(MESSAGE)),
+    });
+    await client.messages.create({
+      model: "claude-sonnet-4-5",
+      max_tokens: 16,
+      messages: [{ role: "user", content: "hello" }],
+    });
+    const spans = await finished(exporter);
+    expect(spans.map((span) => span.name)).toEqual(["Anthropic Messages"]);
+    expect(llmSpans(spans)).toHaveLength(1);
+    expect(
+      spans.filter((span) => span.instrumentationScope.name.startsWith("com.anthropic.sdk")),
+    ).toHaveLength(0);
+  });
+
+  it("receives the Anthropic SDK's own span without the helper", async () => {
+    const { exporter } = startMemory({ useGlobalProvider: true, instrument: [] });
+    const client = new Anthropic({
+      apiKey: "test",
+      baseURL: "http://127.0.0.1:9/v1",
+      fetch: () => Promise.resolve(jsonResponse(MESSAGE)),
+    });
+    await client.messages.create({
+      model: "claude-sonnet-4-5",
+      max_tokens: 16,
+      messages: [{ role: "user", content: "hello" }],
+    });
+    const spans = await finished(exporter);
+    expect(spans.map((span) => span.name)).toEqual(["anthropic.messages.create"]);
+    expect(spans[0]?.attributes["gen_ai.usage.input_tokens"]).toBe(5);
+  });
 });
 
 describe("langchain helper", () => {

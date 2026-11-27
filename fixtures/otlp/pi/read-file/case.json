@@ -1,0 +1,17 @@
+{
+  "description": "pi 1.5.2 in -p mode with cetra's extension: one read of hello.txt, then the answer; traces with prompts.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "@earendil-works/pi-coding-agent",
+    "instrumentation_version": "1.5.2",
+    "language": "typescript",
+    "libraries": {
+      "@earendil-works/pi-coding-agent": "1.5.2"
+    },
+    "captured_at": "2026-11-24T12:31:57Z"
+  },
+  "spec_refs": [
+    "02 § Coding agents"
+  ],
+  "notes": "The extension (crates/cli/src/agents/pi_extension.ts) writes the trace from pi's events, so the scope cetra-pi is the extension's and no pi library produces spans. The provider is pi's openai entry, pointed at the mock with the mock key. The system prompt is empty in the input: pi keeps it outside the messages (D-IN-28 item 4). gen_ai.conversation.id is pi's session id, which differs between runs, so it is volatile. The tool-call id is the mock's and stable. The check passes with no timing attributes."
+}

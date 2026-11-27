@@ -1,0 +1,59 @@
+{
+  "description": "Oh My Pi 18.22.0 in -p mode: one read of hello.txt, then the answer; traces with prompts.",
+  "spec_refs": ["02 \u00a7 Coding agents"],
+  "notes": "Oh My Pi reads its endpoint, key and content switch from its own .env file (~/.omp/agent/.env), the six lines `cetra agents setup oh-my-pi` writes (m7-setup-routes.md \u00a7 5.3); logs and metrics are off, and OTEL_SERVICE_NAME is omp. The provider is Oh My Pi's openai entry pointed at the mock with the mock key. The read tool's only required parameter is path, relative to the repo. The spike saw three side calls beside the main flow (m7-setup-routes.md \u00a7 5.3), but its read tool errored; with the read succeeding, as here, Oh My Pi 18.22.0 makes no side calls, so this case has no auxiliary turns. gen_ai.conversation.id is Oh My Pi's session id, which differs between runs, so it is volatile. gen_ai.input.messages and omp.gen_ai.request.messages carry a system-reminder with today's date, and gen_ai.response.time_to_first_chunk and the omp.gen_ai.agent.*.total_latency_ms timings are measured, so the check ignores their values.",
+  "instrumentation": "@oh-my-pi/pi-coding-agent",
+  "libraries": ["@oh-my-pi/pi-coding-agent"],
+  "timing_attributes": [
+    "gen_ai.input.messages",
+    "omp.gen_ai.request.messages",
+    "gen_ai.response.time_to_first_chunk",
+    "omp.gen_ai.agent.chats.total_latency_ms",
+    "omp.gen_ai.agent.tools.total_latency_ms"
+  ],
+  "volatile_attributes": ["gen_ai.conversation.id"],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": null,
+        "reasoning": null,
+        "tool_calls": [
+          {
+            "id": "call_capture_1",
+            "name": "read",
+            "arguments": {
+              "path": "hello.txt"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": 0
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": "hello.txt says: hello from cetra",
+        "reasoning": null,
+        "tool_calls": []
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": 0
+      }
+    }
+  ]
+}

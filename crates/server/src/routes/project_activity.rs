@@ -197,6 +197,7 @@ async fn project_activity(
     .await
     .map_err(|error| match error {
         storage::WidgetError::Run(storage::RunError::Timeout) => "timeout",
+        storage::WidgetError::Run(storage::RunError::Busy) => "busy",
         _ => "query",
     })?;
     Ok(activity_of(

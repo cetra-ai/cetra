@@ -89,12 +89,14 @@ fn part_and_score_value_tags_match_their_schemas() {
         Part::Uri {
             modality: Some(Modality::Image),
             mime_type: Some("image/png".to_owned()),
+            transcript: None,
             uri: "media://abc".to_owned(),
             extra: Map::new(),
         },
         Part::Blob {
             modality: None,
             mime_type: None,
+            transcript: None,
             content: "AAAA".to_owned(),
             extra: Map::new(),
         },

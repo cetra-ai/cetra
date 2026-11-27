@@ -1782,6 +1782,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/alert-rules/issue-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Preview an issue occurrence rule
+         * @description Any project member can read. Counts the live occurrences an `issue_occurrences` rule with this scope and window would count, per bucket as wide as the window: from the window boundary at or before 24 hours ago (`15m`, `1h`), 3 days ago (`6h`) or 14 days ago (`24h`), to now. Exactly one of `issue_id` and `source_id`; windows under 15 minutes are 400. A missing issue or source is 404.
+         */
+        get: operations["get_alert_issue_preview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/alert-rules/{id}": {
         parameters: {
             query?: never;
@@ -4114,6 +4134,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/traces/totals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get trace list totals
+         * @description Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Counts and sums every trace the list matches, not one page.
+         */
+        get: operations["get_trace_totals"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/traces/{trace_id}": {
         parameters: {
             query?: never;
@@ -4412,7 +4452,7 @@ export interface components {
         };
         /** @description A coding agent's session context, sent by `cetra agents hook` (D-CA-9). */
         AgentContextBody: {
-            /** @description `claude-code`, `codex`, `gemini-cli` or `copilot`. */
+            /** @description `claude-code`, `codex`, `gemini-cli`, `copilot` or `qwen-code`. */
             agent: string;
             /** @description The branch, 1 to 256 characters. Absent keeps; `null` clears. */
             branch?: string | null;
@@ -5330,6 +5370,8 @@ export interface components {
             mime_type?: string | null;
             /** @description Media kind, when known. Omitted when absent. An explicit `null` from the source is kept (D65). */
             modality?: components["schemas"]["Modality"] | null;
+            /** @description Spoken text of the media (an audio part's transcript), when known. Omitted when absent. An explicit `null` from the source is kept (D65). */
+            transcript?: string | null;
             /**
              * @description Part type.
              * @enum {string}
@@ -5520,7 +5562,7 @@ export interface components {
          *     Spec 01 `conventions` and spec 02 § Convention detection.
          * @enum {string}
          */
-        Convention: "cetra" | "genai" | "openinference" | "openllmetry" | "vercel" | "langfuse" | "laminar" | "google_adk";
+        Convention: "cetra" | "genai" | "voltagent" | "openinference" | "openllmetry" | "vercel" | "langfuse" | "laminar" | "google_adk";
         /**
          * @description Where a span's cost came from.
          *
@@ -7839,6 +7881,40 @@ export interface components {
              *     approximation when merged issues share users.
              */
             users: number;
+        };
+        /** @description One bucket of an [`IssueAlertPreview`]. */
+        IssueAlertPoint: {
+            /**
+             * Format: int64
+             * @description Live occurrences created in the bucket (before `to` for the last one); 0 when none.
+             */
+            count: number;
+            /**
+             * Format: date-time
+             * @description Start of the bucket: a multiple of the window since the Unix epoch. JSON is RFC 3339.
+             */
+            time: string;
+        };
+        /** @description Occurrence counts of an `issue_occurrences` rule, per bucket as wide as its window (D-K-22). */
+        IssueAlertPreview: {
+            /**
+             * Format: date-time
+             * @description Start of the range, inclusive: the start of the window-wide bucket that holds `to` minus
+             *     the preview span (24 hours, 3 days or 14 days). JSON is RFC 3339.
+             */
+            from: string;
+            /**
+             * @description One per bucket from `from` to the last one that starts before `to`, oldest first, with no
+             *     gap; only the last one is partial.
+             */
+            points: components["schemas"]["IssueAlertPoint"][];
+            /**
+             * Format: date-time
+             * @description End of the range, exclusive (the request time).
+             */
+            to: string;
+            /** @description The window, which is the bucket width. */
+            window: components["schemas"]["AlertWindow"];
         };
         /** @description Candidates of an LLM source created in the last 24 hours, by status (D-IC-12). */
         IssueCandidateCounts: {
@@ -11281,7 +11357,11 @@ export interface components {
         SqlColumnInfo: {
             /** @description Output column name. */
             name: string;
-            /** @description Arrow type as DataFusion prints it, for example `Int64` or `Utf8`. */
+            /**
+             * @description Unified cetra type display name (D-QE-15): `string`, `integer`, `float`, `decimal`,
+             *     `boolean`, `timestamp`, `date`, `interval`, `binary`, `string_list`, `string_map`,
+             *     `list`, `json`, or `null`.
+             */
             type: string;
         };
         /**
@@ -11664,6 +11744,28 @@ export interface components {
             trace_id: components["schemas"]["TraceId"];
             /** @description End-user id. */
             user_id?: string;
+        };
+        /**
+         * @description Totals of the traces a trace list matches (D-C-31).
+         *
+         *     Spec 09 § Observability data.
+         */
+        TraceTotals: {
+            /**
+             * Format: double
+             * @description Sum of their `cost_total`, USD. 0 when none has a cost.
+             */
+            cost_total: number;
+            /**
+             * Format: int64
+             * @description Of those, traces with status `error`.
+             */
+            error_trace_count: number;
+            /**
+             * Format: int64
+             * @description Traces the list would page through.
+             */
+            trace_count: number;
         };
         /**
          * @description One span in a flat pre-order trace tree.
@@ -12071,6 +12173,8 @@ export interface components {
             mime_type?: string | null;
             /** @description Media kind, when known. Omitted when absent. An explicit `null` from the source is kept (D65). */
             modality?: components["schemas"]["Modality"] | null;
+            /** @description Spoken text of the media (an audio part's transcript), when known. Omitted when absent. An explicit `null` from the source is kept (D65). */
+            transcript?: string | null;
             /**
              * @description Part type.
              * @enum {string}
@@ -19797,6 +19901,105 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_alert_issue_preview: {
+        parameters: {
+            query: {
+                /**
+                 * @description The issue counted, with its merge target and the issues merged into that target.
+                 *     Exactly one of `issue_id` and `source_id`.
+                 */
+                issue_id?: string;
+                /**
+                 * @description The source whose issues are counted, except the ignored and merged ones (with the issues
+                 *     merged into each). Exactly one of `issue_id` and `source_id`.
+                 */
+                source_id?: string;
+                /** @description The rule's window: `15m`, `1h`, `6h` or `24h`. It is the bucket width. */
+                window: components["schemas"]["AlertWindow"];
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The counts per bucket. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssueAlertPreview"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -33004,6 +33207,105 @@ export interface operations {
                 };
                 content: {
                     "text/event-stream": string;
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_trace_totals: {
+        parameters: {
+            query?: {
+                /** @description Filter DSL expression over the `traces` view (spec 05). */
+                filter?: string;
+                /** @description Full-text search (spec 05 § Full-text search). At most 1,024 bytes (D-G-39). */
+                search?: string;
+                /** @description Inclusive range start. RFC 3339 or epoch milliseconds. */
+                from?: components["schemas"]["TimeParam"];
+                /** @description Exclusive range end. RFC 3339 or epoch milliseconds. */
+                to?: components["schemas"]["TimeParam"];
+                /** @description Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions. */
+                include_eval?: boolean;
+                /** @description Include experiment traces. Default false. Spec 05 § Default exclusions. */
+                include_experiments?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Totals of the matching traces. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TraceTotals"];
                 };
             };
             /** @description The request is malformed or a filter is invalid. */

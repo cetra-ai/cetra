@@ -871,7 +871,7 @@ fn try_encode_rle(
             (r.values().clone(), r.run_ends().to_vec())
         }
         Column::Const { value, len } if *len >= 4 && !value.is_null() => {
-            let single = col.slice(0, 1)?.materialize(None)?;
+            let single = col.slice(0, 1, None)?.materialize(None)?;
             (single, vec![*len as u32])
         }
         Column::Flat(f) => {

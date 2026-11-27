@@ -1,0 +1,47 @@
+---
+title: aisuite
+description: "Trace aisuite calls with cetra through the instrumentation of each provider SDK it wraps."
+---
+
+Trace aisuite calls with cetra through the instrumentation of each provider SDK it wraps.
+
+## Install
+
+```bash
+pip install "cetra-sdk[openai,anthropic]" "aisuite[openai,anthropic]"
+```
+
+## Set up
+
+{/* untested: calls OpenAI and needs OPENAI_API_KEY */}
+```python
+import aisuite as ai
+import cetra
+
+cetra.init(instrument=["openai", "anthropic"])
+
+client = ai.Client()
+response = client.chat.completions.create(
+    model="openai:gpt-4o-mini",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+)
+print(response.choices[0].message.content)
+
+cetra.flush()
+```
+
+## What you get
+
+- The spans come from the instrumentation of the provider SDK that aisuite calls, for the providers that `cetra.init` instruments.
+- Token counts and cost come from those spans.
+
+## Limits
+
+- aisuite calls each provider's own SDK, so the spans come from that SDK's instrumentation; a provider without an instrumentation in `cetra-sdk` is not traced.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.

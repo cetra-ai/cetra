@@ -10,8 +10,7 @@ use cetra_query::{EvalContext, Expr, QueryError, covered_predicate};
 use chrono::NaiveDate;
 
 use crate::catalog::FileTable;
-use crate::column_bridge::{arrow_schema_to_column, record_batch_to_column};
-use crate::deletion::{PendingDeletion, applicable};
+use crate::deletion::{PendingDeletion, ProjectMemSnapshot, applicable};
 use crate::memtable::{MemBatch, MemSnapshot};
 use crate::wal::Table;
 
@@ -51,7 +50,7 @@ impl MemtableSource {
         snapshot: Arc<MemSnapshot>,
         deletions: Arc<[Arc<PendingDeletion>]>,
     ) -> Result<Self, QueryError> {
-        let schema = Arc::new(arrow_schema_to_column(&table.schema())?);
+        let schema = FileTable::from(table).column_schema();
         Ok(Self {
             table,
             project,
@@ -60,6 +59,24 @@ impl MemtableSource {
             deletions,
             schema,
         })
+    }
+
+    /// Creates a [`MemtableSource`] over a [`ProjectMemSnapshot`] already filtered by
+    /// `deletion::project_snapshot` (retention `keep_from` and pending `deletions` are
+    /// already applied; `project` is retained because `project_snapshot`'s zero-copy fast
+    /// path may share other projects' partitions).
+    pub(crate) fn from_projected(
+        table: Table,
+        project: ProjectId,
+        snapshot: &ProjectMemSnapshot,
+    ) -> Result<Self, QueryError> {
+        Self::new(
+            table,
+            project,
+            None,
+            Arc::clone(snapshot.as_snapshot()),
+            Arc::from([]),
+        )
     }
 
     fn selected_batches(&self, spec: &ScanSpec) -> Vec<MemBatch> {
@@ -140,7 +157,7 @@ impl ScanSource for MemtableSource {
                     deletions: Arc::clone(&self.deletions),
                     filters: spec.filters.clone(),
                     projection: spec.projection.clone(),
-                    now_ns: ctx.eval.now_ns,
+                    eval: ctx.eval.clone(),
                 }) as Box<dyn PartitionStream>
             })
             .collect();
@@ -172,7 +189,7 @@ struct MemPartitionStream {
     deletions: Arc<[Arc<PendingDeletion>]>,
     filters: Vec<Expr>,
     projection: Option<Vec<usize>>,
-    now_ns: i64,
+    eval: EvalContext,
 }
 
 impl PartitionStream for MemPartitionStream {
@@ -182,10 +199,7 @@ impl PartitionStream for MemPartitionStream {
         mut res: Option<&mut Reservation>,
     ) -> Result<Option<Batch>, QueryError> {
         let before = res.as_ref().map_or(0, |r| r.size());
-        let eval_ctx = EvalContext {
-            now_ns: self.now_ns,
-            cancel: cancel.clone(),
-        };
+        let eval_ctx = self.eval.with_cancel(cancel.clone());
 
         while self.cursor < self.batches.len() {
             if cancel.is_cancelled() {
@@ -197,15 +211,6 @@ impl PartitionStream for MemPartitionStream {
             if mem_batch.batch.num_rows() == 0 {
                 continue;
             }
-
-            let batch = match record_batch_to_column(&mem_batch.batch) {
-                Ok(b) => b,
-                Err(err) => {
-                    rollback_res(res, before);
-                    return Err(err.into());
-                }
-            };
-            reconcile_res(res.as_deref_mut(), before, batch.memory_bytes())?;
 
             let covering = applicable(&self.deletions, None, mem_batch.min_ingest_time);
             let tombstone_pred = if covering.is_empty() {
@@ -220,6 +225,25 @@ impl PartitionStream for MemPartitionStream {
                     }
                 }
             };
+
+            if self.filters.is_empty()
+                && tombstone_pred.is_none()
+                && let Some(indices) = &self.projection
+            {
+                reconcile_res(res.as_deref_mut(), before, mem_batch.bytes)?;
+                let projected = match mem_batch.batch.project(indices) {
+                    Ok(b) => b,
+                    Err(err) => {
+                        rollback_res(res, before);
+                        return Err(err.into());
+                    }
+                };
+                reconcile_res(res, before, projected.memory_bytes())?;
+                return Ok(Some(projected));
+            }
+
+            reconcile_res(res.as_deref_mut(), before, mem_batch.bytes)?;
+            let batch = Batch::clone(&mem_batch.batch);
 
             let mut filtered = apply_tombstones_and_filters(
                 batch,
@@ -313,10 +337,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         ExecContext {
             pool: GlobalPool::standalone(cap),
-            eval: EvalContext {
-                now_ns: 0,
-                cancel: CancelToken::new(),
-            },
+            eval: EvalContext::new(0, CancelToken::new()),
             spill: Arc::new(SpillManager::with_fixed_cap(dir.keep(), 1024 * 1024)),
             workers: Arc::new(WorkerPool::new(2).unwrap()),
             batch_size: 8192,
@@ -463,5 +484,58 @@ mod tests {
 
         let summary = source.explain_summary(&ScanSpec::default());
         assert_eq!(summary, "MemtableSource(table=spans, batches=2, filters=0)");
+    }
+
+    #[test]
+    fn from_projected_isolates_project_on_zero_copy_fast_path() {
+        let p1 = project(1);
+        let p2 = project(2);
+        let mut mt = Memtable::new(Table::Spans);
+
+        let mut s1 = span_row(1, 0, DAY_NS + 100, 1_000);
+        s1.project_id = p1;
+        let mut s2 = span_row(2, 0, DAY_NS + 200, 1_000);
+        s2.project_id = p2;
+
+        mt.insert(p1, span_rows(&[s1]), 1).unwrap();
+        mt.insert(p2, span_rows(&[s2]), 2).unwrap();
+
+        // No deletions and no keep_from -> project_snapshot takes the zero-copy fast path
+        // sharing both projects' partitions.
+        let projected =
+            crate::deletion::project_snapshot(Table::Spans, &mt.snapshot(), p1, None, &[]).unwrap();
+        assert_eq!(projected.as_snapshot().partitions.len(), 2);
+
+        let source = MemtableSource::from_projected(Table::Spans, p1, &projected).unwrap();
+        assert_eq!(
+            source.explain_summary(&ScanSpec::default()),
+            "MemtableSource(table=spans, batches=1, filters=0)"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ExecContext {
+            pool: GlobalPool::standalone(8 * 1024 * 1024),
+            eval: EvalContext::new(0, CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(dir.path().to_path_buf(), 0)),
+            workers: Arc::new(WorkerPool::new(1).unwrap()),
+            batch_size: 16,
+            target_partitions: 1,
+            metrics: ExecMetrics::default(),
+        };
+        let streams = source.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+        let pool = Arc::clone(&ctx.pool);
+        let sinks = cetra_query::exec::run_pipeline(
+            &ctx,
+            streams,
+            |_| Ok(Vec::new()),
+            move |_| Ok(cetra_query::exec::CollectSink::new(&pool)),
+        )
+        .unwrap();
+        let total_rows: usize = sinks
+            .into_iter()
+            .flat_map(cetra_query::exec::CollectSink::into_batches)
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(total_rows, 1, "from_projected must not leak p2 rows");
     }
 }

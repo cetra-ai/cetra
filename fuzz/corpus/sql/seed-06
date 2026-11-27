@@ -1,0 +1,1 @@
+SELECT id, label FROM dataset_items WHERE id IN (SELECT 1) AND id NOT IN (SELECT 99) AND EXISTS (SELECT 1 FROM spans)

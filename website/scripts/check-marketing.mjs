@@ -142,6 +142,22 @@ function isNamed(element, html) {
 }
 
 /**
+ * The findings for the dark-mode opt-out of one built page (marketing or docs): the site has its own dark
+ * theme, so Dark Reader must be locked off and the page must declare a dark colour scheme, which keeps the
+ * browsers' automatic dark mode away.
+ */
+export function checkDarkModeOptOut(html) {
+  const metas = tags(stripBlocks(html), "meta");
+  const findings = [];
+  if (!metas.some((m) => m.get("name") === "darkreader-lock")) {
+    findings.push("darkreader-lock meta missing");
+  }
+  const scheme = metas.find((m) => m.get("name") === "color-scheme")?.get("content") ?? "";
+  if (!scheme.split(/\s+/).includes("dark")) findings.push("color-scheme meta must include dark");
+  return findings;
+}
+
+/**
  * The findings for one built page, as messages (without the route).
  * `distFiles` holds the built paths, e.g. "/docs/index.html".
  */
@@ -253,6 +269,8 @@ export function checkPage(route, html, { noindex, distFiles = new Set(), launche
   if (!hasOgImage) findings.push("og:image missing");
   if (!distFiles.has("/og.png")) findings.push("og image /og.png not built");
 
+  findings.push(...checkDarkModeOptOut(html));
+
   return findings;
 }
 
@@ -352,6 +370,12 @@ function run() {
     if (weight > MAX_PAGE_BYTES) {
       findings.push(`${route}: page weighs ${weight} bytes, the cap is ${MAX_PAGE_BYTES}`);
     }
+  }
+
+  for (const file of distFiles) {
+    if (!file.startsWith("/docs/") || !file.endsWith(".html")) continue;
+    const html = readFileSync(join(DIST, file), "utf8");
+    for (const message of checkDarkModeOptOut(html)) findings.push(`${file}: ${message}`);
   }
 
   if (findings.length > 0) {

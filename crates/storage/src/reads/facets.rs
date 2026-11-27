@@ -1,28 +1,43 @@
-//! Facets: the values, keys or histogram of one field over the rows a list shows (D1 of the
-//! filtering plan). The rows are the list's rows before its cursor, sort and limit.
+//! Native query engine implementation of shared-scan `facets` (D1, D-C-24).
+
+use std::cmp::Ordering;
+use std::collections::{BTreeSet, BinaryHeap, HashSet};
+use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+use cetra_column::{
+    Batch, Column, DataType, Field, FlatColumn, FlatData, Reservation, ScalarValue, Schema,
+    Selection, Utf8Data,
+};
+use cetra_core::schema::{spans, traces};
+use cetra_query::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join};
+use cetra_query::exec::{
+    AggExpr, AggFunc, ControlFlow, DdSketch, ExecContext, HashAgg, HashAggSpec, MapProjection,
+    PartitionStream, PushSink, ScanSource, ScanSpec, collect_expr_map_projections,
+    run_pipeline as exec_run_pipeline,
+};
+use cetra_query::{CompiledFilter, Expr, FilterView, QueryError};
 
 use std::time::Duration;
 
-use futures::StreamExt;
-
-use arrow::array::{Array, AsArray};
-use arrow::record_batch::RecordBatch;
-use datafusion::common::{NullHandling, UnnestOptions};
-use datafusion::functions::string::expr_fn::starts_with;
-use datafusion::functions_aggregate::expr_fn::{count, max, min};
-use datafusion::functions_nested::expr_fn::{array_distinct, cardinality, map_keys};
-use datafusion::logical_expr::expr_fn::when;
-use datafusion::logical_expr::{Expr, Like, cast, col, lit};
-use datafusion::prelude::DataFrame;
-use std::ops::Not;
-
-use super::columns::{f64_at, i64_at, internal, percentile, require};
-use super::sessions::session_rows;
-use super::{ListScope, present};
-use crate::filter::{Filter, FilterView, exclusions, like_pattern, search, time_window};
-use crate::query_error::{RunError, classify};
+use crate::query_error::RunError;
+use crate::reads::ListScope;
+use crate::reads::columns::{
+    active_rows, internal, raw_bool_at, raw_f64_at, raw_i64_at, raw_string_at,
+};
+use crate::reads::context::{
+    DURATION_MS, EngineContext, OperatorStream, populate_id_lookups, query_err_to_run,
+    rewrite_view_expr_for_raw, run_err_to_query, spans_raw_schema, spans_view_projection,
+    spans_view_schema, traces_raw_schema, traces_view_projection, traces_view_schema,
+};
+use crate::reads::present;
+use crate::reads::scope::{
+    SearchPredicate, StreamSet, scoped_spans_spec, scoped_traces_spec, search_predicate,
+    sessions_from_traces, sessions_from_traces_projection,
+};
+use crate::reads::scores_join::{apply_compiled_filter, compile_optional_filter};
 use crate::views::QueryContext;
-use arrow::datatypes::DataType;
 
 /// Most values (or keys) one values facet returns.
 pub const MAX_FACET_LIMIT: usize = 100;
@@ -46,8 +61,6 @@ pub enum FacetView {
 
 /// Most fields one facet batch asks.
 pub const MAX_FACET_FIELDS: usize = 20;
-/// Fields of one batch computed at the same time (D-C-24).
-const FIELDS_AT_ONCE: usize = 4;
 
 /// One field of a facet batch.
 #[derive(Debug, Clone, Copy)]
@@ -142,7 +155,11 @@ pub struct FacetData {
     pub histogram: Option<Histogram>,
 }
 
-/// The columns a view facets, by kind.
+const CANNOT_FACET: &str = "field cannot be faceted";
+const INTERNAL_KEY_PREFIX: &str = "cetra.";
+const VALUE_COL: &str = "facet_value";
+const COUNT_COL: &str = "facet_count";
+
 struct FacetColumns {
     values: &'static [&'static str],
     bools: &'static [&'static str],
@@ -228,8 +245,15 @@ fn columns_of(view: FacetView) -> &'static FacetColumns {
     }
 }
 
-/// A parsed field. Names are the view's own column names.
-#[derive(Debug, Clone, PartialEq, Eq)]
+fn filter_view(view: FacetView) -> FilterView {
+    match view {
+        FacetView::Traces => FilterView::Traces,
+        FacetView::Spans => FilterView::Spans,
+        FacetView::Sessions => FilterView::Sessions,
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 enum ParsedField {
     Values(&'static str),
     Bool(&'static str),
@@ -239,29 +263,23 @@ enum ParsedField {
     Number(&'static str),
 }
 
-const CANNOT_FACET: &str = "field cannot be faceted";
+impl fmt::Debug for ParsedField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Values(col) => f.debug_tuple("Values").field(col).finish(),
+            Self::Bool(col) => f.debug_tuple("Bool").field(col).finish(),
+            Self::List(col) => f.debug_tuple("List").field(col).finish(),
+            Self::Keys(col) => f.debug_tuple("Keys").field(col).finish(),
+            Self::MapValue(col, key) => f
+                .debug_struct("MapValue")
+                .field("col", col)
+                .field("key_len", &key.len())
+                .finish_non_exhaustive(),
+            Self::Number(col) => f.debug_tuple("Number").field(col).finish(),
+        }
+    }
+}
 
-/// Column names of the facets: the aliases of the intermediate frames.
-const VALUE: &str = "facet_value";
-const COUNT: &str = "facet_count";
-const TOTAL: &str = "facet_total";
-const MISSING: &str = "facet_missing";
-const PRESENT: &str = "facet_present";
-const X: &str = "facet_x";
-const BUCKET: &str = "facet_bucket";
-const MIN: &str = "facet_min";
-const MAX: &str = "facet_max";
-const P50: &str = "facet_p50";
-const P95: &str = "facet_p95";
-const P99: &str = "facet_p99";
-/// The prefix of internal keys, which facets leave out.
-const INTERNAL_KEY_PREFIX: &str = "cetra.";
-
-/// Parses `text` as a field of `view`: a column name, or `map['key']` of a keys column.
-///
-/// # Errors
-///
-/// [`RunError::InvalidRequest`] when the field is not a facet column of the view.
 fn parse_field(view: FacetView, text: &str) -> Result<ParsedField, RunError> {
     let columns = columns_of(view);
     let find = |names: &'static [&'static str]| names.iter().find(|name| **name == text).copied();
@@ -293,8 +311,6 @@ fn parse_field(view: FacetView, text: &str) -> Result<ParsedField, RunError> {
     Err(RunError::InvalidRequest(CANNOT_FACET.to_owned()))
 }
 
-/// The key of `map['key']` from the text between `['` and `']`: each `'` is written `''`.
-/// `None` for a bad quote or a key of 0 or more than [`MAX_FACET_KEY`] characters.
 fn unescape_key(escaped: &str) -> Option<String> {
     let mut key = String::with_capacity(escaped.len());
     let mut chars = escaped.chars();
@@ -308,16 +324,25 @@ fn unescape_key(escaped: &str) -> Option<String> {
     (1..=MAX_FACET_KEY).contains(&length).then_some(key)
 }
 
-/// A field that passed its checks: the parsed field, its trimmed `q` and its limit.
-type CheckedField<'a> = (ParsedField, Option<&'a str>, usize);
+#[derive(Clone)]
+struct CheckedField {
+    field: ParsedField,
+    query: Option<String>,
+    limit: usize,
+}
 
-/// The limit and `q` of one field, and the parsed field. The limit is checked first, then `q`,
-/// then the field name.
-///
-/// # Errors
-///
-/// [`RunError::InvalidRequest`] for a bad limit, `q` or field.
-fn check_field<'a>(view: FacetView, field: &FacetField<'a>) -> Result<CheckedField<'a>, RunError> {
+impl fmt::Debug for CheckedField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CheckedField")
+            .field("field", &self.field)
+            .field("has_query", &self.query.is_some())
+            .field("query_len", &self.query.as_ref().map(String::len))
+            .field("limit", &self.limit)
+            .finish()
+    }
+}
+
+fn check_field(view: FacetView, field: &FacetField<'_>) -> Result<CheckedField, RunError> {
     if !(1..=MAX_FACET_LIMIT).contains(&field.limit) {
         return Err(RunError::InvalidRequest(format!(
             "limit must be between 1 and {MAX_FACET_LIMIT}"
@@ -331,31 +356,24 @@ fn check_field<'a>(view: FacetView, field: &FacetField<'a>) -> Result<CheckedFie
                     "q must be 1 to {MAX_FACET_QUERY} characters"
                 )));
             }
-            Some(trimmed)
+            Some(trimmed.to_owned())
         }
         None => None,
     };
     let parsed = parse_field(view, field.field)?;
-    Ok((parsed, query, field.limit))
+    Ok(CheckedField {
+        field: parsed,
+        query,
+        limit: field.limit,
+    })
 }
 
-/// The facets of `request`, one result per field in request order: each field's values, keys or
-/// histogram, over the rows of the list. The rows are built once and the fields run
-/// concurrently under one deadline (D-C-24).
-///
-/// # Errors
-///
-/// The outer error fails the whole batch: [`RunError::InvalidRequest`] for 0 or more than
-/// [`MAX_FACET_FIELDS`] fields, or `search` on sessions; [`RunError::Invalid`] for a bad filter
-/// (all checked before any query runs); [`RunError::Timeout`] when building the rows passes
-/// `timeout`; DataFusion failures through [`classify`].
-///
-/// A field's own error is in its slot: [`RunError::InvalidRequest`] for a bad limit, `q` or
-/// field; [`RunError::Timeout`] when the field passes the deadline; query failures.
+/// Shared-scan native query engine implementation of `facets`.
 pub async fn facets(
     ctx: &QueryContext,
     request: FacetsRequest<'_>,
 ) -> Result<Vec<Result<FacetData, RunError>>, RunError> {
+    let ctx = ctx.engine();
     if !(1..=MAX_FACET_FIELDS).contains(&request.fields.len()) {
         return Err(RunError::InvalidRequest(format!(
             "fields must hold 1 to {MAX_FACET_FIELDS} fields"
@@ -366,270 +384,481 @@ pub async fn facets(
             "search is not supported for sessions".to_owned(),
         ));
     }
-    let filter = match present(request.filter) {
-        Some(text) => Some(ctx.parse_filter(filter_view(request.view), text)?),
-        None => None,
-    };
-    let checked: Vec<Result<CheckedField<'_>, RunError>> = request
+
+    let filter = compile_optional_filter(filter_view(request.view), request.filter)?;
+    let checked: Vec<Result<CheckedField, RunError>> = request
         .fields
         .iter()
         .map(|field| check_field(request.view, field))
         .collect();
+
     if checked.iter().all(Result::is_err) {
-        // No field is valid, so no query runs.
         return Ok(checked
             .into_iter()
             .map(|entry| match entry {
                 Err(error) => Err(error),
-                Ok(_) => Err(internal(
-                    "a valid field reached the error-only path".to_owned(),
-                )),
+                Ok(_) => Err(internal("a valid field reached the error-only path")),
             })
             .collect());
     }
+
+    let search_text = present(request.search).map(str::to_owned);
+    if search_text.is_some() && request.scope.window.is_none() {
+        return Err(RunError::InvalidRequest(
+            "search needs a time range".to_owned(),
+        ));
+    }
+
     let deadline = tokio::time::Instant::now() + request.timeout;
-    let frame = match tokio::time::timeout_at(deadline, rows(ctx, &request, filter)).await {
-        Err(_) => return Err(RunError::Timeout),
-        Ok(frame) => frame?,
-    };
-    // Collected first: a lazy `map` inside the stream makes the handler's future not `Send`.
-    let futures: Vec<_> = checked
+    let valid_fields: Vec<(usize, CheckedField)> = checked
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, entry)| entry.as_ref().ok().cloned().map(|f| (idx, f)))
+        .collect();
+
+    let mut slots: Vec<Result<FacetData, RunError>> = checked
         .into_iter()
-        .map(|entry| {
-            let frame = frame.clone();
-            async move {
-                let (field, query, limit) = entry?;
-                match tokio::time::timeout_at(deadline, one(ctx, frame, &field, query, limit)).await
-                {
-                    Err(_) => Err(RunError::Timeout),
-                    Ok(result) => result,
-                }
+        .map(|entry| match entry {
+            Err(e) => Err(e),
+            Ok(_) => Err(RunError::Timeout),
+        })
+        .collect();
+
+    // Pass 1: 1 shared scan across all valid fields.
+    let pass1_timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let pass1_out = {
+        let ctx_c = ctx.clone();
+        let view = request.view;
+        let scope = request.scope;
+        let filter_c = filter.clone();
+        let search_c = search_text.clone();
+        let fields_c = valid_fields.clone();
+        ctx.run_with_ctx(pass1_timeout, move |exec_ctx| {
+            run_pass1(
+                &ctx_c,
+                exec_ctx,
+                view,
+                scope,
+                filter_c,
+                search_c.as_deref(),
+                &fields_c,
+            )
+            .map_err(run_err_to_query)
+        })
+        .await
+    };
+
+    let (pass1_done, pending_histograms) = match pass1_out {
+        Ok((out, _)) => out,
+        Err(RunError::Timeout) => {
+            // Preserve pre-validated InvalidRequest slots; mark valid slots Timeout.
+            return Ok(slots);
+        }
+        Err(other) => return Err(other),
+    };
+
+    for (slot_idx, res) in pass1_done {
+        slots[slot_idx] = res;
+    }
+
+    if pending_histograms.is_empty() {
+        return Ok(slots);
+    }
+
+    // Pass 2: at most 1 narrow scan projecting only histogram numeric columns where p99 > min.
+    let pass2_timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if pass2_timeout.is_zero() {
+        for h in pending_histograms {
+            slots[h.slot_idx] = Err(RunError::Timeout);
+        }
+        return Ok(slots);
+    }
+    let pass2_out = {
+        let ctx_c = ctx.clone();
+        let view = request.view;
+        let scope = request.scope;
+        let filter_c = filter;
+        let search_c = search_text;
+        let pending_c = pending_histograms.clone();
+        ctx.run_with_ctx(pass2_timeout, move |exec_ctx| {
+            run_pass2(
+                &ctx_c,
+                exec_ctx,
+                view,
+                scope,
+                filter_c,
+                search_c.as_deref(),
+                &pending_c,
+            )
+            .map_err(run_err_to_query)
+        })
+        .await
+    };
+
+    match pass2_out {
+        Ok((completed, _)) => {
+            for (slot_idx, res) in completed {
+                slots[slot_idx] = res;
+            }
+            Ok(slots)
+        }
+        Err(RunError::Timeout) => {
+            // Preserve completed Pass 1 Values/Keys/0-or-1-bucket Histograms; mark only Pass 2
+            // histograms as Timeout.
+            for h in pending_histograms {
+                slots[h.slot_idx] = Err(RunError::Timeout);
+            }
+            Ok(slots)
+        }
+        Err(other) => Err(other),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingHistogram {
+    slot_idx: usize,
+    col_name: &'static str,
+    total: u64,
+    present: u64,
+    min: f64,
+    max: f64,
+    p50: f64,
+    p95: f64,
+    p99: f64,
+}
+
+type FacetSlotResults = Vec<(usize, Result<FacetData, RunError>)>;
+type Pass1Result = (FacetSlotResults, Vec<PendingHistogram>);
+
+fn run_pass1(
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
+    view: FacetView,
+    scope: ListScope,
+    filter: Option<CompiledFilter>,
+    search: Option<&str>,
+    valid_fields: &[(usize, CheckedField)],
+) -> Result<Pass1Result, RunError> {
+    let field_refs: Vec<&ParsedField> = valid_fields.iter().map(|(_, f)| &f.field).collect();
+    let StreamSet {
+        streams,
+        schema: input_schema,
+    } = open_facets_streams(ctx, exec_ctx, view, scope, filter, search, &field_refs)?;
+
+    let utf8_schema = single_utf8_schema()?;
+    let agg_spec = single_utf8_agg_spec(&utf8_schema)?;
+
+    if streams.is_empty() {
+        let mut done = Vec::with_capacity(valid_fields.len());
+        for (slot_idx, checked) in valid_fields {
+            let data = match checked.field {
+                ParsedField::Number(_) => empty_histogram(0),
+                ParsedField::Keys(_) => FacetData {
+                    kind: FacetKind::Keys,
+                    total: 0,
+                    missing: 0,
+                    values: Vec::new(),
+                    more: false,
+                    histogram: None,
+                },
+                _ => FacetData {
+                    kind: FacetKind::Values,
+                    total: 0,
+                    missing: 0,
+                    values: Vec::new(),
+                    more: false,
+                    histogram: None,
+                },
+            };
+            done.push((*slot_idx, Ok(data)));
+        }
+        return Ok((done, Vec::new()));
+    }
+
+    // Allocate one demand-allocated child `ScopedPool` per value field (total cap <= 3/4 * available)
+    // shared across all `P` partition sinks and `combine_pass1_sinks`.
+    let num_value_fields = valid_fields
+        .iter()
+        .filter(|(_, f)| !matches!(f.field, ParsedField::Number(_)))
+        .count();
+    let available = exec_ctx.pool.cap().saturating_sub(exec_ctx.pool.reserved());
+    let three_quarters = (available / 4).saturating_mul(3) + ((available % 4) * 3) / 4;
+    let per_field_cap = three_quarters / num_value_fields.max(1);
+    let budgets: Vec<Option<Arc<FieldBudget>>> = valid_fields
+        .iter()
+        .map(|(_, f)| {
+            if matches!(f.field, ParsedField::Number(_)) {
+                None
+            } else {
+                Some(Arc::new(FieldBudget::new(exec_ctx, per_field_cap)))
             }
         })
         .collect();
-    // At most `FIELDS_AT_ONCE` fields run at a time, so one batch does not take the scans of
-    // twenty readers; `buffered` keeps the request order.
-    Ok(futures::stream::iter(futures)
-        .buffered(FIELDS_AT_ONCE)
-        .collect()
-        .await)
-}
 
-fn filter_view(view: FacetView) -> FilterView {
-    match view {
-        FacetView::Traces => FilterView::Traces,
-        FacetView::Spans => FilterView::Spans,
-        FacetView::Sessions => FilterView::Sessions,
-    }
-}
-
-/// The one set of rows every field of the batch is counted over: the list's rows before its
-/// cursor, sort and limit, with the filter applied.
-async fn rows(
-    ctx: &QueryContext,
-    request: &FacetsRequest<'_>,
-    filter: Option<Filter>,
-) -> Result<DataFrame, RunError> {
-    match request.view {
-        FacetView::Traces => {
-            window_rows(
-                ctx,
-                "traces",
-                FilterView::Traces,
-                request.scope,
-                request.search,
-                filter,
-            )
-            .await
-        }
-        FacetView::Spans => {
-            window_rows(
-                ctx,
-                "spans",
-                FilterView::Spans,
-                request.scope,
-                request.search,
-                filter,
-            )
-            .await
-        }
-        FacetView::Sessions => session_rows(ctx, request.scope, filter).await,
-    }
-}
-
-/// The facet of one parsed field over `frame`: a histogram for a number, else its values.
-async fn one(
-    ctx: &QueryContext,
-    frame: DataFrame,
-    field: &ParsedField,
-    query: Option<&str>,
-    limit: usize,
-) -> Result<FacetData, RunError> {
-    match field {
-        ParsedField::Number(name) => histogram(ctx, frame, name).await,
-        _ => values(ctx, frame, field, query, limit).await,
-    }
-}
-
-/// The rows of the traces or spans list before its cursor, sort and limit: the window, the
-/// default exclusions, the search and the filter, in the order `list_frame` applies them.
-async fn window_rows(
-    ctx: &QueryContext,
-    table: &str,
-    view: FilterView,
-    scope: ListScope,
-    text_search: Option<&str>,
-    filter: Option<Filter>,
-) -> Result<DataFrame, RunError> {
-    let references_environment = filter
-        .as_ref()
-        .is_some_and(|filter| filter.references_environment);
-    let mut frame = ctx.session().table(table).await.map_err(classify)?;
-    let mut conjuncts = Vec::new();
-    if let Some(window) = scope.window {
-        conjuncts.push(time_window(window));
-    }
-    if let Some(expr) = exclusions(
-        ctx,
-        view,
-        scope.include_eval,
-        scope.include_experiments,
-        references_environment,
-    )? {
-        conjuncts.push(expr);
-    }
-    if let Some(text) = present(text_search)
-        && let Some(expr) = search(view, text, scope.window, ctx).await?
+    if !budgets.is_empty()
+        && budgets
+            .iter()
+            .all(|b| b.as_ref().is_some_and(|budget| budget.is_tripped()))
     {
-        conjuncts.push(expr);
+        let done = valid_fields
+            .iter()
+            .map(|(slot_idx, _)| (*slot_idx, Err(RunError::TooLarge)))
+            .collect();
+        return Ok((done, Vec::new()));
     }
-    if let Some(predicate) = conjuncts.into_iter().reduce(Expr::and) {
-        frame = frame.filter(predicate).map_err(classify)?;
-    }
-    if let Some(filter) = filter {
-        frame = filter.apply(frame, ctx).await.map_err(classify)?;
-    }
-    Ok(frame)
-}
 
-/// The expression of the field's value, one per element for a list and one per key for keys.
-fn value_expr(frame: &DataFrame, field: &ParsedField) -> Result<Expr, RunError> {
-    match field {
-        ParsedField::Values(name) | ParsedField::Bool(name) => Ok(col(*name)),
-        ParsedField::List(name) => Ok(array_distinct(col(*name))),
-        ParsedField::Keys(name) => Ok(map_keys(col(*name))),
-        ParsedField::MapValue(name, key) => {
-            let key = key.replace('\'', "''");
-            frame
-                .parse_sql_expr(&format!("{name}['{key}']"))
-                .map_err(classify)
+    let sinks = exec_run_pipeline(exec_ctx, streams, |_| Ok(Vec::new()), {
+        let fields_c = valid_fields.to_vec();
+        let schema_c = Arc::clone(&input_schema);
+        let utf8_c = Arc::clone(&utf8_schema);
+        let agg_c = agg_spec.clone();
+        let ctx_c = exec_ctx.clone();
+        let budgets_c = budgets.clone();
+        move |_| {
+            FacetFanoutSink::new(
+                view,
+                &fields_c,
+                &schema_c,
+                &utf8_c,
+                &agg_c,
+                ctx_c.clone(),
+                &budgets_c,
+            )
         }
-        ParsedField::Number(_) => Err(internal("a number field has no values".to_owned())),
-    }
+    })
+    .map_err(query_err_to_run)?;
+
+    combine_pass1_sinks(sinks, valid_fields, &agg_spec, &utf8_schema, &budgets)
 }
 
-/// Values of a non-number field: totals, then the groups by value.
-async fn values(
-    ctx: &QueryContext,
-    frame: DataFrame,
-    field: &ParsedField,
-    query: Option<&str>,
+fn combine_pass1_sinks(
+    mut sinks: Vec<FacetFanoutSink>,
+    valid_fields: &[(usize, CheckedField)],
+    agg_spec: &HashAggSpec,
+    utf8_schema: &Arc<Schema>,
+    budgets: &[Option<Arc<FieldBudget>>],
+) -> Result<Pass1Result, RunError> {
+    let mut done = Vec::new();
+    let mut pending = Vec::new();
+
+    for (pos, (slot_idx, checked)) in valid_fields.iter().enumerate() {
+        match &checked.field {
+            ParsedField::Number(col_name) => {
+                let mut total = 0u64;
+                let mut present_cnt = 0u64;
+                let mut min_val = f64::INFINITY;
+                let mut max_val = f64::NEG_INFINITY;
+                let mut sketch = DdSketch::new();
+
+                for sink in &sinks {
+                    if let FieldWorkerState::Histogram(st) = &sink.states[pos] {
+                        total = total.saturating_add(st.total);
+                        present_cnt = present_cnt.saturating_add(st.present);
+                        if st.present > 0 {
+                            min_val = min_val.min(st.min);
+                            max_val = max_val.max(st.max);
+                            sketch.merge(&st.sketch);
+                        }
+                    }
+                }
+
+                if present_cnt == 0 {
+                    done.push((*slot_idx, Ok(empty_histogram(total))));
+                    continue;
+                }
+
+                let p50 = sketch
+                    .quantile(0.5)
+                    .map_err(query_err_to_run)?
+                    .ok_or_else(|| internal("non-empty sketch returned None p50"))?;
+                let p95 = sketch
+                    .quantile(0.95)
+                    .map_err(query_err_to_run)?
+                    .ok_or_else(|| internal("non-empty sketch returned None p95"))?;
+                let p99 = sketch
+                    .quantile(0.99)
+                    .map_err(query_err_to_run)?
+                    .ok_or_else(|| internal("non-empty sketch returned None p99"))?;
+
+                if p99 <= min_val {
+                    let data = FacetData {
+                        kind: FacetKind::Histogram,
+                        total,
+                        missing: total.saturating_sub(present_cnt),
+                        values: Vec::new(),
+                        more: false,
+                        histogram: Some(Histogram {
+                            min: min_val,
+                            max: max_val,
+                            p50,
+                            p95,
+                            p99,
+                            buckets: vec![HistogramBucket {
+                                lo: min_val,
+                                hi: max_val,
+                                count: present_cnt,
+                            }],
+                        }),
+                    };
+                    done.push((*slot_idx, Ok(data)));
+                } else {
+                    pending.push(PendingHistogram {
+                        slot_idx: *slot_idx,
+                        col_name,
+                        total,
+                        present: present_cnt,
+                        min: min_val,
+                        max: max_val,
+                        p50,
+                        p95,
+                        p99,
+                    });
+                }
+            }
+            _ => {
+                let kind = if matches!(checked.field, ParsedField::Keys(_)) {
+                    FacetKind::Keys
+                } else {
+                    FacetKind::Values
+                };
+                let mut total = 0u64;
+                let mut missing = 0u64;
+                let mut any_too_large = false;
+                let mut field_aggs = Vec::with_capacity(sinks.len());
+
+                for sink in &mut sinks {
+                    if let FieldWorkerState::Values(st) = &mut sink.states[pos] {
+                        total = total.saturating_add(st.total);
+                        missing = missing.saturating_add(st.missing);
+                        if st.failed_too_large {
+                            any_too_large = true;
+                        }
+                        if let Some(agg) = st.agg.take() {
+                            field_aggs.push(agg);
+                        }
+                    }
+                }
+
+                let budget = budgets[pos]
+                    .as_ref()
+                    .ok_or_else(|| internal("missing facet field budget"))?;
+
+                if any_too_large || budget.is_tripped() {
+                    drop(field_aggs);
+                    done.push((*slot_idx, Err(RunError::TooLarge)));
+                    continue;
+                }
+
+                let res = finalize_value_field(
+                    field_aggs,
+                    agg_spec,
+                    utf8_schema,
+                    &budget.exec_ctx,
+                    ValueFieldMeta {
+                        kind,
+                        total,
+                        missing,
+                        limit: checked.limit,
+                    },
+                );
+                match res {
+                    Ok(data) => done.push((*slot_idx, Ok(data))),
+                    Err(QueryError::TooLarge) => {
+                        done.push((*slot_idx, Err(RunError::TooLarge)));
+                    }
+                    Err(err) => return Err(query_err_to_run(err)),
+                }
+            }
+        }
+    }
+
+    Ok((done, pending))
+}
+
+#[derive(Clone, Copy)]
+struct ValueFieldMeta {
+    kind: FacetKind,
+    total: u64,
+    missing: u64,
     limit: usize,
-) -> Result<FacetData, RunError> {
-    let list = matches!(field, ParsedField::List(_) | ParsedField::Keys(_));
-    let value = value_expr(&frame, field)?;
-    let base = frame.select(vec![value.alias(VALUE)]).map_err(classify)?;
-    let missing = if list {
-        col(VALUE)
-            .is_null()
-            .or(cardinality(col(VALUE)).eq(lit(0_u64)))
-    } else {
-        col(VALUE).is_null()
-    };
-    let missing_count = when(missing, lit(1_i64)).end().map_err(classify)?;
-    let totals = base
-        .clone()
-        .aggregate(
-            vec![],
-            vec![
-                count(lit(1_i64)).alias(TOTAL),
-                count(missing_count).alias(MISSING),
-            ],
-        )
-        .map_err(classify)?
-        .collect()
-        .await
-        .map_err(|error| ctx.fail(error))?;
-    let (total, missing) = match first_row(&totals) {
-        Some(batch) => (count_at(batch, TOTAL)?, count_at(batch, MISSING)?),
-        None => (0, 0),
-    };
+}
 
-    let mut groups = if list {
-        base.unnest_columns_with_options(
-            &[VALUE],
-            UnnestOptions::new().with_null_handling(NullHandling::Drop),
-        )
-        .map_err(classify)?
-    } else {
-        base
-    };
-    groups = groups.filter(col(VALUE).is_not_null()).map_err(classify)?;
-    if matches!(field, ParsedField::Keys(_)) {
-        groups = groups
-            .filter(starts_with(col(VALUE), lit(INTERNAL_KEY_PREFIX)).not())
-            .map_err(classify)?;
+fn finalize_value_field(
+    field_aggs: Vec<HashAgg>,
+    agg_spec: &HashAggSpec,
+    utf8_schema: &Arc<Schema>,
+    exec_ctx: &ExecContext,
+    meta: ValueFieldMeta,
+) -> Result<FacetData, QueryError> {
+    let ValueFieldMeta {
+        kind,
+        total,
+        missing,
+        limit,
+    } = meta;
+    if field_aggs.is_empty() {
+        return Ok(FacetData {
+            kind,
+            total,
+            missing,
+            values: Vec::new(),
+            more: false,
+            histogram: None,
+        });
     }
-    groups = groups
-        .select(vec![cast(col(VALUE), DataType::Utf8).alias(VALUE)])
-        .map_err(classify)?;
-    if let Some(query) = query {
-        let pattern = like_pattern(query);
-        groups = groups
-            .filter(Expr::Like(Like::new(
-                false,
-                Box::new(col(VALUE)),
-                Box::new(lit(pattern)),
-                Some('\\'),
-                true,
-            )))
-            .map_err(classify)?;
-    }
-    let rows = groups
-        .aggregate(vec![col(VALUE)], vec![count(lit(1_i64)).alias(COUNT)])
-        .map_err(classify)?
-        .sort(vec![
-            col(COUNT).sort(false, false),
-            col(VALUE).sort(true, false),
-        ])
-        .map_err(classify)?
-        .limit(0, Some(limit + 1))
-        .map_err(classify)?
-        .collect()
-        .await
-        .map_err(|error| ctx.fail(error))?;
 
-    let mut values = Vec::new();
-    for batch in &rows {
-        let strings = require(batch, VALUE)?
-            .as_string_opt::<i32>()
-            .ok_or_else(|| internal("a facet value is not text".to_owned()))?;
-        let counts = require(batch, COUNT)?;
-        for index in 0..batch.num_rows() {
-            values.push(FacetValue {
-                value: strings.value(index).to_owned(),
-                count: count_value(counts, index)?,
-            });
+    let mut stream = HashAgg::combine_sinks_to_stream(field_aggs, agg_spec, utf8_schema, exec_ctx)?;
+    let mut heap: BinaryHeap<HeapFacetEntry> = BinaryHeap::with_capacity(limit + 1);
+    let mut res = exec_ctx.pool.register("facet_topk", false);
+
+    while let Some(batch) = stream.next_batch(&exec_ctx.eval.cancel, Some(&mut res))? {
+        let val_col = batch
+            .column_by_name(VALUE_COL)
+            .ok_or_else(|| QueryError::internal("missing facet_value column"))?;
+        let cnt_col = batch
+            .column_by_name(COUNT_COL)
+            .ok_or_else(|| QueryError::internal("missing facet_count column"))?;
+        for phys_row in active_rows(&batch) {
+            let val = raw_string_at(val_col, phys_row)
+                .map_err(|e| QueryError::internal(e.to_string()))?
+                .ok_or_else(|| QueryError::internal("facet value is null"))?;
+            let cnt = u64::try_from(
+                raw_i64_at(cnt_col, phys_row).map_err(|e| QueryError::internal(e.to_string()))?,
+            )
+            .map_err(|_| QueryError::internal("facet count is negative"))?;
+
+            let entry = HeapFacetEntry {
+                value: val,
+                count: cnt,
+            };
+            if heap.len() <= limit {
+                heap.push(entry);
+            } else if let Some(worst) = heap.peek()
+                && entry < *worst
+            {
+                let _ = heap.pop();
+                heap.push(entry);
+            }
         }
+        drop(batch);
+        res.free();
     }
-    let more = values.len() > limit;
-    values.truncate(limit);
+
+    let more = heap.len() > limit;
+    let mut entries: Vec<HeapFacetEntry> = heap.into_vec();
+    entries.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+    entries.truncate(limit);
+
+    let values = entries
+        .into_iter()
+        .map(|e| FacetValue {
+            value: e.value,
+            count: e.count,
+        })
+        .collect();
+
     Ok(FacetData {
-        kind: if matches!(field, ParsedField::Keys(_)) {
-            FacetKind::Keys
-        } else {
-            FacetKind::Values
-        },
+        kind,
         total,
         missing,
         values,
@@ -638,74 +867,1247 @@ async fn values(
     })
 }
 
-/// The number of `name` as `Float64`, or null when it is NaN or infinite. Such values are
-/// missing: they count in `missing` and in no bucket (D1). A NaN fails both comparisons.
-fn finite_number(name: &str) -> Result<Expr, RunError> {
-    let x = cast(col(name), DataType::Float64);
-    when(
-        x.clone()
-            .gt_eq(lit(-f64::MAX))
-            .and(x.clone().lt_eq(lit(f64::MAX))),
-        x,
-    )
-    .end()
-    .map_err(classify)
+/// Ordered so `Ord::max` is the WORST entry (smallest count, or equal count and largest value)
+/// so a bounded max-heap of size `limit + 1` keeps the top `limit + 1` best entries.
+#[derive(Eq, PartialEq)]
+struct HeapFacetEntry {
+    value: String,
+    count: u64,
 }
 
-/// A histogram of a number field: min, max and percentiles, then the bucket counts (D1).
-async fn histogram(
-    ctx: &QueryContext,
-    frame: DataFrame,
-    name: &str,
-) -> Result<FacetData, RunError> {
-    let stats = frame
-        .clone()
-        .select(vec![finite_number(name)?.alias(X)])
-        .map_err(classify)?
-        .aggregate(
-            vec![],
-            vec![
-                count(lit(1_i64)).alias(TOTAL),
-                count(col(X)).alias(PRESENT),
-                min(col(X)).alias(MIN),
-                max(col(X)).alias(MAX),
-                percentile(X, 0.5).alias(P50),
-                percentile(X, 0.95).alias(P95),
-                percentile(X, 0.99).alias(P99),
-            ],
-        )
-        .map_err(classify)?
-        .collect()
-        .await
-        .map_err(|error| ctx.fail(error))?;
-    let Some(row) = first_row(&stats) else {
-        return Ok(empty_histogram(0));
-    };
-    let total = count_at(row, TOTAL)?;
-    let present = count_at(row, PRESENT)?;
-    if present == 0 {
-        return Ok(empty_histogram(total));
+impl Ord for HeapFacetEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Worse entry compares Greater so it stays at the max-heap root.
+        other
+            .count
+            .cmp(&self.count)
+            .then_with(|| self.value.cmp(&other.value))
     }
-    let stat = |name: &str| -> Result<f64, RunError> {
-        f64_at(require(row, name)?, 0)?.ok_or_else(|| internal(format!("{name} is null")))
+}
+
+impl PartialOrd for HeapFacetEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn run_pass2(
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
+    view: FacetView,
+    scope: ListScope,
+    filter: Option<CompiledFilter>,
+    search: Option<&str>,
+    pending: &[PendingHistogram],
+) -> Result<FacetSlotResults, RunError> {
+    let parsed: Vec<ParsedField> = pending
+        .iter()
+        .map(|h| ParsedField::Number(h.col_name))
+        .collect();
+    let field_refs: Vec<&ParsedField> = parsed.iter().collect();
+
+    let StreamSet {
+        streams,
+        schema: input_schema,
+    } = open_facets_streams(ctx, exec_ctx, view, scope, filter, search, &field_refs)?;
+
+    let mut tallies = vec![[0u64; HISTOGRAM_BUCKETS + 1]; pending.len()];
+    if !streams.is_empty() {
+        let sinks = exec_run_pipeline(exec_ctx, streams, |_| Ok(Vec::new()), {
+            let pending_c = pending.to_vec();
+            let schema_c = Arc::clone(&input_schema);
+            let cancel_c = exec_ctx.eval.cancel.clone();
+            move |_| BucketFanoutSink::new(view, &pending_c, &schema_c, cancel_c.clone())
+        })
+        .map_err(query_err_to_run)?;
+
+        for sink in sinks {
+            for (i, counts) in sink.tallies.iter().enumerate() {
+                for (b, &cnt) in counts.iter().enumerate() {
+                    tallies[i][b] = tallies[i][b].saturating_add(cnt);
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(pending.len());
+    for (i, h) in pending.iter().enumerate() {
+        let width = (h.p99 / HISTOGRAM_BUCKETS as f64) - (h.min / HISTOGRAM_BUCKETS as f64);
+        let length = if h.max >= h.p99 {
+            HISTOGRAM_BUCKETS + 1
+        } else {
+            HISTOGRAM_BUCKETS
+        };
+        let buckets = tallies[i]
+            .iter()
+            .take(length)
+            .enumerate()
+            .map(|(index, count)| {
+                if index < HISTOGRAM_BUCKETS {
+                    let lo = h.min + index as f64 * width;
+                    let hi = if index + 1 == HISTOGRAM_BUCKETS {
+                        h.p99
+                    } else {
+                        h.min + (index + 1) as f64 * width
+                    };
+                    HistogramBucket {
+                        lo,
+                        hi,
+                        count: *count,
+                    }
+                } else {
+                    HistogramBucket {
+                        lo: h.p99,
+                        hi: h.max,
+                        count: *count,
+                    }
+                }
+            })
+            .collect();
+
+        out.push((
+            h.slot_idx,
+            Ok(FacetData {
+                kind: FacetKind::Histogram,
+                total: h.total,
+                missing: h.total.saturating_sub(h.present),
+                values: Vec::new(),
+                more: false,
+                histogram: Some(Histogram {
+                    min: h.min,
+                    max: h.max,
+                    p50: h.p50,
+                    p95: h.p95,
+                    p99: h.p99,
+                    buckets,
+                }),
+            }),
+        ));
+    }
+
+    Ok(out)
+}
+
+fn open_facets_streams(
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
+    view: FacetView,
+    scope: ListScope,
+    filter: Option<CompiledFilter>,
+    search: Option<&str>,
+    fields: &[&ParsedField],
+) -> Result<StreamSet, RunError> {
+    if view == FacetView::Sessions {
+        let mut spec = scoped_traces_spec(ctx, scope, false)?;
+        let traces_raw = traces_raw_schema()?;
+        spec.projection = Some(sessions_from_traces_projection(&traces_raw)?);
+        let proj_schema = ctx
+            .traces
+            .projected_schema(&spec)
+            .map_err(query_err_to_run)?;
+        let raw_streams = ctx
+            .traces
+            .open_partitions(&spec, exec_ctx)
+            .map_err(query_err_to_run)?;
+        let sess =
+            sessions_from_traces(raw_streams, &proj_schema, exec_ctx).map_err(query_err_to_run)?;
+        let streams = match filter {
+            Some(f) => apply_compiled_filter(ctx, exec_ctx, sess.streams, &sess.schema, &f)
+                .map_err(query_err_to_run)?,
+            None => sess.streams,
+        };
+        return Ok(StreamSet {
+            streams,
+            schema: sess.schema,
+        });
+    }
+
+    let references_environment = filter.as_ref().is_some_and(|f| f.references_environment);
+    let uses_scores = filter.as_ref().is_some_and(|f| !f.scores.is_empty());
+
+    let search_pred = match search {
+        Some(text) => search_predicate(ctx, exec_ctx, filter_view(view), text, scope.window)?,
+        None => SearchPredicate::None,
     };
-    let (min, max) = (stat(MIN)?, stat(MAX)?);
-    let p99 = stat(P99)?;
-    let histogram = Histogram {
-        min,
-        max,
-        p50: stat(P50)?,
-        p95: stat(P95)?,
-        p99,
-        buckets: buckets(ctx, frame, name, present, (min, max, p99)).await?,
+
+    if uses_scores {
+        let mut spec = match view {
+            FacetView::Traces => scoped_traces_spec(ctx, scope, references_environment)?,
+            FacetView::Spans => scoped_spans_spec(ctx, scope, references_environment)?,
+            FacetView::Sessions => return Err(internal("unreachable sessions branch")),
+        };
+        if let SearchPredicate::Spans {
+            filter: s_expr,
+            substrings,
+        } = &search_pred
+        {
+            spec.filters.push(s_expr.clone());
+            if !substrings.is_empty() {
+                spec.substrings.push(substrings.clone());
+            }
+        }
+
+        let (source, raw_schema, view_schema) = match view {
+            FacetView::Traces => (
+                Arc::clone(&ctx.traces) as Arc<dyn ScanSource>,
+                traces_raw_schema()?,
+                traces_view_schema()?,
+            ),
+            FacetView::Spans => (
+                Arc::clone(&ctx.spans),
+                spans_raw_schema()?,
+                spans_view_schema()?,
+            ),
+            FacetView::Sessions => return Err(internal("unreachable sessions branch")),
+        };
+
+        let mut raw_streams = source
+            .open_partitions(&spec, exec_ctx)
+            .map_err(query_err_to_run)?;
+
+        if let SearchPredicate::Traces {
+            trace_ids,
+            schema: ids_schema,
+        } = search_pred
+        {
+            if raw_streams.is_empty() {
+                return Ok(StreamSet {
+                    streams: Vec::new(),
+                    schema: view_schema,
+                });
+            }
+            let left_key = col_expr(&raw_schema, traces::TRACE_ID)?;
+            let right_key = col_expr(&ids_schema, spans::TRACE_ID)?;
+            let joined = execute_hash_join(
+                raw_streams,
+                Arc::clone(&raw_schema),
+                trace_ids,
+                ids_schema,
+                HashJoinSpec {
+                    join_type: JoinType::LeftSemi,
+                    left_keys: vec![left_key],
+                    right_keys: vec![right_key],
+                    null_equals_null: false,
+                    residual_filter: None,
+                },
+                exec_ctx,
+            )
+            .map_err(query_err_to_run)?;
+            raw_streams = vec![joined];
+        }
+
+        let view_streams: Vec<Box<dyn PartitionStream>> = raw_streams
+            .into_iter()
+            .map(|s| {
+                let proj = match view {
+                    FacetView::Traces => traces_view_projection(&raw_schema, exec_ctx.clone())?,
+                    FacetView::Spans => spans_view_projection(&raw_schema, exec_ctx.clone())?,
+                    FacetView::Sessions => {
+                        return Err(QueryError::internal("unreachable sessions branch"));
+                    }
+                };
+                Ok(
+                    Box::new(OperatorStream::new(s, vec![Box::new(proj)], exec_ctx))
+                        as Box<dyn PartitionStream>,
+                )
+            })
+            .collect::<Result<Vec<_>, QueryError>>()
+            .map_err(query_err_to_run)?;
+
+        let filtered = match filter {
+            Some(f) => apply_compiled_filter(ctx, exec_ctx, view_streams, &view_schema, &f)
+                .map_err(query_err_to_run)?,
+            None => view_streams,
+        };
+        return Ok(StreamSet {
+            streams: filtered,
+            schema: view_schema,
+        });
+    }
+
+    // Fast narrow projection path (no score joins).
+    let (source, raw_schema, hex_cols, compute_trace_duration, mut spec): (
+        Arc<dyn ScanSource>,
+        Arc<Schema>,
+        &'static [&'static str],
+        bool,
+        ScanSpec,
+    ) = match view {
+        FacetView::Traces => (
+            Arc::clone(&ctx.traces) as Arc<dyn ScanSource>,
+            traces_raw_schema()?,
+            &[traces::TRACE_ID, traces::ROOT_SPAN_ID],
+            true,
+            scoped_traces_spec(ctx, scope, references_environment)?,
+        ),
+        FacetView::Spans => (
+            Arc::clone(&ctx.spans),
+            spans_raw_schema()?,
+            &[spans::TRACE_ID, spans::SPAN_ID, spans::PARENT_SPAN_ID],
+            false,
+            scoped_spans_spec(ctx, scope, references_environment)?,
+        ),
+        FacetView::Sessions => return Err(internal("unreachable sessions branch")),
     };
-    Ok(FacetData {
-        kind: FacetKind::Histogram,
-        total,
-        missing: total - present,
-        values: Vec::new(),
-        more: false,
-        histogram: Some(histogram),
+
+    if let Some(f) = filter {
+        let rewritten =
+            rewrite_view_expr_for_raw(&f.expr, &raw_schema, hex_cols, compute_trace_duration)
+                .map_err(query_err_to_run)?;
+        spec.filters.push(rewritten);
+        populate_id_lookups(&mut spec);
+    }
+
+    if let SearchPredicate::Spans {
+        filter: s_expr,
+        substrings,
+    } = &search_pred
+    {
+        spec.filters.push(s_expr.clone());
+        if !substrings.is_empty() {
+            spec.substrings.push(substrings.clone());
+        }
+    }
+
+    for filter_expr in &spec.filters {
+        collect_expr_map_projections(filter_expr, &raw_schema, &mut spec.map_projections);
+    }
+
+    let mut needed = BTreeSet::new();
+    for field in fields {
+        match field {
+            ParsedField::Values(c) | ParsedField::Bool(c) | ParsedField::List(c) => {
+                needed.insert(col_index(&raw_schema, c)?);
+            }
+            ParsedField::Keys(c) => {
+                needed.insert(col_index(&raw_schema, c)?);
+                spec.map_projections
+                    .entry((*c).to_owned())
+                    .and_modify(|existing| existing.merge(MapProjection::KeysOnly))
+                    .or_insert(MapProjection::KeysOnly);
+            }
+            ParsedField::MapValue(c, key) => {
+                needed.insert(col_index(&raw_schema, c)?);
+                let proj = MapProjection::Keys(BTreeSet::from([key.clone()]));
+                spec.map_projections
+                    .entry((*c).to_owned())
+                    .and_modify(|existing| existing.merge(proj.clone()))
+                    .or_insert(proj);
+            }
+            ParsedField::Number(c) => {
+                if *c == DURATION_MS {
+                    match view {
+                        FacetView::Traces => {
+                            needed.insert(col_index(&raw_schema, traces::START_TIME)?);
+                            needed.insert(col_index(&raw_schema, traces::END_TIME)?);
+                        }
+                        FacetView::Spans => {
+                            needed.insert(col_index(&raw_schema, spans::DURATION_NS)?);
+                        }
+                        FacetView::Sessions => {
+                            needed.insert(col_index(&raw_schema, DURATION_MS)?);
+                        }
+                    }
+                } else {
+                    needed.insert(col_index(&raw_schema, c)?);
+                }
+            }
+        }
+    }
+
+    if matches!(search_pred, SearchPredicate::Traces { .. }) {
+        needed.insert(col_index(&raw_schema, traces::TRACE_ID)?);
+    }
+
+    let proj_indices: Vec<usize> = needed.into_iter().collect();
+    spec.projection = Some(proj_indices);
+    let proj_schema = source.projected_schema(&spec).map_err(query_err_to_run)?;
+    let streams = source
+        .open_partitions(&spec, exec_ctx)
+        .map_err(query_err_to_run)?;
+
+    if let SearchPredicate::Traces {
+        trace_ids,
+        schema: ids_schema,
+    } = search_pred
+    {
+        if streams.is_empty() {
+            return Ok(StreamSet {
+                streams: Vec::new(),
+                schema: proj_schema,
+            });
+        }
+        let left_key = col_expr(&proj_schema, traces::TRACE_ID)?;
+        let right_key = col_expr(&ids_schema, spans::TRACE_ID)?;
+        let joined = execute_hash_join(
+            streams,
+            Arc::clone(&proj_schema),
+            trace_ids,
+            ids_schema,
+            HashJoinSpec {
+                join_type: JoinType::LeftSemi,
+                left_keys: vec![left_key],
+                right_keys: vec![right_key],
+                null_equals_null: false,
+                residual_filter: None,
+            },
+            exec_ctx,
+        )
+        .map_err(query_err_to_run)?;
+        return Ok(StreamSet {
+            streams: vec![joined],
+            schema: proj_schema,
+        });
+    }
+
+    Ok(StreamSet {
+        streams,
+        schema: proj_schema,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum NumericSource {
+    Column(usize),
+    SpanDurationMs(usize),
+    TraceDurationMs { start_idx: usize, end_idx: usize },
+}
+
+impl NumericSource {
+    fn resolve(view: FacetView, schema: &Schema, col_name: &str) -> Result<Self, QueryError> {
+        if let Some(idx) = schema.index_of(col_name) {
+            return Ok(Self::Column(idx));
+        }
+        if col_name == DURATION_MS {
+            match view {
+                FacetView::Spans => {
+                    let idx = schema
+                        .index_of(spans::DURATION_NS)
+                        .ok_or_else(|| QueryError::internal("missing duration_ns on spans"))?;
+                    return Ok(Self::SpanDurationMs(idx));
+                }
+                FacetView::Traces => {
+                    let start_idx = schema
+                        .index_of(traces::START_TIME)
+                        .ok_or_else(|| QueryError::internal("missing start_time on traces"))?;
+                    let end_idx = schema
+                        .index_of(traces::END_TIME)
+                        .ok_or_else(|| QueryError::internal("missing end_time on traces"))?;
+                    return Ok(Self::TraceDurationMs { start_idx, end_idx });
+                }
+                FacetView::Sessions => {}
+            }
+        }
+        Err(QueryError::internal(format!(
+            "missing numeric facet column {col_name}"
+        )))
+    }
+
+    fn read_finite_at(self, batch: &Batch, phys_row: usize) -> Result<Option<f64>, QueryError> {
+        let val = match self {
+            Self::Column(idx) => {
+                let col = batch
+                    .column(idx)
+                    .ok_or_else(|| QueryError::internal("missing numeric column"))?;
+                raw_f64_at(col, phys_row).map_err(|e| QueryError::internal(e.to_string()))?
+            }
+            Self::SpanDurationMs(idx) => {
+                let col = batch
+                    .column(idx)
+                    .ok_or_else(|| QueryError::internal("missing duration_ns column"))?;
+                raw_f64_at(col, phys_row)
+                    .map_err(|e| QueryError::internal(e.to_string()))?
+                    .map(|ns| ns / 1_000_000.0)
+            }
+            Self::TraceDurationMs { start_idx, end_idx } => {
+                let sc = batch
+                    .column(start_idx)
+                    .ok_or_else(|| QueryError::internal("missing start_time column"))?;
+                let ec = batch
+                    .column(end_idx)
+                    .ok_or_else(|| QueryError::internal("missing end_time column"))?;
+                let start = crate::reads::columns::raw_time_at(sc, phys_row)
+                    .map_err(|e| QueryError::internal(e.to_string()))?;
+                let end = crate::reads::columns::raw_time_at(ec, phys_row)
+                    .map_err(|e| QueryError::internal(e.to_string()))?;
+                Some((end.saturating_sub(start)) as f64 / 1_000_000.0)
+            }
+        };
+        Ok(val.filter(|v| v.is_finite()))
+    }
+}
+
+struct HistogramWorkerState {
+    source: NumericSource,
+    total: u64,
+    present: u64,
+    min: f64,
+    max: f64,
+    sketch: DdSketch,
+}
+
+#[derive(Clone)]
+enum ValueSource {
+    Values(usize),
+    Bool(usize),
+    List(usize),
+    Keys(usize),
+    MapValue(usize, String),
+}
+
+struct FieldBudget {
+    exec_ctx: ExecContext,
+    tripped: AtomicBool,
+}
+
+impl FieldBudget {
+    fn new(parent_ctx: &ExecContext, per_field_cap: usize) -> Self {
+        let field_pool = parent_ctx.pool.child("facet_field", per_field_cap);
+        let mut exec_ctx = parent_ctx.clone();
+        exec_ctx.pool = field_pool;
+
+        Self {
+            exec_ctx,
+            tripped: AtomicBool::new(per_field_cap == 0),
+        }
+    }
+
+    fn is_tripped(&self) -> bool {
+        self.tripped.load(AtomicOrdering::Acquire)
+    }
+
+    fn trip_too_large(&self) {
+        self.tripped.store(true, AtomicOrdering::Release);
+    }
+}
+
+struct ValueWorkerState {
+    source: ValueSource,
+    query: Option<(String, String)>,
+    total: u64,
+    missing: u64,
+    agg: Option<HashAgg>,
+    failed_too_large: bool,
+    budget: Arc<FieldBudget>,
+    utf8_schema: Arc<Schema>,
+    scratch: Reservation,
+    buf_bytes: usize,
+    chunk_buf: Vec<String>,
+    row_dedup: HashSet<String>,
+}
+
+enum FieldWorkerState {
+    Histogram(HistogramWorkerState),
+    Values(Box<ValueWorkerState>),
+}
+
+struct FacetFanoutSink {
+    states: Vec<FieldWorkerState>,
+    exec_ctx: ExecContext,
+}
+
+impl FacetFanoutSink {
+    fn new(
+        view: FacetView,
+        fields: &[(usize, CheckedField)],
+        input_schema: &Schema,
+        utf8_schema: &Arc<Schema>,
+        agg_spec: &HashAggSpec,
+        exec_ctx: ExecContext,
+        budgets: &[Option<Arc<FieldBudget>>],
+    ) -> Result<Self, QueryError> {
+        let mut states = Vec::with_capacity(fields.len());
+        for (pos, (_, checked)) in fields.iter().enumerate() {
+            match &checked.field {
+                ParsedField::Number(name) => {
+                    let source = NumericSource::resolve(view, input_schema, name)?;
+                    states.push(FieldWorkerState::Histogram(HistogramWorkerState {
+                        source,
+                        total: 0,
+                        present: 0,
+                        min: f64::INFINITY,
+                        max: f64::NEG_INFINITY,
+                        sketch: DdSketch::new(),
+                    }));
+                }
+                other => {
+                    let source = match other {
+                        ParsedField::Values(name) => ValueSource::Values(
+                            input_schema
+                                .index_of(name)
+                                .ok_or_else(|| QueryError::internal(format!("missing {name}")))?,
+                        ),
+                        ParsedField::Bool(name) => ValueSource::Bool(
+                            input_schema
+                                .index_of(name)
+                                .ok_or_else(|| QueryError::internal(format!("missing {name}")))?,
+                        ),
+                        ParsedField::List(name) => ValueSource::List(
+                            input_schema
+                                .index_of(name)
+                                .ok_or_else(|| QueryError::internal(format!("missing {name}")))?,
+                        ),
+                        ParsedField::Keys(name) => ValueSource::Keys(
+                            input_schema
+                                .index_of(name)
+                                .ok_or_else(|| QueryError::internal(format!("missing {name}")))?,
+                        ),
+                        ParsedField::MapValue(name, key) => ValueSource::MapValue(
+                            input_schema
+                                .index_of(name)
+                                .ok_or_else(|| QueryError::internal(format!("missing {name}")))?,
+                            key.clone(),
+                        ),
+                        ParsedField::Number(_) => {
+                            return Err(QueryError::internal("unexpected Number in ValueSource"));
+                        }
+                    };
+                    let budget = budgets[pos]
+                        .clone()
+                        .ok_or_else(|| QueryError::internal("missing facet field budget"))?;
+                    let tripped = budget.is_tripped();
+                    let agg = if tripped {
+                        None
+                    } else {
+                        Some(HashAgg::new(
+                            agg_spec.clone(),
+                            Arc::clone(utf8_schema),
+                            budget.exec_ctx.clone(),
+                        )?)
+                    };
+                    let scratch = budget.exec_ctx.pool.register("facet_field_scratch", false);
+                    let query = checked
+                        .query
+                        .as_ref()
+                        .map(|q| (q.clone(), q.to_lowercase()));
+                    states.push(FieldWorkerState::Values(Box::new(ValueWorkerState {
+                        source,
+                        query,
+                        total: 0,
+                        missing: 0,
+                        agg,
+                        failed_too_large: tripped,
+                        budget,
+                        utf8_schema: Arc::clone(utf8_schema),
+                        scratch,
+                        buf_bytes: 0,
+                        chunk_buf: Vec::new(),
+                        row_dedup: HashSet::new(),
+                    })));
+                }
+            }
+        }
+        Ok(Self { states, exec_ctx })
+    }
+}
+
+impl PushSink for FacetFanoutSink {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        _batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
+        if self.exec_ctx.eval.cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        let num_rows = batch.num_rows();
+        if num_rows == 0 {
+            return Ok(ControlFlow::Continue);
+        }
+
+        let batch_limit = self.exec_ctx.batch_size.max(1);
+        for state in &mut self.states {
+            if self.exec_ctx.eval.cancel.is_cancelled() {
+                return Err(QueryError::Cancelled);
+            }
+            match state {
+                FieldWorkerState::Histogram(st) => {
+                    st.total = st.total.saturating_add(num_rows as u64);
+                    for phys_row in active_rows(&batch) {
+                        if let Some(v) = st.source.read_finite_at(&batch, phys_row)? {
+                            st.present = st.present.saturating_add(1);
+                            if v < st.min {
+                                st.min = v;
+                            }
+                            if v > st.max {
+                                st.max = v;
+                            }
+                            st.sketch.add(v);
+                        }
+                    }
+                }
+                FieldWorkerState::Values(st) => {
+                    if st.failed_too_large || st.budget.is_tripped() {
+                        st.agg = None;
+                        st.failed_too_large = true;
+                        continue;
+                    }
+                    st.total = st.total.saturating_add(num_rows as u64);
+                    if let Err(err) = push_value_field_batch(st, &batch, batch_limit) {
+                        st.scratch.free();
+                        st.buf_bytes = 0;
+                        st.chunk_buf = Vec::new();
+                        st.row_dedup = HashSet::new();
+                        match err {
+                            QueryError::TooLarge => {
+                                // Drop ONLY this field's HashAgg state & parent slice so sibling fields proceed.
+                                st.agg = None;
+                                st.failed_too_large = true;
+                                st.budget.trip_too_large();
+                            }
+                            other => return Err(other),
+                        }
+                    }
+                }
+            }
+        }
+        Ok(ControlFlow::Continue)
+    }
+
+    fn finish(&mut self) -> Result<(), QueryError> {
+        for state in &mut self.states {
+            if let FieldWorkerState::Values(st) = state {
+                st.scratch.free();
+                st.buf_bytes = 0;
+                st.chunk_buf = Vec::new();
+                st.row_dedup = HashSet::new();
+                if st.failed_too_large || st.budget.is_tripped() {
+                    st.agg = None;
+                    st.failed_too_large = true;
+                    continue;
+                }
+                if let Some(agg) = st.agg.as_mut()
+                    && let Err(err) = agg.finish()
+                {
+                    st.scratch.free();
+                    match err {
+                        QueryError::TooLarge => {
+                            st.agg = None;
+                            st.failed_too_large = true;
+                            st.budget.trip_too_large();
+                        }
+                        other => return Err(other),
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+struct ChunkFlusher<'a> {
+    utf8_schema: &'a Arc<Schema>,
+    scratch: &'a mut Reservation,
+    buf_bytes: &'a mut usize,
+    chunk_buf: &'a mut Vec<String>,
+    agg: &'a mut Option<HashAgg>,
+    batch_limit: usize,
+}
+
+impl ChunkFlusher<'_> {
+    fn push(&mut self, value: String) -> Result<(), QueryError> {
+        let delta = size_of::<String>().saturating_add(value.len());
+        self.scratch.try_grow(delta)?;
+        *self.buf_bytes = self.buf_bytes.saturating_add(delta);
+        self.chunk_buf.push(value);
+        if self.chunk_buf.len() >= self.batch_limit {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), QueryError> {
+        if self.chunk_buf.is_empty() {
+            return Ok(());
+        }
+        let len = self.chunk_buf.len();
+        let utf8 = Utf8Data::try_from_slices(self.chunk_buf.iter().map(String::as_str))?;
+        self.chunk_buf.clear();
+        let release = *self.buf_bytes;
+        *self.buf_bytes = 0;
+        self.scratch.shrink(release);
+        let flat = FlatColumn::try_new(FlatData::Utf8(utf8), None)?;
+        let mini = Batch::try_new(
+            Arc::clone(self.utf8_schema),
+            vec![Column::Flat(flat)],
+            len,
+            Selection::All,
+        )?;
+        let bytes = mini.memory_bytes();
+        self.scratch.try_grow(bytes)?;
+        let res = match self.agg.as_mut() {
+            Some(a) => a.consume(mini, self.scratch),
+            None => Err(QueryError::internal("missing facet HashAgg")),
+        };
+        self.scratch.shrink(bytes);
+        res?;
+        Ok(())
+    }
+}
+
+fn push_value_field_batch(
+    st: &mut ValueWorkerState,
+    batch: &Batch,
+    batch_limit: usize,
+) -> Result<(), QueryError> {
+    let ValueWorkerState {
+        source,
+        query,
+        missing,
+        agg,
+        utf8_schema,
+        scratch,
+        buf_bytes,
+        chunk_buf,
+        row_dedup,
+        ..
+    } = st;
+    chunk_buf.clear();
+    if *buf_bytes > 0 {
+        scratch.shrink(*buf_bytes);
+        *buf_bytes = 0;
+    }
+    let query_ref = query.as_ref().map(|(q, ql)| (q.as_str(), ql.as_str()));
+
+    match source {
+        ValueSource::Values(col_idx) => {
+            let col = batch
+                .column(*col_idx)
+                .ok_or_else(|| QueryError::internal("missing values column"))?;
+            let mut flusher = ChunkFlusher {
+                utf8_schema,
+                scratch,
+                buf_bytes,
+                chunk_buf,
+                agg,
+                batch_limit,
+            };
+            for phys_row in active_rows(batch) {
+                let val_opt = raw_string_at(col, phys_row)
+                    .map_err(|e| QueryError::internal(e.to_string()))?;
+                match val_opt {
+                    None => *missing = missing.saturating_add(1),
+                    Some(v) => {
+                        if matches_query(&v, query_ref) {
+                            flusher.push(v)?;
+                        }
+                    }
+                }
+            }
+            flusher.flush()?;
+        }
+        ValueSource::Bool(col_idx) => {
+            let col = batch
+                .column(*col_idx)
+                .ok_or_else(|| QueryError::internal("missing bool column"))?;
+            let mut flusher = ChunkFlusher {
+                utf8_schema,
+                scratch,
+                buf_bytes,
+                chunk_buf,
+                agg,
+                batch_limit,
+            };
+            for phys_row in active_rows(batch) {
+                let val_opt =
+                    raw_bool_at(col, phys_row).map_err(|e| QueryError::internal(e.to_string()))?;
+                match val_opt {
+                    None => *missing = missing.saturating_add(1),
+                    Some(b) => {
+                        let s = if b { "true" } else { "false" };
+                        if matches_query(s, query_ref) {
+                            flusher.push(s.to_owned())?;
+                        }
+                    }
+                }
+            }
+            flusher.flush()?;
+        }
+        ValueSource::List(col_idx) => {
+            let col = batch
+                .column(*col_idx)
+                .ok_or_else(|| QueryError::internal("missing list column"))?;
+            for phys_row in active_rows(batch) {
+                row_dedup.clear();
+                let mut dedup_bytes = 0usize;
+                let is_empty_or_null =
+                    read_list_utf8_row(col, phys_row, row_dedup, scratch, &mut dedup_bytes)?;
+                if is_empty_or_null {
+                    *missing = missing.saturating_add(1);
+                } else {
+                    let mut flusher = ChunkFlusher {
+                        utf8_schema,
+                        scratch,
+                        buf_bytes,
+                        chunk_buf,
+                        agg,
+                        batch_limit,
+                    };
+                    for elem in row_dedup.drain() {
+                        if matches_query(&elem, query_ref) {
+                            flusher.push(elem)?;
+                        }
+                    }
+                }
+                if dedup_bytes > 0 {
+                    scratch.shrink(dedup_bytes);
+                }
+                if row_dedup.capacity() > batch_limit.saturating_mul(2) {
+                    *row_dedup = HashSet::new();
+                }
+            }
+            let mut flusher = ChunkFlusher {
+                utf8_schema,
+                scratch,
+                buf_bytes,
+                chunk_buf,
+                agg,
+                batch_limit,
+            };
+            flusher.flush()?;
+        }
+        ValueSource::Keys(col_idx) => {
+            let col = batch
+                .column(*col_idx)
+                .ok_or_else(|| QueryError::internal("missing map column"))?;
+            let mut flusher = ChunkFlusher {
+                utf8_schema,
+                scratch,
+                buf_bytes,
+                chunk_buf,
+                agg,
+                batch_limit,
+            };
+            for phys_row in active_rows(batch) {
+                let had_entries = visit_map_row(col, phys_row, |k, _v| {
+                    if !k.starts_with(INTERNAL_KEY_PREFIX) && matches_query(k, query_ref) {
+                        flusher.push(k.to_owned())?;
+                    }
+                    Ok(())
+                })?;
+                if !had_entries {
+                    *missing = missing.saturating_add(1);
+                }
+            }
+            flusher.flush()?;
+        }
+        ValueSource::MapValue(col_idx, target_key) => {
+            let col = batch
+                .column(*col_idx)
+                .ok_or_else(|| QueryError::internal("missing map column"))?;
+            let mut flusher = ChunkFlusher {
+                utf8_schema,
+                scratch,
+                buf_bytes,
+                chunk_buf,
+                agg,
+                batch_limit,
+            };
+            for phys_row in active_rows(batch) {
+                let mut found: Option<String> = None;
+                let _ = visit_map_row(col, phys_row, |k, v_opt| {
+                    if k == target_key.as_str() {
+                        found = v_opt.map(str::to_owned);
+                    }
+                    Ok(())
+                })?;
+                match found {
+                    None => *missing = missing.saturating_add(1),
+                    Some(v) => {
+                        if matches_query(&v, query_ref) {
+                            flusher.push(v)?;
+                        }
+                    }
+                }
+            }
+            flusher.flush()?;
+        }
+    }
+
+    Ok(())
+}
+
+fn matches_query(value: &str, query: Option<(&str, &str)>) -> bool {
+    let Some((raw_q, lower_q)) = query else {
+        return true;
+    };
+    if value.is_ascii() && raw_q.is_ascii() {
+        let vb = value.as_bytes();
+        let qb = raw_q.as_bytes();
+        if qb.len() > vb.len() {
+            return false;
+        }
+        return vb.windows(qb.len()).any(|w| w.eq_ignore_ascii_case(qb));
+    }
+    value.to_lowercase().contains(lower_q)
+}
+
+/// Reads distinct non-null string elements of `col[phys_row]` into `dedup`.
+/// Returns `true` iff the list cell is NULL or empty (`cardinality == 0`), BEFORE null element drop.
+fn read_list_utf8_row(
+    col: &Column,
+    phys_row: usize,
+    dedup: &mut HashSet<String>,
+    scratch: &mut Reservation,
+    dedup_bytes: &mut usize,
+) -> Result<bool, QueryError> {
+    if phys_row >= col.len() || col.is_null(phys_row) {
+        return Ok(true);
+    }
+    match col {
+        Column::Const { value, .. } => match value {
+            ScalarValue::List { values, .. } => {
+                if values.is_empty() {
+                    return Ok(true);
+                }
+                for sv in values {
+                    if let ScalarValue::Utf8(s) = sv {
+                        insert_dedup(dedup, s.clone(), scratch, dedup_bytes)?;
+                    }
+                }
+                Ok(false)
+            }
+            ScalarValue::Null(_) => Ok(true),
+            _ => Err(QueryError::internal("list scalar mismatch")),
+        },
+        Column::Flat(fc) => read_list_flat(fc, phys_row, dedup, scratch, dedup_bytes),
+        Column::Dict(d) => {
+            if d.is_null(phys_row) {
+                return Ok(true);
+            }
+            let code = d.codes()[phys_row] as usize;
+            if d.values().is_null(code) {
+                return Ok(true);
+            }
+            read_list_flat(d.values(), code, dedup, scratch, dedup_bytes)
+        }
+        Column::Rle(r) => {
+            let run_idx = r
+                .run_ends()
+                .partition_point(|&end| (end as usize) <= phys_row);
+            if r.values().is_null(run_idx) {
+                return Ok(true);
+            }
+            read_list_flat(r.values(), run_idx, dedup, scratch, dedup_bytes)
+        }
+    }
+}
+
+fn insert_dedup(
+    dedup: &mut HashSet<String>,
+    s: String,
+    scratch: &mut Reservation,
+    dedup_bytes: &mut usize,
+) -> Result<(), QueryError> {
+    if !dedup.contains(&s) {
+        let delta = size_of::<String>().saturating_add(s.len());
+        scratch.try_grow(delta)?;
+        *dedup_bytes = dedup_bytes.saturating_add(delta);
+        dedup.insert(s);
+    }
+    Ok(())
+}
+
+fn read_list_flat(
+    fc: &FlatColumn,
+    flat_row: usize,
+    dedup: &mut HashSet<String>,
+    scratch: &mut Reservation,
+    dedup_bytes: &mut usize,
+) -> Result<bool, QueryError> {
+    let FlatData::List {
+        offsets, values, ..
+    } = fc.data()
+    else {
+        return Err(QueryError::internal("list flat storage mismatch"));
+    };
+    let start = offsets[flat_row] as usize;
+    let end = offsets[flat_row + 1] as usize;
+    if start == end {
+        return Ok(true);
+    }
+    for idx in start..end {
+        if let Some(s) =
+            raw_string_at(values, idx).map_err(|e| QueryError::internal(e.to_string()))?
+        {
+            insert_dedup(dedup, s, scratch, dedup_bytes)?;
+        }
+    }
+    Ok(false)
+}
+
+/// Visits `(key, Option<value>)` pairs of `col[phys_row]`.
+/// Returns `true` iff the map cell is non-null AND has at least one entry.
+fn visit_map_row(
+    col: &Column,
+    phys_row: usize,
+    mut f: impl FnMut(&str, Option<&str>) -> Result<(), QueryError>,
+) -> Result<bool, QueryError> {
+    if phys_row >= col.len() || col.is_null(phys_row) {
+        return Ok(false);
+    }
+    match col {
+        Column::Const { value, .. } => match value {
+            ScalarValue::MapUtf8(entries) => {
+                if entries.is_empty() {
+                    return Ok(false);
+                }
+                for (k, v) in entries {
+                    f(k.as_str(), v.as_deref())?;
+                }
+                Ok(true)
+            }
+            ScalarValue::Null(_) => Ok(false),
+            _ => Err(QueryError::internal("map scalar mismatch")),
+        },
+        Column::Flat(fc) => visit_map_flat(fc, phys_row, f),
+        Column::Dict(d) => {
+            if d.is_null(phys_row) {
+                return Ok(false);
+            }
+            let code = d.codes()[phys_row] as usize;
+            if d.values().is_null(code) {
+                return Ok(false);
+            }
+            visit_map_flat(d.values(), code, f)
+        }
+        Column::Rle(r) => {
+            let run_idx = r
+                .run_ends()
+                .partition_point(|&end| (end as usize) <= phys_row);
+            if r.values().is_null(run_idx) {
+                return Ok(false);
+            }
+            visit_map_flat(r.values(), run_idx, f)
+        }
+    }
+}
+
+fn visit_map_flat(
+    fc: &FlatColumn,
+    flat_row: usize,
+    mut f: impl FnMut(&str, Option<&str>) -> Result<(), QueryError>,
+) -> Result<bool, QueryError> {
+    let FlatData::MapUtf8(map) = fc.data() else {
+        return Err(QueryError::internal("map flat storage mismatch"));
+    };
+    let start = map.offsets()[flat_row] as usize;
+    let end = map.offsets()[flat_row + 1] as usize;
+    if start == end {
+        return Ok(false);
+    }
+    let keys = map.keys();
+    let values = map.values();
+    let val_nulls = map.value_nulls();
+    for idx in start..end {
+        let k = keys
+            .get(idx)
+            .ok_or_else(|| QueryError::internal("map key offset out of bounds"))?;
+        let v = if val_nulls.is_some_and(|bm| !bm.get(idx)) {
+            None
+        } else {
+            Some(
+                values
+                    .get(idx)
+                    .ok_or_else(|| QueryError::internal("map value offset out of bounds"))?,
+            )
+        };
+        f(k, v)?;
+    }
+    Ok(true)
+}
+
+struct BucketWorkerSpec {
+    source: NumericSource,
+    min: f64,
+    p99: f64,
+    width: f64,
+}
+
+struct BucketFanoutSink {
+    specs: Vec<BucketWorkerSpec>,
+    tallies: Vec<[u64; HISTOGRAM_BUCKETS + 1]>,
+    cancel: cetra_column::CancelToken,
+}
+
+impl BucketFanoutSink {
+    fn new(
+        view: FacetView,
+        pending: &[PendingHistogram],
+        schema: &Schema,
+        cancel: cetra_column::CancelToken,
+    ) -> Result<Self, QueryError> {
+        let mut specs = Vec::with_capacity(pending.len());
+        for h in pending {
+            specs.push(BucketWorkerSpec {
+                source: NumericSource::resolve(view, schema, h.col_name)?,
+                min: h.min,
+                p99: h.p99,
+                width: (h.p99 / HISTOGRAM_BUCKETS as f64) - (h.min / HISTOGRAM_BUCKETS as f64),
+            });
+        }
+        let tallies = vec![[0u64; HISTOGRAM_BUCKETS + 1]; pending.len()];
+        Ok(Self {
+            specs,
+            tallies,
+            cancel,
+        })
+    }
+}
+
+impl PushSink for BucketFanoutSink {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        _batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
+        if self.cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        if batch.is_empty() {
+            return Ok(ControlFlow::Continue);
+        }
+        for (i, spec) in self.specs.iter().enumerate() {
+            if self.cancel.is_cancelled() {
+                return Err(QueryError::Cancelled);
+            }
+            for phys_row in active_rows(&batch) {
+                let Some(x) = spec.source.read_finite_at(&batch, phys_row)? else {
+                    continue;
+                };
+                let bucket_idx = if x >= spec.p99 {
+                    HISTOGRAM_BUCKETS
+                } else {
+                    let diff = x - spec.min;
+                    let ratio = if diff.is_finite() {
+                        diff / spec.width
+                    } else {
+                        (x / spec.width) - (spec.min / spec.width)
+                    };
+                    let raw = ratio as i64;
+                    (raw.max(0) as usize).min(HISTOGRAM_BUCKETS - 1)
+                };
+                self.tallies[i][bucket_idx] = self.tallies[i][bucket_idx].saturating_add(1);
+            }
+        }
+        Ok(ControlFlow::Continue)
+    }
+}
+
+fn single_utf8_schema() -> Result<Arc<Schema>, RunError> {
+    Schema::try_new_arc(vec![Field::new(VALUE_COL, DataType::Utf8, false)])
+        .map_err(|e| query_err_to_run(e.into()))
+}
+
+fn single_utf8_agg_spec(utf8_schema: &Schema) -> Result<HashAggSpec, RunError> {
+    let col = col_expr(utf8_schema, VALUE_COL)?;
+    Ok(HashAggSpec {
+        group_by: vec![(VALUE_COL.to_owned(), col)],
+        aggs: vec![AggExpr {
+            func: AggFunc::CountStar,
+            filter: None,
+            output_name: COUNT_COL.to_owned(),
+        }],
     })
 }
 
@@ -720,177 +2122,299 @@ fn empty_histogram(total: u64) -> FacetData {
     }
 }
 
-/// The buckets of D1: `HISTOGRAM_BUCKETS` equal ones over `[min, p99)`, then `[p99, max]` when
-/// `max >= p99`. With `p99 <= min` there is one bucket, `[min, max]`.
-async fn buckets(
-    ctx: &QueryContext,
-    frame: DataFrame,
-    name: &str,
-    present: u64,
-    (min, max, p99): (f64, f64, f64),
-) -> Result<Vec<HistogramBucket>, RunError> {
-    if p99 <= min {
-        return Ok(vec![HistogramBucket {
-            lo: min,
-            hi: max,
-            count: present,
-        }]);
-    }
-    let width = (p99 - min) / HISTOGRAM_BUCKETS as f64;
-    let x = col(X);
-    let raw = cast((x.clone() - lit(min)) / lit(width), DataType::Int64);
-    let clamped = when(
-        raw.clone().gt_eq(lit(HISTOGRAM_BUCKETS as i64 - 1)),
-        lit(HISTOGRAM_BUCKETS as i64 - 1),
-    )
-    .otherwise(raw)
-    .map_err(classify)?;
-    let index = when(x.clone().gt_eq(lit(p99)), lit(HISTOGRAM_BUCKETS as i64))
-        .otherwise(clamped)
-        .map_err(classify)?;
-    let counted = frame
-        .select(vec![finite_number(name)?.alias(X)])
-        .map_err(classify)?
-        .filter(col(X).is_not_null())
-        .map_err(classify)?
-        .select(vec![index.alias(BUCKET)])
-        .map_err(classify)?
-        .aggregate(vec![col(BUCKET)], vec![count(lit(1_i64)).alias(COUNT)])
-        .map_err(classify)?
-        .collect()
-        .await
-        .map_err(|error| ctx.fail(error))?;
-
-    let mut tally = [0_u64; HISTOGRAM_BUCKETS + 1];
-    for batch in &counted {
-        let indexes = require(batch, BUCKET)?;
-        let counts = require(batch, COUNT)?;
-        for row in 0..batch.num_rows() {
-            let index = usize::try_from(i64_at(indexes, row)?)
-                .map_err(|_| internal("a bucket index is negative".to_owned()))?;
-            let slot = tally
-                .get_mut(index)
-                .ok_or_else(|| internal("a bucket index is out of range".to_owned()))?;
-            *slot += count_value(counts, row)?;
-        }
-    }
-    let length = if max >= p99 {
-        HISTOGRAM_BUCKETS + 1
-    } else {
-        HISTOGRAM_BUCKETS
-    };
-    Ok(tally
-        .iter()
-        .take(length)
-        .enumerate()
-        .map(|(index, count)| {
-            if index < HISTOGRAM_BUCKETS {
-                let lo = min + index as f64 * width;
-                let hi = if index + 1 == HISTOGRAM_BUCKETS {
-                    p99
-                } else {
-                    min + (index + 1) as f64 * width
-                };
-                HistogramBucket {
-                    lo,
-                    hi,
-                    count: *count,
-                }
-            } else {
-                HistogramBucket {
-                    lo: p99,
-                    hi: max,
-                    count: *count,
-                }
-            }
-        })
-        .collect())
+fn col_index(schema: &Schema, name: &str) -> Result<usize, RunError> {
+    schema
+        .index_of(name)
+        .ok_or_else(|| internal(format!("missing column {name} in schema")))
 }
 
-/// The first row of the batches, if any has one.
-fn first_row(batches: &[RecordBatch]) -> Option<&RecordBatch> {
-    batches.iter().find(|batch| batch.num_rows() > 0)
-}
-
-/// The count in `name` of row 0 of an aggregate.
-fn count_at(batch: &RecordBatch, name: &str) -> Result<u64, RunError> {
-    count_value(require(batch, name)?, 0)
-}
-
-/// A count as `u64`. Counts are never negative.
-fn count_value(column: &dyn Array, index: usize) -> Result<u64, RunError> {
-    u64::try_from(i64_at(column, index)?)
-        .map_err(|_| internal("aggregate count is negative".to_owned()))
+fn col_expr(schema: &Schema, name: &str) -> Result<Expr, RunError> {
+    let idx = col_index(schema, name)?;
+    Ok(Expr::Column {
+        index: idx,
+        name: name.to_owned(),
+        data_type: schema.fields()[idx].data_type.clone(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use bytesize::ByteSize;
+    use cetra_core::enums::{SpanKind, SpanStatus};
+    use cetra_core::ids::ProjectId;
+    use cetra_core::names::{environment, metadata_key};
+    use std::time::Duration;
+
+    use cetra_column::GlobalPool;
+    use cetra_core::score::{Score, ScoreValue};
     use cetra_core::span::Span;
-    use cetra_core::time_serde::parse_rfc3339;
-    use datafusion::execution::runtime_env::RuntimeEnv;
+    use cetra_query::exec::SpillManager;
 
     use super::*;
-    use crate::reads::Histogram;
-    use crate::test_support::{
-        example_query, live_scores_table, span_row, spans_table, traces_table,
+    use crate::config::{
+        FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
     };
-    use crate::views::{ProjectQuery, TimeWindow};
+    use crate::test_support::{score_row, score_rows, span_row, span_rows};
+    use crate::views::{QueryContext, TimeWindow};
+    use crate::{QeRuntime, QueryMemory, QueryOptions};
 
-    const TIMEOUT: Duration = Duration::from_secs(30);
+    const T0: i64 = 1_700_000_000_000_000_000;
+    const MIN: i64 = 60_000_000_000;
 
-    fn context() -> QueryContext {
-        QueryContext::new(example_query(), None).expect("context")
-    }
-
-    /// A context over `spans` (the example dataset's shape, with the given rows).
-    fn context_with(spans: &[Span]) -> QueryContext {
-        QueryContext::new(
-            ProjectQuery {
-                spans: spans_table(spans),
-                traces: traces_table(spans),
-                scores: live_scores_table(&[]),
-                runtime: Arc::new(RuntimeEnv::default()),
-                target_partitions: NonZeroUsize::new(2).expect("two partitions"),
-                optimizer_rules: Vec::new(),
-                suspects: crate::verify::Suspects::detached(),
-                visible_from: None,
+    fn test_config(dir: &std::path::Path) -> StorageConfig {
+        StorageConfig {
+            delete_objects: true,
+            data_dir: dir.to_path_buf(),
+            min_free_bytes: ByteSize::b(0),
+            object_store: None,
+            s3: S3Config::default(),
+            wal: WalConfig::default(),
+            flush: FlushConfig::default(),
+            memtable: MemtableConfig::default(),
+            query: QueryConfig {
+                target_partitions: 2,
+                ..QueryConfig::default()
             },
-            None,
-        )
-        .expect("context")
+            anchor: Default::default(),
+            gc: Default::default(),
+            compaction: Default::default(),
+            deletion: Default::default(),
+        }
     }
 
-    fn nanos(text: &str) -> i64 {
-        parse_rfc3339(text).expect(text)
+    #[derive(Debug)]
+    struct CountingSource {
+        inner: Arc<dyn ScanSource>,
+        opens: Arc<AtomicUsize>,
     }
 
-    /// The example dataset's window: 10:00 to 11:00 on 2026-01-01.
-    fn hour() -> Option<TimeWindow> {
-        Some(
-            TimeWindow::new(nanos("2026-01-01T10:00:00Z"), nanos("2026-01-01T11:00:00Z"))
-                .expect("window"),
-        )
+    impl ScanSource for CountingSource {
+        fn schema(&self) -> Arc<Schema> {
+            self.inner.schema()
+        }
+        fn projected_schema(&self, spec: &ScanSpec) -> Result<Arc<Schema>, QueryError> {
+            self.inner.projected_schema(spec)
+        }
+        fn open_partitions(
+            &self,
+            spec: &ScanSpec,
+            ctx: &ExecContext,
+        ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            self.inner.open_partitions(spec, ctx)
+        }
+        fn explain_summary(&self, spec: &ScanSpec) -> String {
+            self.inner.explain_summary(spec)
+        }
     }
 
-    /// One field asked alone, the shape the single-field tests were written for.
-    #[derive(Debug, Clone, Copy)]
-    struct Ask<'a> {
-        view: FacetView,
-        field: &'a str,
-        filter: Option<&'a str>,
-        search: Option<&'a str>,
-        scope: ListScope,
-        query: Option<&'a str>,
-        limit: usize,
+    #[derive(Debug)]
+    struct SlowStream {
+        delay: Duration,
     }
 
-    fn request(view: FacetView, field: &str) -> Ask<'_> {
-        Ask {
-            view,
-            field,
+    impl PartitionStream for SlowStream {
+        fn next_batch(
+            &mut self,
+            cancel: &cetra_column::CancelToken,
+            _res: Option<&mut Reservation>,
+        ) -> Result<Option<Batch>, QueryError> {
+            let start = std::time::Instant::now();
+            while start.elapsed() < self.delay {
+                if cancel.is_cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(None)
+        }
+    }
+
+    #[derive(Debug)]
+    struct Pass2SlowSource {
+        inner: Arc<dyn ScanSource>,
+        opens: Arc<AtomicUsize>,
+        slow_on_open: usize,
+        delay: Duration,
+    }
+
+    impl ScanSource for Pass2SlowSource {
+        fn schema(&self) -> Arc<Schema> {
+            self.inner.schema()
+        }
+        fn projected_schema(&self, spec: &ScanSpec) -> Result<Arc<Schema>, QueryError> {
+            self.inner.projected_schema(spec)
+        }
+        fn open_partitions(
+            &self,
+            spec: &ScanSpec,
+            ctx: &ExecContext,
+        ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+            let n = self.opens.fetch_add(1, Ordering::SeqCst) + 1;
+            if n == self.slow_on_open {
+                return Ok(vec![Box::new(SlowStream { delay: self.delay })]);
+            }
+            self.inner.open_partitions(spec, ctx)
+        }
+        fn explain_summary(&self, spec: &ScanSpec) -> String {
+            self.inner.explain_summary(spec)
+        }
+    }
+
+    fn build_sample_data() -> (Vec<Span>, Vec<Score>) {
+        let mut spans = Vec::new();
+        for t in 0..200_u16 {
+            let start = T0 + i64::from(t) * 10_000_000;
+            let mut s = span_row(t, 0, start, start);
+            s.name = format!("agent-{}", t % 3);
+            s.end_time = s.start_time + (i64::from(t) + 1) * 1_000_000;
+            s.environment = Some(if t % 2 == 0 { "prod" } else { "staging" }.to_owned());
+            s.user_id = if t < 180 {
+                Some(format!("u-{}", t % 2))
+            } else {
+                None
+            };
+            s.session_id = Some(format!("sess-{}", t % 3));
+            s.tags = match t % 3 {
+                0 => vec!["alpha".to_owned(), "beta".to_owned()],
+                1 => vec!["alpha".to_owned()],
+                _ => Vec::new(),
+            };
+            s.metadata = match t % 4 {
+                0 => BTreeMap::from([
+                    ("team".to_owned(), "core".to_owned()),
+                    ("cetra.internal".to_owned(), "hidden".to_owned()),
+                ]),
+                1 => BTreeMap::from([("cetra.only".to_owned(), "x".to_owned())]),
+                2 => BTreeMap::from([("team".to_owned(), "ml".to_owned())]),
+                _ => BTreeMap::new(),
+            };
+            s.cost_total = Some(1.0 + 0.01 * f64::from(t + 1));
+            s.total_tokens = Some(100 * i64::from(t + 1));
+            if t == 2 {
+                s.status = SpanStatus::Error;
+                s.input = Some("needle order".to_owned());
+            }
+            if t == 4 {
+                // Non-finite cost must count as missing on histogram.
+                s.cost_total = Some(f64::NAN);
+            }
+            let mut child = span_row(t, 1, s.start_time + 1000, s.start_time + 1000);
+            child.span_kind = SpanKind::Llm;
+            child.parent_span_id = Some(s.span_id);
+            child.end_time = child.start_time + (i64::from(t) + 1) * 1_000_000 + 500_000;
+            child.response_model = Some(if t % 2 == 0 { "gpt-5" } else { "claude" }.to_owned());
+            child.attributes = BTreeMap::from([
+                ("k1".to_owned(), "v1".to_owned()),
+                ("cetra.secret".to_owned(), "skip".to_owned()),
+            ]);
+            spans.push(s);
+            spans.push(child);
+        }
+        // Eval & experiment traces (excluded by default).
+        let mut eval_s = span_row(900, 0, T0 + MIN, T0 + MIN);
+        eval_s.environment = Some(environment::EVAL.to_owned());
+        spans.push(eval_s);
+
+        let mut exp_s = span_row(901, 0, T0 + MIN, T0 + MIN);
+        exp_s
+            .metadata
+            .insert(metadata_key::EXPERIMENT_ID.to_owned(), "e1".to_owned());
+        spans.push(exp_s);
+
+        let mut sc = score_row(1, 0, T0 + MIN, T0 + MIN, T0 + MIN, false, "quality");
+        sc.value = ScoreValue::Numeric(0.95);
+        (spans, vec![sc])
+    }
+
+    #[tokio::test]
+    async fn facets_all_views_and_scan_count_le_2() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+        let (spans, scores) = build_sample_data();
+        storage
+            .append_spans(project, span_rows(&spans))
+            .await
+            .expect("append spans");
+        storage
+            .append_scores(project, score_rows(&scores))
+            .await
+            .expect("append scores");
+
+        let opts = QueryOptions::new(None, None);
+        let qe_ctx = EngineContext::from_storage(&storage, project, &opts).expect("qe ctx");
+        let ctx = QueryContext::from_engine(qe_ctx.clone());
+
+        // 10 mixed fields on Spans in <= 2 scans.
+        let opens = Arc::new(AtomicUsize::new(0));
+        let mut counted_engine = qe_ctx.clone();
+        counted_engine.spans = Arc::new(CountingSource {
+            inner: Arc::clone(&qe_ctx.spans),
+            opens: Arc::clone(&opens),
+        });
+        let counted_ctx = QueryContext::from_engine(counted_engine);
+
+        let span_fields = [
+            FacetField {
+                field: "name",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "span_kind",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "status",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "model",
+                query: Some("GP"),
+                limit: 1,
+            },
+            FacetField {
+                field: "user_id",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "tags",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "metadata",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "metadata['team']",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "duration_ms",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "cost_total",
+                query: None,
+                limit: 10,
+            },
+        ];
+        let span_req = FacetsRequest {
+            view: FacetView::Spans,
             filter: None,
             search: None,
             scope: ListScope {
@@ -898,681 +2422,889 @@ mod tests {
                 include_eval: false,
                 include_experiments: false,
             },
-            query: None,
-            limit: 10,
-        }
-    }
-
-    /// `ask` as a batch of one; the batch's error or the field's.
-    async fn facet(ctx: &QueryContext, ask: Ask<'_>) -> Result<FacetData, RunError> {
-        let fields = [FacetField {
-            field: ask.field,
-            query: ask.query,
-            limit: ask.limit,
-        }];
-        let mut results = facets(
-            ctx,
-            FacetsRequest {
-                view: ask.view,
-                filter: ask.filter,
-                search: ask.search,
-                scope: ask.scope,
-                fields: &fields,
-                timeout: TIMEOUT,
-            },
-        )
-        .await?;
-        results.pop().expect("one result per field")
-    }
-
-    /// A batch over `fields` with no window, filter or search.
-    fn batch<'a>(view: FacetView, fields: &'a [FacetField<'a>]) -> FacetsRequest<'a> {
-        FacetsRequest {
-            view,
-            filter: None,
-            search: None,
-            scope: ListScope {
-                window: None,
-                include_eval: false,
-                include_experiments: false,
-            },
-            fields,
-            timeout: TIMEOUT,
-        }
-    }
-
-    fn field(name: &str) -> FacetField<'_> {
-        FacetField {
-            field: name,
-            query: None,
-            limit: 10,
-        }
-    }
-
-    fn pairs(data: &FacetData) -> Vec<(&str, u64)> {
-        data.values
-            .iter()
-            .map(|value| (value.value.as_str(), value.count))
-            .collect()
-    }
-
-    /// The traces of the example window, without the eval trace: 5 traces.
-    #[tokio::test]
-    async fn status_values_count_traces_of_the_window() {
-        let ctx = context();
-        let mut traces = request(FacetView::Traces, "status");
-        traces.scope.window = hour();
-        let data = facet(&ctx, traces).await.expect("facet");
-        assert_eq!(data.kind, FacetKind::Values);
-        assert_eq!(data.total, 5);
-        assert_eq!(data.missing, 0);
-        // Trace 6 has no root span, so its status is "unset".
-        assert_eq!(pairs(&data), [("ok", 3), ("error", 1), ("unset", 1)]);
-        assert!(!data.more);
-        assert!(data.histogram.is_none());
-    }
-
-    #[tokio::test]
-    async fn filter_and_search_narrow_counts() {
-        let ctx = context();
-        let mut filtered = request(FacetView::Traces, "status");
-        filtered.filter = Some("user_id = 'user-42'");
-        let data = facet(&ctx, filtered).await.expect("facet");
-        assert_eq!(data.total, 3);
-        assert_eq!(pairs(&data), [("ok", 3)]);
-
-        let mut searched = request(FacetView::Traces, "status");
-        searched.scope.window = hour();
-        searched.search = Some("order");
-        let data = facet(&ctx, searched).await.expect("facet");
-        assert_eq!(data.total, 1);
-        assert_eq!(pairs(&data), [("ok", 1)]);
-    }
-
-    #[tokio::test]
-    async fn query_keeps_matching_values_case_insensitive() {
-        let ctx = context();
-        let mut upper = request(FacetView::Traces, "name");
-        upper.query = Some("SUPPORT");
-        let data = facet(&ctx, upper).await.expect("facet");
-        assert_eq!(pairs(&data), [("support-agent", 2)]);
-        assert_eq!(data.total, 5);
-    }
-
-    #[tokio::test]
-    async fn query_escapes_like_wildcards() {
-        let ctx = context();
-        let mut percent = request(FacetView::Traces, "name");
-        percent.query = Some("%");
-        let data = facet(&ctx, percent).await.expect("facet");
-        assert!(data.values.is_empty(), "{:?}", pairs(&data));
-        assert_eq!(data.total, 5);
-
-        let mut underscore = request(FacetView::Spans, "name");
-        underscore.query = Some("_");
-        let data = facet(&ctx, underscore).await.expect("facet");
-        assert_eq!(pairs(&data), [("get_order_status", 1)]);
-    }
-
-    #[tokio::test]
-    async fn limit_sets_more() {
-        let ctx = context();
-        let all = facet(&ctx, request(FacetView::Traces, "name"))
-            .await
-            .expect("facet");
-        assert_eq!(all.values.len(), 4, "{:?}", pairs(&all));
-        assert!(!all.more);
-        let mut one = request(FacetView::Traces, "name");
-        one.limit = 1;
-        let data = facet(&ctx, one).await.expect("facet");
-        assert_eq!(pairs(&data), [("support-agent", 2)]);
-        assert!(data.more);
-    }
-
-    #[tokio::test]
-    async fn tags_count_elements() {
-        let ctx = context();
-        let data = facet(&ctx, request(FacetView::Traces, "tags"))
-            .await
-            .expect("facet");
-        assert_eq!(data.kind, FacetKind::Values);
-        assert_eq!(pairs(&data), [("beta", 2), ("refund", 1)]);
-        assert_eq!(data.total, 5);
-        assert_eq!(data.missing, 3);
-    }
-
-    #[tokio::test]
-    async fn metadata_keys_and_values() {
-        let ctx = context();
-        let keys = facet(&ctx, request(FacetView::Traces, "metadata"))
-            .await
-            .expect("facet");
-        assert_eq!(keys.kind, FacetKind::Keys);
-        assert_eq!(pairs(&keys), [("user.name", 1), ("user.plan", 1)]);
-        assert_eq!(keys.missing, 4);
-
-        let plan = facet(&ctx, request(FacetView::Traces, "metadata['user.plan']"))
-            .await
-            .expect("facet");
-        assert_eq!(plan.kind, FacetKind::Values);
-        assert_eq!(pairs(&plan), [("\"pro\"", 1)]);
-        assert_eq!(plan.missing, 4);
-    }
-
-    #[tokio::test]
-    async fn bool_values_are_true_false() {
-        let ctx = context();
-        let data = facet(&ctx, request(FacetView::Traces, "has_root"))
-            .await
-            .expect("facet");
-        assert_eq!(pairs(&data), [("true", 4), ("false", 1)]);
-    }
-
-    #[tokio::test]
-    async fn keys_leave_out_cetra_prefix() {
-        let mut span = span_row(1, 0, 1_000, 1_000);
-        span.metadata
-            .insert("cetra.internal".to_owned(), "1".to_owned());
-        span.metadata
-            .insert("user.plan".to_owned(), "\"pro\"".to_owned());
-        let ctx = context_with(&[span]);
-        let data = facet(&ctx, request(FacetView::Spans, "metadata"))
-            .await
-            .expect("facet");
-        assert_eq!(pairs(&data), [("user.plan", 1)]);
-        assert_eq!(data.total, 1);
-    }
-
-    #[tokio::test]
-    async fn histogram_buckets_cover_all_rows() {
-        let ctx = context();
-        let data = facet(&ctx, request(FacetView::Traces, "duration_ms"))
-            .await
-            .expect("facet");
-        assert_eq!(data.kind, FacetKind::Histogram);
-        assert_eq!(data.total, 5);
-        assert_eq!(data.missing, 0);
-        let histogram = data.histogram.expect("histogram");
-        let sum: u64 = histogram.buckets.iter().map(|bucket| bucket.count).sum();
-        assert_eq!(sum, 5);
-        assert!(matches!(histogram.buckets.len(), 1 | 20 | 21));
-        assert!(
-            histogram
-                .buckets
-                .windows(2)
-                .all(|pair| pair[0].lo <= pair[1].lo)
-        );
-        assert!(histogram.min <= histogram.p50 && histogram.p99 <= histogram.max + 1e-9);
-        assert!(data.values.is_empty());
-        assert!(!data.more);
-    }
-
-    #[tokio::test]
-    async fn histogram_of_no_rows_is_none() {
-        let ctx = context();
-        let mut empty = request(FacetView::Traces, "duration_ms");
-        empty.filter = Some("name = 'no such trace'");
-        let data = facet(&ctx, empty).await.expect("facet");
-        assert_eq!(data.kind, FacetKind::Histogram);
-        assert_eq!(data.total, 0);
-        assert!(data.histogram.is_none());
-    }
-
-    #[tokio::test]
-    async fn sessions_facets_use_session_rows() {
-        let ctx = context();
-        let data = facet(&ctx, request(FacetView::Sessions, "user_id"))
-            .await
-            .expect("facet");
-        assert_eq!(data.total, 2);
-        assert_eq!(data.missing, 0);
-        assert_eq!(pairs(&data), [("user-42", 1), ("user-7", 1)]);
-    }
-
-    #[tokio::test]
-    async fn bad_field_is_invalid_request() {
-        let ctx = context();
-        for field in [
-            "input",
-            "trace_id",
-            "start_time",
-            "nope",
-            "metadata[",
-            "metadata['']",
-        ] {
-            let result = facet(&ctx, request(FacetView::Traces, field)).await;
-            assert!(
-                matches!(&result, Err(RunError::InvalidRequest(message)) if message == CANNOT_FACET),
-                "{field}: {result:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_field_accepts_columns_and_map_keys() {
-        assert_eq!(
-            parse_field(FacetView::Traces, "status").expect("status"),
-            ParsedField::Values("status")
-        );
-        assert_eq!(
-            parse_field(FacetView::Traces, "has_root").expect("has_root"),
-            ParsedField::Bool("has_root")
-        );
-        assert_eq!(
-            parse_field(FacetView::Traces, "models").expect("models"),
-            ParsedField::List("models")
-        );
-        assert_eq!(
-            parse_field(FacetView::Traces, "metadata").expect("metadata"),
-            ParsedField::Keys("metadata")
-        );
-        assert_eq!(
-            parse_field(FacetView::Traces, "metadata['user.plan']").expect("map"),
-            ParsedField::MapValue("metadata", "user.plan".to_owned())
-        );
-        assert_eq!(
-            parse_field(FacetView::Traces, "metadata['it''s']").expect("quote"),
-            ParsedField::MapValue("metadata", "it's".to_owned())
-        );
-        assert_eq!(
-            parse_field(FacetView::Traces, "duration_ms").expect("duration"),
-            ParsedField::Number("duration_ms")
-        );
-        assert!(matches!(
-            parse_field(FacetView::Spans, "attributes['x']"),
-            Ok(ParsedField::MapValue("attributes", _))
-        ));
-    }
-
-    #[test]
-    fn malformed_map_fields_are_rejected() {
-        for text in [
-            "metadata['a'b']",
-            "metadata['a'",
-            "metadata[']",
-            "tags['x']",
-            "attributes['x']",
-        ] {
-            assert!(
-                parse_field(FacetView::Traces, text).is_err(),
-                "{text} should be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn key_longer_than_the_limit_is_rejected() {
-        let long = "k".repeat(MAX_FACET_KEY + 1);
-        assert!(parse_field(FacetView::Traces, &format!("metadata['{long}']")).is_err());
-        let exact = "k".repeat(MAX_FACET_KEY);
-        assert!(parse_field(FacetView::Traces, &format!("metadata['{exact}']")).is_ok());
-    }
-
-    #[tokio::test]
-    async fn bad_limit_and_query_are_invalid_requests() {
-        let ctx = context();
-        let mut zero = request(FacetView::Traces, "status");
-        zero.limit = 0;
-        assert!(matches!(
-            facet(&ctx, zero).await,
-            Err(RunError::InvalidRequest(_))
-        ));
-        let mut too_many = request(FacetView::Traces, "status");
-        too_many.limit = MAX_FACET_LIMIT + 1;
-        assert!(matches!(
-            facet(&ctx, too_many).await,
-            Err(RunError::InvalidRequest(_))
-        ));
-        for query in ["   ", ""] {
-            let mut blank = request(FacetView::Traces, "status");
-            blank.query = Some(query);
-            assert!(matches!(
-                facet(&ctx, blank).await,
-                Err(RunError::InvalidRequest(_))
-            ));
-        }
-        let long = "q".repeat(MAX_FACET_QUERY + 1);
-        let mut too_long = request(FacetView::Traces, "status");
-        too_long.query = Some(&long);
-        assert!(matches!(
-            facet(&ctx, too_long).await,
-            Err(RunError::InvalidRequest(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn bad_filter_is_invalid() {
-        let ctx = context();
-        let mut bad = request(FacetView::Traces, "status");
-        bad.filter = Some("error_count >");
-        assert!(matches!(facet(&ctx, bad).await, Err(RunError::Invalid(_))));
-    }
-
-    #[tokio::test]
-    async fn sessions_reject_search() {
-        let ctx = context();
-        let mut bad = request(FacetView::Sessions, "user_id");
-        bad.search = Some("refund");
-        assert!(matches!(
-            facet(&ctx, bad).await,
-            Err(RunError::InvalidRequest(_))
-        ));
-    }
-
-    /// One span per value, each in its own trace, with `cost_total` set to the value.
-    fn cost_spans(values: &[Option<f64>]) -> Vec<Span> {
-        values
-            .iter()
-            .enumerate()
-            .map(|(index, value)| {
-                let mut span = span_row(index as u16, 0, 1_000, 1_000);
-                span.cost_total = *value;
-                span
-            })
-            .collect()
-    }
-
-    /// The `cost_total` histogram of the spans that hold `values`.
-    async fn cost_histogram(values: &[Option<f64>]) -> FacetData {
-        let ctx = context_with(&cost_spans(values));
-        facet(&ctx, request(FacetView::Spans, "cost_total"))
-            .await
-            .expect("facet")
-    }
-
-    fn bucket_sum(histogram: &Histogram) -> u64 {
-        histogram.buckets.iter().map(|bucket| bucket.count).sum()
-    }
-
-    #[tokio::test]
-    async fn histogram_of_one_value_is_one_bucket() {
-        let data = cost_histogram(&[Some(5.0), Some(5.0), Some(5.0)]).await;
-        let histogram = data.histogram.expect("histogram");
-        assert_eq!((histogram.min, histogram.max), (5.0, 5.0));
-        assert_eq!(
-            histogram.buckets,
-            [HistogramBucket {
-                lo: 5.0,
-                hi: 5.0,
-                count: 3
-            }]
-        );
-    }
-
-    #[tokio::test]
-    async fn histogram_with_p99_at_min_is_one_bucket() {
-        // 200 rows at 1.0 and one at 10.0: the 99th percentile is the minimum.
-        let mut values = vec![Some(1.0); 200];
-        values.push(Some(10.0));
-        let data = cost_histogram(&values).await;
-        let histogram = data.histogram.expect("histogram");
-        assert_eq!(histogram.p99, histogram.min);
-        assert!(histogram.max > histogram.min);
-        assert_eq!(
-            histogram.buckets,
-            [HistogramBucket {
-                lo: 1.0,
-                hi: 10.0,
-                count: 201
-            }]
-        );
-    }
-
-    #[tokio::test]
-    async fn outlier_lands_in_the_overflow_bucket() {
-        let mut values: Vec<Option<f64>> = (0..100).map(|n| Some(f64::from(n))).collect();
-        values.push(Some(1_000.0));
-        let data = cost_histogram(&values).await;
-        let histogram = data.histogram.expect("histogram");
-        assert_eq!(histogram.max, 1_000.0);
-        assert!(histogram.p99 < histogram.max);
-        assert_eq!(histogram.buckets.len(), 21);
-        assert_eq!(histogram.buckets[19].hi, histogram.p99);
-        let overflow = histogram.buckets[20];
-        assert_eq!((overflow.lo, overflow.hi), (histogram.p99, histogram.max));
-        assert!(overflow.count >= 1);
-        assert!(
-            histogram
-                .buckets
-                .windows(2)
-                .all(|pair| pair[0].lo <= pair[1].lo)
-        );
-        assert_eq!(bucket_sum(&histogram), data.total - data.missing);
-        assert_eq!(bucket_sum(&histogram), 101);
-    }
-
-    #[tokio::test]
-    async fn negative_values_are_bucketed() {
-        let values = [-5.0, -1.0, 0.0, 2.5, 5.0].map(Some);
-        let data = cost_histogram(&values).await;
-        let histogram = data.histogram.expect("histogram");
-        assert_eq!((histogram.min, histogram.max), (-5.0, 5.0));
-        assert_eq!(histogram.buckets[0].lo, -5.0);
-        assert_eq!(bucket_sum(&histogram), 5);
-    }
-
-    #[tokio::test]
-    async fn null_and_non_finite_numbers_are_missing() {
-        let values = [
-            Some(1.0),
-            Some(2.0),
-            Some(f64::NAN),
-            Some(f64::INFINITY),
-            Some(f64::NEG_INFINITY),
-            None,
-        ];
-        let data = cost_histogram(&values).await;
-        assert_eq!(data.total, 6);
-        assert_eq!(data.missing, 4);
-        let histogram = data.histogram.expect("histogram");
-        assert_eq!((histogram.min, histogram.max), (1.0, 2.0));
-        assert_eq!(bucket_sum(&histogram), 2);
-    }
-
-    #[tokio::test]
-    async fn only_non_finite_numbers_make_no_histogram() {
-        let data = cost_histogram(&[Some(f64::NAN), None]).await;
-        assert_eq!((data.total, data.missing), (2, 2));
-        assert!(data.histogram.is_none());
-    }
-
-    #[tokio::test]
-    async fn sessions_check_search_before_the_filter() {
-        let ctx = context();
-        let mut bad = request(FacetView::Sessions, "user_id");
-        bad.search = Some("refund");
-        bad.filter = Some("error_count >");
-        assert!(matches!(
-            facet(&ctx, bad).await,
-            Err(RunError::InvalidRequest(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn spans_values_count_spans_of_the_window() {
-        let ctx = context();
-        let data = facet(&ctx, request(FacetView::Spans, "span_kind"))
-            .await
-            .expect("facet");
-        assert_eq!(data.total, 12);
-        assert_eq!(
-            pairs(&data),
-            [
-                ("llm", 6),
-                ("agent", 2),
-                ("chain", 2),
-                ("retriever", 1),
-                ("tool", 1)
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn include_eval_adds_the_eval_rows() {
-        let ctx = context();
-        let mut spans = request(FacetView::Spans, "span_kind");
-        spans.scope.include_eval = true;
-        let data = facet(&ctx, spans).await.expect("facet");
-        assert_eq!(data.total, 14);
-        assert_eq!(
-            pairs(&data),
-            [
-                ("llm", 7),
-                ("agent", 2),
-                ("chain", 2),
-                ("evaluator", 1),
-                ("retriever", 1),
-                ("tool", 1)
-            ]
-        );
-
-        let mut traces = request(FacetView::Traces, "status");
-        traces.scope.include_eval = true;
-        let data = facet(&ctx, traces).await.expect("facet");
-        assert_eq!(data.total, 6);
-        assert_eq!(pairs(&data), [("ok", 4), ("error", 1), ("unset", 1)]);
-    }
-
-    #[tokio::test]
-    async fn metadata_key_with_a_quote_is_read_back() {
-        let mut span = span_row(1, 0, 1_000, 1_000);
-        span.metadata.insert("it's".to_owned(), "v1".to_owned());
-        let ctx = context_with(&[span]);
-        let keys = facet(&ctx, request(FacetView::Spans, "metadata"))
-            .await
-            .expect("facet");
-        assert_eq!(pairs(&keys), [("it's", 1)]);
-        let value = facet(&ctx, request(FacetView::Spans, "metadata['it''s']"))
-            .await
-            .expect("facet");
-        assert_eq!(pairs(&value), [("v1", 1)]);
-        assert_eq!(value.missing, 0);
-    }
-
-    #[tokio::test]
-    async fn batch_answers_each_field_in_order() {
-        let ctx = context();
-        let fields = [field("status"), field("duration_ms"), field("metadata")];
-        let mut request = batch(FacetView::Traces, &fields);
-        request.scope.window = hour();
-        let results = facets(&ctx, request).await.expect("batch");
-        assert_eq!(results.len(), 3);
-        let status = results[0].as_ref().expect("status");
-        assert_eq!(pairs(status), [("ok", 3), ("error", 1), ("unset", 1)]);
-        assert_eq!(
-            results[1].as_ref().expect("duration").kind,
-            FacetKind::Histogram
-        );
-        assert_eq!(results[2].as_ref().expect("metadata").kind, FacetKind::Keys);
-    }
-
-    /// More fields than run at once still come back in request order.
-    #[tokio::test]
-    async fn more_fields_than_run_at_once_keep_their_order() {
-        let ctx = context();
-        let names = [
-            "status",
-            "duration_ms",
-            "metadata",
-            "name",
-            "cost_total",
-            "tags",
-            "input",
-        ];
-        assert!(names.len() > FIELDS_AT_ONCE);
-        let fields: Vec<FacetField<'_>> = names.iter().map(|name| field(name)).collect();
-        let results = facets(&ctx, batch(FacetView::Traces, &fields))
-            .await
-            .expect("batch");
-        let kinds: Vec<Option<FacetKind>> = results
-            .iter()
-            .map(|result| result.as_ref().ok().map(|data| data.kind))
-            .collect();
-        assert_eq!(
-            kinds,
-            [
-                Some(FacetKind::Values),
-                Some(FacetKind::Histogram),
-                Some(FacetKind::Keys),
-                Some(FacetKind::Values),
-                Some(FacetKind::Histogram),
-                Some(FacetKind::Values),
-                None,
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn one_bad_field_does_not_fail_the_others() {
-        let ctx = context();
-        let zero_limit = FacetField {
-            field: "status",
-            query: None,
-            limit: 0,
+            fields: &span_fields,
+            timeout: Duration::from_secs(10),
         };
-        let fields = [field("status"), field("input"), zero_limit];
-        let results = facets(&ctx, batch(FacetView::Traces, &fields))
-            .await
-            .expect("batch");
-        assert!(results[0].is_ok());
-        assert!(matches!(&results[1], Err(RunError::InvalidRequest(_))));
-        assert!(matches!(&results[2], Err(RunError::InvalidRequest(_))));
-    }
-
-    #[tokio::test]
-    async fn duplicate_fields_are_answered_twice() {
-        let ctx = context();
-        let fields = [field("status"), field("status")];
-        let results = facets(&ctx, batch(FacetView::Traces, &fields))
-            .await
-            .expect("batch");
-        assert_eq!(results.len(), 2);
-        assert_eq!(
-            results[0].as_ref().expect("first"),
-            results[1].as_ref().expect("second")
+        let span_res = facets(&counted_ctx, span_req).await.expect("span facets");
+        assert!(
+            opens.load(Ordering::SeqCst) <= 2,
+            "expected <= 2 scans for 10 facets, got {}",
+            opens.load(Ordering::SeqCst)
         );
-    }
+        assert_eq!(span_res.len(), 10);
+        for res in &span_res {
+            let f = res.as_ref().expect("span facet ok");
+            assert_eq!(f.total, 400);
+        }
+        let duration_hist = span_res[8]
+            .as_ref()
+            .unwrap()
+            .histogram
+            .as_ref()
+            .expect("duration histogram");
+        assert_eq!(duration_hist.buckets.len(), HISTOGRAM_BUCKETS + 1);
 
-    #[tokio::test]
-    async fn no_field_or_too_many_fail_the_batch() {
-        let ctx = context();
-        let none: [FacetField<'_>; 0] = [];
-        assert!(matches!(
-            facets(&ctx, batch(FacetView::Traces, &none)).await,
-            Err(RunError::InvalidRequest(_))
-        ));
-        let many = [field("status"); MAX_FACET_FIELDS + 1];
-        assert!(matches!(
-            facets(&ctx, batch(FacetView::Traces, &many)).await,
-            Err(RunError::InvalidRequest(_))
-        ));
-    }
+        // Traces with search + score filter + bool + lists + keys + histogram.
+        let win = TimeWindow::new(T0 - MIN, T0 + 20 * MIN).expect("win");
+        let trace_fields = [
+            FacetField {
+                field: "has_root",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "tags",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "metadata",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "duration_ms",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "status",
+                query: None,
+                limit: 10,
+            },
+        ];
+        let trace_req = FacetsRequest {
+            view: FacetView::Traces,
+            filter: Some("score('quality') > 0.5 OR status = 'ok'"),
+            search: Some("needle"),
+            scope: ListScope {
+                window: Some(win),
+                include_eval: false,
+                include_experiments: false,
+            },
+            fields: &trace_fields,
+            timeout: Duration::from_secs(10),
+        };
+        let trace_res = facets(&ctx, trace_req).await.expect("traces facets");
+        assert_eq!(trace_res.len(), 5);
+        for res in &trace_res {
+            let f = res.as_ref().expect("trace facet ok");
+            assert_eq!(f.total, 0);
+        }
 
-    #[tokio::test]
-    async fn bad_filter_fails_the_batch_before_the_fields() {
-        let ctx = context();
-        let fields = [field("input")];
-        let mut request = batch(FacetView::Traces, &fields);
-        request.filter = Some("error_count >");
-        assert!(matches!(
-            facets(&ctx, request).await,
-            Err(RunError::Invalid(_))
-        ));
-    }
+        // Sessions facets.
+        let sess_fields = [
+            FacetField {
+                field: "user_id",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "tags",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "duration_ms",
+                query: None,
+                limit: 10,
+            },
+        ];
+        let sess_req = FacetsRequest {
+            view: FacetView::Sessions,
+            filter: Some("trace_count >= 1"),
+            search: None,
+            scope: ListScope {
+                window: Some(win),
+                include_eval: false,
+                include_experiments: false,
+            },
+            fields: &sess_fields,
+            timeout: Duration::from_secs(10),
+        };
+        let sess_res = facets(&ctx, sess_req).await.expect("sess facets");
+        assert_eq!(sess_res.len(), 3);
+        for res in &sess_res {
+            let f = res.as_ref().expect("sess facet ok");
+            assert!(f.total > 0);
+        }
 
-    #[tokio::test]
-    async fn only_bad_fields_answer_their_errors() {
-        let ctx = context();
-        let fields = [field("input"), field("output")];
-        let results = facets(&ctx, batch(FacetView::Traces, &fields))
+        // All-invalid early return BEFORE search window check.
+        let bad_fields = [
+            FacetField {
+                field: "nonexistent",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "status",
+                query: None,
+                limit: 0,
+            },
+        ];
+        let early_req = FacetsRequest {
+            view: FacetView::Traces,
+            filter: None,
+            search: Some("needle"),
+            scope: ListScope {
+                window: None,
+                include_eval: false,
+                include_experiments: false,
+            },
+            fields: &bad_fields,
+            timeout: Duration::from_secs(10),
+        };
+        let early_res = facets(&ctx, early_req)
             .await
-            .expect("batch");
-        assert_eq!(results.len(), 2);
-        for result in &results {
+            .expect("all-invalid must not check search window");
+        assert_eq!(early_res.len(), 2);
+        assert!(matches!(early_res[0], Err(RunError::InvalidRequest(_))));
+        assert!(matches!(early_res[1], Err(RunError::InvalidRequest(_))));
+
+        // Mixed valid + invalid without window with search -> outer InvalidRequest("search needs a time range").
+        let mixed_fields = [
+            FacetField {
+                field: "status",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "bad",
+                query: None,
+                limit: 10,
+            },
+        ];
+        let err = facets(
+            &ctx,
+            FacetsRequest {
+                view: FacetView::Traces,
+                filter: None,
+                search: Some("needle"),
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                fields: &mixed_fields,
+                timeout: Duration::from_secs(10),
+            },
+        )
+        .await
+        .expect_err("mixed with search and no window must fail");
+        assert!(matches!(err, RunError::InvalidRequest(ref m) if m == "search needs a time range"));
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn per_field_too_large_isolation_keeps_siblings_ok() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+
+        // Create many distinct long `name` values across multiple batches and only 2 distinct `status` values.
+        for chunk in 0..40_u16 {
+            let mut spans = Vec::with_capacity(100);
+            for i in 0..100_u16 {
+                let t = chunk * 100 + i;
+                let mut s = span_row(t, 0, T0 + i64::from(t) * 1000, T0 + i64::from(t) * 1000);
+                s.name = format!("unique-long-span-name-{t:06}-{}", "x".repeat(160));
+                s.status = if t % 2 == 0 {
+                    SpanStatus::Ok
+                } else {
+                    SpanStatus::Error
+                };
+                spans.push(s);
+            }
+            storage
+                .append_spans(project, span_rows(&spans))
+                .await
+                .expect("append");
+        }
+
+        let mut ctx =
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("ctx");
+        // Tight memory pool (1/4 headroom covers upstream memtable batches; 3/8 per-field cap trips `name`).
+        let cap = 1024 * 1024;
+        let admission = Arc::new(crate::engine::admission::AsyncAdmissionPool::new(cap));
+        let spill = Arc::new(SpillManager::with_fixed_cap(dir.path().join("spill"), 0));
+        ctx.runtime = QeRuntime::new(
+            admission,
+            Arc::clone(&ctx.runtime.metadata_cache),
+            spill,
+            1,
+            QueryMemory {
+                initial: 0,
+                cap,
+                wait: Duration::from_secs(1),
+            },
+        );
+        ctx.pool = GlobalPool::standalone(cap);
+
+        let fields = [
+            FacetField {
+                field: "status",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "name",
+                query: None,
+                limit: 10,
+            },
+        ];
+        let res = facets(
+            &QueryContext::from_engine(ctx),
+            FacetsRequest {
+                view: FacetView::Spans,
+                filter: None,
+                search: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                fields: &fields,
+                timeout: Duration::from_secs(10),
+            },
+        )
+        .await
+        .expect("facets");
+
+        let status_res = res[0].as_ref().expect("status sibling must succeed");
+        assert_eq!(status_res.total, 4000);
+        assert_eq!(status_res.values.len(), 2);
+        assert!(
+            matches!(res[1], Err(RunError::TooLarge)),
+            "high-cardinality field must fail with TooLarge, got {:?}",
+            res[1]
+        );
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pass1_and_pass2_timeout_isolation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+
+        let mut spans = Vec::new();
+        for t in 0..20_u16 {
+            let mut s = span_row(t, 0, T0 + i64::from(t) * MIN, T0 + i64::from(t) * MIN);
+            s.end_time = s.start_time + (i64::from(t) + 1) * 1_000_000;
+            s.total_tokens = Some(100);
+            spans.push(s);
+        }
+        storage
+            .append_spans(project, span_rows(&spans))
+            .await
+            .expect("append");
+
+        let base_ctx =
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("ctx");
+
+        let fields = [
+            FacetField {
+                field: "status",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "nonexistent",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "duration_ms",
+                query: None,
+                limit: 10,
+            },
+        ];
+
+        // Pass 1 timeout: preserves InvalidRequest, marks valid fields Timeout.
+        let mut p1_ctx = base_ctx.clone();
+        p1_ctx.spans = Arc::new(Pass2SlowSource {
+            inner: Arc::clone(&base_ctx.spans),
+            opens: Arc::new(AtomicUsize::new(0)),
+            slow_on_open: 1,
+            delay: Duration::from_millis(400),
+        });
+        let p1_res = facets(
+            &QueryContext::from_engine(p1_ctx),
+            FacetsRequest {
+                view: FacetView::Spans,
+                filter: None,
+                search: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                fields: &fields,
+                timeout: Duration::from_millis(50),
+            },
+        )
+        .await
+        .expect("pass1 timeout returns per-field results");
+        assert!(matches!(p1_res[0], Err(RunError::Timeout)));
+        assert!(matches!(p1_res[1], Err(RunError::InvalidRequest(_))));
+        assert!(matches!(p1_res[2], Err(RunError::Timeout)));
+
+        // Pass 2 timeout: preserves Pass 1 completed `status` as Ok, preserves `InvalidRequest`,
+        // marks only Pass 2 `duration_ms` histogram as Timeout.
+        let mut p2_ctx = base_ctx.clone();
+        p2_ctx.spans = Arc::new(Pass2SlowSource {
+            inner: Arc::clone(&base_ctx.spans),
+            opens: Arc::new(AtomicUsize::new(0)),
+            slow_on_open: 2,
+            delay: Duration::from_millis(400),
+        });
+        let p2_res = facets(
+            &QueryContext::from_engine(p2_ctx),
+            FacetsRequest {
+                view: FacetView::Spans,
+                filter: None,
+                search: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                fields: &fields,
+                timeout: Duration::from_millis(120),
+            },
+        )
+        .await
+        .expect("pass2 timeout returns per-field results");
+        assert!(p2_res[0].as_ref().is_ok_and(|d| d.total == 20));
+        assert!(matches!(p2_res[1], Err(RunError::InvalidRequest(_))));
+        assert!(matches!(p2_res[2], Err(RunError::Timeout)));
+
+        // Constant numeric field (`p99 <= min`) completes in Pass 1 with 1 bucket and skips Pass 2 (opens == 1).
+        let const_opens = Arc::new(AtomicUsize::new(0));
+        let mut const_ctx = base_ctx.clone();
+        const_ctx.spans = Arc::new(CountingSource {
+            inner: Arc::clone(&base_ctx.spans),
+            opens: Arc::clone(&const_opens),
+        });
+        let const_fields = [FacetField {
+            field: "total_tokens",
+            query: None,
+            limit: 10,
+        }];
+        let const_res = facets(
+            &QueryContext::from_engine(const_ctx),
+            FacetsRequest {
+                view: FacetView::Spans,
+                filter: None,
+                search: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                fields: &const_fields,
+                timeout: Duration::from_secs(10),
+            },
+        )
+        .await
+        .expect("const facets");
+        assert_eq!(const_opens.load(Ordering::SeqCst), 1);
+        let hist = const_res[0]
+            .as_ref()
+            .expect("ok")
+            .histogram
+            .as_ref()
+            .expect("hist");
+        assert_eq!(hist.buckets.len(), 1);
+
+        // Privacy-safe Debug on ParsedField/CheckedField must not leak map key or query text.
+        let pf = ParsedField::MapValue("metadata", "secret_key_xyz".to_owned());
+        let cf = CheckedField {
+            field: pf.clone(),
+            query: Some("secret_query_abc".to_owned()),
+            limit: 10,
+        };
+        let dbg = format!("{pf:?} {cf:?}");
+        assert!(!dbg.contains("secret_key_xyz"));
+        assert!(!dbg.contains("secret_query_abc"));
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn multi_partition_per_field_isolation_and_pool_release() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+
+        // Flush 4 separate 100-row Parquet files + 36 100-row memtable chunks so `target_partitions = 4`
+        // drives multiple partitions concurrently without exceeding the 1/4 scan headroom.
+        for chunk in 0..40_u16 {
+            let mut spans = Vec::with_capacity(100);
+            for i in 0..100_u16 {
+                let t = chunk * 100 + i;
+                let mut s = span_row(t, 0, T0 + i64::from(t) * 1000, T0 + i64::from(t) * 1000);
+                s.name = format!("unique-multi-part-name-{t:06}-{}", "y".repeat(256));
+                s.status = if t % 2 == 0 {
+                    SpanStatus::Ok
+                } else {
+                    SpanStatus::Error
+                };
+                spans.push(s);
+            }
+            storage
+                .append_spans(project, span_rows(&spans))
+                .await
+                .expect("append");
+            if chunk < 4 {
+                storage
+                    .flush_now(Duration::from_secs(5))
+                    .await
+                    .expect("flush");
+            }
+        }
+
+        let mut ctx =
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("ctx");
+        let cap = 2 * 1024 * 1024;
+        let admission = Arc::new(crate::engine::admission::AsyncAdmissionPool::new(cap));
+        let spill = Arc::new(SpillManager::with_fixed_cap(dir.path().join("spill"), 0));
+        ctx.runtime = QeRuntime::new(
+            admission,
+            Arc::clone(&ctx.runtime.metadata_cache),
+            spill,
+            4,
+            QueryMemory {
+                initial: 0,
+                cap,
+                wait: Duration::from_secs(1),
+            },
+        );
+        let pool = GlobalPool::standalone(cap);
+        ctx.pool = Arc::clone(&pool);
+
+        let fields = [
+            FacetField {
+                field: "status",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "name",
+                query: None,
+                limit: 10,
+            },
+        ];
+        let res = facets(
+            &QueryContext::from_engine(ctx),
+            FacetsRequest {
+                view: FacetView::Spans,
+                filter: None,
+                search: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                fields: &fields,
+                timeout: Duration::from_secs(10),
+            },
+        )
+        .await
+        .expect("facets");
+
+        let status_res = res[0].as_ref().expect("status sibling must succeed");
+        assert_eq!(status_res.total, 4000);
+        assert_eq!(status_res.values.len(), 2);
+        assert_eq!(status_res.values[0].count, 2000);
+        assert_eq!(status_res.values[1].count, 2000);
+        assert!(
+            matches!(res[1], Err(RunError::TooLarge)),
+            "high-cardinality field must fail with TooLarge across P=4 partitions, got {:?}",
+            res[1]
+        );
+        assert_eq!(pool.reserved(), 0, "all parent_res slices must be freed");
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[test]
+    fn chunk_flusher_returns_scratch_to_zero_after_flush() {
+        use cetra_column::CancelToken;
+        use cetra_query::EvalContext;
+        use cetra_query::exec::{ExecMetrics, WorkerPool};
+
+        let utf8_schema = single_utf8_schema().expect("schema");
+        let agg_spec = single_utf8_agg_spec(&utf8_schema).expect("agg_spec");
+        let pool = GlobalPool::standalone(1024 * 1024);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exec_ctx = ExecContext {
+            pool: Arc::clone(&pool),
+            eval: EvalContext::new(T0, CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(dir.path().join("spill"), 0)),
+            workers: Arc::new(WorkerPool::new(1).expect("workers")),
+            batch_size: 2,
+            target_partitions: 1,
+            metrics: ExecMetrics::new(),
+        };
+        let budget = Arc::new(FieldBudget::new(&exec_ctx, 512 * 1024));
+
+        // 1. Scalar Values path with multiple flushes (batch_limit = 2 on 5 rows).
+        let vals_schema =
+            Schema::try_new_arc(vec![Field::new("v", DataType::Utf8, false)]).expect("schema");
+        let vals_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(["alpha", "beta", "gamma", "delta", "epsilon"])
+                        .expect("utf8"),
+                ),
+                None,
+            )
+            .expect("flat"),
+        );
+        let vals_batch = Batch::try_new_all(vals_schema, vec![vals_col], 5).expect("batch");
+        let mut val_state = ValueWorkerState {
+            source: ValueSource::Values(0),
+            query: None,
+            total: 0,
+            missing: 0,
+            agg: Some(
+                HashAgg::new(
+                    agg_spec.clone(),
+                    Arc::clone(&utf8_schema),
+                    budget.exec_ctx.clone(),
+                )
+                .expect("agg"),
+            ),
+            failed_too_large: false,
+            budget: Arc::clone(&budget),
+            utf8_schema: Arc::clone(&utf8_schema),
+            scratch: budget.exec_ctx.pool.register("test_scratch", false),
+            buf_bytes: 0,
+            chunk_buf: Vec::new(),
+            row_dedup: HashSet::new(),
+        };
+        push_value_field_batch(&mut val_state, &vals_batch, 2).expect("push values");
+        assert_eq!(val_state.scratch.size(), 0);
+        assert_eq!(val_state.buf_bytes, 0);
+
+        // 2. List path with dedup_bytes + mid-row flushes (batch_limit = 2 on 5 unique elements).
+        let list_schema = Schema::try_new_arc(vec![Field::new(
+            "tags",
+            DataType::List(Box::new(DataType::Utf8)),
+            false,
+        )])
+        .expect("schema");
+        let elems = Utf8Data::try_from_slices(["t1", "t2", "t3", "t4", "t5", "t1"]).expect("elems");
+        let elems_col =
+            Column::Flat(FlatColumn::try_new(FlatData::Utf8(elems), None).expect("elems_col"));
+        let list_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets: vec![0, 6],
+                    values: Box::new(elems_col),
+                },
+                None,
+            )
+            .expect("flat"),
+        );
+        let list_batch = Batch::try_new_all(list_schema, vec![list_col], 1).expect("batch");
+        let mut list_state = ValueWorkerState {
+            source: ValueSource::List(0),
+            query: None,
+            total: 0,
+            missing: 0,
+            agg: Some(
+                HashAgg::new(agg_spec, Arc::clone(&utf8_schema), budget.exec_ctx.clone())
+                    .expect("agg"),
+            ),
+            failed_too_large: false,
+            budget: Arc::clone(&budget),
+            utf8_schema,
+            scratch: budget.exec_ctx.pool.register("test_list_scratch", false),
+            buf_bytes: 0,
+            chunk_buf: Vec::new(),
+            row_dedup: HashSet::new(),
+        };
+        push_value_field_batch(&mut list_state, &list_batch, 2).expect("push list");
+        assert_eq!(list_state.scratch.size(), 0);
+        assert_eq!(list_state.buf_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn keys_facet_with_map_value_filter_upgrades_to_full_on_parquet() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+
+        let mut s1 = span_row(1, 0, T0 + 1000, T0 + 2000);
+        s1.metadata = BTreeMap::from([
+            ("env".to_owned(), "prod".to_owned()),
+            ("region".to_owned(), "us".to_owned()),
+        ]);
+        let mut s2 = span_row(2, 0, T0 + 3000, T0 + 4000);
+        s2.metadata = BTreeMap::from([
+            ("env".to_owned(), "dev".to_owned()),
+            ("region".to_owned(), "eu".to_owned()),
+        ]);
+        storage
+            .append_spans(project, span_rows(&[s1, s2]))
+            .await
+            .expect("append");
+        storage
+            .flush_now(Duration::from_secs(5))
+            .await
+            .expect("flush");
+
+        let query = storage
+            .query(project, QueryOptions::new(None, None))
+            .await
+            .expect("query");
+        let ctx = QueryContext::new(query, None).expect("ctx");
+        let fields = [FacetField {
+            field: "metadata",
+            query: None,
+            limit: 10,
+        }];
+        let res = facets(
+            &ctx,
+            FacetsRequest {
+                view: FacetView::Spans,
+                filter: Some("metadata['env'] = 'prod'"),
+                search: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                fields: &fields,
+                timeout: Duration::from_secs(10),
+            },
+        )
+        .await
+        .expect("facets");
+
+        let data = res[0].as_ref().expect("keys facet ok");
+        assert_eq!(data.kind, FacetKind::Keys);
+        assert_eq!(data.total, 1);
+        let got: BTreeMap<&str, u64> = data
+            .values
+            .iter()
+            .map(|e| (e.value.as_str(), e.count))
+            .collect();
+        assert_eq!(got, BTreeMap::from([("env", 1), ("region", 1)]));
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_facets_on_small_global_pool_succeed_without_starvation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+
+        let mut spans = Vec::with_capacity(100);
+        for t in 0..100_u16 {
+            let mut s = span_row(t, 0, T0 + i64::from(t) * 1000, T0 + i64::from(t) * 1000);
+            s.name = format!("op-{}", t % 5);
+            s.environment = Some(if t % 2 == 0 { "prod" } else { "dev" }.to_owned());
+            s.status = if t % 3 == 0 {
+                SpanStatus::Error
+            } else {
+                SpanStatus::Ok
+            };
+            spans.push(s);
+        }
+        storage
+            .append_spans(project, span_rows(&spans))
+            .await
+            .expect("append");
+
+        // Shared GlobalPool where total == cap == 2 MiB: eager 3/4 locking would fail the 2nd query.
+        let cap = 2 * 1024 * 1024;
+        let global = GlobalPool::new(cap);
+        let scope1 = global.try_admit(0, cap).expect("admit 1");
+        let scope2 = global.try_admit(0, cap).expect("admit 2");
+
+        let mut ctx1 =
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("ctx1");
+        ctx1.pool = scope1;
+        let mut ctx2 = ctx1.clone();
+        ctx2.pool = scope2;
+
+        let fields = [
+            FacetField {
+                field: "status",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "name",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "environment",
+                query: None,
+                limit: 10,
+            },
+        ];
+        let req = FacetsRequest {
+            view: FacetView::Spans,
+            filter: None,
+            search: None,
+            scope: ListScope {
+                window: None,
+                include_eval: false,
+                include_experiments: false,
+            },
+            fields: &fields,
+            timeout: Duration::from_secs(10),
+        };
+
+        let q1 = QueryContext::from_engine(ctx1);
+        let q2 = QueryContext::from_engine(ctx2);
+        let (r1, r2) = tokio::join!(facets(&q1, req), facets(&q2, req));
+        let res1 = r1.expect("first facets query must succeed");
+        let res2 = r2.expect("second concurrent facets query must succeed");
+        for slot in res1.iter().chain(res2.iter()) {
+            let data = slot.as_ref().expect("value facet must succeed");
+            assert_eq!(data.total, 100);
+        }
+        drop(q1);
+        drop(q2);
+        assert_eq!(global.used(), 0);
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn tiny_or_exhausted_pool_trips_only_value_fields_without_failing_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+
+        let s1 = span_row(1, 0, T0 + 1000, T0 + 2000);
+        storage
+            .append_spans(project, span_rows(&[s1]))
+            .await
+            .expect("append");
+
+        // 1. Tiny pool (cap = 4, 4 value fields -> per_field_cap = 0):
+        //    value fields trip to TooLarge immediately without failing the whole request.
+        let mut ctx1 =
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("ctx1");
+        let tiny_pool = GlobalPool::standalone(4);
+        ctx1.pool = Arc::clone(&tiny_pool);
+
+        let fields = [
+            FacetField {
+                field: "status",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "name",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "environment",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "release",
+                query: None,
+                limit: 10,
+            },
+            FacetField {
+                field: "nonexistent",
+                query: None,
+                limit: 10,
+            },
+        ];
+        let res1 = facets(
+            &QueryContext::from_engine(ctx1),
+            FacetsRequest {
+                view: FacetView::Spans,
+                filter: None,
+                search: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                fields: &fields,
+                timeout: Duration::from_secs(10),
+            },
+        )
+        .await
+        .expect("tiny pool must not fail the whole request");
+        for (i, slot) in res1[..4].iter().enumerate() {
             assert!(
-                matches!(result, Err(RunError::InvalidRequest(_))),
-                "{result:?}"
+                matches!(slot, Err(RunError::TooLarge)),
+                "value field {i} should fail with TooLarge, got {slot:?}"
             );
         }
+        assert!(matches!(res1[4], Err(RunError::InvalidRequest(_))));
+        assert_eq!(tiny_pool.reserved(), 0);
+
+        // 2. Exhausted pool (available == 0): value fields fail with TooLarge without failing request.
+        let mut ctx2 =
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("ctx2");
+        let full_pool = GlobalPool::standalone(1024);
+        let mut held = full_pool.register("pre_reserved", false);
+        held.try_grow(1024).expect("reserve full pool");
+        ctx2.pool = Arc::clone(&full_pool);
+
+        let res2 = facets(
+            &QueryContext::from_engine(ctx2),
+            FacetsRequest {
+                view: FacetView::Spans,
+                filter: None,
+                search: None,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                fields: &fields[..4],
+                timeout: Duration::from_secs(10),
+            },
+        )
+        .await
+        .expect("available == 0 must not fail the whole request");
+        for (i, slot) in res2.iter().enumerate() {
+            assert!(
+                matches!(slot, Err(RunError::TooLarge)),
+                "value field {i} should fail with TooLarge when available == 0, got {slot:?}"
+            );
+        }
+        drop(held);
+        assert_eq!(full_pool.reserved(), 0);
+
+        let _ = storage.shutdown().await;
     }
 }

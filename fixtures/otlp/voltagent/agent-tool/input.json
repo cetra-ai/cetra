@@ -1,0 +1,512 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          },
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "nodejs"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "2.12.0"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "@voltagent/core",
+            "version": "1.0.0",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "b0caaddc90fd6b0c03b911bb2a42be4e",
+              "spanId": "d2a2263eb9e24d0d",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 257,
+              "name": "weather-agent",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590144000000",
+              "attributes": [
+                {
+                  "key": "user.id",
+                  "value": {
+                    "stringValue": "user-1"
+                  }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": {
+                    "stringValue": "conv-1"
+                  }
+                },
+                {
+                  "key": "operation.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "entity.id",
+                  "value": {
+                    "stringValue": "weather-agent"
+                  }
+                },
+                {
+                  "key": "entity.type",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                },
+                {
+                  "key": "entity.name",
+                  "value": {
+                    "stringValue": "weather-agent"
+                  }
+                },
+                {
+                  "key": "input",
+                  "value": {
+                    "stringValue": "What's the weather in Paris?"
+                  }
+                },
+                {
+                  "key": "agent.state",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "voltagent.operation_id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "agent.workingMemory.enabled",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.instructions",
+                  "value": {
+                    "stringValue": "You are a weather assistant."
+                  }
+                },
+                {
+                  "key": "ai.model.name",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "ai.model.max_steps",
+                  "value": {
+                    "intValue": "3"
+                  }
+                },
+                {
+                  "key": "agent.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"system\",\"content\":\"You are a weather assistant.\"},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"What's the weather in Paris?\"}]}]"
+                  }
+                },
+                {
+                  "key": "agent.messages.ui",
+                  "value": {
+                    "stringValue": "capture-volatile-2"
+                  }
+                },
+                {
+                  "key": "agent.stateSnapshot",
+                  "value": {
+                    "stringValue": "{\"id\":\"weather-agent\",\"name\":\"weather-agent\",\"instructions\":\"You are a weather assistant.\",\"status\":\"idle\",\"model\":\"gpt-4o-mini\",\"node_id\":\"agent_weather-agent\",\"tools\":[{\"id\":\"get_weather\",\"name\":\"get_weather\",\"description\":\"Look up the weather for a city\",\"parameters\":{\"def\":{\"type\":\"object\",\"shape\":{\"city\":{\"def\":{\"type\":\"string\"},\"type\":\"string\"}}},\"type\":\"object\"},\"type\":\"user-defined\",\"node_id\":\"tool_get_weather_weather-agent\"}],\"subAgents\":[],\"memory\":{\"type\":\"Memory\",\"resourceId\":\"weather-agent\",\"options\":{},\"available\":true,\"status\":\"idle\",\"node_id\":\"memory_weather-agent\",\"storage\":{\"adapter\":\"InMemoryStorageAdapter\"},\"vectorDB\":null,\"embeddingModel\":null},\"retriever\":null,\"scorers\":[]}"
+                  }
+                },
+                {
+                  "key": "voltagent.conversation_id",
+                  "value": {
+                    "stringValue": "conv-1"
+                  }
+                },
+                {
+                  "key": "usage.prompt_tokens",
+                  "value": {
+                    "intValue": "213"
+                  }
+                },
+                {
+                  "key": "usage.completion_tokens",
+                  "value": {
+                    "intValue": "29"
+                  }
+                },
+                {
+                  "key": "usage.total_tokens",
+                  "value": {
+                    "intValue": "242"
+                  }
+                },
+                {
+                  "key": "usage.cached_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "usage.reasoning_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "output",
+                  "value": {
+                    "stringValue": "It is sunny in Paris."
+                  }
+                },
+                {
+                  "key": "ai.response.finish_reason",
+                  "value": {
+                    "stringValue": "stop"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "b0caaddc90fd6b0c03b911bb2a42be4e",
+              "spanId": "a3158dbb170af6ac",
+              "traceState": "",
+              "parentSpanId": "d2a2263eb9e24d0d",
+              "flags": 257,
+              "name": "llm:generateText",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590030000000",
+              "endTimeUnixNano": "1767225590143000000",
+              "attributes": [
+                {
+                  "key": "user.id",
+                  "value": {
+                    "stringValue": "user-1"
+                  }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": {
+                    "stringValue": "conv-1"
+                  }
+                },
+                {
+                  "key": "operation.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "entity.id",
+                  "value": {
+                    "stringValue": "weather-agent"
+                  }
+                },
+                {
+                  "key": "entity.type",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                },
+                {
+                  "key": "entity.name",
+                  "value": {
+                    "stringValue": "weather-agent"
+                  }
+                },
+                {
+                  "key": "span.type",
+                  "value": {
+                    "stringValue": "llm"
+                  }
+                },
+                {
+                  "key": "llm.operation",
+                  "value": {
+                    "stringValue": "generateText"
+                  }
+                },
+                {
+                  "key": "llm.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "llm.stream",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "llm.max_retries",
+                  "value": {
+                    "intValue": "3"
+                  }
+                },
+                {
+                  "key": "llm.attempt",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "llm.model_index",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "llm.messages.count",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "llm.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"system\",\"content\":\"You are a weather assistant.\"},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"What's the weather in Paris?\"}]}]"
+                  }
+                },
+                {
+                  "key": "llm.tools.count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "llm.tools",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "usage.prompt_context.system_tokens_estimated",
+                  "value": {
+                    "intValue": "9"
+                  }
+                },
+                {
+                  "key": "usage.prompt_context.message_tokens_estimated",
+                  "value": {
+                    "intValue": "18"
+                  }
+                },
+                {
+                  "key": "usage.prompt_context.non_system_message_tokens_estimated",
+                  "value": {
+                    "intValue": "9"
+                  }
+                },
+                {
+                  "key": "usage.prompt_context.tool_tokens_estimated",
+                  "value": {
+                    "intValue": "41"
+                  }
+                },
+                {
+                  "key": "usage.prompt_context.total_tokens_estimated",
+                  "value": {
+                    "intValue": "59"
+                  }
+                },
+                {
+                  "key": "usage.prompt_context.system_message_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "usage.prompt_context.tool_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "llm.usage.prompt_tokens",
+                  "value": {
+                    "intValue": "131"
+                  }
+                },
+                {
+                  "key": "llm.usage.completion_tokens",
+                  "value": {
+                    "intValue": "12"
+                  }
+                },
+                {
+                  "key": "llm.usage.total_tokens",
+                  "value": {
+                    "intValue": "143"
+                  }
+                },
+                {
+                  "key": "llm.finish_reason",
+                  "value": {
+                    "stringValue": "stop"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "b0caaddc90fd6b0c03b911bb2a42be4e",
+              "spanId": "e0ce472c5e9ef2c4",
+              "traceState": "",
+              "parentSpanId": "d2a2263eb9e24d0d",
+              "flags": 257,
+              "name": "tool.execution:get_weather",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590100000000",
+              "endTimeUnixNano": "1767225590100000000",
+              "attributes": [
+                {
+                  "key": "user.id",
+                  "value": {
+                    "stringValue": "user-1"
+                  }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": {
+                    "stringValue": "conv-1"
+                  }
+                },
+                {
+                  "key": "operation.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "entity.id",
+                  "value": {
+                    "stringValue": "weather-agent"
+                  }
+                },
+                {
+                  "key": "entity.type",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                },
+                {
+                  "key": "entity.name",
+                  "value": {
+                    "stringValue": "weather-agent"
+                  }
+                },
+                {
+                  "key": "span.type",
+                  "value": {
+                    "stringValue": "tool"
+                  }
+                },
+                {
+                  "key": "span.label",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "tool.name",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "tool.call.id",
+                  "value": {
+                    "stringValue": "call_weather_1"
+                  }
+                },
+                {
+                  "key": "tool.description",
+                  "value": {
+                    "stringValue": "Look up the weather for a city"
+                  }
+                },
+                {
+                  "key": "tool.parameters",
+                  "value": {
+                    "stringValue": "{\"def\":{\"type\":\"object\",\"shape\":{\"city\":{\"def\":{\"type\":\"string\"},\"type\":\"string\"}}},\"type\":\"object\"}"
+                  }
+                },
+                {
+                  "key": "input",
+                  "value": {
+                    "stringValue": "{\"city\":\"Paris\"}"
+                  }
+                },
+                {
+                  "key": "output",
+                  "value": {
+                    "stringValue": "{\"temperature_c\":18,\"city\":\"Paris\"}"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

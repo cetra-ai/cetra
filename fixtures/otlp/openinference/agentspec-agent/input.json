@@ -1,0 +1,1854 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "python"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.45.2"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "",
+            "version": "",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "8cfc6256fd34808b275a4f7c493ba55b",
+              "spanId": "9e61b2579cd4edec",
+              "traceState": "",
+              "parentSpanId": "1962ebb49a078c71",
+              "flags": 256,
+              "name": "AgentExecution[assistant]",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590093000000",
+              "attributes": [
+                {
+                  "key": "description",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "agent.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "agent.name",
+                  "value": {
+                    "stringValue": "assistant"
+                  }
+                },
+                {
+                  "key": "agent.description",
+                  "value": {
+                    "stringValue": "A general purpose agent that can read files."
+                  }
+                },
+                {
+                  "key": "agent.llm_config.id",
+                  "value": {
+                    "stringValue": "capture-volatile-2"
+                  }
+                },
+                {
+                  "key": "agent.llm_config.name",
+                  "value": {
+                    "stringValue": "openai-gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "agent.llm_config.description",
+                  "value": {
+                    "stringValue": "null"
+                  }
+                },
+                {
+                  "key": "agent.llm_config.model_id",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "agent.llm_config.api_type",
+                  "value": {
+                    "stringValue": "chat_completions"
+                  }
+                },
+                {
+                  "key": "agent.llm_config.api_key.$component_ref",
+                  "value": {
+                    "stringValue": "capture-volatile-2.api_key"
+                  }
+                },
+                {
+                  "key": "agent.llm_config.default_generation_parameters",
+                  "value": {
+                    "stringValue": "null"
+                  }
+                },
+                {
+                  "key": "agent.llm_config.retry_policy",
+                  "value": {
+                    "stringValue": "null"
+                  }
+                },
+                {
+                  "key": "agent.llm_config.component_type",
+                  "value": {
+                    "stringValue": "OpenAiConfig"
+                  }
+                },
+                {
+                  "key": "agent.system_prompt",
+                  "value": {
+                    "stringValue": "You are a helpful assistant. Help the user answering politely."
+                  }
+                },
+                {
+                  "key": "agent.tools.0.id",
+                  "value": {
+                    "stringValue": "capture-volatile-3"
+                  }
+                },
+                {
+                  "key": "agent.tools.0.name",
+                  "value": {
+                    "stringValue": "read_file"
+                  }
+                },
+                {
+                  "key": "agent.tools.0.description",
+                  "value": {
+                    "stringValue": "Read a file from the working directory and return its text."
+                  }
+                },
+                {
+                  "key": "agent.tools.0.inputs.0.title",
+                  "value": {
+                    "stringValue": "path"
+                  }
+                },
+                {
+                  "key": "agent.tools.0.inputs.0.type",
+                  "value": {
+                    "stringValue": "string"
+                  }
+                },
+                {
+                  "key": "agent.tools.0.requires_confirmation",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.tools.0.component_type",
+                  "value": {
+                    "stringValue": "ServerTool"
+                  }
+                },
+                {
+                  "key": "agent.human_in_the_loop",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "agent.component_type",
+                  "value": {
+                    "stringValue": "Agent"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "capture-volatile-4"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "AGENT"
+                  }
+                },
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{}"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "{}"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590000000000",
+                  "name": "AgentExecutionStart",
+                  "attributes": [
+                    {
+                      "key": "id",
+                      "value": {
+                        "stringValue": "capture-volatile-5"
+                      }
+                    },
+                    {
+                      "key": "name",
+                      "value": {
+                        "stringValue": "AgentExecutionStart"
+                      }
+                    },
+                    {
+                      "key": "description",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "timestamp",
+                      "value": {
+                        "intValue": "1767225590000000000"
+                      }
+                    },
+                    {
+                      "key": "agent.id",
+                      "value": {
+                        "stringValue": "capture-volatile-1"
+                      }
+                    },
+                    {
+                      "key": "agent.name",
+                      "value": {
+                        "stringValue": "assistant"
+                      }
+                    },
+                    {
+                      "key": "agent.description",
+                      "value": {
+                        "stringValue": "A general purpose agent that can read files."
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.id",
+                      "value": {
+                        "stringValue": "capture-volatile-2"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.name",
+                      "value": {
+                        "stringValue": "openai-gpt-4o-mini"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.description",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.model_id",
+                      "value": {
+                        "stringValue": "gpt-4o-mini"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.api_type",
+                      "value": {
+                        "stringValue": "chat_completions"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.api_key.$component_ref",
+                      "value": {
+                        "stringValue": "capture-volatile-2.api_key"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.default_generation_parameters",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.retry_policy",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.component_type",
+                      "value": {
+                        "stringValue": "OpenAiConfig"
+                      }
+                    },
+                    {
+                      "key": "agent.system_prompt",
+                      "value": {
+                        "stringValue": "You are a helpful assistant. Help the user answering politely."
+                      }
+                    },
+                    {
+                      "key": "agent.tools.0.id",
+                      "value": {
+                        "stringValue": "capture-volatile-3"
+                      }
+                    },
+                    {
+                      "key": "agent.tools.0.name",
+                      "value": {
+                        "stringValue": "read_file"
+                      }
+                    },
+                    {
+                      "key": "agent.tools.0.description",
+                      "value": {
+                        "stringValue": "Read a file from the working directory and return its text."
+                      }
+                    },
+                    {
+                      "key": "agent.tools.0.inputs.0.title",
+                      "value": {
+                        "stringValue": "path"
+                      }
+                    },
+                    {
+                      "key": "agent.tools.0.inputs.0.type",
+                      "value": {
+                        "stringValue": "string"
+                      }
+                    },
+                    {
+                      "key": "agent.tools.0.requires_confirmation",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
+                      "key": "agent.tools.0.component_type",
+                      "value": {
+                        "stringValue": "ServerTool"
+                      }
+                    },
+                    {
+                      "key": "agent.human_in_the_loop",
+                      "value": {
+                        "boolValue": true
+                      }
+                    },
+                    {
+                      "key": "agent.component_type",
+                      "value": {
+                        "stringValue": "Agent"
+                      }
+                    },
+                    {
+                      "key": "type",
+                      "value": {
+                        "stringValue": "AgentExecutionStart"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590093000000",
+                  "name": "AgentExecutionEnd",
+                  "attributes": [
+                    {
+                      "key": "id",
+                      "value": {
+                        "stringValue": "capture-volatile-6"
+                      }
+                    },
+                    {
+                      "key": "name",
+                      "value": {
+                        "stringValue": "AgentExecutionEnd"
+                      }
+                    },
+                    {
+                      "key": "description",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "timestamp",
+                      "value": {
+                        "intValue": "1767225590093000000"
+                      }
+                    },
+                    {
+                      "key": "agent.id",
+                      "value": {
+                        "stringValue": "capture-volatile-1"
+                      }
+                    },
+                    {
+                      "key": "agent.name",
+                      "value": {
+                        "stringValue": "assistant"
+                      }
+                    },
+                    {
+                      "key": "agent.description",
+                      "value": {
+                        "stringValue": "A general purpose agent that can read files."
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.id",
+                      "value": {
+                        "stringValue": "capture-volatile-2"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.name",
+                      "value": {
+                        "stringValue": "openai-gpt-4o-mini"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.description",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.model_id",
+                      "value": {
+                        "stringValue": "gpt-4o-mini"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.api_type",
+                      "value": {
+                        "stringValue": "chat_completions"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.api_key.$component_ref",
+                      "value": {
+                        "stringValue": "capture-volatile-2.api_key"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.default_generation_parameters",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.retry_policy",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "agent.llm_config.component_type",
+                      "value": {
+                        "stringValue": "OpenAiConfig"
+                      }
+                    },
+                    {
+                      "key": "agent.system_prompt",
+                      "value": {
+                        "stringValue": "You are a helpful assistant. Help the user answering politely."
+                      }
+                    },
+                    {
+                      "key": "agent.tools.0.id",
+                      "value": {
+                        "stringValue": "capture-volatile-3"
+                      }
+                    },
+                    {
+                      "key": "agent.tools.0.name",
+                      "value": {
+                        "stringValue": "read_file"
+                      }
+                    },
+                    {
+                      "key": "agent.tools.0.description",
+                      "value": {
+                        "stringValue": "Read a file from the working directory and return its text."
+                      }
+                    },
+                    {
+                      "key": "agent.tools.0.inputs.0.title",
+                      "value": {
+                        "stringValue": "path"
+                      }
+                    },
+                    {
+                      "key": "agent.tools.0.inputs.0.type",
+                      "value": {
+                        "stringValue": "string"
+                      }
+                    },
+                    {
+                      "key": "agent.tools.0.requires_confirmation",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
+                      "key": "agent.tools.0.component_type",
+                      "value": {
+                        "stringValue": "ServerTool"
+                      }
+                    },
+                    {
+                      "key": "agent.human_in_the_loop",
+                      "value": {
+                        "boolValue": true
+                      }
+                    },
+                    {
+                      "key": "agent.component_type",
+                      "value": {
+                        "stringValue": "Agent"
+                      }
+                    },
+                    {
+                      "key": "type",
+                      "value": {
+                        "stringValue": "AgentExecutionEnd"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "8cfc6256fd34808b275a4f7c493ba55b",
+              "spanId": "584e192ea187bddc",
+              "traceState": "",
+              "parentSpanId": "9e61b2579cd4edec",
+              "flags": 256,
+              "name": "LlmGenerationSpan",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590004000000",
+              "endTimeUnixNano": "1767225590049000000",
+              "attributes": [
+                {
+                  "key": "description",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "capture-volatile-4"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "LLM"
+                  }
+                },
+                {
+                  "key": "llm.model_name",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "llm.invocation_parameters",
+                  "value": {
+                    "stringValue": "{}"
+                  }
+                },
+                {
+                  "key": "llm.tools.0.tool.json_schema",
+                  "value": {
+                    "stringValue": "{\"type\": \"function\", \"function\": {\"name\": \"read_file\", \"description\": \"Read a file from the working directory and return its text.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\", \"title\": \"path\"}}, \"required\": [\"path\"]}}}"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.id",
+                  "value": {
+                    "stringValue": "null"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.content",
+                  "value": {
+                    "stringValue": "You are a helpful assistant. Help the user answering politely."
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.sender",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.role",
+                  "value": {
+                    "stringValue": "system"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.id",
+                  "value": {
+                    "stringValue": "null"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.content",
+                  "value": {
+                    "stringValue": "Read hello.txt and tell me what it says."
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.sender",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.role",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.content",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.tool_calls.0.tool_call.id",
+                  "value": {
+                    "stringValue": "call_read_file_1"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.tool_calls.0.tool_call.function.name",
+                  "value": {
+                    "stringValue": "read_file"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments",
+                  "value": {
+                    "stringValue": "{'path': 'hello.txt'}"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.role",
+                  "value": {
+                    "stringValue": "assistant"
+                  }
+                },
+                {
+                  "key": "llm.token_count.completion",
+                  "value": {
+                    "stringValue": "null"
+                  }
+                },
+                {
+                  "key": "llm.token_count.prompt",
+                  "value": {
+                    "stringValue": "null"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590004000000",
+                  "name": "LlmGenerationRequest",
+                  "attributes": [
+                    {
+                      "key": "id",
+                      "value": {
+                        "stringValue": "capture-volatile-7"
+                      }
+                    },
+                    {
+                      "key": "name",
+                      "value": {
+                        "stringValue": "LlmGenerationRequest"
+                      }
+                    },
+                    {
+                      "key": "description",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "timestamp",
+                      "value": {
+                        "intValue": "1767225590004000000"
+                      }
+                    },
+                    {
+                      "key": "llm_config.id",
+                      "value": {
+                        "stringValue": "capture-volatile-2"
+                      }
+                    },
+                    {
+                      "key": "llm_config.name",
+                      "value": {
+                        "stringValue": "openai-gpt-4o-mini"
+                      }
+                    },
+                    {
+                      "key": "llm_config.description",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "llm_config.model_id",
+                      "value": {
+                        "stringValue": "gpt-4o-mini"
+                      }
+                    },
+                    {
+                      "key": "llm_config.api_type",
+                      "value": {
+                        "stringValue": "chat_completions"
+                      }
+                    },
+                    {
+                      "key": "llm_config.api_key.$component_ref",
+                      "value": {
+                        "stringValue": "capture-volatile-2.api_key"
+                      }
+                    },
+                    {
+                      "key": "llm_config.default_generation_parameters",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "llm_config.retry_policy",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "llm_config.component_type",
+                      "value": {
+                        "stringValue": "OpenAiConfig"
+                      }
+                    },
+                    {
+                      "key": "prompt.0.id",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "prompt.0.content",
+                      "value": {
+                        "stringValue": "You are a helpful assistant. Help the user answering politely."
+                      }
+                    },
+                    {
+                      "key": "prompt.0.sender",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "prompt.0.role",
+                      "value": {
+                        "stringValue": "system"
+                      }
+                    },
+                    {
+                      "key": "prompt.1.id",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "prompt.1.content",
+                      "value": {
+                        "stringValue": "Read hello.txt and tell me what it says."
+                      }
+                    },
+                    {
+                      "key": "prompt.1.sender",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "prompt.1.role",
+                      "value": {
+                        "stringValue": "user"
+                      }
+                    },
+                    {
+                      "key": "tools.0.id",
+                      "value": {
+                        "stringValue": "capture-volatile-8"
+                      }
+                    },
+                    {
+                      "key": "tools.0.name",
+                      "value": {
+                        "stringValue": "read_file"
+                      }
+                    },
+                    {
+                      "key": "tools.0.description",
+                      "value": {
+                        "stringValue": "Read a file from the working directory and return its text."
+                      }
+                    },
+                    {
+                      "key": "tools.0.inputs.0.type",
+                      "value": {
+                        "stringValue": "string"
+                      }
+                    },
+                    {
+                      "key": "tools.0.inputs.0.title",
+                      "value": {
+                        "stringValue": "path"
+                      }
+                    },
+                    {
+                      "key": "tools.0.requires_confirmation",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
+                      "key": "tools.0.component_type",
+                      "value": {
+                        "stringValue": "ClientTool"
+                      }
+                    },
+                    {
+                      "key": "request_id",
+                      "value": {
+                        "stringValue": "capture-volatile-9"
+                      }
+                    },
+                    {
+                      "key": "llm_generation_config",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "type",
+                      "value": {
+                        "stringValue": "LlmGenerationRequest"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590049000000",
+                  "name": "LlmGenerationResponse",
+                  "attributes": [
+                    {
+                      "key": "id",
+                      "value": {
+                        "stringValue": "capture-volatile-10"
+                      }
+                    },
+                    {
+                      "key": "name",
+                      "value": {
+                        "stringValue": "LlmGenerationResponse"
+                      }
+                    },
+                    {
+                      "key": "description",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "timestamp",
+                      "value": {
+                        "intValue": "1767225590049000000"
+                      }
+                    },
+                    {
+                      "key": "llm_config.id",
+                      "value": {
+                        "stringValue": "capture-volatile-2"
+                      }
+                    },
+                    {
+                      "key": "llm_config.name",
+                      "value": {
+                        "stringValue": "openai-gpt-4o-mini"
+                      }
+                    },
+                    {
+                      "key": "llm_config.description",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "llm_config.model_id",
+                      "value": {
+                        "stringValue": "gpt-4o-mini"
+                      }
+                    },
+                    {
+                      "key": "llm_config.api_type",
+                      "value": {
+                        "stringValue": "chat_completions"
+                      }
+                    },
+                    {
+                      "key": "llm_config.api_key.$component_ref",
+                      "value": {
+                        "stringValue": "capture-volatile-2.api_key"
+                      }
+                    },
+                    {
+                      "key": "llm_config.default_generation_parameters",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "llm_config.retry_policy",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "llm_config.component_type",
+                      "value": {
+                        "stringValue": "OpenAiConfig"
+                      }
+                    },
+                    {
+                      "key": "content",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "tool_calls.0.call_id",
+                      "value": {
+                        "stringValue": "call_read_file_1"
+                      }
+                    },
+                    {
+                      "key": "tool_calls.0.tool_name",
+                      "value": {
+                        "stringValue": "read_file"
+                      }
+                    },
+                    {
+                      "key": "tool_calls.0.arguments",
+                      "value": {
+                        "stringValue": "{'path': 'hello.txt'}"
+                      }
+                    },
+                    {
+                      "key": "request_id",
+                      "value": {
+                        "stringValue": "capture-volatile-9"
+                      }
+                    },
+                    {
+                      "key": "completion_id",
+                      "value": {
+                        "stringValue": "lc_run--capture-volatile-9-0"
+                      }
+                    },
+                    {
+                      "key": "input_tokens",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "output_tokens",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "type",
+                      "value": {
+                        "stringValue": "LlmGenerationResponse"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "8cfc6256fd34808b275a4f7c493ba55b",
+              "spanId": "d3cd15902326c4a2",
+              "traceState": "",
+              "parentSpanId": "9e61b2579cd4edec",
+              "flags": 256,
+              "name": "ToolExecution[read_file]",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590053000000",
+              "endTimeUnixNano": "1767225590054000000",
+              "attributes": [
+                {
+                  "key": "description",
+                  "value": {
+                    "stringValue": "tcid__call_read_file_1"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "capture-volatile-4"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "TOOL"
+                  }
+                },
+                {
+                  "key": "tool.name",
+                  "value": {
+                    "stringValue": "read_file"
+                  }
+                },
+                {
+                  "key": "tool.description",
+                  "value": {
+                    "stringValue": "Read a file from the working directory and return its text."
+                  }
+                },
+                {
+                  "key": "tool.json_schema",
+                  "value": {
+                    "stringValue": "{\"type\": \"function\", \"function\": {\"name\": \"read_file\", \"description\": \"Read a file from the working directory and return its text.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"title\": \"path\", \"type\": \"string\"}}, \"required\": [\"path\"]}}}"
+                  }
+                },
+                {
+                  "key": "tool_call.id",
+                  "value": {
+                    "stringValue": "capture-volatile-11"
+                  }
+                },
+                {
+                  "key": "tool_call.function.name",
+                  "value": {
+                    "stringValue": "read_file"
+                  }
+                },
+                {
+                  "key": "tool.parameters.path",
+                  "value": {
+                    "stringValue": "hello.txt"
+                  }
+                },
+                {
+                  "key": "tool_call.function.arguments",
+                  "value": {
+                    "stringValue": "{\"path\": \"hello.txt\"}"
+                  }
+                },
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"path\": \"hello.txt\"}"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "{}"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590052000000",
+                  "name": "ToolExecutionRequest",
+                  "attributes": [
+                    {
+                      "key": "id",
+                      "value": {
+                        "stringValue": "capture-volatile-12"
+                      }
+                    },
+                    {
+                      "key": "name",
+                      "value": {
+                        "stringValue": "ToolExecutionRequest"
+                      }
+                    },
+                    {
+                      "key": "description",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "timestamp",
+                      "value": {
+                        "intValue": "1767225590052000000"
+                      }
+                    },
+                    {
+                      "key": "tool.id",
+                      "value": {
+                        "stringValue": "capture-volatile-3"
+                      }
+                    },
+                    {
+                      "key": "tool.name",
+                      "value": {
+                        "stringValue": "read_file"
+                      }
+                    },
+                    {
+                      "key": "tool.description",
+                      "value": {
+                        "stringValue": "Read a file from the working directory and return its text."
+                      }
+                    },
+                    {
+                      "key": "tool.inputs.0.title",
+                      "value": {
+                        "stringValue": "path"
+                      }
+                    },
+                    {
+                      "key": "tool.inputs.0.type",
+                      "value": {
+                        "stringValue": "string"
+                      }
+                    },
+                    {
+                      "key": "tool.requires_confirmation",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
+                      "key": "tool.component_type",
+                      "value": {
+                        "stringValue": "ServerTool"
+                      }
+                    },
+                    {
+                      "key": "inputs.path",
+                      "value": {
+                        "stringValue": "hello.txt"
+                      }
+                    },
+                    {
+                      "key": "request_id",
+                      "value": {
+                        "stringValue": "capture-volatile-11"
+                      }
+                    },
+                    {
+                      "key": "type",
+                      "value": {
+                        "stringValue": "ToolExecutionRequest"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590053000000",
+                  "name": "ToolExecutionResponse",
+                  "attributes": [
+                    {
+                      "key": "id",
+                      "value": {
+                        "stringValue": "capture-volatile-13"
+                      }
+                    },
+                    {
+                      "key": "name",
+                      "value": {
+                        "stringValue": "ToolExecutionResponse"
+                      }
+                    },
+                    {
+                      "key": "description",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "timestamp",
+                      "value": {
+                        "intValue": "1767225590053000000"
+                      }
+                    },
+                    {
+                      "key": "tool.id",
+                      "value": {
+                        "stringValue": "capture-volatile-3"
+                      }
+                    },
+                    {
+                      "key": "tool.name",
+                      "value": {
+                        "stringValue": "read_file"
+                      }
+                    },
+                    {
+                      "key": "tool.description",
+                      "value": {
+                        "stringValue": "Read a file from the working directory and return its text."
+                      }
+                    },
+                    {
+                      "key": "tool.inputs.0.title",
+                      "value": {
+                        "stringValue": "path"
+                      }
+                    },
+                    {
+                      "key": "tool.inputs.0.type",
+                      "value": {
+                        "stringValue": "string"
+                      }
+                    },
+                    {
+                      "key": "tool.requires_confirmation",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
+                      "key": "tool.component_type",
+                      "value": {
+                        "stringValue": "ServerTool"
+                      }
+                    },
+                    {
+                      "key": "request_id",
+                      "value": {
+                        "stringValue": "capture-volatile-11"
+                      }
+                    },
+                    {
+                      "key": "type",
+                      "value": {
+                        "stringValue": "ToolExecutionResponse"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "8cfc6256fd34808b275a4f7c493ba55b",
+              "spanId": "b9820d97e5bae556",
+              "traceState": "",
+              "parentSpanId": "9e61b2579cd4edec",
+              "flags": 256,
+              "name": "LlmGenerationSpan",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590056000000",
+              "endTimeUnixNano": "1767225590091000000",
+              "attributes": [
+                {
+                  "key": "description",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "capture-volatile-4"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "LLM"
+                  }
+                },
+                {
+                  "key": "llm.model_name",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "llm.invocation_parameters",
+                  "value": {
+                    "stringValue": "{}"
+                  }
+                },
+                {
+                  "key": "llm.tools.0.tool.json_schema",
+                  "value": {
+                    "stringValue": "{\"type\": \"function\", \"function\": {\"name\": \"read_file\", \"description\": \"Read a file from the working directory and return its text.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\", \"title\": \"path\"}}, \"required\": [\"path\"]}}}"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.id",
+                  "value": {
+                    "stringValue": "null"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.content",
+                  "value": {
+                    "stringValue": "You are a helpful assistant. Help the user answering politely."
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.sender",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.role",
+                  "value": {
+                    "stringValue": "system"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.id",
+                  "value": {
+                    "stringValue": "null"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.content",
+                  "value": {
+                    "stringValue": "Read hello.txt and tell me what it says."
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.sender",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.role",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.2.message.id",
+                  "value": {
+                    "stringValue": "null"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.2.message.content",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "llm.input_messages.2.message.sender",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "llm.input_messages.2.message.role",
+                  "value": {
+                    "stringValue": "assistant"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.3.message.id",
+                  "value": {
+                    "stringValue": "null"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.3.message.content",
+                  "value": {
+                    "stringValue": "hello from cetra\n"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.3.message.sender",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "llm.input_messages.3.message.role",
+                  "value": {
+                    "stringValue": "tool"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.content",
+                  "value": {
+                    "stringValue": "hello.txt says: hello from cetra"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.role",
+                  "value": {
+                    "stringValue": "assistant"
+                  }
+                },
+                {
+                  "key": "llm.token_count.completion",
+                  "value": {
+                    "stringValue": "null"
+                  }
+                },
+                {
+                  "key": "llm.token_count.prompt",
+                  "value": {
+                    "stringValue": "null"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590057000000",
+                  "name": "LlmGenerationRequest",
+                  "attributes": [
+                    {
+                      "key": "id",
+                      "value": {
+                        "stringValue": "capture-volatile-14"
+                      }
+                    },
+                    {
+                      "key": "name",
+                      "value": {
+                        "stringValue": "LlmGenerationRequest"
+                      }
+                    },
+                    {
+                      "key": "description",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "timestamp",
+                      "value": {
+                        "intValue": "1767225590057000000"
+                      }
+                    },
+                    {
+                      "key": "llm_config.id",
+                      "value": {
+                        "stringValue": "capture-volatile-2"
+                      }
+                    },
+                    {
+                      "key": "llm_config.name",
+                      "value": {
+                        "stringValue": "openai-gpt-4o-mini"
+                      }
+                    },
+                    {
+                      "key": "llm_config.description",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "llm_config.model_id",
+                      "value": {
+                        "stringValue": "gpt-4o-mini"
+                      }
+                    },
+                    {
+                      "key": "llm_config.api_type",
+                      "value": {
+                        "stringValue": "chat_completions"
+                      }
+                    },
+                    {
+                      "key": "llm_config.api_key.$component_ref",
+                      "value": {
+                        "stringValue": "capture-volatile-2.api_key"
+                      }
+                    },
+                    {
+                      "key": "llm_config.default_generation_parameters",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "llm_config.retry_policy",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "llm_config.component_type",
+                      "value": {
+                        "stringValue": "OpenAiConfig"
+                      }
+                    },
+                    {
+                      "key": "prompt.0.id",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "prompt.0.content",
+                      "value": {
+                        "stringValue": "You are a helpful assistant. Help the user answering politely."
+                      }
+                    },
+                    {
+                      "key": "prompt.0.sender",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "prompt.0.role",
+                      "value": {
+                        "stringValue": "system"
+                      }
+                    },
+                    {
+                      "key": "prompt.1.id",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "prompt.1.content",
+                      "value": {
+                        "stringValue": "Read hello.txt and tell me what it says."
+                      }
+                    },
+                    {
+                      "key": "prompt.1.sender",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "prompt.1.role",
+                      "value": {
+                        "stringValue": "user"
+                      }
+                    },
+                    {
+                      "key": "prompt.2.id",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "prompt.2.content",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "prompt.2.sender",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "prompt.2.role",
+                      "value": {
+                        "stringValue": "assistant"
+                      }
+                    },
+                    {
+                      "key": "prompt.3.id",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "prompt.3.content",
+                      "value": {
+                        "stringValue": "hello from cetra\n"
+                      }
+                    },
+                    {
+                      "key": "prompt.3.sender",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "prompt.3.role",
+                      "value": {
+                        "stringValue": "tool"
+                      }
+                    },
+                    {
+                      "key": "tools.0.id",
+                      "value": {
+                        "stringValue": "capture-volatile-15"
+                      }
+                    },
+                    {
+                      "key": "tools.0.name",
+                      "value": {
+                        "stringValue": "read_file"
+                      }
+                    },
+                    {
+                      "key": "tools.0.description",
+                      "value": {
+                        "stringValue": "Read a file from the working directory and return its text."
+                      }
+                    },
+                    {
+                      "key": "tools.0.inputs.0.type",
+                      "value": {
+                        "stringValue": "string"
+                      }
+                    },
+                    {
+                      "key": "tools.0.inputs.0.title",
+                      "value": {
+                        "stringValue": "path"
+                      }
+                    },
+                    {
+                      "key": "tools.0.requires_confirmation",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
+                      "key": "tools.0.component_type",
+                      "value": {
+                        "stringValue": "ClientTool"
+                      }
+                    },
+                    {
+                      "key": "request_id",
+                      "value": {
+                        "stringValue": "capture-volatile-16"
+                      }
+                    },
+                    {
+                      "key": "llm_generation_config",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "type",
+                      "value": {
+                        "stringValue": "LlmGenerationRequest"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590091000000",
+                  "name": "LlmGenerationResponse",
+                  "attributes": [
+                    {
+                      "key": "id",
+                      "value": {
+                        "stringValue": "capture-volatile-17"
+                      }
+                    },
+                    {
+                      "key": "name",
+                      "value": {
+                        "stringValue": "LlmGenerationResponse"
+                      }
+                    },
+                    {
+                      "key": "description",
+                      "value": {
+                        "stringValue": ""
+                      }
+                    },
+                    {
+                      "key": "timestamp",
+                      "value": {
+                        "intValue": "1767225590091000000"
+                      }
+                    },
+                    {
+                      "key": "llm_config.id",
+                      "value": {
+                        "stringValue": "capture-volatile-2"
+                      }
+                    },
+                    {
+                      "key": "llm_config.name",
+                      "value": {
+                        "stringValue": "openai-gpt-4o-mini"
+                      }
+                    },
+                    {
+                      "key": "llm_config.description",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "llm_config.model_id",
+                      "value": {
+                        "stringValue": "gpt-4o-mini"
+                      }
+                    },
+                    {
+                      "key": "llm_config.api_type",
+                      "value": {
+                        "stringValue": "chat_completions"
+                      }
+                    },
+                    {
+                      "key": "llm_config.api_key.$component_ref",
+                      "value": {
+                        "stringValue": "capture-volatile-2.api_key"
+                      }
+                    },
+                    {
+                      "key": "llm_config.default_generation_parameters",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "llm_config.retry_policy",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "llm_config.component_type",
+                      "value": {
+                        "stringValue": "OpenAiConfig"
+                      }
+                    },
+                    {
+                      "key": "content",
+                      "value": {
+                        "stringValue": "hello.txt says: hello from cetra"
+                      }
+                    },
+                    {
+                      "key": "request_id",
+                      "value": {
+                        "stringValue": "capture-volatile-16"
+                      }
+                    },
+                    {
+                      "key": "completion_id",
+                      "value": {
+                        "stringValue": "lc_run--capture-volatile-16-0"
+                      }
+                    },
+                    {
+                      "key": "input_tokens",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "output_tokens",
+                      "value": {
+                        "stringValue": "null"
+                      }
+                    },
+                    {
+                      "key": "type",
+                      "value": {
+                        "stringValue": "LlmGenerationResponse"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

@@ -181,6 +181,8 @@ pub enum Part {
         modality: Option<Modality>,
         /// MIME type, when known.
         mime_type: Option<String>,
+        /// Spoken text of the media (an audio part's transcript), when known.
+        transcript: Option<String>,
         /// The URI.
         uri: String,
         /// Unmodelled fields.
@@ -192,6 +194,8 @@ pub enum Part {
         modality: Option<Modality>,
         /// MIME type, when known.
         mime_type: Option<String>,
+        /// Spoken text of the media (an audio part's transcript), when known.
+        transcript: Option<String>,
         /// Base64 payload.
         content: String,
         /// Unmodelled fields.
@@ -307,8 +311,13 @@ fn uri_part(map: &Map<String, Value>) -> Result<Part, ()> {
     Ok(Part::Uri {
         modality: optional_modality(map, "modality")?,
         mime_type: optional_string(map, "mime_type")?,
+        transcript: optional_string(map, "transcript")?,
         uri: require_string(map, "uri")?,
-        extra: leftovers(map, &["type", "uri"], &["modality", "mime_type"]),
+        extra: leftovers(
+            map,
+            &["type", "uri"],
+            &["modality", "mime_type", "transcript"],
+        ),
     })
 }
 
@@ -316,8 +325,13 @@ fn blob_part(map: &Map<String, Value>) -> Result<Part, ()> {
     Ok(Part::Blob {
         modality: optional_modality(map, "modality")?,
         mime_type: optional_string(map, "mime_type")?,
+        transcript: optional_string(map, "transcript")?,
         content: require_string(map, "content")?,
-        extra: leftovers(map, &["type", "content"], &["modality", "mime_type"]),
+        extra: leftovers(
+            map,
+            &["type", "content"],
+            &["modality", "mime_type", "transcript"],
+        ),
     })
 }
 
@@ -393,24 +407,28 @@ fn part_to_value(part: &Part) -> Value {
         Part::Uri {
             modality,
             mime_type,
+            transcript,
             uri,
             extra,
         } => {
             let mut fields = vec![("type", Value::String("uri".to_owned()))];
             push_modality(&mut fields, modality);
             push_string(&mut fields, "mime_type", mime_type);
+            push_string(&mut fields, "transcript", transcript);
             fields.push(("uri", Value::String(uri.clone())));
             object(&fields, extra)
         }
         Part::Blob {
             modality,
             mime_type,
+            transcript,
             content,
             extra,
         } => {
             let mut fields = vec![("type", Value::String("blob".to_owned()))];
             push_modality(&mut fields, modality);
             push_string(&mut fields, "mime_type", mime_type);
+            push_string(&mut fields, "transcript", transcript);
             fields.push(("content", Value::String(content.clone())));
             object(&fields, extra)
         }
@@ -658,6 +676,13 @@ fn part_components() -> [(&'static str, SchemaRef); 7] {
                         nullable_string("MIME type, when known."),
                         false,
                     ),
+                    (
+                        "transcript",
+                        nullable_string(
+                            "Spoken text of the media (an audio part's transcript), when known.",
+                        ),
+                        false,
+                    ),
                     ("uri", string_schema("The URI.").into(), true),
                 ],
             ),
@@ -676,6 +701,13 @@ fn part_components() -> [(&'static str, SchemaRef); 7] {
                     (
                         "mime_type",
                         nullable_string("MIME type, when known."),
+                        false,
+                    ),
+                    (
+                        "transcript",
+                        nullable_string(
+                            "Spoken text of the media (an audio part's transcript), when known.",
+                        ),
                         false,
                     ),
                     ("content", string_schema("Base64 payload.").into(), true),
@@ -960,6 +992,62 @@ mod tests {
     }
 
     #[test]
+    fn a_blob_transcript_round_trips() {
+        let input = r#"{"type":"blob","modality":"audio","mime_type":"audio/wav","transcript":"hi","content":"QQ=="}"#;
+        let part: Part = serde_json::from_str(input).unwrap();
+        assert!(matches!(
+            &part,
+            Part::Blob { transcript: Some(text), extra, .. } if text == "hi" && extra.is_empty()
+        ));
+        assert_eq!(serde_json::to_string(&part).unwrap(), input);
+    }
+
+    #[test]
+    fn a_uri_transcript_round_trips() {
+        let input = r#"{"type":"uri","modality":"audio","mime_type":"audio/wav","transcript":"What's my balance?","uri":"media://abc"}"#;
+        let part: Part = serde_json::from_str(input).unwrap();
+        assert!(matches!(
+            &part,
+            Part::Uri { transcript: Some(text), extra, .. } if text == "What's my balance?" && extra.is_empty()
+        ));
+        assert_eq!(serde_json::to_string(&part).unwrap(), input);
+    }
+
+    #[test]
+    fn a_null_transcript_is_preserved() {
+        let input = r#"{"type":"uri","uri":"https://example.com/a.wav","transcript":null}"#;
+        let part: Part = serde_json::from_str(input).unwrap();
+        assert!(matches!(
+            &part,
+            Part::Uri { transcript: None, extra, .. } if extra.get("transcript") == Some(&Value::Null)
+        ));
+        assert_eq!(serde_json::to_string(&part).unwrap(), input);
+    }
+
+    #[test]
+    fn a_non_string_transcript_makes_the_part_unknown() {
+        let input = r#"{"type":"blob","modality":"audio","transcript":3,"content":"QQ=="}"#;
+        let part: Part = serde_json::from_str(input).unwrap();
+        assert_eq!(part, Part::Unknown(json(input)));
+        assert_eq!(serde_json::to_string(&part).unwrap(), input);
+    }
+
+    #[test]
+    fn a_part_without_transcript_writes_no_key() {
+        let input =
+            r#"{"type":"blob","modality":"audio","mime_type":"audio/wav","content":"QQ=="}"#;
+        let part: Part = serde_json::from_str(input).unwrap();
+        assert!(matches!(
+            &part,
+            Part::Blob {
+                transcript: None,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_string(&part).unwrap(), input);
+    }
+
+    #[test]
     fn explicit_nulls_round_trip() {
         let input = json(
             r#"{"role":"assistant","name":null,"parts":[{"type":"tool_call","id":null,"name":"f","arguments":{}},{"type":"uri","modality":null,"mime_type":null,"uri":"https://example.com/a.png"}],"finish_reason":null}"#,
@@ -998,6 +1086,7 @@ mod tests {
         let part = Part::Uri {
             modality: Some(Modality::Image),
             mime_type: None,
+            transcript: None,
             uri: "media://abc".to_owned(),
             extra,
         };

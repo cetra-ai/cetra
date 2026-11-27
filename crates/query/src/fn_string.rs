@@ -1,5 +1,7 @@
 //! Vectorized string, binary, `LIKE`/`ILIKE`, regex, and encoding functions.
 
+use std::sync::Arc;
+
 use cetra_column::{
     Bitmap, Column, ColumnError, DataType, FlatColumn, FlatData, Reservation, ScalarValue, Utf8Data,
 };
@@ -7,13 +9,15 @@ use regex::{Regex, RegexBuilder};
 
 use crate::error::QueryError;
 use crate::eval::{
-    active_count, check_cancel, checked_varlen_bytes, is_active, pool_size, read_bytes, read_i64,
-    read_str, reconcile_output, rollback_to, try_reserve,
+    check_cancel, checked_varlen_bytes, is_active, pool_size, read_bytes, read_i64, read_str,
+    reconcile_output, rollback_to, try_reserve,
 };
 use crate::ir::{EvalContext, ScalarFn};
 
 const CANCEL_CHECK_MASK: usize = 1023;
-const REGEX_SIZE_LIMIT: usize = 10 * 1024 * 1024;
+const REGEX_SIZE_LIMIT: usize = 256 * 1024;
+const REGEX_DFA_SIZE_LIMIT: usize = 128 * 1024;
+pub(crate) const REGEX_ESTIMATED_BYTES: usize = 384 * 1024;
 const MAX_CONCAT_BYTES: usize = i32::MAX as usize;
 
 fn bitmap_mem_bytes(len: usize) -> usize {
@@ -96,7 +100,7 @@ enum LikeToken {
     AnyChar,
 }
 
-enum LikeMatcher {
+pub(crate) enum LikeMatcher {
     Any,
     Empty,
     Exact {
@@ -119,7 +123,47 @@ enum LikeMatcher {
 }
 
 impl LikeMatcher {
-    fn compile(
+    pub(crate) fn estimated_bytes(&self) -> usize {
+        let extra = match self {
+            Self::Any | Self::Empty => 0,
+            Self::Exact { lit, ci_regex } => {
+                lit.len()
+                    + if ci_regex.is_some() {
+                        REGEX_ESTIMATED_BYTES
+                    } else {
+                        0
+                    }
+            }
+            Self::Prefix { prefix, ci_regex } => {
+                prefix.len()
+                    + if ci_regex.is_some() {
+                        REGEX_ESTIMATED_BYTES
+                    } else {
+                        0
+                    }
+            }
+            Self::Suffix { suffix, ci_regex } => {
+                suffix.len()
+                    + if ci_regex.is_some() {
+                        REGEX_ESTIMATED_BYTES
+                    } else {
+                        0
+                    }
+            }
+            Self::Contains { mid, ci_regex } => {
+                mid.len()
+                    + if ci_regex.is_some() {
+                        REGEX_ESTIMATED_BYTES
+                    } else {
+                        0
+                    }
+            }
+            Self::Regex(_) => REGEX_ESTIMATED_BYTES,
+        };
+        size_of::<Self>() + extra
+    }
+
+    pub(crate) fn compile(
         pattern: &str,
         escape: Option<char>,
         case_insensitive: bool,
@@ -288,7 +332,7 @@ fn compile_like_regex(tokens: &[LikeToken], case_insensitive: bool) -> Result<Re
         .case_insensitive(case_insensitive)
         .dot_matches_new_line(true)
         .size_limit(REGEX_SIZE_LIMIT)
-        .dfa_size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
         .build()
         .map_err(|_| QueryError::failed("invalid or oversized LIKE pattern"))
 }
@@ -355,18 +399,21 @@ fn eval_like_inner(
         return Ok(null_const(DataType::Bool, len));
     }
 
-    if let Column::Const {
-        value: ScalarValue::Null(_),
-        ..
-    } = pattern
-    {
+    if matches!(
+        input,
+        Column::Const {
+            value: ScalarValue::Null(_),
+            ..
+        }
+    ) || matches!(
+        pattern,
+        Column::Const {
+            value: ScalarValue::Null(_),
+            ..
+        }
+    ) {
         return Ok(null_const(DataType::Bool, len));
     }
-
-    let bm_bytes = bitmap_mem_bytes(len);
-    try_reserve(pool, bm_bytes * 2)?;
-    let mut vals = Bitmap::new_zeroed(len);
-    let mut nulls = Bitmap::new_zeroed(len);
 
     let const_pat = match pattern {
         Column::Const {
@@ -375,8 +422,16 @@ fn eval_like_inner(
         } => Some(p.as_str()),
         _ => None,
     };
-    let mut cached_const: Option<LikeMatcher> = None;
-    let mut last_dyn: Option<(&str, LikeMatcher)> = None;
+    if len == 0 {
+        return Ok(null_const(DataType::Bool, len));
+    }
+    let mut cached_const: Option<Arc<LikeMatcher>> = None;
+    let mut last_dyn: Option<(&str, Arc<LikeMatcher>)> = None;
+
+    let bm_bytes = bitmap_mem_bytes(len);
+    try_reserve(pool, bm_bytes * 2)?;
+    let mut vals = Bitmap::new_zeroed(len);
+    let mut nulls = Bitmap::new_zeroed(len);
 
     for row in 0..len {
         if (row & CANCEL_CHECK_MASK) == 0 {
@@ -389,10 +444,14 @@ fn eval_like_inner(
             continue;
         };
         let matched = if let Some(pat) = const_pat {
-            let matcher = match cached_const.as_ref() {
+            let matcher = match &cached_const {
                 Some(m) => m,
                 None => {
-                    let compiled = LikeMatcher::compile(pat, escape, case_insensitive)?;
+                    let compiled =
+                        ctx.cache
+                            .get_or_insert_like(pat, escape, case_insensitive, || {
+                                LikeMatcher::compile(pat, escape, case_insensitive)
+                            })?;
                     cached_const.insert(compiled)
                 }
             };
@@ -401,9 +460,13 @@ fn eval_like_inner(
             let Some(pat) = read_str(pattern, row) else {
                 continue;
             };
-            let need_compile = !matches!(last_dyn.as_ref(), Some((prev, _)) if *prev == pat);
-            if need_compile {
-                let compiled = LikeMatcher::compile(pat, escape, case_insensitive)?;
+            let hit = matches!(last_dyn.as_ref(), Some((prev, _)) if *prev == pat);
+            if !hit {
+                let compiled =
+                    ctx.cache
+                        .get_or_insert_like(pat, escape, case_insensitive, || {
+                            LikeMatcher::compile(pat, escape, case_insensitive)
+                        })?;
                 last_dyn = Some((pat, compiled));
             }
             match last_dyn.as_ref() {
@@ -532,6 +595,18 @@ pub fn eval_string_fn(
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
+    pool: Option<&mut Reservation>,
+) -> Result<Column, QueryError> {
+    let refs: Vec<&Column> = args.iter().collect();
+    eval_string_fn_refs(func, &refs, len, active, ctx, pool)
+}
+
+pub(crate) fn eval_string_fn_refs(
+    func: ScalarFn,
+    args: &[&Column],
+    len: usize,
+    active: Option<&Bitmap>,
+    ctx: &EvalContext,
     mut pool: Option<&mut Reservation>,
 ) -> Result<Column, QueryError> {
     let before = pool_size(&pool);
@@ -541,7 +616,7 @@ pub fn eval_string_fn(
 
 fn eval_string_fn_inner(
     func: ScalarFn,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -550,7 +625,7 @@ fn eval_string_fn_inner(
 ) -> Result<Column, QueryError> {
     check_cancel(ctx, pool, before)?;
     check_active_len(active, len)?;
-    for col in args {
+    for &col in args {
         check_col_len(col, len)?;
     }
 
@@ -589,7 +664,7 @@ fn eval_string_fn_inner(
 // ---------------------------------------------------------------------------
 
 fn eval_case_change(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -597,7 +672,7 @@ fn eval_case_change(
     before: usize,
     to_upper: bool,
 ) -> Result<Column, QueryError> {
-    let [input] = args else {
+    let &[input] = args else {
         return Err(QueryError::failed("lower/upper takes 1 argument"));
     };
     expect_utf8_or_null(input)?;
@@ -689,14 +764,14 @@ fn eval_case_change(
 // ---------------------------------------------------------------------------
 
 fn eval_length(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
     pool: &mut Option<&mut Reservation>,
     before: usize,
 ) -> Result<Column, QueryError> {
-    let [input] = args else {
+    let &[input] = args else {
         return Err(QueryError::failed("length takes 1 argument"));
     };
     expect_utf8_or_null(input)?;
@@ -832,14 +907,14 @@ fn substr_slice(s: &str, start: i64, count: Option<i64>) -> Result<&str, QueryEr
 }
 
 fn eval_substr(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
     pool: &mut Option<&mut Reservation>,
     before: usize,
 ) -> Result<Column, QueryError> {
-    let (s_col, start_col, count_col) = match args {
+    let (s_col, start_col, count_col) = match *args {
         [s, start] => (s, start, None),
         [s, start, count] => (s, start, Some(count)),
         _ => return Err(QueryError::failed("substr takes 2 or 3 arguments")),
@@ -888,7 +963,7 @@ enum TrimKind {
 }
 
 fn eval_trim(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -896,7 +971,7 @@ fn eval_trim(
     before: usize,
     kind: TrimKind,
 ) -> Result<Column, QueryError> {
-    let (s_col, chars_col) = match args {
+    let (s_col, chars_col) = match *args {
         [s] => (s, None),
         [s, chars] => (s, Some(chars)),
         _ => return Err(QueryError::failed("trim takes 1 or 2 arguments")),
@@ -975,7 +1050,7 @@ fn slice_left_or_right(s: &str, n: i64, is_left: bool) -> &str {
 }
 
 fn eval_left_right(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -983,7 +1058,7 @@ fn eval_left_right(
     before: usize,
     is_left: bool,
 ) -> Result<Column, QueryError> {
-    let [s_col, n_col] = args else {
+    let &[s_col, n_col] = args else {
         return Err(QueryError::failed("left/right takes 2 arguments"));
     };
     expect_utf8_or_null(s_col)?;
@@ -1032,14 +1107,14 @@ fn split_part_slice<'a>(s: &'a str, delim: &str, n: i64) -> Result<&'a str, Quer
 }
 
 fn eval_split_part(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
     pool: &mut Option<&mut Reservation>,
     before: usize,
 ) -> Result<Column, QueryError> {
-    let [s_col, delim_col, n_col] = args else {
+    let &[s_col, delim_col, n_col] = args else {
         return Err(QueryError::failed("split_part takes 3 arguments"));
     };
     expect_utf8_or_null(s_col)?;
@@ -1073,7 +1148,7 @@ fn eval_split_part(
 // ---------------------------------------------------------------------------
 
 fn eval_concat(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1083,7 +1158,7 @@ fn eval_concat(
     if args.is_empty() {
         return Err(QueryError::failed("concat requires at least 1 argument"));
     }
-    for col in args {
+    for &col in args {
         expect_utf8_or_null(col)?;
     }
 
@@ -1099,7 +1174,7 @@ fn eval_concat(
         if !is_active(active, row) {
             continue;
         }
-        for col in args {
+        for &col in args {
             if let Some(s) = read_str(col, row) {
                 total_bytes = add_concat_bytes(total_bytes, s.len())?;
             }
@@ -1128,7 +1203,7 @@ fn eval_concat(
             if let Some(n) = nulls.as_mut() {
                 let _ = n.set(row, true);
             }
-            for col in args {
+            for &col in args {
                 if let Some(s) = read_str(col, row) {
                     bytes.extend_from_slice(s.as_bytes());
                 }
@@ -1144,36 +1219,8 @@ fn eval_concat(
     )?))
 }
 
-fn longest_active_str(
-    col: &Column,
-    len: usize,
-    active: Option<&Bitmap>,
-    ctx: &EvalContext,
-    pool: &mut Option<&mut Reservation>,
-    before: usize,
-) -> Result<usize, QueryError> {
-    if let Column::Const { value, .. } = col {
-        return Ok(match value {
-            ScalarValue::Utf8(s) => s.len(),
-            _ => 0,
-        });
-    }
-    let mut max_len = 0usize;
-    for row in 0..len {
-        if (row & CANCEL_CHECK_MASK) == 0 {
-            check_cancel(ctx, pool, before)?;
-        }
-        if is_active(active, row)
-            && let Some(s) = read_str(col, row)
-        {
-            max_len = max_len.max(s.len());
-        }
-    }
-    Ok(max_len)
-}
-
 fn eval_concat_ws(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1185,25 +1232,17 @@ fn eval_concat_ws(
             "concat_ws requires at least 2 arguments",
         ));
     }
-    for col in args {
+    for &col in args {
         expect_utf8_or_null(col)?;
     }
 
-    let sep_col = &args[0];
+    let sep_col = args[0];
     let val_cols = &args[1..];
     if matches!(sep_col.data_type(), DataType::Null) || active.is_some_and(Bitmap::all_zeros) {
         return Ok(null_const(DataType::Utf8, len));
     }
 
-    let n_active = active_count(active, len);
-    let longest_sep = longest_active_str(sep_col, len, active, ctx, pool, before)?;
-    let amp_bytes = longest_sep
-        .checked_mul(args.len().saturating_sub(2))
-        .and_then(|v| v.checked_mul(n_active))
-        .ok_or(QueryError::TooLarge)?;
-
     let mut total_bytes = 0usize;
-    let mut payload_bytes = 0usize;
     for row in 0..len {
         if (row & CANCEL_CHECK_MASK) == 0 {
             check_cancel(ctx, pool, before)?;
@@ -1214,27 +1253,19 @@ fn eval_concat_ws(
         let Some(sep) = read_str(sep_col, row) else {
             continue;
         };
-        payload_bytes = payload_bytes.saturating_add(sep.len());
         let mut first = true;
-        for col in val_cols {
+        for &col in val_cols {
             if let Some(s) = read_str(col, row) {
                 if !first {
                     total_bytes = add_concat_bytes(total_bytes, sep.len())?;
                 }
                 first = false;
                 total_bytes = add_concat_bytes(total_bytes, s.len())?;
-                payload_bytes = payload_bytes.saturating_add(s.len());
             }
         }
     }
 
-    let reserved_data = total_bytes.max(payload_bytes.saturating_add(amp_bytes));
-    let est = (len + 1)
-        .checked_mul(4)
-        .and_then(|o| o.checked_add(reserved_data))
-        .and_then(|o| o.checked_add(bitmap_mem_bytes(len)))
-        .ok_or(QueryError::TooLarge)?;
-    try_reserve(pool, est)?;
+    try_reserve(pool, checked_varlen_bytes(len, total_bytes, true)?)?;
 
     let mut offsets = Vec::with_capacity(len + 1);
     offsets.push(0u32);
@@ -1250,7 +1281,7 @@ fn eval_concat_ws(
         {
             let _ = nulls.set(row, true);
             let mut first = true;
-            for col in val_cols {
+            for &col in val_cols {
                 if let Some(s) = read_str(col, row) {
                     if !first {
                         bytes.extend_from_slice(sep.as_bytes());
@@ -1275,7 +1306,7 @@ fn eval_concat_ws(
 // ---------------------------------------------------------------------------
 
 fn eval_str_predicate(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1283,7 +1314,7 @@ fn eval_str_predicate(
     before: usize,
     pred: fn(&str, &str) -> bool,
 ) -> Result<Column, QueryError> {
-    let [s_col, pat_col] = args else {
+    let &[s_col, pat_col] = args else {
         return Err(QueryError::failed("string predicate takes 2 arguments"));
     };
     expect_utf8_or_null(s_col)?;
@@ -1319,14 +1350,14 @@ fn eval_str_predicate(
 }
 
 fn eval_strpos(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
     pool: &mut Option<&mut Reservation>,
     before: usize,
 ) -> Result<Column, QueryError> {
-    let [s_col, sub_col] = args else {
+    let &[s_col, sub_col] = args else {
         return Err(QueryError::failed("strpos takes 2 arguments"));
     };
     expect_utf8_or_null(s_col)?;
@@ -1395,80 +1426,79 @@ fn compile_regex(pat: &str, flags: &str) -> Result<Regex, QueryError> {
         .multi_line(multi_line)
         .dot_matches_new_line(dot_matches_new_line)
         .size_limit(REGEX_SIZE_LIMIT)
-        .dfa_size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
         .build()
         .map_err(|_| QueryError::failed("invalid or oversized regex pattern"))
 }
 
 enum RegexpCache<'a> {
-    Const {
-        pat: &'a str,
-        flags: &'a str,
-        compiled: Option<Regex>,
-    },
+    Const(Option<Arc<Regex>>),
     Dynamic {
-        last: Option<(&'a str, &'a str, Regex)>,
+        last: Option<(&'a str, &'a str, Arc<Regex>)>,
     },
 }
 
 impl<'a> RegexpCache<'a> {
     fn new(pat_col: &'a Column, flags_col: Option<&'a Column>) -> Self {
-        let const_pat = match pat_col {
+        let is_const_pat = matches!(
+            pat_col,
             Column::Const {
-                value: ScalarValue::Utf8(p),
+                value: ScalarValue::Utf8(_),
                 ..
-            } => Some(p.as_str()),
-            _ => None,
-        };
-        let const_flags = match flags_col {
-            None => Some(""),
-            Some(Column::Const {
-                value: ScalarValue::Utf8(f),
+            }
+        );
+        let is_const_flags = matches!(
+            flags_col,
+            None | Some(Column::Const {
+                value: ScalarValue::Utf8(_),
                 ..
-            }) => Some(f.as_str()),
-            _ => None,
-        };
-        match (const_pat, const_flags) {
-            (Some(pat), Some(flags)) => Self::Const {
-                pat,
-                flags,
-                compiled: None,
-            },
-            _ => Self::Dynamic { last: None },
+            })
+        );
+        if is_const_pat && is_const_flags {
+            Self::Const(None)
+        } else {
+            Self::Dynamic { last: None }
         }
     }
 
-    fn get_or_compile(&mut self, pat: &'a str, flags: &'a str) -> Result<&Regex, QueryError> {
+    fn get_or_compile(
+        &mut self,
+        pat: &'a str,
+        flags: &'a str,
+        ctx: &EvalContext,
+    ) -> Result<Arc<Regex>, QueryError> {
         match self {
-            Self::Const {
-                pat: cpat,
-                flags: cflags,
-                compiled,
-            } => {
-                if compiled.is_none() {
-                    let re = compile_regex(cpat, cflags)?;
-                    *compiled = Some(re);
+            Self::Const(slot) => {
+                if let Some(re) = slot.as_ref() {
+                    return Ok(Arc::clone(re));
                 }
-                compiled
-                    .as_ref()
-                    .ok_or_else(|| QueryError::failed("regex cache invariant violated"))
+                let re = ctx
+                    .cache
+                    .get_or_insert_regex(pat, flags, || compile_regex(pat, flags))?;
+                *slot = Some(Arc::clone(&re));
+                Ok(re)
             }
             Self::Dynamic { last } => {
-                let hit = matches!(last.as_ref(), Some((p, f, _)) if *p == pat && *f == flags);
-                if !hit {
-                    let re = compile_regex(pat, flags)?;
-                    *last = Some((pat, flags, re));
+                if let Some((p, f, re)) = last.as_ref()
+                    && *p == pat
+                    && *f == flags
+                {
+                    return Ok(Arc::clone(re));
                 }
-                last.as_ref()
-                    .map(|(_, _, re)| re)
-                    .ok_or_else(|| QueryError::failed("regex cache invariant violated"))
+                let re = ctx
+                    .cache
+                    .get_or_insert_regex(pat, flags, || compile_regex(pat, flags))?;
+                *last = Some((pat, flags, Arc::clone(&re)));
+                Ok(re)
             }
         }
     }
 }
 
-fn check_regexp_args(args: &[Column]) -> Result<(&Column, &Column, Option<&Column>), QueryError> {
-    let (s_col, pat_col, flags_col) = match args {
+fn check_regexp_args<'a>(
+    args: &[&'a Column],
+) -> Result<(&'a Column, &'a Column, Option<&'a Column>), QueryError> {
+    let (s_col, pat_col, flags_col) = match *args {
         [s, pat] => (s, pat, None),
         [s, pat, flags] => (s, pat, Some(flags)),
         _ => return Err(QueryError::failed("regexp function takes 2 or 3 arguments")),
@@ -1485,10 +1515,33 @@ fn has_null_regexp_arg_type(s_col: &Column, pat_col: &Column, flags_col: Option<
     matches!(s_col.data_type(), DataType::Null)
         || matches!(pat_col.data_type(), DataType::Null)
         || flags_col.is_some_and(|c| matches!(c.data_type(), DataType::Null))
+        || matches!(
+            s_col,
+            Column::Const {
+                value: ScalarValue::Null(_),
+                ..
+            }
+        )
+        || matches!(
+            pat_col,
+            Column::Const {
+                value: ScalarValue::Null(_),
+                ..
+            }
+        )
+        || flags_col.is_some_and(|c| {
+            matches!(
+                c,
+                Column::Const {
+                    value: ScalarValue::Null(_),
+                    ..
+                }
+            )
+        })
 }
 
 fn eval_regexp_like(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1496,16 +1549,18 @@ fn eval_regexp_like(
     before: usize,
 ) -> Result<Column, QueryError> {
     let (s_col, pat_col, flags_col) = check_regexp_args(args)?;
-    if has_null_regexp_arg_type(s_col, pat_col, flags_col) || active.is_some_and(Bitmap::all_zeros)
+    if len == 0
+        || has_null_regexp_arg_type(s_col, pat_col, flags_col)
+        || active.is_some_and(Bitmap::all_zeros)
     {
         return Ok(null_const(DataType::Bool, len));
     }
 
+    let mut cache = RegexpCache::new(pat_col, flags_col);
     let bm_bytes = bitmap_mem_bytes(len);
     try_reserve(pool, bm_bytes * 2)?;
     let mut vals = Bitmap::new_zeroed(len);
     let mut nulls = Bitmap::new_zeroed(len);
-    let mut cache = RegexpCache::new(pat_col, flags_col);
 
     for row in 0..len {
         if (row & CANCEL_CHECK_MASK) == 0 {
@@ -1527,7 +1582,7 @@ fn eval_regexp_like(
             },
             None => "",
         };
-        let re = cache.get_or_compile(pat, flags)?;
+        let re = cache.get_or_compile(pat, flags, ctx)?;
         let _ = nulls.set(row, true);
         if re.is_match(s) {
             let _ = vals.set(row, true);
@@ -1548,7 +1603,7 @@ fn regexp_extract_match<'a>(re: &Regex, s: &'a str) -> Option<&'a str> {
 }
 
 fn eval_regexp_extract(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1556,17 +1611,19 @@ fn eval_regexp_extract(
     before: usize,
 ) -> Result<Column, QueryError> {
     let (s_col, pat_col, flags_col) = check_regexp_args(args)?;
-    if has_null_regexp_arg_type(s_col, pat_col, flags_col) || active.is_some_and(Bitmap::all_zeros)
+    if len == 0
+        || has_null_regexp_arg_type(s_col, pat_col, flags_col)
+        || active.is_some_and(Bitmap::all_zeros)
     {
         return Ok(null_const(DataType::Utf8, len));
     }
 
+    let mut cache = RegexpCache::new(pat_col, flags_col);
     try_reserve(pool, checked_varlen_bytes(len, 0, true)?)?;
     let mut offsets = Vec::with_capacity(len + 1);
     offsets.push(0u32);
     let mut bytes = Vec::new();
     let mut nulls = Bitmap::new_zeroed(len);
-    let mut cache = RegexpCache::new(pat_col, flags_col);
 
     for row in 0..len {
         if (row & CANCEL_CHECK_MASK) == 0 {
@@ -1580,8 +1637,8 @@ fn eval_regexp_extract(
                 None => Some(""),
             }
         {
-            let re = cache.get_or_compile(pat, flags)?;
-            if let Some(m) = regexp_extract_match(re, s) {
+            let re = cache.get_or_compile(pat, flags, ctx)?;
+            if let Some(m) = regexp_extract_match(&re, s) {
                 let next_len = bytes
                     .len()
                     .checked_add(m.len())
@@ -1622,14 +1679,14 @@ fn read_encode_bytes(col: &Column, row: usize) -> Result<Option<&[u8]>, QueryErr
 }
 
 fn eval_encode(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
     pool: &mut Option<&mut Reservation>,
     before: usize,
 ) -> Result<Column, QueryError> {
-    let [val_col, enc_col] = args else {
+    let &[val_col, enc_col] = args else {
         return Err(QueryError::failed("encode takes 2 arguments"));
     };
     if !matches!(
@@ -1733,10 +1790,7 @@ mod tests {
     use super::*;
 
     fn ctx() -> EvalContext {
-        EvalContext {
-            now_ns: 0,
-            cancel: CancelToken::new(),
-        }
+        EvalContext::new(0, CancelToken::new())
     }
 
     fn utf8_col(vals: &[Option<&str>]) -> Column {
@@ -2514,18 +2568,42 @@ mod tests {
         assert!(matches!(err_concat, QueryError::TooLarge));
         assert_eq!(res.size(), before);
 
-        // Amplification guard on concat_ws with tight pool even when value args are mostly null
+        // Exact reservation on concat_ws: mostly-null args with large unused separator succeed,
+        // while actual non-null separator amplification returns TooLarge and rolls back.
         let sep_big = const_str(&"-".repeat(50), 2);
         let n1 = Column::try_new_const(ScalarValue::Null(DataType::Utf8), 2).unwrap();
-        let err_ws = eval_string_fn(
+        let mostly_null_ws = eval_string_fn(
             ScalarFn::ConcatWs,
             &[
-                sep_big,
+                sep_big.clone(),
                 const_str("a", 2),
                 n1.clone(),
                 n1.clone(),
                 n1.clone(),
                 n1,
+            ],
+            2,
+            None,
+            &ctx(),
+            Some(&mut res),
+        )
+        .unwrap();
+        assert_eq!(
+            str_vec(&mostly_null_ws),
+            vec![Some("a".into()), Some("a".into())]
+        );
+        assert_eq!(res.size(), before + mostly_null_ws.memory_bytes());
+        res.shrink(mostly_null_ws.memory_bytes());
+        assert_eq!(res.size(), before);
+
+        let err_ws = eval_string_fn(
+            ScalarFn::ConcatWs,
+            &[
+                sep_big,
+                const_str("a", 2),
+                const_str("b", 2),
+                const_str("c", 2),
+                const_str("d", 2),
             ],
             2,
             None,
@@ -2596,10 +2674,7 @@ mod tests {
         assert!(matches!(cap_err, QueryError::Failed(_)));
 
         // 6. CancelToken abort
-        let cancelled = EvalContext {
-            now_ns: 0,
-            cancel: CancelToken::new(),
-        };
+        let cancelled = EvalContext::new(0, CancelToken::new());
         cancelled.cancel.cancel();
         let cancel_err = eval_string_fn(
             ScalarFn::Upper,
@@ -2722,5 +2797,38 @@ mod tests {
         .unwrap_err();
         assert!(matches!(oom, QueryError::TooLarge));
         assert_eq!(res.size(), 0);
+
+        // H2-M2: lazy constant regex/LIKE compilation for NULL-input SQL semantics.
+        let null_const_utf8 = Column::Const {
+            value: ScalarValue::Null(DataType::Utf8),
+            len: 3,
+        };
+        let all_null_flat = utf8_col(&[None, None, None]);
+        let invalid_re = const_str("[unclosed", 3);
+
+        for input_col in [&null_const_utf8, &all_null_flat] {
+            let out_like =
+                eval_regexp_like(&[input_col, &invalid_re], 3, None, &ctx(), &mut None, 0).unwrap();
+            assert!((0..3).all(|r| out_like.is_null(r)));
+
+            let out_ext =
+                eval_regexp_extract(&[input_col, &invalid_re], 3, None, &ctx(), &mut None, 0)
+                    .unwrap();
+            assert!((0..3).all(|r| out_ext.is_null(r)));
+
+            let oversized_like_pat = const_str(&"_".repeat(100_000), 3);
+            let like_res = eval_like(
+                input_col,
+                &oversized_like_pat,
+                Some('\\'),
+                false,
+                false,
+                None,
+                &ctx(),
+                None,
+            )
+            .unwrap();
+            assert!((0..3).all(|r| like_res.is_null(r)));
+        }
     }
 }

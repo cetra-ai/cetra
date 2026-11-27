@@ -101,7 +101,7 @@ pub(super) fn core_column_plan(
 impl<'a, W: Write + Seek> StatamWriter<'a, W> {
     pub(super) fn flush_rg_columns(
         &mut self,
-        rg_cols: &[Column],
+        rg_cols: &[Arc<Column>],
         base_row_off: usize,
         rg_rows: usize,
         mut prechunked: Option<PrechunkedRefs<'_>>,
@@ -426,7 +426,7 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
     #[allow(clippy::too_many_arguments)]
     fn encode_rg_columns_parallel(
         &mut self,
-        rg_cols: &[Column],
+        rg_cols: &[Arc<Column>],
         base_row_off: usize,
         rg_rows: usize,
         first_row_u32: u32,
@@ -718,7 +718,7 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
     #[allow(clippy::too_many_arguments)]
     fn encode_shredded_maps_group(
         &mut self,
-        rg_cols: &[Column],
+        rg_cols: &[Arc<Column>],
         base_row_off: usize,
         rg_rows: usize,
         first_row_u32: u32,
@@ -756,10 +756,10 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                 let mb_first_row = first_row_u32 + row_off as u32;
                 let abs_off = base_row_off + row_off;
                 let sliced_owned;
-                let sliced = if abs_off == 0 && mb_len == rg_cols[logical_col].len() {
+                let sliced: &Column = if abs_off == 0 && mb_len == rg_cols[logical_col].len() {
                     &rg_cols[logical_col]
                 } else {
-                    sliced_owned = rg_cols[logical_col].slice(abs_off, mb_len)?;
+                    sliced_owned = rg_cols[logical_col].slice(abs_off, mb_len, None)?;
                     &sliced_owned
                 };
                 let flat = as_flat_cow(sliced)?;
@@ -821,7 +821,7 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
 
     fn init_rg0(
         &mut self,
-        rg_cols: &[Column],
+        rg_cols: &[Arc<Column>],
         base_row_off: usize,
         rg_rows: usize,
     ) -> Result<(), StatamError> {
@@ -868,7 +868,7 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
 
     fn init_rg0_parallel(
         &mut self,
-        rg_cols: &[Column],
+        rg_cols: &[Arc<Column>],
         base_row_off: usize,
         rg_rows: usize,
     ) -> Result<(), StatamError> {
@@ -1790,7 +1790,7 @@ fn build_rg_sbbf(
     if base_row_off == 0 && rg_rows == col.len() {
         collect_column_bloom_hashes(col, &mut hashes)?;
     } else {
-        let sliced = col.slice(base_row_off, rg_rows)?;
+        let sliced = col.slice(base_row_off, rg_rows, None)?;
         collect_column_bloom_hashes(&sliced, &mut hashes)?;
     }
     if hashes.is_empty() {
@@ -1932,7 +1932,7 @@ fn extract_rg0_shredded_keys(
     let col_ref = if base_row_off == 0 && rg_rows == col.len() {
         col
     } else {
-        sliced_owned = col.slice(base_row_off, rg_rows)?;
+        sliced_owned = col.slice(base_row_off, rg_rows, None)?;
         &sliced_owned
     };
     let flat = as_flat_cow(col_ref)?;
@@ -1973,7 +1973,7 @@ fn eval_rg0_dict_candidate(
     let col_ref = if base_row_off == 0 && rg_rows == col.len() {
         col
     } else {
-        sliced_owned = col.slice(base_row_off, rg_rows)?;
+        sliced_owned = col.slice(base_row_off, rg_rows, None)?;
         &sliced_owned
     };
     let flat = as_flat_cow(col_ref)?;
@@ -2051,7 +2051,7 @@ fn encode_scalar_or_nested_col_into(
         let rg_slice = if base_row_off == 0 && rg_rows == col.len() {
             col
         } else {
-            rg_slice_owned = col.slice(base_row_off, rg_rows)?;
+            rg_slice_owned = col.slice(base_row_off, rg_rows, None)?;
             &rg_slice_owned
         };
         if let Ok(flat) = as_flat_cow(rg_slice)
@@ -2203,7 +2203,7 @@ fn encode_scalar_or_nested_col_into(
         let sliced = if abs_off == 0 && mb_len == col.len() {
             col
         } else {
-            sliced_owned = col.slice(abs_off, mb_len)?;
+            sliced_owned = col.slice(abs_off, mb_len, None)?;
             &sliced_owned
         };
         let enc = encode_mini_block_with_locality(sliced, dt, profile, dict, is_wide_row)?;
@@ -2299,7 +2299,7 @@ fn encode_shredded_map_to_local(
         let sliced = if abs_off == 0 && mb_len == col.len() {
             col
         } else {
-            sliced_owned = col.slice(abs_off, mb_len)?;
+            sliced_owned = col.slice(abs_off, mb_len, None)?;
             &sliced_owned
         };
         let flat = as_flat_cow(sliced)?;

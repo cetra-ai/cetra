@@ -10,7 +10,7 @@ import {
   chartSpec,
 } from "@/lib/sql/chart";
 
-const TS = 'Timestamp(Nanosecond, Some("UTC"))';
+const TS = "timestamp";
 
 function result(
   columns: { name: string; type: string }[],
@@ -32,7 +32,7 @@ it("draws a line over the first timestamp column, sorted by time", () => {
     result(
       [
         { name: "day", type: TS },
-        { name: "cost", type: "Float64" },
+        { name: "cost", type: "float" },
       ],
       [
         { day: "2026-01-02T00:00:00.000000000Z", cost: 2 },
@@ -58,8 +58,8 @@ it("pivots a single numeric column by a text column", () => {
     result(
       [
         { name: "day", type: TS },
-        { name: "model", type: "Utf8" },
-        { name: "cost", type: "Float64" },
+        { name: "model", type: "string" },
+        { name: "cost", type: "float" },
       ],
       [
         { day: d1, model: "a", cost: 1 },
@@ -87,9 +87,9 @@ it("does not pivot with two numeric columns", () => {
     result(
       [
         { name: "day", type: TS },
-        { name: "model", type: "Utf8" },
-        { name: "a", type: "Int64" },
-        { name: "b", type: "Int64" },
+        { name: "model", type: "string" },
+        { name: "a", type: "integer" },
+        { name: "b", type: "integer" },
       ],
       [{ day: "2026-01-01T00:00:00.000000000Z", model: "m", a: 1, b: 2 }],
     ),
@@ -103,9 +103,9 @@ it("does not pivot when the second numeric column is only dropped as unsafe", ()
     result(
       [
         { name: "day", type: TS },
-        { name: "model", type: "Utf8" },
-        { name: "cost", type: "Float64" },
-        { name: "__proto__", type: "Float64" },
+        { name: "model", type: "string" },
+        { name: "cost", type: "float" },
+        { name: "__proto__", type: "float" },
       ],
       [{ day: "2026-01-01T00:00:00.000000000Z", model: "m", cost: 1, ["__proto__"]: 9 }],
     ),
@@ -120,8 +120,8 @@ it("keeps a dotted pivot value as its own series key", () => {
     result(
       [
         { name: "day", type: TS },
-        { name: "model", type: "Utf8" },
-        { name: "cost", type: "Float64" },
+        { name: "model", type: "string" },
+        { name: "cost", type: "float" },
       ],
       [{ day: "2026-01-01T00:00:00.000000000Z", model: "gpt-4.1", cost: 1 }],
     ),
@@ -135,9 +135,9 @@ it("draws a bar chart over a text column", () => {
   const spec = specOf(
     result(
       [
-        { name: "name", type: "Utf8" },
-        { name: "traces", type: "Int64" },
-        { name: "cost", type: "Float64" },
+        { name: "name", type: "string" },
+        { name: "traces", type: "integer" },
+        { name: "cost", type: "float" },
       ],
       [
         { name: "a", traces: 1, cost: 0.5 },
@@ -151,16 +151,16 @@ it("draws a bar chart over a text column", () => {
 });
 
 it("returns null without an x or a numeric column", () => {
-  expect(chartSpec(result([{ name: "a", type: "Utf8" }], [{ a: "x" }]))).toBeNull();
-  expect(chartSpec(result([{ name: "n", type: "Int64" }], [{ n: 1 }]))).toBeNull();
+  expect(chartSpec(result([{ name: "a", type: "string" }], [{ a: "x" }]))).toBeNull();
+  expect(chartSpec(result([{ name: "n", type: "integer" }], [{ n: 1 }]))).toBeNull();
 });
 
 it("clips series, points and pivot values", () => {
   const seven = specOf(
     result(
       [
-        { name: "name", type: "Utf8" },
-        ...["a", "b", "c", "d", "e", "f", "g"].map((name) => ({ name, type: "Int64" })),
+        { name: "name", type: "string" },
+        ...["a", "b", "c", "d", "e", "f", "g"].map((name) => ({ name, type: "integer" })),
       ],
       [{ name: "x", a: 1, b: 1, c: 1, d: 1, e: 1, f: 1, g: 1 }],
     ),
@@ -172,7 +172,7 @@ it("clips series, points and pivot values", () => {
     result(
       [
         { name: "day", type: TS },
-        { name: "n", type: "Int64" },
+        { name: "n", type: "integer" },
       ],
       Array.from({ length: 1001 }, (_, index) => ({
         day: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
@@ -187,8 +187,8 @@ it("clips series, points and pivot values", () => {
     result(
       [
         { name: "day", type: TS },
-        { name: "model", type: "Utf8" },
-        { name: "cost", type: "Float64" },
+        { name: "model", type: "string" },
+        { name: "cost", type: "float" },
       ],
       ["a", "b", "c", "d", "e", "f"].map((model, index) => ({
         day: "2026-01-01T00:00:00.000000000Z",
@@ -206,7 +206,7 @@ it("reads decimal strings and keeps null", () => {
     result(
       [
         { name: "day", type: TS },
-        { name: "amount", type: "Decimal128(38, 18)" },
+        { name: "amount", type: "decimal" },
       ],
       [
         { day: "2026-01-01T00:00:00.000000000Z", amount: "0.25" },
@@ -224,8 +224,8 @@ it("treats a date column as a date axis and sorts it", () => {
   const spec = specOf(
     result(
       [
-        { name: "d", type: "Date32" },
-        { name: "n", type: "Int64" },
+        { name: "d", type: "date" },
+        { name: "n", type: "integer" },
       ],
       [
         { d: "2026-01-02", n: 2 },
@@ -243,7 +243,7 @@ it("sorts an unparseable timestamp last", () => {
     result(
       [
         { name: "day", type: TS },
-        { name: "n", type: "Int64" },
+        { name: "n", type: "integer" },
       ],
       [
         { day: "not a time", n: 3 },
@@ -259,8 +259,8 @@ it("keeps odd names as series keys and drops unsafe ones", () => {
     result(
       [
         { name: "day", type: TS },
-        { name: "model", type: "Utf8" },
-        { name: "cost", type: "Float64" },
+        { name: "model", type: "string" },
+        { name: "cost", type: "float" },
       ],
       [{ day: "2026-01-01T00:00:00.000000000Z", model: "a;}b{", cost: 1 }],
     ),
@@ -272,7 +272,7 @@ it("keeps odd names as series keys and drops unsafe ones", () => {
     result(
       [
         { name: "day", type: TS },
-        { name: "x", type: "Int64" },
+        { name: "x", type: "integer" },
       ],
       [{ day: "2026-01-01T00:00:00.000000000Z", x: 4 }],
     ),
@@ -284,8 +284,8 @@ it("keeps odd names as series keys and drops unsafe ones", () => {
     result(
       [
         { name: "day", type: TS },
-        { name: "model", type: "Utf8" },
-        { name: "cost", type: "Float64" },
+        { name: "model", type: "string" },
+        { name: "cost", type: "float" },
       ],
       [
         { day: "2026-01-01T00:00:00.000000000Z", model: "__proto__", cost: 1 },
@@ -300,8 +300,8 @@ it("keeps odd names as series keys and drops unsafe ones", () => {
     result(
       [
         { name: "day", type: TS },
-        { name: "model", type: "Utf8" },
-        { name: "cost", type: "Float64" },
+        { name: "model", type: "string" },
+        { name: "cost", type: "float" },
       ],
       [{ day: "2026-01-01T00:00:00.000000000Z", model: null, cost: 1 }],
     ),
@@ -316,9 +316,9 @@ const MODEL_ROWS = [
 ];
 const MODEL_COLUMNS = [
   { name: "day", type: TS },
-  { name: "model", type: "Utf8" },
-  { name: "cost", type: "Float64" },
-  { name: "traces", type: "Int64" },
+  { name: "model", type: "string" },
+  { name: "cost", type: "float" },
+  { name: "traces", type: "integer" },
 ];
 
 it("autoChartConfig is the automatic choice: line over time, pivot when one measure", () => {
@@ -327,8 +327,8 @@ it("autoChartConfig is the automatic choice: line over time, pivot when one meas
       result(
         [
           { name: "day", type: TS },
-          { name: "model", type: "Utf8" },
-          { name: "cost", type: "Float64" },
+          { name: "model", type: "string" },
+          { name: "cost", type: "float" },
         ],
         MODEL_ROWS,
       ),
@@ -339,8 +339,8 @@ it("autoChartConfig is the automatic choice: line over time, pivot when one meas
       result(
         [
           { name: "day", type: TS },
-          { name: "cost", type: "Float64" },
-          { name: "traces", type: "Int64" },
+          { name: "cost", type: "float" },
+          { name: "traces", type: "integer" },
         ],
         [{ day: "2026-01-01T00:00:00.000000000Z", cost: 1, traces: 2 }],
       ),
@@ -350,8 +350,8 @@ it("autoChartConfig is the automatic choice: line over time, pivot when one meas
     autoChartConfig(
       result(
         [
-          { name: "name", type: "Utf8" },
-          { name: "n", type: "Int64" },
+          { name: "name", type: "string" },
+          { name: "n", type: "integer" },
         ],
         [],
       ),
@@ -360,8 +360,8 @@ it("autoChartConfig is the automatic choice: line over time, pivot when one meas
 });
 
 it("autoChartConfig is null without an x or a safe numeric column", () => {
-  expect(autoChartConfig(result([{ name: "a", type: "Utf8" }], []))).toBeNull();
-  expect(autoChartConfig(result([{ name: "n", type: "Int64" }], []))).toBeNull();
+  expect(autoChartConfig(result([{ name: "a", type: "string" }], []))).toBeNull();
+  expect(autoChartConfig(result([{ name: "n", type: "integer" }], []))).toBeNull();
 });
 
 it("buildChart draws a bar chart over time in row order", () => {
@@ -387,8 +387,8 @@ it("buildChart sorts a line over a numeric x by value, nulls last", () => {
   const spec = buildChart(
     result(
       [
-        { name: "n", type: "Int64" },
-        { name: "cost", type: "Float64" },
+        { name: "n", type: "integer" },
+        { name: "cost", type: "float" },
       ],
       [
         { n: 10, cost: 3 },
@@ -410,8 +410,8 @@ it("buildChart keeps row order for a line over a text x", () => {
   const spec = buildChart(
     result(
       [
-        { name: "name", type: "Utf8" },
-        { name: "cost", type: "Float64" },
+        { name: "name", type: "string" },
+        { name: "cost", type: "float" },
       ],
       [
         { name: "b", cost: 2 },
@@ -468,9 +468,9 @@ it("chartColumns lists x, y and split-by candidates", () => {
       result(
         [
           ...MODEL_COLUMNS,
-          { name: "d", type: "Date32" },
-          { name: "__proto__", type: "Float64" },
-          { name: "flag", type: "Boolean" },
+          { name: "d", type: "date" },
+          { name: "__proto__", type: "float" },
+          { name: "flag", type: "boolean" },
         ],
         [],
       ),

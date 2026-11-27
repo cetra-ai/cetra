@@ -85,7 +85,7 @@ fn turn(value: Value) -> Turn {
 
 /// Starts the mock on a free loopback port. The server runs until the test ends.
 async fn start(turns: Vec<Turn>) -> (Arc<Mock>, SocketAddr) {
-    let mock = Mock::new(turns);
+    let mock = Mock::new(turns, Vec::new());
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("address");
     let router = mock.router();

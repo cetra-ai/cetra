@@ -2,15 +2,10 @@
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use std::sync::Arc;
 
-use arrow::array::{
-    Array, ArrayRef, ListArray, RecordBatch, StringArray, StructArray, TimestampNanosecondArray,
-};
-use arrow::compute::cast;
-use arrow::datatypes::{DataType, TimeUnit};
+use cetra_column::Batch;
 use cetra_core::ids::{ProjectId, SpanId, TraceId};
-use cetra_core::schema::{event_field, spans};
+use cetra_core::schema::spans;
 use cetra_core::score::{ScoreTarget, ScoreValue};
 use cetra_eval::issue::fingerprint::{ErrorFields, fingerprint_hex, normalize_message};
 use cetra_storage::{ErrorSpansRequest, QueryContext, RunError, error_spans};
@@ -18,7 +13,9 @@ use serde_json::Value;
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
-use crate::api::convert::ConvertError;
+use crate::api::convert::{
+    Col, ConvertError, active_rows, event_items, events_col, opt_string, opt_time, strings, times,
+};
 use crate::api::scores::ScoreCreate;
 use crate::entitlements::{Visibility, query_options};
 use crate::eval::budget::DAY_NS;
@@ -363,7 +360,7 @@ struct Decoded {
 
 /// Decodes the rows of `batches`. A row that cannot be decoded is skipped; a batch whose columns
 /// do not have the expected types skips all of its rows.
-fn decode(batches: &[RecordBatch]) -> Decoded {
+fn decode(batches: &[Batch]) -> Decoded {
     let mut out = Decoded {
         spans: Vec::new(),
         skipped: 0,
@@ -381,11 +378,11 @@ fn decode(batches: &[RecordBatch]) -> Decoded {
 }
 
 /// Appends the decodable rows of `batch` to `out`; returns how many rows were skipped.
-fn decode_batch(batch: &RecordBatch, out: &mut Vec<ErrorSpan>) -> Result<usize, ConvertError> {
+fn decode_batch(batch: &Batch, out: &mut Vec<ErrorSpan>) -> Result<usize, ConvertError> {
     let columns = Columns::of(batch)?;
     let mut skipped = 0;
-    for row in 0..batch.num_rows() {
-        match columns.row(row) {
+    for phys_row in active_rows(batch) {
+        match columns.row(phys_row) {
             Ok(Some(span)) => out.push(span),
             Ok(None) | Err(_) => skipped += 1,
         }
@@ -394,20 +391,20 @@ fn decode_batch(batch: &RecordBatch, out: &mut Vec<ErrorSpan>) -> Result<usize, 
 }
 
 /// The columns [`decode_batch`] reads, extracted once per batch.
-struct Columns {
-    trace_id: StringArray,
-    span_id: StringArray,
-    start_time: TimestampNanosecondArray,
-    service_name: StringArray,
-    name: StringArray,
-    status_message: StringArray,
-    events: ListArray,
-    user_id: StringArray,
-    session_id: StringArray,
+struct Columns<'a> {
+    trace_id: Col<'a>,
+    span_id: Col<'a>,
+    start_time: Col<'a>,
+    service_name: Col<'a>,
+    name: Col<'a>,
+    status_message: Col<'a>,
+    events: Col<'a>,
+    user_id: Col<'a>,
+    session_id: Col<'a>,
 }
 
-impl Columns {
-    fn of(batch: &RecordBatch) -> Result<Self, ConvertError> {
+impl<'a> Columns<'a> {
+    fn of(batch: &'a Batch) -> Result<Self, ConvertError> {
         Ok(Self {
             trace_id: strings(batch, spans::TRACE_ID)?,
             span_id: strings(batch, spans::SPAN_ID)?,
@@ -415,41 +412,44 @@ impl Columns {
             service_name: strings(batch, spans::SERVICE_NAME)?,
             name: strings(batch, spans::NAME)?,
             status_message: strings(batch, spans::STATUS_MESSAGE)?,
-            events: lists(batch, spans::EVENTS)?,
+            events: events_col(batch, spans::EVENTS)?,
             user_id: strings(batch, spans::USER_ID)?,
             session_id: strings(batch, spans::SESSION_ID)?,
         })
     }
 
-    /// Row `row`. `None` when a required value is null or does not parse.
-    fn row(&self, row: usize) -> Result<Option<ErrorSpan>, ConvertError> {
+    /// Physical row `phys_row`. `None` when a required value is null or does not parse.
+    fn row(&self, phys_row: usize) -> Result<Option<ErrorSpan>, ConvertError> {
         let Some(trace_id) =
-            text(&self.trace_id, row).and_then(|value| TraceId::from_str(&value).ok())
+            non_empty(&self.trace_id, phys_row)?.and_then(|value| TraceId::from_str(&value).ok())
         else {
             return Ok(None);
         };
         let Some(span_id) =
-            text(&self.span_id, row).and_then(|value| SpanId::from_str(&value).ok())
+            non_empty(&self.span_id, phys_row)?.and_then(|value| SpanId::from_str(&value).ok())
         else {
             return Ok(None);
         };
-        if self.start_time.is_null(row) {
-            return Ok(None);
-        }
-        let Some(name) = text(&self.name, row) else {
+        let Some(start_time) = opt_time(&self.start_time, phys_row)? else {
             return Ok(None);
         };
-        let (exception_type, exception_message) = exception(&self.events, row)?;
+        let Some(name) = non_empty(&self.name, phys_row)? else {
+            return Ok(None);
+        };
+        let (exception_type, exception_message) = exception(&self.events, phys_row)?;
         Ok(Some(ErrorSpan {
             trace_id,
             span_id,
-            start_time: self.start_time.value(row),
-            service_name: text(&self.service_name, row),
+            start_time,
+            service_name: non_empty(&self.service_name, phys_row)?,
             name,
             exception_type,
-            message: exception_message.or_else(|| text(&self.status_message, row)),
-            user_id: text(&self.user_id, row),
-            session_id: text(&self.session_id, row),
+            message: match exception_message {
+                Some(m) => Some(m),
+                None => non_empty(&self.status_message, phys_row)?,
+            },
+            user_id: non_empty(&self.user_id, phys_row)?,
+            session_id: non_empty(&self.session_id, phys_row)?,
         }))
     }
 }
@@ -457,27 +457,18 @@ impl Columns {
 /// The exception of a span: `exception.type` and `exception.message` of its last `exception`
 /// event (D-IC-2). Missing, non-string or unparsable values are absent.
 fn exception(
-    events: &ListArray,
-    row: usize,
+    events: &Col<'_>,
+    phys_row: usize,
 ) -> Result<(Option<String>, Option<String>), ConvertError> {
-    if events.is_null(row) {
-        return Ok((None, None));
-    }
-    let values = events.value(row);
-    let items = values
-        .as_any()
-        .downcast_ref::<StructArray>()
-        .ok_or(ConvertError::Type(spans::EVENTS))?;
-    let names = child_strings(items, event_field::NAME)?;
-    let attributes = child_strings(items, event_field::ATTRIBUTES)?;
-    let found = (0..items.len())
-        .rev()
-        .find(|&index| text(&names, index).as_deref() == Some(EXCEPTION_EVENT));
-    let Some(index) = found else {
+    let items = event_items(events, phys_row)?;
+    let Some(item) = items.iter().rev().find(|item| item.name == EXCEPTION_EVENT) else {
         return Ok((None, None));
     };
-    let parsed: Option<Value> =
-        text(&attributes, index).and_then(|json| serde_json::from_str(&json).ok());
+    let parsed: Option<Value> = item
+        .attributes
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .and_then(|json| serde_json::from_str(json).ok());
     let field = |key: &str| {
         parsed
             .as_ref()
@@ -490,74 +481,8 @@ fn exception(
 }
 
 /// A nullable string as text. Empty is absent.
-fn text(array: &StringArray, row: usize) -> Option<String> {
-    (!array.is_null(row))
-        .then(|| array.value(row))
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
-/// The batch column `name`, cast to `data_type` when its type differs.
-fn column(
-    batch: &RecordBatch,
-    name: &'static str,
-    data_type: &DataType,
-) -> Result<ArrayRef, ConvertError> {
-    let array = batch
-        .column_by_name(name)
-        .ok_or(ConvertError::Missing(name))?;
-    if array.data_type() == data_type {
-        return Ok(Arc::clone(array));
-    }
-    cast(array, data_type).map_err(|_| ConvertError::Type(name))
-}
-
-fn strings(batch: &RecordBatch, name: &'static str) -> Result<StringArray, ConvertError> {
-    column(batch, name, &DataType::Utf8)?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .cloned()
-        .ok_or(ConvertError::Type(name))
-}
-
-fn times(
-    batch: &RecordBatch,
-    name: &'static str,
-) -> Result<TimestampNanosecondArray, ConvertError> {
-    let data_type = DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()));
-    column(batch, name, &data_type)?
-        .as_any()
-        .downcast_ref::<TimestampNanosecondArray>()
-        .cloned()
-        .ok_or(ConvertError::Type(name))
-}
-
-/// A list column as it is stored: its items are cast when read.
-fn lists(batch: &RecordBatch, name: &'static str) -> Result<ListArray, ConvertError> {
-    batch
-        .column_by_name(name)
-        .ok_or(ConvertError::Missing(name))?
-        .as_any()
-        .downcast_ref::<ListArray>()
-        .cloned()
-        .ok_or(ConvertError::Type(name))
-}
-
-/// A string child of a struct item, cast to Utf8 when its type differs.
-fn child_strings(items: &StructArray, name: &'static str) -> Result<StringArray, ConvertError> {
-    let child = items
-        .column_by_name(name)
-        .ok_or(ConvertError::Missing(name))?;
-    let child: ArrayRef = if child.data_type() == &DataType::Utf8 {
-        Arc::clone(child)
-    } else {
-        cast(child, &DataType::Utf8).map_err(|_| ConvertError::Type(name))?
-    };
-    child
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .cloned()
-        .ok_or(ConvertError::Type(name))
+fn non_empty(col: &Col<'_>, phys_row: usize) -> Result<Option<String>, ConvertError> {
+    Ok(opt_string(col, phys_row)?.filter(|value| !value.is_empty()))
 }
 
 /// One error group of a source: its title, its normalized message, and one hit per trace.

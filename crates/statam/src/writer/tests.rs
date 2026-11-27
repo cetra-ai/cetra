@@ -718,8 +718,8 @@ fn writer_l1_multithreaded_is_bit_exact_with_single_threaded() {
                 )
                 .unwrap();
                 if let Some(mid) = split_at {
-                    w.write_batch(&src.slice(0, mid).unwrap()).unwrap();
-                    w.write_batch(&src.slice(mid, src.num_rows() - mid).unwrap())
+                    w.write_batch(&src.slice(0, mid, None).unwrap()).unwrap();
+                    w.write_batch(&src.slice(mid, src.num_rows() - mid, None).unwrap())
                         .unwrap();
                 } else {
                     w.write_batch(src).unwrap();
@@ -742,7 +742,7 @@ fn writer_l1_multithreaded_is_bit_exact_with_single_threaded() {
     assert_eq!(p_1t, p_4t, ".stpk output must be bit-exact 1T vs 4T");
 
     // 1-row tiny-flush parity check with write_threads = 8 (gated to 1T RG path).
-    let one_row = batch.slice(0, 1).unwrap();
+    let one_row = batch.slice(0, 1, None).unwrap();
     let (one_s1, one_p1, one_st1) = run(1, &one_row, None);
     let (one_s8, one_p8, one_st8) = run(8, &one_row, None);
     assert_eq!(one_st1, one_st8);
@@ -847,8 +847,8 @@ fn writer_l0_multithreaded_is_bit_exact_with_single_threaded() {
         )
         .unwrap();
         if let Some(mid) = split_at {
-            w.write_batch(&src.slice(0, mid).unwrap()).unwrap();
-            w.write_batch(&src.slice(mid, src.num_rows() - mid).unwrap())
+            w.write_batch(&src.slice(0, mid, None).unwrap()).unwrap();
+            w.write_batch(&src.slice(mid, src.num_rows() - mid, None).unwrap())
                 .unwrap();
         } else {
             w.write_batch(src).unwrap();
@@ -873,7 +873,7 @@ fn writer_l0_multithreaded_is_bit_exact_with_single_threaded() {
     );
 
     // 1-row tiny-flush parity check with write_threads = 8 (gated to 1T RG path).
-    let one_row = batch.slice(0, 1).unwrap();
+    let one_row = batch.slice(0, 1, None).unwrap();
     let (one_1t, one_s1) = run(1, &one_row, None);
     let (one_8t, one_s8) = run(8, &one_row, None);
     assert_eq!(one_s1, one_s8);
@@ -1559,7 +1559,7 @@ fn m18_m23_rejects_empty_schema_duplicate_sort_cols_and_unifies_l1_payload_codec
             batch
                 .columns()
                 .iter()
-                .map(|c| c.slice(0, 8).unwrap())
+                .map(|c| c.slice(0, 8, None).unwrap())
                 .collect(),
             8,
         )
@@ -1569,7 +1569,7 @@ fn m18_m23_rejects_empty_schema_duplicate_sort_cols_and_unifies_l1_payload_codec
             batch
                 .columns()
                 .iter()
-                .map(|c| c.slice(8, 8).unwrap())
+                .map(|c| c.slice(8, 8, None).unwrap())
                 .collect(),
             8,
         )
@@ -1744,7 +1744,7 @@ fn pass21_non_payload_compressed_rg_sizing() {
 
     // 2. Compressible non-payload streamed small batches (20 x 80 KiB) stays 1 RG.
     let small_batches: Vec<Batch> = (0..20)
-        .map(|chunk| comp_batch.slice(chunk * 10, 10).unwrap())
+        .map(|chunk| comp_batch.slice(chunk * 10, 10, None).unwrap())
         .collect();
     for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
         let mut opts = WriteOptions::for_table(TableKind::Generic, profile);

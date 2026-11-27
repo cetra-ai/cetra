@@ -1,0 +1,17 @@
+{
+  "description": "OpenCode 1.19.6 (npm opencode-ai) in run mode with cetra's plugin: one bash call (cat hello.txt), then the answer; traces with prompts.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "opencode-ai",
+    "instrumentation_version": "1.19.6",
+    "language": "typescript",
+    "libraries": {
+      "opencode-ai": "1.19.6"
+    },
+    "captured_at": "2026-11-24T15:17:45Z"
+  },
+  "spec_refs": [
+    "02 § Coding agents"
+  ],
+  "notes": "OpenCode's spans come from cetra's own plugin (D-IN-29 item 1), loaded from the config dir through the 1.x Hooks API; the config file it reads is the one `cetra agents setup opencode` writes. The provider is OpenCode's openai entry pointed at the mock with the mock key. OpenCode 1.x names its shell tool `bash` (read from the tool list the build sends); its only required parameter is command. The first turn is the session-title call OpenCode makes beside the main flow (1.x sends it to its default small model), so it is an auxiliary turn served to the request that declares no tools; the plugin emits no span for it. XDG_DATA_HOME is set into the isolated home because 1.x otherwise keeps its database under the passwd home. The update, model and LSP fetches are disabled, so nothing leaves loopback. gen_ai.conversation.id is OpenCode's session id, which differs between runs, so it is volatile. gen_ai.tool.call.id is the mock's tool-call id and stable."
+}

@@ -1,0 +1,234 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "8cfc6256fd34808b275a4f7c493ba55b",
+      "span_id": "9e61b2579cd4edec",
+      "parent_span_id": "1962ebb49a078c71",
+      "name": "AgentExecution[assistant]",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.093000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "session_id": "capture-volatile-4",
+      "input": "{}",
+      "input_format": "text",
+      "output": "{}",
+      "output_format": "text",
+      "input_preview": "{}",
+      "output_preview": "{}",
+      "attributes": {
+        "agent.component_type": "Agent",
+        "agent.description": "A general purpose agent that can read files.",
+        "agent.human_in_the_loop": "true",
+        "agent.id": "capture-volatile-1",
+        "agent.llm_config.api_key.$component_ref": "capture-volatile-2.api_key",
+        "agent.llm_config.api_type": "chat_completions",
+        "agent.llm_config.component_type": "OpenAiConfig",
+        "agent.llm_config.default_generation_parameters": "null",
+        "agent.llm_config.description": "null",
+        "agent.llm_config.id": "capture-volatile-2",
+        "agent.llm_config.model_id": "gpt-4o-mini",
+        "agent.llm_config.name": "openai-gpt-4o-mini",
+        "agent.llm_config.retry_policy": "null",
+        "agent.name": "assistant",
+        "agent.system_prompt": "You are a helpful assistant. Help the user answering politely.",
+        "agent.tools.0.component_type": "ServerTool",
+        "agent.tools.0.description": "Read a file from the working directory and return its text.",
+        "agent.tools.0.id": "capture-volatile-3",
+        "agent.tools.0.inputs.0.title": "path",
+        "agent.tools.0.inputs.0.type": "string",
+        "agent.tools.0.name": "read_file",
+        "agent.tools.0.requires_confirmation": "false",
+        "description": "",
+        "openinference.span.kind": "AGENT",
+        "session.id": "capture-volatile-4"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.000000000Z",
+          "name": "AgentExecutionStart",
+          "attributes": "{\"id\":\"capture-volatile-5\",\"name\":\"AgentExecutionStart\",\"description\":\"\",\"timestamp\":1767225590000000000,\"agent.id\":\"capture-volatile-1\",\"agent.name\":\"assistant\",\"agent.description\":\"A general purpose agent that can read files.\",\"agent.llm_config.id\":\"capture-volatile-2\",\"agent.llm_config.name\":\"openai-gpt-4o-mini\",\"agent.llm_config.description\":\"null\",\"agent.llm_config.model_id\":\"gpt-4o-mini\",\"agent.llm_config.api_type\":\"chat_completions\",\"agent.llm_config.api_key.$component_ref\":\"capture-volatile-2.api_key\",\"agent.llm_config.default_generation_parameters\":\"null\",\"agent.llm_config.retry_policy\":\"null\",\"agent.llm_config.component_type\":\"OpenAiConfig\",\"agent.system_prompt\":\"You are a helpful assistant. Help the user answering politely.\",\"agent.tools.0.id\":\"capture-volatile-3\",\"agent.tools.0.name\":\"read_file\",\"agent.tools.0.description\":\"Read a file from the working directory and return its text.\",\"agent.tools.0.inputs.0.title\":\"path\",\"agent.tools.0.inputs.0.type\":\"string\",\"agent.tools.0.requires_confirmation\":false,\"agent.tools.0.component_type\":\"ServerTool\",\"agent.human_in_the_loop\":true,\"agent.component_type\":\"Agent\",\"type\":\"AgentExecutionStart\"}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.093000000Z",
+          "name": "AgentExecutionEnd",
+          "attributes": "{\"id\":\"capture-volatile-6\",\"name\":\"AgentExecutionEnd\",\"description\":\"\",\"timestamp\":1767225590093000000,\"agent.id\":\"capture-volatile-1\",\"agent.name\":\"assistant\",\"agent.description\":\"A general purpose agent that can read files.\",\"agent.llm_config.id\":\"capture-volatile-2\",\"agent.llm_config.name\":\"openai-gpt-4o-mini\",\"agent.llm_config.description\":\"null\",\"agent.llm_config.model_id\":\"gpt-4o-mini\",\"agent.llm_config.api_type\":\"chat_completions\",\"agent.llm_config.api_key.$component_ref\":\"capture-volatile-2.api_key\",\"agent.llm_config.default_generation_parameters\":\"null\",\"agent.llm_config.retry_policy\":\"null\",\"agent.llm_config.component_type\":\"OpenAiConfig\",\"agent.system_prompt\":\"You are a helpful assistant. Help the user answering politely.\",\"agent.tools.0.id\":\"capture-volatile-3\",\"agent.tools.0.name\":\"read_file\",\"agent.tools.0.description\":\"Read a file from the working directory and return its text.\",\"agent.tools.0.inputs.0.title\":\"path\",\"agent.tools.0.inputs.0.type\":\"string\",\"agent.tools.0.requires_confirmation\":false,\"agent.tools.0.component_type\":\"ServerTool\",\"agent.human_in_the_loop\":true,\"agent.component_type\":\"Agent\",\"type\":\"AgentExecutionEnd\"}"
+        }
+      ],
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "8cfc6256fd34808b275a4f7c493ba55b",
+      "span_id": "584e192ea187bddc",
+      "parent_span_id": "9e61b2579cd4edec",
+      "name": "LlmGenerationSpan",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.004000000Z",
+      "end_time": "2025-12-31T23:59:50.049000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "session_id": "capture-volatile-4",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "cost_source": "none",
+      "input": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a helpful assistant. Help the user answering politely.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Read hello.txt and tell me what it says.\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_read_file_1\",\"name\":\"read_file\",\"arguments\":\"{'path': 'hello.txt'}\"}]}]",
+      "output_format": "messages",
+      "input_preview": "Read hello.txt and tell me what it says.",
+      "tool_definitions": "[{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"description\":\"Read a file from the working directory and return its text.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"title\":\"path\"}},\"required\":[\"path\"]}}}]",
+      "attributes": {
+        "description": "",
+        "llm.invocation_parameters": "{}",
+        "llm.model_name": "gpt-4o-mini",
+        "llm.token_count.completion": "null",
+        "llm.token_count.prompt": "null",
+        "openinference.span.kind": "LLM",
+        "session.id": "capture-volatile-4"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.004000000Z",
+          "name": "LlmGenerationRequest",
+          "attributes": "{\"id\":\"capture-volatile-7\",\"name\":\"LlmGenerationRequest\",\"description\":\"\",\"timestamp\":1767225590004000000,\"llm_config.id\":\"capture-volatile-2\",\"llm_config.name\":\"openai-gpt-4o-mini\",\"llm_config.description\":\"null\",\"llm_config.model_id\":\"gpt-4o-mini\",\"llm_config.api_type\":\"chat_completions\",\"llm_config.api_key.$component_ref\":\"capture-volatile-2.api_key\",\"llm_config.default_generation_parameters\":\"null\",\"llm_config.retry_policy\":\"null\",\"llm_config.component_type\":\"OpenAiConfig\",\"prompt.0.id\":\"null\",\"prompt.0.content\":\"You are a helpful assistant. Help the user answering politely.\",\"prompt.0.sender\":\"\",\"prompt.0.role\":\"system\",\"prompt.1.id\":\"null\",\"prompt.1.content\":\"Read hello.txt and tell me what it says.\",\"prompt.1.sender\":\"\",\"prompt.1.role\":\"user\",\"tools.0.id\":\"capture-volatile-8\",\"tools.0.name\":\"read_file\",\"tools.0.description\":\"Read a file from the working directory and return its text.\",\"tools.0.inputs.0.type\":\"string\",\"tools.0.inputs.0.title\":\"path\",\"tools.0.requires_confirmation\":false,\"tools.0.component_type\":\"ClientTool\",\"request_id\":\"capture-volatile-9\",\"llm_generation_config\":\"null\",\"type\":\"LlmGenerationRequest\"}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.049000000Z",
+          "name": "LlmGenerationResponse",
+          "attributes": "{\"id\":\"capture-volatile-10\",\"name\":\"LlmGenerationResponse\",\"description\":\"\",\"timestamp\":1767225590049000000,\"llm_config.id\":\"capture-volatile-2\",\"llm_config.name\":\"openai-gpt-4o-mini\",\"llm_config.description\":\"null\",\"llm_config.model_id\":\"gpt-4o-mini\",\"llm_config.api_type\":\"chat_completions\",\"llm_config.api_key.$component_ref\":\"capture-volatile-2.api_key\",\"llm_config.default_generation_parameters\":\"null\",\"llm_config.retry_policy\":\"null\",\"llm_config.component_type\":\"OpenAiConfig\",\"content\":\"\",\"tool_calls.0.call_id\":\"call_read_file_1\",\"tool_calls.0.tool_name\":\"read_file\",\"tool_calls.0.arguments\":\"{'path': 'hello.txt'}\",\"request_id\":\"capture-volatile-9\",\"completion_id\":\"lc_run--capture-volatile-9-0\",\"input_tokens\":\"null\",\"output_tokens\":\"null\",\"type\":\"LlmGenerationResponse\"}"
+        }
+      ],
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "8cfc6256fd34808b275a4f7c493ba55b",
+      "span_id": "d3cd15902326c4a2",
+      "parent_span_id": "9e61b2579cd4edec",
+      "name": "ToolExecution[read_file]",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.053000000Z",
+      "end_time": "2025-12-31T23:59:50.054000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "session_id": "capture-volatile-4",
+      "input": "{\"path\": \"hello.txt\"}",
+      "input_format": "text",
+      "output": "{}",
+      "output_format": "text",
+      "input_preview": "{\"path\": \"hello.txt\"}",
+      "output_preview": "{}",
+      "attributes": {
+        "description": "tcid__call_read_file_1",
+        "openinference.span.kind": "TOOL",
+        "session.id": "capture-volatile-4",
+        "tool.description": "Read a file from the working directory and return its text.",
+        "tool.json_schema": "{\"type\": \"function\", \"function\": {\"name\": \"read_file\", \"description\": \"Read a file from the working directory and return its text.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"title\": \"path\", \"type\": \"string\"}}, \"required\": [\"path\"]}}}",
+        "tool.name": "read_file",
+        "tool.parameters.path": "hello.txt",
+        "tool_call.function.arguments": "{\"path\": \"hello.txt\"}",
+        "tool_call.function.name": "read_file",
+        "tool_call.id": "capture-volatile-11"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.052000000Z",
+          "name": "ToolExecutionRequest",
+          "attributes": "{\"id\":\"capture-volatile-12\",\"name\":\"ToolExecutionRequest\",\"description\":\"\",\"timestamp\":1767225590052000000,\"tool.id\":\"capture-volatile-3\",\"tool.name\":\"read_file\",\"tool.description\":\"Read a file from the working directory and return its text.\",\"tool.inputs.0.title\":\"path\",\"tool.inputs.0.type\":\"string\",\"tool.requires_confirmation\":false,\"tool.component_type\":\"ServerTool\",\"inputs.path\":\"hello.txt\",\"request_id\":\"capture-volatile-11\",\"type\":\"ToolExecutionRequest\"}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.053000000Z",
+          "name": "ToolExecutionResponse",
+          "attributes": "{\"id\":\"capture-volatile-13\",\"name\":\"ToolExecutionResponse\",\"description\":\"\",\"timestamp\":1767225590053000000,\"tool.id\":\"capture-volatile-3\",\"tool.name\":\"read_file\",\"tool.description\":\"Read a file from the working directory and return its text.\",\"tool.inputs.0.title\":\"path\",\"tool.inputs.0.type\":\"string\",\"tool.requires_confirmation\":false,\"tool.component_type\":\"ServerTool\",\"request_id\":\"capture-volatile-11\",\"type\":\"ToolExecutionResponse\"}"
+        }
+      ],
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "8cfc6256fd34808b275a4f7c493ba55b",
+      "span_id": "b9820d97e5bae556",
+      "parent_span_id": "9e61b2579cd4edec",
+      "name": "LlmGenerationSpan",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.056000000Z",
+      "end_time": "2025-12-31T23:59:50.091000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "session_id": "capture-volatile-4",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "cost_source": "none",
+      "input": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a helpful assistant. Help the user answering politely.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Read hello.txt and tell me what it says.\"}]},{\"role\":\"assistant\",\"parts\":[]},{\"role\":\"tool\",\"parts\":[{\"type\":\"text\",\"content\":\"hello from cetra\\n\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"hello.txt says: hello from cetra\"}]}]",
+      "output_format": "messages",
+      "input_preview": "Read hello.txt and tell me what it says.",
+      "output_preview": "hello.txt says: hello from cetra",
+      "tool_definitions": "[{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"description\":\"Read a file from the working directory and return its text.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"title\":\"path\"}},\"required\":[\"path\"]}}}]",
+      "attributes": {
+        "description": "",
+        "llm.invocation_parameters": "{}",
+        "llm.model_name": "gpt-4o-mini",
+        "llm.token_count.completion": "null",
+        "llm.token_count.prompt": "null",
+        "openinference.span.kind": "LLM",
+        "session.id": "capture-volatile-4"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.057000000Z",
+          "name": "LlmGenerationRequest",
+          "attributes": "{\"id\":\"capture-volatile-14\",\"name\":\"LlmGenerationRequest\",\"description\":\"\",\"timestamp\":1767225590057000000,\"llm_config.id\":\"capture-volatile-2\",\"llm_config.name\":\"openai-gpt-4o-mini\",\"llm_config.description\":\"null\",\"llm_config.model_id\":\"gpt-4o-mini\",\"llm_config.api_type\":\"chat_completions\",\"llm_config.api_key.$component_ref\":\"capture-volatile-2.api_key\",\"llm_config.default_generation_parameters\":\"null\",\"llm_config.retry_policy\":\"null\",\"llm_config.component_type\":\"OpenAiConfig\",\"prompt.0.id\":\"null\",\"prompt.0.content\":\"You are a helpful assistant. Help the user answering politely.\",\"prompt.0.sender\":\"\",\"prompt.0.role\":\"system\",\"prompt.1.id\":\"null\",\"prompt.1.content\":\"Read hello.txt and tell me what it says.\",\"prompt.1.sender\":\"\",\"prompt.1.role\":\"user\",\"prompt.2.id\":\"null\",\"prompt.2.content\":\"\",\"prompt.2.sender\":\"\",\"prompt.2.role\":\"assistant\",\"prompt.3.id\":\"null\",\"prompt.3.content\":\"hello from cetra\\n\",\"prompt.3.sender\":\"\",\"prompt.3.role\":\"tool\",\"tools.0.id\":\"capture-volatile-15\",\"tools.0.name\":\"read_file\",\"tools.0.description\":\"Read a file from the working directory and return its text.\",\"tools.0.inputs.0.type\":\"string\",\"tools.0.inputs.0.title\":\"path\",\"tools.0.requires_confirmation\":false,\"tools.0.component_type\":\"ClientTool\",\"request_id\":\"capture-volatile-16\",\"llm_generation_config\":\"null\",\"type\":\"LlmGenerationRequest\"}"
+        },
+        {
+          "time": "2025-12-31T23:59:50.091000000Z",
+          "name": "LlmGenerationResponse",
+          "attributes": "{\"id\":\"capture-volatile-17\",\"name\":\"LlmGenerationResponse\",\"description\":\"\",\"timestamp\":1767225590091000000,\"llm_config.id\":\"capture-volatile-2\",\"llm_config.name\":\"openai-gpt-4o-mini\",\"llm_config.description\":\"null\",\"llm_config.model_id\":\"gpt-4o-mini\",\"llm_config.api_type\":\"chat_completions\",\"llm_config.api_key.$component_ref\":\"capture-volatile-2.api_key\",\"llm_config.default_generation_parameters\":\"null\",\"llm_config.retry_policy\":\"null\",\"llm_config.component_type\":\"OpenAiConfig\",\"content\":\"hello.txt says: hello from cetra\",\"request_id\":\"capture-volatile-16\",\"completion_id\":\"lc_run--capture-volatile-16-0\",\"input_tokens\":\"null\",\"output_tokens\":\"null\",\"type\":\"LlmGenerationResponse\"}"
+        }
+      ],
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

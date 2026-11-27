@@ -1,0 +1,74 @@
+---
+title: Genkit Go
+description: "Trace Genkit Go model and tool calls with cetra through the otelgenai plugin. Setup only: not run, written from the plugin's source."
+---
+
+Genkit Go writes OpenTelemetry spans with GenAI attributes when you register its `otelgenai` plugin, and cetra reads those spans. This page is setup only: no Genkit program was run, and every fact comes from the plugin's source and documentation.
+
+## Install
+
+```bash
+go get github.com/firebase/genkit/go@v1.14.0
+go get go.opentelemetry.io/otel@v1.46.0 go.opentelemetry.io/otel/sdk@v1.46.0
+go get go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.46.0
+```
+
+## Set up
+
+The application owns the OpenTelemetry SDK. Export over OTLP/HTTP with the standard variables, and set a service name so your traces are named:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-cetra-…"
+export OTEL_SERVICE_NAME=my-app
+```
+
+Register the plugin, then call models as usual:
+
+```go
+ctx := context.Background()
+exp, err := otlptracehttp.New(ctx) // go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp
+if err != nil {
+	log.Fatal(err)
+}
+tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exp))
+otel.SetTracerProvider(tp)
+defer tp.Shutdown(ctx)
+tracing.SetInstrumentation(otelgenai.New(&otelgenai.Options{
+	ContentCapturingMode: otelgenai.SpanOnly,
+	EmitToolSpans:        true,
+}))
+
+plugin := &oai.OpenAI{APIKey: os.Getenv("OPENAI_API_KEY")} // github.com/firebase/genkit/go/plugins/compat_oai/openai
+g := genkit.Init(ctx, genkit.WithPlugins(plugin), genkit.WithDefaultModel("openai/gpt-5.4"))
+resp, err := genkit.Generate(ctx, g, ai.WithPrompt("What is the weather in Lyon?"))
+_ = resp.Text()
+```
+
+- Set the global tracer provider before `otelgenai.New(...)`: the plugin resolves its tracer once, when `New` runs.
+- Registering the plugin replaces Genkit's own default instrumentation. To keep Genkit's `genkit:*` spans as well, the plugin's README says `OTelInstrumentation` must be listed too.
+- Add provider plugins such as `oai.OpenAI` to `genkit.Init`; `otelgenai` takes no Genkit instance.
+
+Content is off by default. Turn it on with `ContentCapturingMode`, or leave the option unset and set `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` to `NO_CONTENT`, `SPAN_ONLY`, `EVENT_ONLY` or `SPAN_AND_EVENT`; the variable is read only when the option is empty. Use `SPAN_ONLY`: it writes `gen_ai.input.messages`, `gen_ai.output.messages` and `gen_ai.system_instructions` on the span, which cetra reads. `EVENT_ONLY` and `SPAN_AND_EVENT` write the content to a log event, which cetra does not read.
+
+## What you get
+
+- An `llm` span named `chat <model>` for each model call, with the provider derived from the model's prefix (`openai/gpt-5.4` gives `openai`), the request model, the finish reasons and the token counts; cetra computes the cost from the built-in prices.
+- A `tool` span named `execute_tool <name>` for each tool call, when `EmitToolSpans` is on.
+- With `SPAN_ONLY`, the input and output messages and the system instructions on the `llm` spans.
+- Other Genkit actions become plain spans carrying `genkit.action.type`.
+
+## Limits
+
+- Not captured: written from the library's source and documentation. No Genkit Go program was run.
+- Content is off by default. cetra reads it only from spans (`SPAN_ONLY`); the `EVENT_ONLY` and `SPAN_AND_EVENT` modes write log records, which cetra drops.
+- Tool spans need `EmitToolSpans: true`.
+- No `gen_ai.response.model` is written: cetra shows the request model only.
+- The plugin also emits `gen_ai.client.token.usage` and `gen_ai.client.operation.duration` metrics by default. cetra reads traces only; set `DisableMetrics: true` to turn them off.
+- This page was written against Genkit Go v1.14.0 and OpenTelemetry Go v1.46.0.
+
+## Next
+
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.

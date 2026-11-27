@@ -306,9 +306,10 @@ mod tests {
         .unwrap();
         let mut ids = Vec::new();
         for batch in &page.batches {
-            let column = batch.column_by_name("trace_id").unwrap();
-            let strings = arrow::array::AsArray::as_string::<i32>(column.as_ref());
-            ids.extend(strings.iter().map(|id| id.unwrap().to_owned()));
+            let col = convert::strings(batch, "trace_id").unwrap();
+            for row in convert::active_rows(batch) {
+                ids.push(convert::opt_string(&col, row).unwrap().unwrap());
+            }
         }
         let expected = [
             "a1000000000000000000000000000006",

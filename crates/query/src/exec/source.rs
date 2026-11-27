@@ -1,14 +1,15 @@
 //! Format-agnostic table/file scan boundary (`ScanSource`, `ScanSpec`, `PartitionStream`)
 //! and in-memory [`BatchSource`].
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
-use cetra_column::{Batch, CancelToken, ColumnError, Reservation, Schema};
+use cetra_column::{Batch, CancelToken, ColumnError, DataType, Reservation, ScalarValue, Schema};
 
 use crate::error::QueryError;
 use crate::eval::eval_filter;
-use crate::ir::{EvalContext, Expr};
+use crate::ir::{EvalContext, Expr, ScalarFn};
 
 use super::pipeline::ExecContext;
 
@@ -103,25 +104,179 @@ pub struct SortHint {
     pub descending: bool,
 }
 
+/// Requested column-level map shredding projection for a `MapUtf8` column (Strata).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MapProjection {
+    /// Only map keys are needed (e.g. `map_keys(m)`), values can be elided.
+    KeysOnly,
+    /// Only the listed keys' values (and keys) are needed (e.g. `m['k1']`).
+    Keys(BTreeSet<String>),
+    /// All keys and values of the map are needed.
+    Full,
+}
+
+impl MapProjection {
+    /// Merges `other` into `self` lattice-wise (`Full` absorbs all; `KeysOnly` + `Keys(_)` -> `Full`;
+    /// `Keys` + `Keys` unions).
+    pub fn merge(&mut self, other: Self) {
+        match (self, other) {
+            (Self::Full, _) => {}
+            (this, Self::Full) => *this = Self::Full,
+            (Self::KeysOnly, Self::KeysOnly) => {}
+            (this @ Self::KeysOnly, Self::Keys(_)) | (this @ Self::Keys(_), Self::KeysOnly) => {
+                *this = Self::Full;
+            }
+            (Self::Keys(dst), Self::Keys(src)) => dst.extend(src),
+        }
+    }
+}
+
+fn merge_map_projection(out: &mut BTreeMap<String, MapProjection>, col: &str, proj: MapProjection) {
+    match out.get_mut(col) {
+        Some(existing) => existing.merge(proj),
+        None => {
+            out.insert(col.to_owned(), proj);
+        }
+    }
+}
+
+/// Collects per-column [`MapProjection`] requirements referenced by `expr` against `schema`
+/// and merges them into `out` (`MapIndex` with literal UTF-8 key -> `Keys`, `map_keys(col)` ->
+/// `KeysOnly`, any other `MapUtf8` column use -> `Full`).
+///
+/// Implemented iteratively so deeply nested expressions never overflow the stack.
+pub fn collect_expr_map_projections(
+    expr: &Expr,
+    schema: &Schema,
+    out: &mut BTreeMap<String, MapProjection>,
+) {
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Column { index, .. } => {
+                if let Some(field) = schema.fields().get(*index)
+                    && field.data_type == DataType::MapUtf8
+                {
+                    merge_map_projection(out, &field.name, MapProjection::Full);
+                }
+            }
+            Expr::Literal(_) => {}
+            Expr::MapIndex { map, key } => {
+                if let (Expr::Column { index, .. }, Expr::Literal(ScalarValue::Utf8(k))) =
+                    (map.as_ref(), key.as_ref())
+                    && let Some(field) = schema.fields().get(*index)
+                    && field.data_type == DataType::MapUtf8
+                {
+                    let mut keys = BTreeSet::new();
+                    keys.insert(k.clone());
+                    merge_map_projection(out, &field.name, MapProjection::Keys(keys));
+                } else {
+                    stack.push(map);
+                    stack.push(key);
+                }
+            }
+            Expr::Call {
+                func: ScalarFn::MapKeys,
+                args,
+                ..
+            } if args.len() == 1 => {
+                if let Expr::Column { index, .. } = &args[0]
+                    && let Some(field) = schema.fields().get(*index)
+                    && field.data_type == DataType::MapUtf8
+                {
+                    merge_map_projection(out, &field.name, MapProjection::KeysOnly);
+                } else {
+                    stack.push(&args[0]);
+                }
+            }
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => stack.push(expr),
+            Expr::Binary { left, right, .. } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            Expr::Between {
+                expr, low, high, ..
+            } => {
+                stack.push(high);
+                stack.push(low);
+                stack.push(expr);
+            }
+            Expr::InList { expr, list, .. } => {
+                for item in list {
+                    stack.push(item);
+                }
+                stack.push(expr);
+            }
+            Expr::Like { expr, pattern, .. } => {
+                stack.push(pattern);
+                stack.push(expr);
+            }
+            Expr::Case {
+                operand,
+                when_then,
+                else_expr,
+                ..
+            } => {
+                if let Some(el) = else_expr {
+                    stack.push(el);
+                }
+                for (w, t) in when_then {
+                    stack.push(t);
+                    stack.push(w);
+                }
+                if let Some(op) = operand {
+                    stack.push(op);
+                }
+            }
+            Expr::MakeArray { elems, .. } => {
+                for e in elems {
+                    stack.push(e);
+                }
+            }
+            Expr::Call { args, .. } => {
+                for a in args {
+                    stack.push(a);
+                }
+            }
+        }
+    }
+}
+
 /// Format-agnostic scan specification passed to every [`ScanSource`] (`D-QE-3`).
-#[derive(Debug, Clone, Default)]
+/// Manual `fmt::Debug` redacts filter literal payloads and map key names (`AGENTS.md` § Privacy).
+#[derive(Clone, Default)]
 pub struct ScanSpec {
     /// Projected column indices in the source's full schema (`None` = all columns; `Some(vec![])` = 0-column row-count batch).
     pub projection: Option<Vec<usize>>,
-    /// Referenced map keys `(column_name, key)` for shredded readers (Strata).
-    pub map_keys: Vec<(String, String)>,
+    /// Requested map column projections keyed by column name for shredded readers (Strata).
+    pub map_projections: BTreeMap<String, MapProjection>,
     /// Time range hint on the table's primary time column (`start_time` or `created_at`).
     pub time_range: TimeRangeHint,
     /// ID lookup hints (`trace_id`, `span_id`, `session_id`, `user_id`, `score_id`).
     pub id_lookups: Vec<IdLookupHint>,
     /// Conjunctive predicates bound against the source's **full** `schema()`; every `ScanSource` MUST evaluate these exactly before projecting.
     pub filters: Vec<Expr>,
-    /// Substring search hints.
-    pub substrings: Vec<SubstringHint>,
+    /// CNF substring search clauses (outer AND of inner OR disjuncts).
+    pub substrings: Vec<Vec<SubstringHint>>,
     /// Optional requested ordering hints.
     pub sort_hints: Vec<SortHint>,
     /// Optional row limit hint (sources may still emit more; upstream `Limit` enforces exactness).
     pub limit: Option<usize>,
+}
+
+impl fmt::Debug for ScanSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScanSpec")
+            .field("projection", &self.projection)
+            .field("map_projections_len", &self.map_projections.len())
+            .field("time_range", &self.time_range)
+            .field("id_lookups", &self.id_lookups)
+            .field("filters_len", &self.filters.len())
+            .field("substrings", &self.substrings)
+            .field("sort_hints", &self.sort_hints)
+            .field("limit", &self.limit)
+            .finish()
+    }
 }
 
 /// One partition stream pulled synchronously by a CPU worker inside a push pipeline.
@@ -221,7 +376,7 @@ impl ScanSource for BatchSource {
                 end,
                 filters: spec.filters.clone(),
                 projection: spec.projection.clone(),
-                now_ns: ctx.eval.now_ns,
+                eval: ctx.eval.clone(),
             }));
             start = end;
         }
@@ -243,7 +398,7 @@ struct BatchPartitionStream {
     end: usize,
     filters: Vec<Expr>,
     projection: Option<Vec<usize>>,
-    now_ns: i64,
+    eval: EvalContext,
 }
 
 impl PartitionStream for BatchPartitionStream {
@@ -253,10 +408,7 @@ impl PartitionStream for BatchPartitionStream {
         mut res: Option<&mut Reservation>,
     ) -> Result<Option<Batch>, QueryError> {
         let before = res.as_ref().map_or(0, |r| r.size());
-        let eval_ctx = EvalContext {
-            now_ns: self.now_ns,
-            cancel: cancel.clone(),
-        };
+        let eval_ctx = self.eval.with_cancel(cancel.clone());
 
         while self.cursor < self.end {
             if cancel.is_cancelled() {
@@ -359,10 +511,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ExecContext {
             pool: GlobalPool::standalone(cap),
-            eval: EvalContext {
-                now_ns: 0,
-                cancel: CancelToken::new(),
-            },
+            eval: EvalContext::new(0, CancelToken::new()),
             spill: Arc::new(SpillManager::with_fixed_cap(
                 dir.path().to_path_buf(),
                 1024 * 1024,
@@ -377,6 +526,31 @@ mod tests {
 
     #[test]
     fn batch_source_filters_empty_projection_and_privacy_debug() {
+        let email_eq_expr = Expr::Binary {
+            left: Box::new(Expr::Column {
+                index: 0,
+                name: "email".to_owned(),
+                data_type: DataType::Utf8,
+            }),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(ScalarValue::Utf8(
+                "alice@secret.com".to_owned(),
+            ))),
+            data_type: DataType::Bool,
+        };
+        let prompt_like_expr = Expr::Like {
+            expr: Box::new(Expr::Column {
+                index: 1,
+                name: "prompt".to_owned(),
+                data_type: DataType::Utf8,
+            }),
+            pattern: Box::new(Expr::Literal(ScalarValue::Utf8(
+                "%secret-prompt%".to_owned(),
+            ))),
+            escape: Some('\\'),
+            case_insensitive: false,
+            negated: false,
+        };
         let spec_privacy = ScanSpec {
             id_lookups: vec![
                 IdLookupHint::Utf8 {
@@ -392,21 +566,39 @@ mod tests {
                     values: vec![[0xCD; 8]],
                 },
             ],
-            substrings: vec![SubstringHint {
+            filters: vec![email_eq_expr.clone(), prompt_like_expr.clone()],
+            substrings: vec![vec![SubstringHint {
                 column: "input".to_owned(),
                 needle: "secret-prompt-needle".to_owned(),
                 case_insensitive: true,
-            }],
+            }]],
             ..ScanSpec::default()
         };
         let dbg = format!("{spec_privacy:?}");
         assert!(!dbg.contains("alice-secret-user"), "leaked id in {dbg}");
+        assert!(!dbg.contains("alice@secret.com"), "leaked email in {dbg}");
         assert!(
             !dbg.contains("secret-prompt-needle"),
             "leaked needle in {dbg}"
         );
+        assert!(
+            !dbg.contains("%secret-prompt%"),
+            "leaked like pattern in {dbg}"
+        );
         assert!(dbg.contains("count: 1"));
         assert!(dbg.contains("needle_len: 20"));
+        assert!(dbg.contains("filters_len: 2"));
+
+        let expr_dbg_1 = format!("{email_eq_expr:?}");
+        let expr_dbg_2 = format!("{prompt_like_expr:?}");
+        assert!(
+            !expr_dbg_1.contains("alice@secret.com"),
+            "leaked email in {expr_dbg_1}"
+        );
+        assert!(
+            !expr_dbg_2.contains("%secret-prompt%"),
+            "leaked pattern in {expr_dbg_2}"
+        );
 
         let schema = Schema::try_new_arc(vec![
             Field::new("id", DataType::I64, false),
@@ -489,5 +681,71 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, QueryError::TooLarge));
         assert_eq!(tiny_res.size(), 16);
+    }
+
+    #[test]
+    fn map_projection_merge_and_collect_expr_map_projections() {
+        let mut a = MapProjection::KeysOnly;
+        a.merge(MapProjection::KeysOnly);
+        assert_eq!(a, MapProjection::KeysOnly);
+
+        a.merge(MapProjection::Keys(BTreeSet::from(["k1".to_owned()])));
+        assert_eq!(a, MapProjection::Full);
+
+        let mut b = MapProjection::Keys(BTreeSet::from(["k1".to_owned()]));
+        b.merge(MapProjection::Keys(BTreeSet::from(["k2".to_owned()])));
+        assert_eq!(
+            b,
+            MapProjection::Keys(BTreeSet::from(["k1".to_owned(), "k2".to_owned()]))
+        );
+        b.merge(MapProjection::KeysOnly);
+        assert_eq!(b, MapProjection::Full);
+
+        let schema = Schema::try_new_arc(vec![
+            Field::new("m1", DataType::MapUtf8, true),
+            Field::new("m2", DataType::MapUtf8, true),
+            Field::new("m3", DataType::MapUtf8, true),
+        ])
+        .unwrap();
+
+        let expr = Expr::Binary {
+            left: Box::new(Expr::MapIndex {
+                map: Box::new(Expr::Column {
+                    index: 0,
+                    name: "m1".to_owned(),
+                    data_type: DataType::MapUtf8,
+                }),
+                key: Box::new(Expr::Literal(ScalarValue::Utf8("env".to_owned()))),
+            }),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(ScalarValue::Utf8("prod".to_owned()))),
+            data_type: DataType::Bool,
+        };
+        let keys_call = Expr::Call {
+            func: ScalarFn::MapKeys,
+            args: vec![Expr::Column {
+                index: 1,
+                name: "m2".to_owned(),
+                data_type: DataType::MapUtf8,
+            }],
+            data_type: DataType::List(Box::new(DataType::Utf8)),
+        };
+        let bare_m3 = Expr::Column {
+            index: 2,
+            name: "m3".to_owned(),
+            data_type: DataType::MapUtf8,
+        };
+
+        let mut out = BTreeMap::new();
+        collect_expr_map_projections(&expr, &schema, &mut out);
+        collect_expr_map_projections(&keys_call, &schema, &mut out);
+        collect_expr_map_projections(&bare_m3, &schema, &mut out);
+
+        assert_eq!(
+            out.get("m1"),
+            Some(&MapProjection::Keys(BTreeSet::from(["env".to_owned()])))
+        );
+        assert_eq!(out.get("m2"), Some(&MapProjection::KeysOnly));
+        assert_eq!(out.get("m3"), Some(&MapProjection::Full));
     }
 }

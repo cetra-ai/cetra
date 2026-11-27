@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Semantic Kernel .NET 1.82.0 with one tool round against the capture mock
+       (IN8.4). Versions are exact pins; packages.lock.json records the resolved graph.
+       OpenAI is taken transitively (2.10.0 in the spike lock): no direct reference. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NoWarn>$(NoWarn);SKEXP0001;SKEXP0010;SKEXP0110;OPENAI001;SKEXP0070</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SemanticKernel" Version="1.82.0" />
+    <PackageReference Include="OpenTelemetry" Version="1.21.0" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.21.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../Harness/Harness.csproj" />
+  </ItemGroup>
+
+</Project>

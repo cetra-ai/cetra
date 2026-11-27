@@ -1,15 +1,35 @@
 [
-  { "name": "trace-list", "path": "/acme/support-bot/traces", "waitFor": "100 loaded" },
+  {
+    "name": "trace-list",
+    "path": "/acme/support-bot/traces",
+    "waitFor": "100 loaded"
+  },
   {
     "name": "trace-view",
     "path": "/acme/support-bot/traces",
     "waitFor": "100 loaded",
-    "actions": [{ "click": "text=How can I export my traces to a CSV file?" }],
+    "actions": [
+      {
+        "click": "div[role=\"grid\"][aria-label=\"Traces\"] >> text=support-agent"
+      }
+    ],
     "waitAfter": "Input / Output"
   },
-  { "name": "sessions", "path": "/acme/support-bot/sessions?range=30d", "waitFor": "100 loaded" },
-  { "name": "users", "path": "/acme/support-bot/users", "waitFor": "Top by cost" },
-  { "name": "dashboard", "path": "/acme/support-bot/dashboard", "waitFor": "Tokens by type" },
+  {
+    "name": "sessions",
+    "path": "/acme/support-bot/sessions?range=30d",
+    "waitFor": "100 loaded"
+  },
+  {
+    "name": "users",
+    "path": "/acme/support-bot/users",
+    "waitFor": "Top by cost"
+  },
+  {
+    "name": "dashboard",
+    "path": "/acme/support-bot/dashboard",
+    "waitFor": "Tokens by type"
+  },
   {
     "name": "sql-console",
     "path": "/acme/support-bot/sql",
@@ -19,7 +39,9 @@
         "click": ".cm-content",
         "type": "SELECT span_kind, count(*) AS spans, min(start_time) AS first_start\nFROM spans\nGROUP BY span_kind\nORDER BY span_kind"
       },
-      { "click": "button:has-text('Run')" }
+      {
+        "click": "button:has-text('Run')"
+      }
     ],
     "waitAfter": " rows · "
   },
@@ -35,8 +57,16 @@
     "waitFor": "Relevance on answers",
     "now": "2026-01-01T11:00:00Z"
   },
-  { "name": "datasets", "path": "/acme/support-bot/datasets", "waitFor": "api-rate-limits" },
-  { "name": "experiments", "path": "/acme/support-bot/experiments", "waitFor": "nightly-12" },
+  {
+    "name": "datasets",
+    "path": "/acme/support-bot/datasets",
+    "waitFor": "api-rate-limits"
+  },
+  {
+    "name": "experiments",
+    "path": "/acme/support-bot/experiments",
+    "waitFor": "nightly-12"
+  },
   {
     "name": "alerts",
     "path": "/acme/support-bot/alerts",
@@ -52,7 +82,7 @@
   {
     "name": "prompt",
     "path": "/acme/support-bot/prompts/support-reply",
-    "waitFor": "Friendlier tone",
+    "waitFor": "Say plainly what cetra doesn't do",
     "now": "2026-01-01T11:00:00Z"
   },
   {
@@ -60,7 +90,11 @@
     "path": "/acme/support-bot/playground?prompt=support-reply&version=2",
     "waitFor": "Run all",
     "now": "2026-01-01T11:00:00Z",
-    "actions": [{ "click": "button:has-text('Run all')" }],
+    "actions": [
+      {
+        "click": "button:has-text('Run all')"
+      }
+    ],
     "waitAfter": "Open trace"
   },
   {
@@ -80,12 +114,16 @@
     "path": "/acme/support-bot/traces",
     "waitFor": "100 loaded",
     "actions": [
-      { "click": "button[aria-label=\"Ask AI\"]" },
+      {
+        "click": "button[aria-label=\"Ask AI\"]"
+      },
       {
         "click": "textarea[aria-label=\"Message the assistant\"]",
-        "type": "Which traces failed in the last day?"
+        "type": "Which trace errors spiked in the last 24 hours?"
       },
-      { "click": "button[aria-label=\"Send\"]" }
+      {
+        "click": "button[aria-label=\"Send\"]"
+      }
     ],
     "waitAfter": "Open in traces"
   },
@@ -99,58 +137,251 @@
     "path": "/acme/support-bot/traces",
     "waitFor": "100 loaded",
     "theme": "dark",
-    "actions": [{ "click": "text=How can I export my traces to a CSV file?" }],
-    "waitAfter": "Input / Output"
+    "viewport": {
+      "width": 1920,
+      "height": 530
+    },
+    "actions": [
+      {
+        "click": "div[role=\"grid\"][aria-label=\"Traces\"] >> text=support-agent"
+      },
+      {
+        "click": "aside[aria-label=\"Trace\"] button:has-text(\"Timeline\")"
+      }
+    ],
+    "waitAfter": "Input / Output",
+    "clip": "aside[aria-label=\"Trace\"]"
   },
   {
-    "name": "marketing-trace-list",
-    "path": "/acme/support-bot/traces",
+    "name": "marketing-trace-view-coding",
+    "path": "/acme/code-agent/traces?trace=a0000000000000000000000000000004",
     "waitFor": "100 loaded",
-    "theme": "dark"
+    "theme": "dark",
+    "viewport": {
+      "width": 1920,
+      "height": 530
+    },
+    "actions": [
+      {
+        "click": "aside[aria-label=\"Trace\"] button:has-text(\"Timeline\")"
+      }
+    ],
+    "waitAfter": "Input / Output",
+    "clip": "aside[aria-label=\"Trace\"]"
   },
   {
-    "name": "marketing-alerts",
-    "path": "/acme/support-bot/alerts",
-    "waitFor": "High error rate",
-    "now": "2026-01-01T11:00:00Z",
-    "theme": "dark"
+    "name": "marketing-trace-view-voice",
+    "path": "/acme/voice-desk/traces?trace=a0000000000000000000000000000005",
+    "waitFor": "100 loaded",
+    "theme": "dark",
+    "viewport": {
+      "width": 1920,
+      "height": 530
+    },
+    "actions": [
+      {
+        "click": "aside[aria-label=\"Trace\"] button:has-text(\"Timeline\")"
+      }
+    ],
+    "waitAfter": "Input / Output",
+    "clip": "aside[aria-label=\"Trace\"]"
+  },
+  {
+    "name": "marketing-trace-view-extraction",
+    "path": "/acme/invoice-pipeline/traces?trace=a0000000000000000000000000000006",
+    "waitFor": "100 loaded",
+    "theme": "dark",
+    "viewport": {
+      "width": 1920,
+      "height": 530
+    },
+    "actions": [
+      {
+        "click": "aside[aria-label=\"Trace\"] button:has-text(\"Timeline\")"
+      }
+    ],
+    "waitAfter": "Input / Output",
+    "clip": "aside[aria-label=\"Trace\"]"
+  },
+  {
+    "name": "marketing-trace-page",
+    "path": "/acme/support-bot/sessions/sess-0142",
+    "waitFor": "Can I schedule it every week?",
+    "theme": "dark",
+    "viewport": {
+      "width": 1450,
+      "height": 790
+    },
+    "clip": "section[aria-label=\"Conversation\"]"
   },
   {
     "name": "marketing-assistant",
-    "path": "/acme/support-bot/traces",
-    "waitFor": "100 loaded",
+    "path": "/acme/support-bot/traces?range=7d",
+    "waitFor": "loaded",
     "actions": [
-      { "click": "button[aria-label=\"Ask AI\"]" },
       {
-        "click": "textarea[aria-label=\"Message the assistant\"]",
-        "type": "Which traces failed in the last day?"
+        "click": "button[aria-label=\"Ask AI\"]"
       },
-      { "click": "button[aria-label=\"Send\"]" }
+      {
+        "click": "button[aria-label^=\"Chats:\"]"
+      },
+      {
+        "click": "[role=\"menuitem\"]:has-text(\"Which of our prompts got worse this week?\")"
+      }
     ],
-    "waitAfter": "Open in traces",
-    "theme": "dark"
-  },
-  {
-    "name": "marketing-playground",
-    "path": "/acme/support-bot/playground?prompt=support-reply&version=2",
-    "waitFor": "Run all",
-    "now": "2026-01-01T11:00:00Z",
-    "actions": [{ "click": "button:has-text('Run all')" }],
-    "waitAfter": "Open trace",
-    "theme": "dark"
-  },
-  {
-    "name": "marketing-queue-review",
-    "path": "/acme/support-bot/annotation-queues/01900000-0000-7000-8000-000000000a01/review/01900000-0000-7000-8000-000000000a11",
-    "waitFor": "Complete and next",
-    "now": "2026-01-01T11:00:00Z",
-    "theme": "dark"
+    "waitAfter": "Want me to build a dashboard",
+    "storage": {
+      "cetra.assistant.window": "{\"x\":16,\"y\":16,\"width\":640,\"height\":540}"
+    },
+    "theme": "dark",
+    "viewport": {
+      "width": 1024,
+      "height": 592
+    },
+    "clip": "section[aria-label=\"Assistant\"]"
   },
   {
     "name": "marketing-issue",
-    "path": "/acme/support-bot/issues/01900000-0000-7000-8000-000000001c01",
-    "waitFor": "ValueError: could not parse the reply",
-    "now": "2026-01-03T20:00:00Z",
-    "theme": "dark"
+    "path": "/acme/support-bot/issues/01900000-0000-7000-8000-000000570105",
+    "waitFor": "Answer contradicts its sources",
+    "theme": "dark",
+    "viewport": {
+      "width": 773,
+      "height": 555
+    },
+    "clip": "main"
+  },
+  {
+    "name": "marketing-coding-cost",
+    "path": "/acme/code-agent/dashboard/01900000-0000-7000-8000-000000570405?range=7d",
+    "waitFor": "Cost by repository",
+    "waitAfter": "github.com/sebastiencs/chromium",
+    "theme": "dark",
+    "viewport": {
+      "width": 1332,
+      "height": 1100
+    },
+    "clip": [
+      "section[aria-label=\"Cost by repository\"]",
+      "section[aria-label=\"Cost per repository\"]"
+    ]
+  },
+  {
+    "name": "marketing-playground",
+    "path": "/acme/support-bot/playground?prompt=support-reply&version=2&compare=3",
+    "waitFor": "Run all",
+    "actions": [
+      {
+        "click": "input[aria-label=\"product\"]",
+        "type": "cetra"
+      },
+      {
+        "click": "input[aria-label=\"language\"]",
+        "type": "English"
+      },
+      {
+        "click": "input[aria-label=\"question\"]",
+        "type": "Can I schedule it every week?"
+      },
+      {
+        "click": "button:has-text('Run all')"
+      }
+    ],
+    "waitAfter": "can't schedule exports yet",
+    "theme": "dark",
+    "viewport": {
+      "width": 1374,
+      "height": 640
+    },
+    "clip": "main"
+  },
+  {
+    "name": "marketing-alerts",
+    "path": "/acme/support-bot/alerts?rule=01900000-0000-7000-8000-000000570205",
+    "waitFor": "Error rate above 15%",
+    "actions": [
+      {
+        "click": "button[aria-label=\"Bottom\"]"
+      }
+    ],
+    "waitAfter": "History",
+    "theme": "dark",
+    "viewport": {
+      "width": 773,
+      "height": 1040
+    },
+    "storage": {
+      "cetra.split.alerts.bottom": "{\"alerts-list\":49,\"alerts-detail\":51}"
+    },
+    "clip": "main"
+  },
+  {
+    "name": "marketing-trace-page-coding",
+    "path": "/acme/code-agent/traces?trace=a0000000000000000000000000000004&mode=transcript",
+    "waitFor": "coding-agent",
+    "theme": "dark",
+    "viewport": {
+      "width": 1100,
+      "height": 1330
+    },
+    "clip": "section[aria-label=\"Transcript\"]",
+    "storage": {
+      "cetra.transcript-wide": "1"
+    }
+  },
+  {
+    "name": "marketing-trace-page-voice",
+    "path": "/acme/voice-desk/traces?trace=a000000000000000000000000000006e&span=0000006e00000008",
+    "waitFor": "Friday at 9:30 is free",
+    "theme": "dark",
+    "viewport": {
+      "width": 1550,
+      "height": 680
+    },
+    "clip": "[role=\"tabpanel\"] > div",
+    "storage": {
+      "cetra.split.traces": "{\"traces-list\":15,\"traces-detail\":85}",
+      "cetra.split.trace": "{\"trace-tree\":20,\"trace-detail\":80}"
+    }
+  },
+  {
+    "name": "marketing-trace-page-extraction",
+    "path": "/acme/invoice-pipeline/traces?filter=tags%20%40%3E%20%5B%27batch-1119%27%5D&cols=status,input,output",
+    "waitFor": "200 traces · 3 errors",
+    "theme": "dark",
+    "viewport": {
+      "width": 774,
+      "height": 560
+    },
+    "actions": [
+      {
+        "click": "button[aria-pressed]:has-text(\"Filters\")"
+      }
+    ],
+    "clipRect": {
+      "x": 40,
+      "y": 168,
+      "width": 734,
+      "height": 392
+    },
+    "storage": {
+      "cetra.table.traces": "{\"name\":140,\"input\":228,\"output\":330}"
+    }
+  },
+  {
+    "name": "marketing-evaluate",
+    "path": "/acme/invoice-pipeline/experiments/compare?ids=01900000-0000-7000-8000-000000570931,01900000-0000-7000-8000-000000570932",
+    "waitFor": "vat_number",
+    "theme": "dark",
+    "viewport": {
+      "width": 774,
+      "height": 700
+    },
+    "clipRect": {
+      "x": 40,
+      "y": 40,
+      "width": 734,
+      "height": 512
+    }
   }
 ]

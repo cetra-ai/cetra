@@ -2,6 +2,7 @@
 
 use std::cmp::Ordering;
 use std::fmt;
+use std::sync::Arc;
 
 use crate::{
     Bitmap, ColumnError, DataType, EventItem, Interval, LinkItem, MAX_NESTING_DEPTH, Reservation,
@@ -279,6 +280,10 @@ impl Utf8Data {
         &self.bytes
     }
 
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
     /// String slice at `row`, or `None` if out of bounds.
     pub fn get(&self, row: usize) -> Option<&str> {
         if row >= self.len() {
@@ -452,6 +457,10 @@ impl BinaryData {
     /// Contiguous raw bytes.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
     }
 
     /// Byte slice at `row`, or `None` if out of bounds.
@@ -1782,13 +1791,192 @@ impl FlatColumn {
         }
     }
 
-    /// Slices `offset..offset + len`.
-    pub fn slice(&self, offset: usize, len: usize) -> Result<Self, ColumnError> {
+    /// Slices `offset..offset + len`, accounting for newly allocated slice buffers in `pool`
+    /// when `Some` (rolling back on error).
+    pub fn slice(
+        &self,
+        offset: usize,
+        len: usize,
+        mut pool: Option<&mut Reservation>,
+    ) -> Result<Self, ColumnError> {
         if offset.checked_add(len).is_none_or(|end| end > self.len()) {
             return Err(ColumnError::InvalidBatch {
                 reason: "flat column slice out of bounds",
             });
         }
+        let before = pool.as_ref().map_or(0, |p| p.size());
+        match self.slice_inner(offset, len, pool.as_deref_mut(), before) {
+            Ok(out) => Ok(out),
+            Err(err) => {
+                rollback_reservation(pool, before);
+                Err(err)
+            }
+        }
+    }
+
+    fn slice_inner(
+        &self,
+        offset: usize,
+        len: usize,
+        mut pool: Option<&mut Reservation>,
+        before: usize,
+    ) -> Result<Self, ColumnError> {
+        let nulls_max_bytes = if self.nulls.is_some() {
+            checked_mul_bytes(len.div_ceil(64), 8, "flat slice nulls byte overflow")?
+        } else {
+            0
+        };
+
+        if let FlatData::List {
+            item_type,
+            offsets,
+            values,
+        } = &self.data
+        {
+            let offsets_bytes = checked_mul_bytes(
+                checked_add_bytes(len, 1, "list slice offsets overflow")?,
+                4,
+                "list slice offsets overflow",
+            )?;
+            let pre_bytes =
+                checked_add_bytes(offsets_bytes, nulls_max_bytes, "list slice byte overflow")?;
+            if let Some(res) = pool.as_deref_mut() {
+                res.try_grow(pre_bytes)?;
+            }
+            let base = offsets[offset];
+            let child_start = base as usize;
+            let child_end = offsets[offset + len] as usize;
+            let new_values =
+                values.slice(child_start, child_end - child_start, pool.as_deref_mut())?;
+            let new_offsets = offsets[offset..=offset + len]
+                .iter()
+                .map(|&o| o - base)
+                .collect();
+            let nulls = slice_optional_bitmap(self.nulls.as_ref(), offset, len)?;
+            if nulls.is_none()
+                && nulls_max_bytes > 0
+                && let Some(res) = pool
+            {
+                res.shrink(nulls_max_bytes);
+            }
+            return Ok(Self {
+                data: FlatData::List {
+                    item_type: item_type.clone(),
+                    offsets: new_offsets,
+                    values: Box::new(new_values),
+                },
+                nulls,
+            });
+        }
+
+        let max_data_bytes = match &self.data {
+            FlatData::Null(_) => 0,
+            FlatData::Bool(_) => checked_mul_bytes(len.div_ceil(64), 8, "bool slice overflow")?,
+            FlatData::I64(_)
+            | FlatData::F64(_)
+            | FlatData::TimestampNs { .. }
+            | FlatData::FixedBytes8(_) => checked_mul_bytes(len, 8, "flat slice byte overflow")?,
+            FlatData::Decimal128 { .. } | FlatData::Interval(_) | FlatData::FixedBytes16(_) => {
+                checked_mul_bytes(len, 16, "flat slice byte overflow")?
+            }
+            FlatData::Date(_) => checked_mul_bytes(len, 4, "flat slice byte overflow")?,
+            FlatData::Utf8(u) => {
+                let offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(len, 1, "utf8 slice offsets overflow")?,
+                    4,
+                    "utf8 slice offsets overflow",
+                )?;
+                let str_bytes = (u.offsets()[offset + len] - u.offsets()[offset]) as usize;
+                checked_add_bytes(offsets_bytes, str_bytes, "utf8 slice byte overflow")?
+            }
+            FlatData::Binary(b) => {
+                let offsets_bytes = checked_mul_bytes(
+                    checked_add_bytes(len, 1, "binary slice offsets overflow")?,
+                    4,
+                    "binary slice offsets overflow",
+                )?;
+                let bin_bytes = (b.offsets()[offset + len] - b.offsets()[offset]) as usize;
+                checked_add_bytes(offsets_bytes, bin_bytes, "binary slice byte overflow")?
+            }
+            FlatData::MapUtf8(m) => {
+                let offsets_bytes = checked_mul_bytes(len + 1, 4, "map slice offsets overflow")?;
+                let start = m.offsets()[offset] as usize;
+                let end = m.offsets()[offset + len] as usize;
+                let count = end - start;
+                let entry_offsets = checked_mul_bytes(count + 1, 4, "map slice byte overflow")?;
+                let key_bytes = (m.keys().offsets()[end] - m.keys().offsets()[start]) as usize;
+                let val_bytes = (m.values().offsets()[end] - m.values().offsets()[start]) as usize;
+                let vnulls = if m.value_nulls().is_some() {
+                    checked_mul_bytes(count.div_ceil(64), 8, "map slice byte overflow")?
+                } else {
+                    0
+                };
+                offsets_bytes
+                    .checked_add(entry_offsets)
+                    .and_then(|s| s.checked_add(key_bytes))
+                    .and_then(|s| s.checked_add(entry_offsets))
+                    .and_then(|s| s.checked_add(val_bytes))
+                    .and_then(|s| s.checked_add(vnulls))
+                    .ok_or(ColumnError::Overflow {
+                        reason: "map slice byte overflow",
+                    })?
+            }
+            FlatData::Events(e) => {
+                let offsets_bytes = checked_mul_bytes(len + 1, 4, "events slice offsets overflow")?;
+                let start = e.offsets()[offset] as usize;
+                let end = e.offsets()[offset + len] as usize;
+                let count = end - start;
+                let times_bytes = checked_mul_bytes(count, 8, "events slice byte overflow")?;
+                let entry_offsets = checked_mul_bytes(count + 1, 4, "events slice byte overflow")?;
+                let name_bytes = (e.names().offsets()[end] - e.names().offsets()[start]) as usize;
+                let attr_bytes =
+                    (e.attributes().offsets()[end] - e.attributes().offsets()[start]) as usize;
+                let anulls = if e.attribute_nulls().is_some() {
+                    checked_mul_bytes(count.div_ceil(64), 8, "events slice byte overflow")?
+                } else {
+                    0
+                };
+                offsets_bytes
+                    .checked_add(times_bytes)
+                    .and_then(|s| s.checked_add(entry_offsets))
+                    .and_then(|s| s.checked_add(name_bytes))
+                    .and_then(|s| s.checked_add(entry_offsets))
+                    .and_then(|s| s.checked_add(attr_bytes))
+                    .and_then(|s| s.checked_add(anulls))
+                    .ok_or(ColumnError::Overflow {
+                        reason: "events slice byte overflow",
+                    })?
+            }
+            FlatData::Links(l) => {
+                let offsets_bytes = checked_mul_bytes(len + 1, 4, "links slice offsets overflow")?;
+                let start = l.offsets()[offset] as usize;
+                let end = l.offsets()[offset + len] as usize;
+                let count = end - start;
+                let ids_bytes = checked_mul_bytes(count, 24, "links slice byte overflow")?;
+                let entry_offsets = checked_mul_bytes(count + 1, 4, "links slice byte overflow")?;
+                let attr_bytes =
+                    (l.attributes().offsets()[end] - l.attributes().offsets()[start]) as usize;
+                let anulls = if l.attribute_nulls().is_some() {
+                    checked_mul_bytes(count.div_ceil(64), 8, "links slice byte overflow")?
+                } else {
+                    0
+                };
+                offsets_bytes
+                    .checked_add(ids_bytes)
+                    .and_then(|s| s.checked_add(entry_offsets))
+                    .and_then(|s| s.checked_add(attr_bytes))
+                    .and_then(|s| s.checked_add(anulls))
+                    .ok_or(ColumnError::Overflow {
+                        reason: "links slice byte overflow",
+                    })?
+            }
+            FlatData::List { .. } => unreachable!(),
+        };
+        let pre_bytes = checked_add_bytes(max_data_bytes, nulls_max_bytes, "flat slice overflow")?;
+        if let Some(res) = pool.as_deref_mut() {
+            res.try_grow(pre_bytes)?;
+        }
+
         let data = match &self.data {
             FlatData::Null(_) => FlatData::Null(len),
             FlatData::Bool(bm) => FlatData::Bool(bm.slice(offset, len)?),
@@ -1813,31 +2001,15 @@ impl FlatColumn {
             FlatData::Binary(b) => FlatData::Binary(b.slice(offset, len)?),
             FlatData::FixedBytes8(v) => FlatData::FixedBytes8(v[offset..offset + len].to_vec()),
             FlatData::FixedBytes16(v) => FlatData::FixedBytes16(v[offset..offset + len].to_vec()),
-            FlatData::List {
-                item_type,
-                offsets,
-                values,
-            } => {
-                let base = offsets[offset];
-                let child_start = base as usize;
-                let child_end = offsets[offset + len] as usize;
-                let new_offsets = offsets[offset..=offset + len]
-                    .iter()
-                    .map(|&o| o - base)
-                    .collect();
-                let new_values = values.slice(child_start, child_end - child_start)?;
-                FlatData::List {
-                    item_type: item_type.clone(),
-                    offsets: new_offsets,
-                    values: Box::new(new_values),
-                }
-            }
             FlatData::MapUtf8(m) => FlatData::MapUtf8(Box::new(m.slice(offset, len)?)),
             FlatData::Events(e) => FlatData::Events(Box::new(e.slice(offset, len)?)),
             FlatData::Links(l) => FlatData::Links(Box::new(l.slice(offset, len)?)),
+            FlatData::List { .. } => unreachable!(),
         };
         let nulls = slice_optional_bitmap(self.nulls.as_ref(), offset, len)?;
-        Ok(Self { data, nulls })
+        let out = Self { data, nulls };
+        reconcile_reservation(pool, before, out.memory_bytes())?;
+        Ok(out)
     }
 
     /// Gathers rows by `indices`, writing canonical zero/empty backing values into null slots
@@ -3105,7 +3277,7 @@ fn gather_fixed<T: Copy>(
 /// Dictionary-encoded column (`values` holds distinct entries; every non-null `codes[i] < values.len()`).
 #[derive(Clone, PartialEq)]
 pub struct DictColumn {
-    values: Box<FlatColumn>,
+    values: Arc<FlatColumn>,
     codes: Vec<u32>,
     nulls: Option<Bitmap>,
 }
@@ -3128,6 +3300,16 @@ impl DictColumn {
         codes: Vec<u32>,
         nulls: Option<Bitmap>,
     ) -> Result<Self, ColumnError> {
+        Self::try_new_shared(Arc::new(values), codes, nulls)
+    }
+
+    /// Validates `nulls` length (normalizing all-ones to `None`) and checks every non-null code `< values.len()`
+    /// over a shared `Arc<FlatColumn>` dictionary.
+    pub fn try_new_shared(
+        values: Arc<FlatColumn>,
+        codes: Vec<u32>,
+        nulls: Option<Bitmap>,
+    ) -> Result<Self, ColumnError> {
         let nulls = normalize_nulls(nulls, codes.len())?;
         let dict_len = values.len();
         for (row, &code) in codes.iter().enumerate() {
@@ -3138,7 +3320,7 @@ impl DictColumn {
             }
         }
         Ok(Self {
-            values: Box::new(values),
+            values,
             codes,
             nulls,
         })
@@ -3146,6 +3328,11 @@ impl DictColumn {
 
     /// Dictionary values table.
     pub fn values(&self) -> &FlatColumn {
+        &self.values
+    }
+
+    /// Shared `Arc` handle to the dictionary values table.
+    pub fn values_arc(&self) -> &Arc<FlatColumn> {
         &self.values
     }
 
@@ -3206,20 +3393,88 @@ impl DictColumn {
         self.values.get_scalar(self.codes[row] as usize)
     }
 
-    /// Slices `offset..offset + len` (keeps `values`, slices `codes` and `nulls`).
-    pub fn slice(&self, offset: usize, len: usize) -> Result<Self, ColumnError> {
+    /// Slices `offset..offset + len` (shares `values` `Arc`, slices `codes` and `nulls`,
+    /// and reserves the sliced column's full `memory_bytes()` in `pool`, rolling back on error).
+    pub fn slice(
+        &self,
+        offset: usize,
+        len: usize,
+        pool: Option<&mut Reservation>,
+    ) -> Result<Self, ColumnError> {
+        self.slice_with_accounting(offset, len, pool, true)
+    }
+
+    pub(crate) fn slice_with_accounting(
+        &self,
+        offset: usize,
+        len: usize,
+        mut pool: Option<&mut Reservation>,
+        account_values: bool,
+    ) -> Result<Self, ColumnError> {
         if offset.checked_add(len).is_none_or(|end| end > self.len()) {
             return Err(ColumnError::InvalidBatch {
                 reason: "dict column slice out of bounds",
             });
         }
+        let before = pool.as_ref().map_or(0, |p| p.size());
+        let values_bytes = if account_values {
+            self.values.memory_bytes()
+        } else {
+            0
+        };
+        let codes_bytes = match checked_mul_bytes(len, 4, "dict slice codes overflow") {
+            Ok(b) => b,
+            Err(err) => {
+                rollback_reservation(pool, before);
+                return Err(err);
+            }
+        };
+        let nulls_max_bytes = if self.nulls.is_some() {
+            match checked_mul_bytes(len.div_ceil(64), 8, "dict slice nulls overflow") {
+                Ok(b) => b,
+                Err(err) => {
+                    rollback_reservation(pool, before);
+                    return Err(err);
+                }
+            }
+        } else {
+            0
+        };
+        let pre_bytes = match checked_add_bytes(values_bytes, codes_bytes, "dict slice overflow")
+            .and_then(|s| checked_add_bytes(s, nulls_max_bytes, "dict slice overflow"))
+        {
+            Ok(b) => b,
+            Err(err) => {
+                rollback_reservation(pool, before);
+                return Err(err);
+            }
+        };
+        if let Some(res) = pool.as_deref_mut()
+            && let Err(err) = res.try_grow(pre_bytes)
+        {
+            rollback_reservation(pool, before);
+            return Err(err);
+        }
         let codes = self.codes[offset..offset + len].to_vec();
-        let nulls = slice_optional_bitmap(self.nulls.as_ref(), offset, len)?;
-        Ok(Self {
-            values: self.values.clone(),
+        let nulls = match slice_optional_bitmap(self.nulls.as_ref(), offset, len) {
+            Ok(n) => n,
+            Err(err) => {
+                rollback_reservation(pool, before);
+                return Err(err);
+            }
+        };
+        let out = Self {
+            values: Arc::clone(&self.values),
             codes,
             nulls,
-        })
+        };
+        let target_bytes = if account_values {
+            out.memory_bytes()
+        } else {
+            out.codes.len() * 4 + out.nulls.as_ref().map_or(0, Bitmap::memory_bytes)
+        };
+        reconcile_reservation(pool, before, target_bytes)?;
+        Ok(out)
     }
 
     /// Deterministic logical heap bytes (`values.memory_bytes() + codes.len() * 4 + nulls`).
@@ -3234,7 +3489,7 @@ impl DictColumn {
 /// `run_ends[0] > 0` and `run_ends` is strictly increasing; logical length is `*run_ends.last().unwrap_or(&0)`).
 #[derive(Clone, PartialEq)]
 pub struct RleColumn {
-    values: Box<FlatColumn>,
+    values: Arc<FlatColumn>,
     run_ends: Vec<u32>,
 }
 
@@ -3248,9 +3503,28 @@ impl fmt::Debug for RleColumn {
     }
 }
 
+fn empty_flat_memory_bytes(dt: &DataType) -> usize {
+    match dt {
+        DataType::Utf8 | DataType::Binary => 4,
+        DataType::Links => 8,
+        DataType::MapUtf8 | DataType::Events => 12,
+        DataType::List(inner) => 4 + empty_flat_memory_bytes(inner),
+        _ => 0,
+    }
+}
+
 impl RleColumn {
     /// Validates `run_ends.len() == values.len()`, `run_ends[0] > 0` (if non-empty), and strict monotonicity.
     pub fn try_new(values: FlatColumn, run_ends: Vec<u32>) -> Result<Self, ColumnError> {
+        Self::try_new_shared(Arc::new(values), run_ends)
+    }
+
+    /// Validates `run_ends.len() == values.len()`, `run_ends[0] > 0` (if non-empty), and strict monotonicity
+    /// over a shared `Arc<FlatColumn>` run values table.
+    pub fn try_new_shared(
+        values: Arc<FlatColumn>,
+        run_ends: Vec<u32>,
+    ) -> Result<Self, ColumnError> {
         if run_ends.len() != values.len() {
             return Err(ColumnError::InvalidBatch {
                 reason: "rle run_ends length must match values length",
@@ -3270,14 +3544,16 @@ impl RleColumn {
                 }
             }
         }
-        Ok(Self {
-            values: Box::new(values),
-            run_ends,
-        })
+        Ok(Self { values, run_ends })
     }
 
     /// One value per run (null runs encoded via `values.nulls()`).
     pub fn values(&self) -> &FlatColumn {
+        &self.values
+    }
+
+    /// Shared `Arc` handle to the run values table.
+    pub fn values_arc(&self) -> &Arc<FlatColumn> {
         &self.values
     }
 
@@ -3326,18 +3602,34 @@ impl RleColumn {
         self.values.get_scalar(run_idx)
     }
 
-    /// Slices `offset..offset + len`, trimming and rebasing `run_ends` to `0..len`.
-    pub fn slice(&self, offset: usize, len: usize) -> Result<Self, ColumnError> {
+    /// Slices `offset..offset + len`, trimming and rebasing `run_ends` to `0..len`
+    /// and reserving the sliced column's full `memory_bytes()` in `pool` (rolling back on error).
+    pub fn slice(
+        &self,
+        offset: usize,
+        len: usize,
+        mut pool: Option<&mut Reservation>,
+    ) -> Result<Self, ColumnError> {
         if offset.checked_add(len).is_none_or(|end| end > self.len()) {
             return Err(ColumnError::InvalidBatch {
                 reason: "rle column slice out of bounds",
             });
         }
+        let before = pool.as_ref().map_or(0, |p| p.size());
         if len == 0 {
-            return Ok(Self {
-                values: Box::new(FlatColumn::empty(&self.data_type())),
+            let empty_bytes = empty_flat_memory_bytes(&self.data_type());
+            if let Some(res) = pool.as_deref_mut()
+                && let Err(err) = res.try_grow(empty_bytes)
+            {
+                rollback_reservation(pool, before);
+                return Err(err);
+            }
+            let empty = Self {
+                values: Arc::new(FlatColumn::empty(&self.data_type())),
                 run_ends: Vec::new(),
-            });
+            };
+            debug_assert_eq!(empty.memory_bytes(), empty_bytes);
+            return Ok(empty);
         }
         let end_row = offset + len;
         let first_run = self
@@ -3347,15 +3639,36 @@ impl RleColumn {
             .run_ends
             .partition_point(|&end| (end as usize) < end_row);
         let run_count = last_run - first_run + 1;
-        let new_values = self.values.slice(first_run, run_count)?;
+        let run_ends_bytes = match checked_mul_bytes(run_count, 4, "rle slice run_ends overflow") {
+            Ok(b) => b,
+            Err(err) => {
+                rollback_reservation(pool, before);
+                return Err(err);
+            }
+        };
+        if let Some(res) = pool.as_deref_mut()
+            && let Err(err) = res.try_grow(run_ends_bytes)
+        {
+            rollback_reservation(pool, before);
+            return Err(err);
+        }
+        let new_values = match self.values.slice(first_run, run_count, pool.as_deref_mut()) {
+            Ok(v) => v,
+            Err(err) => {
+                rollback_reservation(pool, before);
+                return Err(err);
+            }
+        };
         let new_run_ends = self.run_ends[first_run..=last_run]
             .iter()
             .map(|&re| ((re as usize).min(end_row) - offset) as u32)
             .collect();
-        Ok(Self {
-            values: Box::new(new_values),
+        let out = Self {
+            values: Arc::new(new_values),
             run_ends: new_run_ends,
-        })
+        };
+        reconcile_reservation(pool, before, out.memory_bytes())?;
+        Ok(out)
     }
 
     /// Deterministic logical heap bytes (`values.memory_bytes() + run_ends.len() * 4`).
@@ -3398,8 +3711,13 @@ impl fmt::Debug for Column {
 }
 
 impl Column {
-    /// Checked constructor for `Column::Const` (validates `value.validate(MAX_NESTING_DEPTH)`).
+    /// Checked constructor for `Column::Const` (validates `len <= u32::MAX` and `value.validate(MAX_NESTING_DEPTH)`).
     pub fn try_new_const(value: ScalarValue, len: usize) -> Result<Self, ColumnError> {
+        if len > u32::MAX as usize {
+            return Err(ColumnError::Overflow {
+                reason: "const column length exceeds u32::MAX",
+            });
+        }
         value.validate(MAX_NESTING_DEPTH)?;
         Ok(Self::Const { value, len })
     }
@@ -3744,10 +4062,16 @@ impl Column {
         }
     }
 
-    /// Slices `offset..offset + len` (`Const` is O(1)).
-    pub fn slice(&self, offset: usize, len: usize) -> Result<Self, ColumnError> {
+    /// Slices `offset..offset + len` (`Const` is O(1)), reserving the sliced column's full
+    /// `memory_bytes()` in `pool` when `Some` (rolling back on error).
+    pub fn slice(
+        &self,
+        offset: usize,
+        len: usize,
+        mut pool: Option<&mut Reservation>,
+    ) -> Result<Self, ColumnError> {
         match self {
-            Self::Flat(f) => Ok(Self::Flat(f.slice(offset, len)?)),
+            Self::Flat(f) => Ok(Self::Flat(f.slice(offset, len, pool)?)),
             Self::Const {
                 value,
                 len: cur_len,
@@ -3757,13 +4081,16 @@ impl Column {
                         reason: "const column slice out of bounds",
                     });
                 }
+                if let Some(res) = pool.as_deref_mut() {
+                    res.try_grow(value.heap_bytes())?;
+                }
                 Ok(Self::Const {
                     value: value.clone(),
                     len,
                 })
             }
-            Self::Dict(d) => Ok(Self::Dict(d.slice(offset, len)?)),
-            Self::Rle(r) => Ok(Self::Rle(r.slice(offset, len)?)),
+            Self::Dict(d) => Ok(Self::Dict(d.slice(offset, len, pool)?)),
+            Self::Rle(r) => Ok(Self::Rle(r.slice(offset, len, pool)?)),
         }
     }
 
@@ -4234,7 +4561,7 @@ mod tests {
             .unwrap();
             assert!(taken.semantic_eq(&expected_taken));
 
-            let sliced = flat_col.slice(1, 2).unwrap();
+            let sliced = flat_col.slice(1, 2, None).unwrap();
             assert!(sliced.get_scalar(0).unwrap().semantic_eq(&scalars[1]));
             assert!(sliced.get_scalar(1).unwrap().semantic_eq(&scalars[2]));
 
@@ -4247,7 +4574,7 @@ mod tests {
             let const_taken = const_col.take(&[2, 0], None).unwrap();
             assert_eq!(const_taken.len(), 2);
             assert!(const_taken.get_scalar(0).unwrap().semantic_eq(&scalars[0]));
-            let const_sliced = const_col.slice(1, 2).unwrap();
+            let const_sliced = const_col.slice(1, 2, None).unwrap();
             assert_eq!(const_sliced.len(), 2);
             assert!(const_sliced.get_scalar(1).unwrap().semantic_eq(&scalars[0]));
 
@@ -4268,11 +4595,11 @@ mod tests {
             assert!(dict_taken.get_scalar(0).unwrap().semantic_eq(&scalars[1]));
             assert!(dict_taken.get_scalar(1).unwrap().is_null());
             assert!(dict_taken.get_scalar(2).unwrap().semantic_eq(&scalars[2]));
-            let dict_sliced = dict_col.slice(2, 2).unwrap();
-            assert!(dict_sliced.semantic_eq(&Column::Flat(flat.slice(0, 2).unwrap())));
+            let dict_sliced = dict_col.slice(2, 2, None).unwrap();
+            assert!(dict_sliced.semantic_eq(&Column::Flat(flat.slice(0, 2, None).unwrap())));
             assert!(dict_sliced.get_scalar(0).unwrap().semantic_eq(&scalars[0]));
             if !matches!(dt, DataType::Null) {
-                assert!(!dict_col.slice(0, 1).unwrap().has_nulls());
+                assert!(!dict_col.slice(0, 1, None).unwrap().has_nulls());
             }
 
             // Rle
@@ -4288,7 +4615,7 @@ mod tests {
             assert!(rle_taken.get_scalar(0).unwrap().semantic_eq(&scalars[2]));
             assert!(rle_taken.get_scalar(1).unwrap().semantic_eq(&scalars[1]));
             assert!(rle_taken.get_scalar(2).unwrap().semantic_eq(&scalars[0]));
-            let rle_sliced = rle_col.slice(1, 3).unwrap();
+            let rle_sliced = rle_col.slice(1, 3, None).unwrap();
             assert_eq!(rle_sliced.len(), 3);
             assert!(rle_sliced.get_scalar(0).unwrap().semantic_eq(&scalars[0]));
             assert!(rle_sliced.get_scalar(1).unwrap().semantic_eq(&scalars[1]));
@@ -4658,5 +4985,75 @@ mod tests {
         let err_mismatch =
             FlatColumn::concat(&DataType::I64, &[&i64_flat, &f64_flat], 2).unwrap_err();
         assert!(matches!(err_mismatch, ColumnError::InvalidBatch { .. }));
+    }
+
+    #[test]
+    fn dict_slice_shares_values_arc_and_reserves_memory_bytes() {
+        let dict_vals = FlatColumn::try_new(
+            FlatData::Utf8(
+                Utf8Data::try_from_slices(["alpha_long_entry", "beta_long_entry"]).unwrap(),
+            ),
+            None,
+        )
+        .unwrap();
+        let dict = DictColumn::try_new(
+            dict_vals,
+            vec![0, 1, 0, 1],
+            Some(Bitmap::from_bools(&[true, false, true, true])),
+        )
+        .unwrap();
+
+        let scope = GlobalPool::standalone(4096);
+        let mut res = scope.register("dict_slice", true);
+        let sliced = dict.slice(1, 2, Some(&mut res)).unwrap();
+        assert!(Arc::ptr_eq(dict.values_arc(), sliced.values_arc()));
+        assert_eq!(res.size(), sliced.memory_bytes());
+        res.shrink(sliced.memory_bytes());
+        assert_eq!(res.size(), 0);
+
+        // Tight pool smaller than sliced.memory_bytes() rejects and rolls back cleanly.
+        let tight = GlobalPool::standalone(sliced.memory_bytes() - 1);
+        let mut tight_res = tight.register("tight", true);
+        let err = dict.slice(1, 2, Some(&mut tight_res)).unwrap_err();
+        assert!(matches!(err, ColumnError::MemoryLimit { .. }));
+        assert_eq!(tight_res.size(), 0);
+    }
+
+    #[test]
+    fn rle_slice_zero_len_reserves_empty_memory_bytes() {
+        let map_col = FlatColumn::try_new(
+            FlatData::MapUtf8(Box::new(
+                MapData::try_new(
+                    vec![0, 1],
+                    Utf8Data::try_from_slices(["k"]).unwrap(),
+                    Utf8Data::try_from_slices(["v"]).unwrap(),
+                    None,
+                )
+                .unwrap(),
+            )),
+            None,
+        )
+        .unwrap();
+        let rle = RleColumn::try_new(map_col, vec![3]).unwrap();
+
+        let scope = GlobalPool::standalone(4096);
+        let mut res = scope.register("rle_empty", true);
+        let empty = rle.slice(1, 0, Some(&mut res)).unwrap();
+        assert_eq!(empty.len(), 0);
+        assert!(empty.memory_bytes() > 0);
+        assert_eq!(res.size(), empty.memory_bytes());
+
+        let tight = GlobalPool::standalone(empty.memory_bytes() - 1);
+        let mut tight_res = tight.register("tight_rle_empty", true);
+        let err = rle.slice(1, 0, Some(&mut tight_res)).unwrap_err();
+        assert!(matches!(err, ColumnError::MemoryLimit { .. }));
+        assert_eq!(tight_res.size(), 0);
+    }
+
+    #[test]
+    fn const_rejects_len_exceeding_u32_max() {
+        assert!(Column::try_new_const(ScalarValue::I64(1), u32::MAX as usize).is_ok());
+        let err = Column::try_new_const(ScalarValue::I64(1), u32::MAX as usize + 1).unwrap_err();
+        assert!(matches!(err, ColumnError::Overflow { .. }));
     }
 }

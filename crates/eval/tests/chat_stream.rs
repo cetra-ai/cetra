@@ -528,6 +528,7 @@ async fn request_errors_come_before_sending() {
     media.messages[0].parts = vec![Part::Uri {
         modality: None,
         mime_type: None,
+        transcript: None,
         uri: "https://example.com/a.png".to_owned(),
         extra: Map::new(),
     }];

@@ -77,6 +77,33 @@ export function traceDetailQuery(org: string, project: string, traceId: string) 
   });
 }
 
+export function traceTotalsQuery(
+  org: string,
+  project: string,
+  query: {
+    from: string;
+    to: string;
+    filter?: string;
+    search?: string;
+    includeEval?: boolean;
+    includeExperiments?: boolean;
+  },
+) {
+  return $api.queryOptions("get", "/api/v1/projects/{project}/traces/totals", {
+    params: {
+      path: { project: projectRef(org, project) },
+      query: {
+        from: query.from,
+        to: query.to,
+        ...(query.filter ? { filter: query.filter } : {}),
+        ...(query.search ? { search: query.search } : {}),
+        ...(query.includeEval ? { include_eval: true } : {}),
+        ...(query.includeExperiments ? { include_experiments: true } : {}),
+      },
+    },
+  });
+}
+
 export function schemaQuery(org: string, project: string) {
   return {
     ...$api.queryOptions("get", "/api/v1/projects/{project}/schema", {

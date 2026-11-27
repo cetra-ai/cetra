@@ -11,10 +11,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use arrow::array::{RecordBatch, TimestampNanosecondArray};
-use arrow::compute::{concat_batches, min};
-use arrow::datatypes::SchemaRef;
 use bytes::Bytes;
+use cetra_column::{Batch, Column, DataType, FlatData, ScalarValue, Selection};
 use cetra_core::ids::ProjectId;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
@@ -22,15 +20,15 @@ use tokio::task::JoinHandle;
 use crate::anchor::{AnchorPlan, Anchors};
 use crate::catalog::{Catalog, CatalogEdit, Committer, FileId, FileMeta, FileTable};
 use crate::dedup;
-use crate::deletion::{Tombstones, applicable, covered_predicate, drop_covered};
+use crate::deletion::{Tombstones, applicable, drop_covered_batch, to_tombstone_specs};
 use crate::error::FlushError;
+use crate::file_format::{WrittenFile, write_file_batch};
 use crate::hooks::{HookPoint, Hooks};
 #[cfg(test)]
 use crate::memtable::MemBatch;
 use crate::memtable::{FrozenView, Memtable, PartitionKey};
 use crate::objects::Objects;
-use crate::parquet::{WrittenFile, write_file};
-use crate::partials::partials_from_spans;
+use crate::partials::partials_from_spans_batch;
 use crate::projects::ProjectStates;
 use crate::read_state::{Published, ReadState};
 use crate::wal::writer::{RotateError, WriterShared};
@@ -487,8 +485,7 @@ fn prepare(
                 let min_ingest = min_ingest_time(&partition.batch, table)?;
                 let batch = uncovered_rows(
                     file_table,
-                    &cetra_core::schema::spans_schema(),
-                    &partition.batch,
+                    partition.batch,
                     tombstones,
                     partition.key.project,
                     min_ingest,
@@ -496,7 +493,7 @@ fn prepare(
                 if batch.num_rows() == 0 {
                     continue;
                 }
-                let batch = dedup::latest_spans(&batch)
+                let batch = dedup::latest_spans_batch(&batch)
                     .map_err(|error| FlushError::dedup(error.reason()))?;
                 push_spans_files(&mut files, &mut sources, &partition.key, batch, known_seq)?;
             }
@@ -509,24 +506,18 @@ fn prepare(
                 if batches.is_empty() {
                     continue;
                 }
-                let refs: Vec<&RecordBatch> =
-                    batches.iter().map(|batch| batch.batch.as_ref()).collect();
-                let combined = concat_batches(&cetra_core::schema::scores_schema(), refs).map_err(
-                    |source| FlushError::prepare(crate::error::ParquetWriteError::arrow(source)),
-                )?;
+                let refs: Vec<&Batch> = batches.iter().map(|batch| batch.batch.as_ref()).collect();
+                let combined = Batch::concat(FileTable::Scores.column_schema(), &refs, None)
+                    .map_err(|source| {
+                        FlushError::prepare(crate::error::ParquetWriteError::from_column(source))
+                    })?;
                 let min_ingest = min_ingest_time(&combined, table)?;
-                let combined = uncovered_rows(
-                    file_table,
-                    &cetra_core::schema::scores_schema(),
-                    &combined,
-                    tombstones,
-                    key.project,
-                    min_ingest,
-                )?;
+                let combined =
+                    uncovered_rows(file_table, combined, tombstones, key.project, min_ingest)?;
                 if combined.num_rows() == 0 {
                     continue;
                 }
-                let written = write_file(file_table, 0, &[Arc::new(combined)])
+                let written = write_file_batch(file_table, 0, &[Arc::new(combined)])
                     .map_err(FlushError::prepare)?;
                 let (path, id) = Objects::table_file_path(file_table, key.project, key.day, 0);
                 files.push(prepared_file(id, file_table, key, path, written, known_seq));
@@ -542,40 +533,112 @@ fn prepare(
 
 /// The minimum `ingest_time` of `batch`. An empty, missing or all-null column
 /// fails the flush: the covered-row rule cannot skip the batch.
-fn min_ingest_time(batch: &RecordBatch, table: Table) -> Result<i64, FlushError> {
+fn min_ingest_time(batch: &Batch, table: Table) -> Result<i64, FlushError> {
     let column = table.ingest_column();
     let missing = || FlushError::dedup("missing ingest time");
-    let array = batch
-        .column_by_name(column)
-        .ok_or_else(missing)?
-        .as_any()
-        .downcast_ref::<TimestampNanosecondArray>()
-        .ok_or_else(missing)?;
-    min(array).ok_or_else(missing)
+    let col = batch.column_by_name(column).ok_or_else(missing)?;
+    if !matches!(col.data_type(), DataType::TimestampNs { .. }) {
+        return Err(missing());
+    }
+    let mut best: Option<i64> = None;
+    match batch.selection() {
+        Selection::All => {
+            for row in 0..batch.raw_len() {
+                if let Some(v) = read_ts(col, row) {
+                    best = Some(best.map_or(v, |cur| cur.min(v)));
+                }
+            }
+        }
+        Selection::Mask(mask) => {
+            for row in mask.iter_ones() {
+                if let Some(v) = read_ts(col, row) {
+                    best = Some(best.map_or(v, |cur| cur.min(v)));
+                }
+            }
+        }
+        Selection::Indices(indices) => {
+            for &row in indices {
+                if let Some(v) = read_ts(col, row as usize) {
+                    best = Some(best.map_or(v, |cur| cur.min(v)));
+                }
+            }
+        }
+    }
+    best.ok_or_else(missing)
+}
+
+fn read_ts(col: &Column, row: usize) -> Option<i64> {
+    match col {
+        Column::Flat(flat) => {
+            if flat.is_null(row) {
+                return None;
+            }
+            match flat.data() {
+                FlatData::TimestampNs { values, .. } => values.get(row).copied(),
+                _ => None,
+            }
+        }
+        Column::Const { value, len } => (row < *len).then_some(value).and_then(|val| match val {
+            ScalarValue::TimestampNs { value, .. } => Some(*value),
+            _ => None,
+        }),
+        Column::Dict(dict) => {
+            if dict.is_null(row) {
+                return None;
+            }
+            let code = *dict.codes().get(row)? as usize;
+            if dict.values().is_null(code) {
+                return None;
+            }
+            match dict.values().data() {
+                FlatData::TimestampNs { values, .. } => values.get(code).copied(),
+                _ => None,
+            }
+        }
+        Column::Rle(rle) => {
+            if row >= rle.len() {
+                return None;
+            }
+            let run = rle.run_ends().partition_point(|&end| (end as usize) <= row);
+            if rle.values().is_null(run) {
+                return None;
+            }
+            match rle.values().data() {
+                FlatData::TimestampNs { values, .. } => values.get(run).copied(),
+                _ => None,
+            }
+        }
+    }
 }
 
 /// The rows of `batch` no pending deletion of `project` covers. Batches no
 /// deletion can cover are returned as they are.
 fn uncovered_rows(
     table: FileTable,
-    schema: &SchemaRef,
-    batch: &RecordBatch,
+    batch: Batch,
     tombstones: &Tombstones,
     project: ProjectId,
     min_ingest: i64,
-) -> Result<RecordBatch, FlushError> {
+) -> Result<Batch, FlushError> {
     let deletions = applicable(&tombstones.for_project(project), None, min_ingest);
     if deletions.is_empty() {
-        return Ok(batch.clone());
+        return Ok(batch);
     }
-    let Some(predicate) =
-        covered_predicate(table, schema, &deletions).map_err(|_| FlushError::Deletion {
-            reason: "building the deletion filter",
-        })?
-    else {
-        return Ok(batch.clone());
+    let tombstone_table = match table {
+        FileTable::Spans => cetra_query::TombstoneTable::Spans,
+        FileTable::Scores => cetra_query::TombstoneTable::Scores,
+        FileTable::Traces => cetra_query::TombstoneTable::Traces,
     };
-    drop_covered(batch, &predicate).map_err(|_| FlushError::Deletion {
+    let specs = to_tombstone_specs(&deletions);
+    let Some(predicate) =
+        cetra_query::tombstone::covered_predicate(tombstone_table, batch.schema(), &specs)
+            .map_err(|_| FlushError::Deletion {
+                reason: "building the deletion filter",
+            })?
+    else {
+        return Ok(batch);
+    };
+    drop_covered_batch(&batch, &predicate).map_err(|_| FlushError::Deletion {
         reason: "applying the deletion filter",
     })
 }
@@ -585,15 +648,15 @@ fn push_spans_files(
     files: &mut Vec<PreparedFile>,
     sources: &mut Vec<(FileId, FileId)>,
     key: &PartitionKey,
-    batch: RecordBatch,
+    batch: Batch,
     known_seq: u64,
 ) -> Result<(), FlushError> {
     let batch = Arc::new(batch);
-    let spans_written =
-        write_file(FileTable::Spans, 0, &[Arc::clone(&batch)]).map_err(FlushError::prepare)?;
-    let partials = partials_from_spans(&batch).map_err(FlushError::partials)?;
-    let traces_written =
-        write_file(FileTable::Traces, 0, &[Arc::new(partials)]).map_err(FlushError::prepare)?;
+    let spans_written = write_file_batch(FileTable::Spans, 0, &[Arc::clone(&batch)])
+        .map_err(FlushError::prepare)?;
+    let partials = partials_from_spans_batch(&batch).map_err(FlushError::partials)?;
+    let traces_written = write_file_batch(FileTable::Traces, 0, &[Arc::new(partials)])
+        .map_err(FlushError::prepare)?;
     let (spans_path, spans_id) =
         Objects::table_file_path(FileTable::Spans, key.project, key.day, 0);
     let (traces_path, traces_id) =
@@ -653,12 +716,13 @@ fn prepared_file(
 ///
 /// Batches are in WAL order. An equal `ingest_time` keeps the later row.
 #[cfg(test)]
-fn dedup_spans(batches: &[MemBatch]) -> Result<RecordBatch, FlushError> {
-    let schema = batches[0].batch.schema();
-    let refs: Vec<&RecordBatch> = batches.iter().map(|batch| batch.batch.as_ref()).collect();
-    let combined = concat_batches(&schema, refs)
-        .map_err(|source| FlushError::prepare(crate::error::ParquetWriteError::arrow(source)))?;
-    dedup::latest_spans(&combined).map_err(|error| FlushError::dedup(error.reason()))
+fn dedup_spans(batches: &[MemBatch]) -> Result<Batch, FlushError> {
+    let schema = Arc::clone(batches[0].batch.schema());
+    let refs: Vec<&Batch> = batches.iter().map(|batch| batch.batch.as_ref()).collect();
+    let combined = Batch::concat(schema, &refs, None).map_err(|source| {
+        FlushError::prepare(crate::error::ParquetWriteError::from_column(source))
+    })?;
+    dedup::latest_spans_batch(&combined).map_err(|error| FlushError::dedup(error.reason()))
 }
 
 async fn put_all(
@@ -752,10 +816,9 @@ mod tests {
     use crate::QueryOptions;
     use bytesize::ByteSize;
     use std::path::Path;
-    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use arrow::array::Array;
+    use cetra_column::{Batch, ScalarValue};
     use cetra_core::ids::ProjectId;
     use chrono::{Datelike, NaiveDate};
 
@@ -768,22 +831,24 @@ mod tests {
     };
     use crate::hooks::HookPoint;
     use crate::memtable::MemBatch;
-    use crate::test_support::{object_rows, trace_ids_of};
+    use crate::reads::columns::{require_col, string_at};
+    use crate::test_support::{object_rows, rows, trace_ids_of};
+    use crate::views::QueryContext;
     use crate::wal::{Table, spans_named};
 
     fn batch(starts: &[i64], name: &str) -> MemBatch {
         MemBatch::from_batch(Table::Spans, spans_named(starts, name)).unwrap()
     }
 
-    fn names(batch: &arrow::array::RecordBatch) -> Vec<String> {
+    fn names(batch: &Batch) -> Vec<String> {
         let column = batch
             .column_by_name(cetra_core::schema::spans::NAME)
-            .unwrap()
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
             .unwrap();
-        (0..column.len())
-            .map(|index| column.value(index).to_owned())
+        (0..batch.num_rows())
+            .map(|row| match column.get_scalar(row).unwrap() {
+                ScalarValue::Utf8(s) => s,
+                other => panic!("expected utf8 name, got {other:?}"),
+            })
             .collect()
     }
 
@@ -873,16 +938,10 @@ mod tests {
         }
     }
 
-    fn values_of(rows: &arrow::array::RecordBatch, column: &str) -> Vec<String> {
-        use arrow::array::Array;
-
-        let column = rows.column_by_name(column).unwrap();
-        let array = column
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
-        (0..array.len())
-            .map(|row| array.value(row).to_owned())
+    fn values_of(batch: &Batch, column: &str) -> Vec<String> {
+        let col = require_col(batch, column).unwrap();
+        (0..batch.num_rows())
+            .map(|row| string_at(batch, col, row).unwrap().unwrap())
             .collect()
     }
 
@@ -1175,25 +1234,9 @@ mod tests {
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
-        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
-            datafusion::execution::context::SessionConfig::new(),
-            Arc::clone(&query.runtime),
-        );
-        ctx.register_table("spans_t", query.spans).unwrap();
-        let counted = ctx
-            .sql("SELECT count(*) FROM spans_t")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-        let total = counted[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap()
-            .value(0);
-        assert_eq!(total, 0);
+        let ctx = QueryContext::new(query, None).unwrap();
+        let counted = rows(&ctx, "SELECT count(*) AS n FROM spans").await;
+        assert_eq!(counted[0]["n"].as_i64().unwrap(), 0);
         storage.shutdown().await.unwrap();
     }
 

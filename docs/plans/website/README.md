@@ -1,6 +1,6 @@
 # Marketing site (cetra.sh)
 
-The design is `docs/website/00-design.md`. It has nine milestones, M1–M9, each with its own plan written just before it starts. M6 (benchmarks) waits for the benchmark and is not planned yet.
+The design is `docs/website/00-design.md`. It has twenty milestones, M1–M20, each with its own plan written just before it starts. M6 (benchmarks) waits for the benchmark and is not planned yet.
 
 | Milestone | Plan | Status |
 |---|---|---|
@@ -13,6 +13,17 @@ The design is `docs/website/00-design.md`. It has nine milestones, M1–M9, each
 | M7 Launch | [`07-m7-launch.md`](07-m7-launch.md) | done (L1–L2) |
 | M8 Main sync | [`08-m8-main-sync.md`](08-m8-main-sync.md) | done (S1–S7) |
 | M9 Pricing feature table | [`09-m9-pricing-matrix.md`](09-m9-pricing-matrix.md) | done (X1–X2) |
+| M10 Focused screenshots | [`10-m10-focused-shots.md`](10-m10-focused-shots.md) | done (Z1–Z2) |
+| M11 Showcase trace | [`11-m11-showcase-trace.md`](11-m11-showcase-trace.md) | done (T1–T2) |
+| M12 Hero scenarios | [`12-m12-hero-scenarios.md`](12-m12-hero-scenarios.md) | done (E1–E3) |
+| M13 Voice story, trace list, issues, alerts | [`13-m13-voice-issues-alerts.md`](13-m13-voice-issues-alerts.md) | done (V1, L1, S1, V2) |
+| M14 Prompts, dashboards, queues, assistant | [`14-m14-prompts-dashboards-queues-assistant.md`](14-m14-prompts-dashboards-queues-assistant.md) | done (P0–P5) |
+| M15 Story screenshots and switcher | [`15-m15-story-shots-and-switcher.md`](15-m15-story-shots-and-switcher.md) | done (Q0–Q2) |
+| M16 A mock project per story | done (P1–P6) | [16-m16-story-projects.md](16-m16-story-projects.md) |
+| M17 Story data | planned | [17-m17-story-data.md](17-m17-story-data.md) |
+| M18 Pictures that need no UI change | done | [18-m18-story-pictures.md](18-m18-story-pictures.md) |
+| M19 Pictures that wait for the UI | done | [19-m19-ui-pictures.md](19-m19-ui-pictures.md) |
+| M20 Integrations directory | [`20-m20-integrations-directory.md`](20-m20-integrations-directory.md) | done (D1–D3) |
 
 ## Branches
 

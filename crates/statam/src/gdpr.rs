@@ -702,7 +702,7 @@ fn gather_surviving_non_payload_batch(
     let new_len = surviving_indices.len();
     let mut new_cols = Vec::with_capacity(schema.len());
     for col in batch.columns() {
-        if let Column::Const { value, .. } = col {
+        if let Column::Const { value, .. } = col.as_ref() {
             new_cols.push(Column::try_new_const(value.clone(), new_len)?);
         } else {
             let flat = col.take(surviving_indices, None)?;

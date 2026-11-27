@@ -13,11 +13,10 @@ ignore = [
     # openidconnect 4.1.0 requires rsa ^0.9. The Marvin fix is rsa 0.10, which that crate does not accept.
     # The mock IdP signs with rsa 0.10. openidconnect uses the 0.9 copy to verify signatures.
     { id = "RUSTSEC-2023-0071", reason = "openidconnect 4.1.0 requires rsa ^0.9; the Marvin fix is rsa 0.10, which that crate does not accept" },
-    # Marked unmaintained on 2026-11-17 (chronotope/chrono#1768); no vulnerability. arrow requires
-    # chrono and chrono-tz, and object_store requires humantime, so we can't drop them on our own.
+    # Marked unmaintained on 2026-11-17 (chronotope/chrono#1768); no vulnerability. `object_store`
+    # requires `humantime`, and `chrono` is a direct workspace dependency, so we keep these ignores.
     { id = "RUSTSEC-2026-0542", reason = "humantime is unmaintained; object_store 0.13 and humantime-serde require it" },
-    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; arrow 59 requires it" },
-    { id = "RUSTSEC-2026-0555", reason = "chrono-tz is unmaintained; arrow 59 requires it" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; direct workspace dependency" },
 ]
 
 [licenses]
@@ -60,21 +59,17 @@ multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true # path deps between workspace crates
 highlight = "all"
-# The DataFusion family is pinned together (AGENTS.md § Dependencies): two versions of any
-# of these crates in the graph means the family is split. cargo-deny has no wildcard for
-# crate names, so every arrow sub-crate is listed.
+# The arrow/parquet/object_store family is pinned together (AGENTS.md § Dependencies): two
+# versions of any of these crates in the graph means the family is split. cargo-deny has no
+# wildcard for crate names, so every active arrow sub-crate is listed.
 deny = [
-    { crate = "datafusion", deny-multiple-versions = true },
-    { crate = "datafusion-datasource", deny-multiple-versions = true },
     { crate = "arrow", deny-multiple-versions = true },
     { crate = "arrow-arith", deny-multiple-versions = true },
     { crate = "arrow-array", deny-multiple-versions = true },
     { crate = "arrow-buffer", deny-multiple-versions = true },
     { crate = "arrow-cast", deny-multiple-versions = true },
-    { crate = "arrow-csv", deny-multiple-versions = true },
     { crate = "arrow-data", deny-multiple-versions = true },
     { crate = "arrow-ipc", deny-multiple-versions = true },
-    { crate = "arrow-json", deny-multiple-versions = true },
     { crate = "arrow-ord", deny-multiple-versions = true },
     { crate = "arrow-row", deny-multiple-versions = true },
     { crate = "arrow-schema", deny-multiple-versions = true },

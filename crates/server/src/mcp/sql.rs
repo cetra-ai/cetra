@@ -588,7 +588,7 @@ mod tests {
         assert_eq!(
             body,
             json!({
-                "columns": [{"name": "trace_id", "type": "Utf8"}, {"name": "name", "type": "Utf8"}],
+                "columns": [{"name": "trace_id", "type": "string"}, {"name": "name", "type": "string"}],
                 "rows": [
                     {"trace_id": T1, "name": "support-agent"},
                     {"trace_id": T5, "name": "judge helpfulness"},
@@ -712,7 +712,7 @@ mod tests {
         assert_eq!(
             body,
             json!({
-                "columns": [{"name": "n", "type": "Int64"}],
+                "columns": [{"name": "n", "type": "integer"}],
                 "rows": [{"n": 7}],
                 "row_count": 1,
                 "truncated": false,

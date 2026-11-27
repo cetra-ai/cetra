@@ -1,0 +1,116 @@
+---
+title: LangGraph
+description: "Trace LangGraph graphs with cetra from Python and TypeScript, through the OpenInference LangChain instrumentation."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace LangGraph graphs with cetra from Python and TypeScript, through the OpenInference LangChain instrumentation. The one `langchain` instrumentor covers LangChain, LangGraph and Deep Agents; see [LangChain](/docs/integrations/langchain/) and [Deep Agents](/docs/integrations/deepagents/).
+
+<Backing fixtures={["openinference/langgraph-agent", "openllmetry/langgraph-agent"]} tests={["sdks/typescript/src/instrument.test.ts::langchain helper"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[langchain]" langchain langchain-openai
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```bash
+npm install @cetra-ai/sdk @arizeai/openinference-instrumentation-langchain @langchain/core @langchain/openai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenAI through LangGraph and needs OPENAI_API_KEY */}
+```python
+import json
+import os
+
+import cetra
+from langchain.agents import create_agent
+from langchain.tools import tool
+from langchain_core.messages import HumanMessage
+from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
+
+cetra.init(instrument=["langchain"])
+
+
+@tool
+def get_weather(city: str) -> str:
+    """Look up the weather for a city."""
+    return json.dumps({"temperature_c": 18, "conditions": "sunny", "city": city})
+
+
+model = ChatOpenAI(model="gpt-4o-mini", api_key=SecretStr(os.environ["OPENAI_API_KEY"]))
+agent = create_agent(
+    model,
+    tools=[get_weather],
+    system_prompt="You are a weather assistant.",
+)
+agent.invoke({"messages": [HumanMessage("What's the weather in Paris?")]})
+
+cetra.flush()
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+{/* untested: the imports of the example below */}
+```ts
+import { init } from "@cetra-ai/sdk";
+import { langchain } from "@cetra-ai/sdk/langchain";
+import * as callbacksManager from "@langchain/core/callbacks/manager";
+```
+
+{/* example:integration-langchain */}
+```ts
+init({ apiKey: process.env.CETRA_API_KEY, instrument: [langchain(callbacksManager)] });
+```
+
+{/* untested: calls OpenAI */}
+```ts
+import { ChatOpenAI } from "@langchain/openai";
+
+const model = new ChatOpenAI({ model: "gpt-4o-mini" });
+await model.invoke("What is the weather in Paris?");
+```
+
+  </TabItem>
+</Tabs>
+
+`langchain.agents.create_agent` (LangChain 1.x) and `langgraph.prebuilt.create_react_agent` produce the same graph spans.
+
+## What you get
+
+- A graph run is a `LangGraph` `chain` span as the trace root.
+- Each node is a `chain` span named after the node (`model`, `tools`), with the model calls and the tool calls under their nodes.
+- Each model call is an `llm` span with the messages, the tool definitions, the token counts and the cost, computed from the built-in prices.
+- Each tool call is a `tool` span with the tool's input and output.
+
+## Limits
+
+- LangGraph's own keys, such as `langgraph_node` and `langgraph_step`, stay in the span's metadata.
+- With OpenLLMetry, the graph and its nodes come out as `agent` and `chain` spans with the provider `langgraph`.
+- The TypeScript helper is covered by an SDK test that builds the instrumentation from LangChain's callback module. No spans of a LangGraph.js run are captured.
+- The fixtures were captured in Python with `langchain` 1.4.8, `langchain-openai` 1.7.3 and `langgraph` 1.2.19, with OpenInference 0.1.81 and OpenLLMetry 0.62.4.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

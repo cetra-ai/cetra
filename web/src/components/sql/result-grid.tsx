@@ -48,7 +48,7 @@ function sqlCellValue(values: Record<string, unknown>, name: string): unknown {
   return Object.hasOwn(values, name) ? values[name] : undefined;
 }
 
-/** The icon that stands for an Arrow type in the column header. */
+/** The icon that stands for a column type in the column header. */
 function sqlTypeIcon(type: string): LucideIcon | undefined {
   if (isNumericType(type)) {
     return Hash;
@@ -89,7 +89,7 @@ export function sqlColumns(result: SqlResult): DataTableColumn<SqlRow>[] {
       column.name,
       rows.slice(0, FIT_ROWS).map((row) => sqlCellValue(row.values, column.name)),
     ),
-    // A render function, so the Arrow type shows as a tooltip; its accessible name is `label`.
+    // A render function, so the column type shows as a tooltip; its accessible name is `label`.
     header: () => <span title={column.type}>{column.name}</span>,
     enableSorting: true,
     meta: {

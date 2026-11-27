@@ -1,0 +1,27 @@
+{
+  "description": "Temporal workflow running an OpenAI Agents agent with one activity tool, on the dev server.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "openinference-instrumentation-openai-agents",
+    "instrumentation_version": "2.7.0",
+    "language": "python",
+    "libraries": {
+      "openai": "3.45.0",
+      "openai-agents": "0.24.0",
+      "openinference-instrumentation-openai-agents": "2.7.0",
+      "opentelemetry-sdk": "1.45.2",
+      "temporal-cli": "1.10.1",
+      "temporalio": "1.36.1",
+      "temporalio-openai-agents": "2.0.0"
+    },
+    "captured_at": "2026-11-24T00:39:09Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Normalization rules"
+  ],
+  "notes": "The pinned Temporal CLI runs the dev server headless (dev_server_existing_path avoids the SDK's runtime download). The tracer provider is temporalio's replay-safe one with a batch OTLP exporter reading the runner's OTEL_EXPORTER_OTLP_* environment, set globally before the plugin instruments. OpenAIAgentsPlugin(use_otel_instrumentation=True) instruments OpenAI Agents itself, so no OpenAIAgentsInstrumentor runs (a second one would double the spans), and OpenTelemetryPlugin(add_temporal_spans=True) adds Temporal's own spans. The model calls go through the Responses API to the mock. All 22 spans are kept: 14 from the plugin (the OpenAI Agents agent, chain, turn, LLM and tool spans plus temporal:startActivity/executeActivity chains) and 8 from Temporal itself (StartWorkflow, RunWorkflow, StartActivity and RunActivity, which stay untyped spans). temporalRunID is a UUID per run."
+}

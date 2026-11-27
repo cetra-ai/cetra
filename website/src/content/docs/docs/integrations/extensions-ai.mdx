@@ -1,0 +1,88 @@
+---
+title: Microsoft.Extensions.AI
+description: "Trace Microsoft.Extensions.AI chat calls with cetra from .NET: model calls with their messages and tokens, and tool calls."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces Microsoft.Extensions.AI `IChatClient` calls as model call and tool spans, from the OpenTelemetry instrumentation that `UseOpenTelemetry` adds to the client.
+
+<Backing fixtures={["genai/extensions-ai-dotnet-tool"]} />
+
+## Install
+
+```bash
+dotnet add package Microsoft.Extensions.AI --version 11.0.0
+dotnet add package Microsoft.Extensions.AI.OpenAI --version 11.0.0
+dotnet add package OpenAI --version 2.15.0
+dotnet add package OpenTelemetry --version 1.21.0
+dotnet add package OpenTelemetry.Exporter.OpenTelemetryProtocol --version 1.21.0
+```
+
+## Set up
+
+The application owns the OpenTelemetry SDK. Export over OTLP/HTTP with the standard variables, and set a service name so your traces are named:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-cetra-…"
+export OTEL_SERVICE_NAME=my-app
+```
+
+Add `UseOpenTelemetry` to the client builder, and listen on the source name you pass it. Set `OPENAI_API_KEY` to your OpenAI key:
+
+```csharp
+using System.ClientModel;
+using System.ComponentModel;
+using Microsoft.Extensions.AI;
+using OpenAI;
+using OpenTelemetry;
+using OpenTelemetry.Trace;
+
+using var tracerProvider = Sdk.CreateTracerProviderBuilder()
+    .AddSource("Experimental.Microsoft.Extensions.AI")
+    .AddOtlpExporter()
+    .Build();
+
+var openAi = new OpenAIClient(
+    new ApiKeyCredential(Environment.GetEnvironmentVariable("OPENAI_API_KEY")!));
+IChatClient inner = openAi.GetChatClient("gpt-4o-mini").AsIChatClient();
+IChatClient client = new ChatClientBuilder(inner)
+    .UseFunctionInvocation()
+    .UseOpenTelemetry(sourceName: "Experimental.Microsoft.Extensions.AI",
+        configure: c => c.EnableSensitiveData = true)
+    .Build();
+
+[Description("Get the current weather for a city")]
+static string GetWeather([Description("City name")] string city) => $"Sunny in {city}, 21 C";
+
+var tool = AIFunctionFactory.Create(GetWeather, "get_weather");
+var answer = await client.GetResponseAsync("What is the weather in Lyon? Use the tool.",
+    new ChatOptions { Tools = [tool] });
+Console.WriteLine("answer: " + answer.Text);
+```
+
+`EnableSensitiveData = true` records the messages and the tool arguments and results; it is off by default. `UseFunctionInvocation` runs the called tools and sends their results back to the model.
+
+## What you get
+
+With one tool round, a call produces:
+
+- an `llm` span named `chat gpt-4o-mini` for each model call, with the provider `openai`, the request and response models, the input and output messages, the tool definitions, the token counts and the cost computed from the built-in prices;
+- a `tool` span named `execute_tool get_weather`, with the arguments as its input and the result as its output;
+- a plain `orchestrate_tools` span around the call. It carries the summed token usage of the model calls below it; cetra counts the tokens on the `llm` spans, so nothing is counted twice.
+
+## Limits
+
+- Content is off by default: without `EnableSensitiveData = true`, the spans carry no messages, tool arguments or results.
+- OpenTelemetry .NET 1.21.0 ignores `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. Set `OTEL_EXPORTER_OTLP_ENDPOINT`, the base URL without the `/v1/traces` path; the exporter appends the path itself.
+- The capture sent no Authorization header; the header setting above is the library's documented option, not part of the captured run.
+- The fixture was captured with `Microsoft.Extensions.AI` 11.0.0, `OpenAI` 2.15.0 and OpenTelemetry .NET 1.21.0.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

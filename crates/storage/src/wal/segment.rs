@@ -3,9 +3,6 @@
 //! The writer task rotates between groups. [`SegmentWriter::needs_rotation`]
 //! is therefore checked after a group is durable, never in the middle of one,
 //! and a single group may leave the file larger than `segment_bytes`.
-//!
-//! Called from tests until the writer task lands.
-#![allow(dead_code)]
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};

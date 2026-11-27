@@ -8,7 +8,7 @@ Instructions for any agent (Claude, Cursor, Codex, …) working in this reposito
 
 What sets it apart is that it runs as **one binary on one machine**, while staying fast at volume:
 - OTLP ingestion;
-- a custom storage engine (WAL → memtable → Parquet files, queried with Apache DataFusion);
+- a custom columnar format (`cetra-column`), storage engine (WAL → memtable → Parquet files), and pure-Rust analytical query engine (`cetra-query`);
 - a SQLite metadata DB;
 - a React UI embedded in the binary;
 - Python and TypeScript SDKs built on OpenTelemetry.
@@ -44,7 +44,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 
 **Dependencies.**
 - Every version is declared once in the root `Cargo.toml` `[workspace.dependencies]`; crates use `dep = { workspace = true }`.
-- `datafusion`, `arrow`, `parquet` and `object_store` are a pinned family: never bump one without the others. DataFusion picks the majors. Dependabot ignores arrow-side majors; a DataFusion major PR is completed by hand with the arrow, parquet and object_store versions that release requires. `cargo deny` fails on two versions of a family crate.
+- `arrow`, `parquet` and `object_store` are a pinned family (used inside `cetra-storage`; `sqlparser` is pinned independently for `cetra-query`): never bump one family crate without the others. Dependabot moves the `arrow-parquet-family` group together. `cargo deny` fails on two versions of a family crate.
 - Look up real versions (`cargo search`, `cargo info`); never guess one.
 - JS packages use exact versions and respect `minimumReleaseAge`; Python dev tools are pinned by `uv.lock`.
 - `typescript` stays on 5.x while `openapi-typescript` requires it (`.github/dependabot.yml` ignores TypeScript majors).
@@ -94,7 +94,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - Python samples of the site run in `sdks/python/tests/test_examples.py` and TypeScript samples in `sdks/typescript/src/examples.test.ts`; the SDK reference pages are checked against the exports by `just check-py` and `just check-ts`.
 - Tests cover the current behaviour only.
 - UI tests use the MSW mocks from `fixtures/api/`; a page test overrides an endpoint with `server.use` instead of mocking modules.
-- Captured OTLP fixtures are recorded with `just capture` (tools/capture) and never edited by hand; `just check-capture` before committing one.
+- Captured OTLP fixtures are recorded with `just capture` (tools/capture) and never edited by hand; `just check-capture` before committing one. Every capture runs in a network namespace with only loopback (`unshare --user --net`, D-IN-26 item 11), so no scenario reaches the internet; the capture needs unprivileged user namespaces, `ip` (iproute2) and a tmpfs mount on `/root`, and captures are not run in CI. A capture scenario whose packages cannot share `tools/capture/py`'s lock lives under `tools/capture/envs/<env>/scenarios/` (D-IN-26). A scenario that tolerates a provider probe (`GET /responses`, `POST /api/show`, `GET /models/<id>`) lists it in `tolerated_probes`; otherwise the mock counts the probe as an error.
 - A fuzz crash is fixed with its input in `fuzz/regressions/<target>/` and a named unit test. `just test` replays every corpus and regression on stable. Regressions are never passed to libFuzzer, and a crashing input never goes into `fuzz/corpus/`.
 
 **Reference implementations.** The competitors' source code is checked out in `/home/sebastien/github/{lmnr,phoenix,langfuse,langwatch,helicone,opik,mlflow}`. Read it to compare designs and learn from their mistakes. Never copy code from it.
@@ -103,17 +103,18 @@ If the code has to deviate from the spec, update the spec **in the same change**
 
 ```
 crates/
-  column/    cetra-column   pure-Rust columnar in-memory batches, encodings, memory pool, and binary framing (track QE)
+  column/    cetra-column   pure-Rust columnar in-memory batches, encodings, memory pool,
+                             and binary framing                                       (track QE)
   core/      cetra-core     shared contracts: IDs, enums, names, messages, Span/Score,
-                             Arrow schemas + batch conversion, OpenAPI schemas,
+                             cetra-column schemas + batch conversion, OpenAPI schemas,
                              no config (D59)                                          (spec 01)
   otel/      cetra-otel     OTLP decode, normalization, media, truncation, cost      (spec 02)
   eval/      cetra-eval     evaluator execution: checks, mapping, templates, judges,
                              webhooks, judge traces                                   (spec 06)
   query/     cetra-query    pure-Rust vectorized expressions, Filter DSL, Shape B SQL
-                             planner, and push-pipeline executor                      (track QE)
+                             planner, and push-pipeline executor                      (specs 03, 05)
   storage/   cetra-storage  WAL, memtable, Parquet, catalog (catalog.db), compaction,
-                             deletion, DataFusion providers, filter DSL, SQL sandbox  (specs 03, 05)
+                             deletion, ScanSource adapters, product reads, SQL execution (specs 03, 05)
   token/     cetra-token    signed licence, org and control-plane tokens (Elastic-2.0, D-P-26)
   saml/      cetra-saml     SAML 2.0 SP: IdP metadata, AuthnRequest, response validation (Elastic-2.0, D-SA-14)
   server/    cetra-server   API, auth, metadata DB, evaluation, alerts, email, MCP   (specs 04, 06–09)
@@ -134,7 +135,7 @@ fixtures/saml/               test IdP keys and certificates for cetra-saml (trac
 fixtures/scim/               SCIM requests in the shape Okta and Entra ID send, replayed in tests (track EA M6; written from the vendors' documentation, not validator runs)
 tools/                       dev tools (fixture capture, benchmarks); not shipped
 tools/soak/                  soak plots (uv)
-tools/capture/               fixture capture: mock provider, OTLP receiver, scenarios (B2)
+tools/capture/               fixture capture: mock provider, OTLP receiver, scenarios (B2); `harness/` (the Python harness package), `envs/<env>/` (scenario environments), the Java scenario reactor `java/` and .NET projects `dotnet/` (M8), and the tool projects `litellm-proxy/`, `langflow/`, `n8n/`, `promptfoo/` (D-IN-26)
 tools/e2e/                   run.sh for just e2e: a real cetra serve and both SDK suites (D-G-20)
 fuzz/                        cargo-fuzz targets (nightly only), committed corpus and regressions (track R M3)
 docs/                        decisions, specs, plans, research
@@ -142,13 +143,13 @@ docs/                        decisions, specs, plans, research
 
 **Crate dependency graph (enforced):**
 - `column` depends on no workspace crate.
-- `core` depends on no workspace crate.
+- `core` depends only on `column`.
 - `query` depends only on `column`.
-- `otel` depends only on `core`; `storage` depends on `core` and `column`. **They never depend on each other**, so they can be built in parallel; `server` connects them.
+- `otel` depends only on `core`; `storage` depends on `core`, `column` and `query`. **They never depend on each other**, so they can be built in parallel; `server` connects them.
 - `eval` depends on `core` and `otel`.
 - `token` depends on no workspace crate. `server` and `tools/license` use it, and so does the control plane (by git commit).
 - `saml` depends on no workspace crate. `server` uses it from track SA's M2, and so does the control plane (by git commit).
-- `server` depends on `core`, `otel`, `storage`, `eval` and `token`; `cli` depends on `server`, `core` and `ui`.
+- `server` depends on `core`, `column`, `otel`, `storage`, `eval`, `token` and `saml`; `cli` depends on `server`, `core` and `ui`.
 - `ui` depends on no workspace crate.
 - A `tools/` crate is never a dependency of a shipped crate. It may be a dev-dependency, for tests only: `cetra-cli`'s end-to-end test uses `cetra-capture`'s mock provider (D-I-43).
 
@@ -211,9 +212,10 @@ Run everything through `just`:
 | `just fuzz-seed` | write the fuzz seed files from the test fixtures (track R M3) |
 | `just fuzz-cmin` | minimize every corpus, then fit the size and file-count budgets |
 | `just fuzz-lock` · `just fuzz-tools` | write `fuzz/Cargo.lock` from the root lock · install the fuzz toolchain and cargo-fuzz |
-| `just capture <group>/<case>` | record an OTLP fixture from a scenario, e.g. `just capture openinference/openai-chat-tool` |
-| `just capture-all` | recapture every scenario |
-| `just check-capture` | lint and type-check the capture scenarios, then recapture every scenario and compare (timing excluded) |
+| `just capture <group>/<case>` | record an OTLP fixture from a scenario, in a loopback-only network namespace (D-IN-26 item 11), e.g. `just capture openinference/openai-chat-tool` |
+| `just capture-all` | recapture every scenario, in the loopback-only namespace |
+| `just check-capture` | lint and type-check the capture scenarios, then recapture every scenario in the loopback-only namespace and compare (timing excluded) |
+| `just capture-tools` | download the pinned gateway binaries and install the LiteLLM Proxy, Langflow, n8n and Promptfoo tools and the scenario environments into `target/capture-tools` (checksummed; Linux x86_64) |
 | `just fetch-corpus` | download the pinned benchmark corpus (OpenAssistant oasst2, Apache-2.0) into `target/bench-corpus` |
 | `just soak` | the storage soak (D-R-11), configured by `CETRA_SOAK_*` |
 | `just soak-plot <out>` | plots and a summary table of a soak run |
@@ -237,6 +239,7 @@ Required tools:
 - `uv`
 - `actionlint` and `zizmor` (only when editing `.github/`)
 - for fuzzing: the nightly toolchain and cargo-fuzz 0.13.2 (`just fuzz-tools`)
+- for captures, `just capture-tools` downloads Temporal CLI, Bifrost, aigw and Envoy into `target/capture-tools` (pinned, checksummed), installs the LiteLLM Proxy environment (`tools/capture/litellm-proxy`, locked), Langflow (`tools/capture/langflow`), the n8n and Promptfoo tools (`tools/capture/{n8n,promptfoo}`, pnpm-locked) and the Python environments under `tools/capture/envs/` (uv-locked); it also fetches the pinned JDK, Maven and .NET SDK and builds the Java and .NET capture scenarios with them (`build-jvm-dotnet.sh`)
 - for packaging (`just dist`, `just check-packaging`): `musl-tools` (Linux), `cargo-auditable` 0.7.7, `cargo-about` 0.9.3 (`--features cli`), Docker Engine 25+ with Compose 2.24+, helm 4.3.1, kubeconform 0.8.0; kind 0.33.0 and kubectl for `just helm-smoke`
 
 ## CI

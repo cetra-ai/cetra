@@ -2,9 +2,10 @@
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use cetra_column::{
-    Bitmap, Column, ColumnError, DataType, FlatColumn, FlatData, Interval, Reservation,
+    Bitmap, Column, ColumnError, DataType, FlatColumn, FlatData, MAX_NESTING_DEPTH, Reservation,
     ScalarValue, Utf8Data,
 };
 use serde_json::Value as JsonValue;
@@ -15,13 +16,15 @@ use crate::eval::{
     ElemRef, ListRef, MapRef, bitmap_mem_bytes, build_flat_from_elem_refs, build_flat_from_sources,
     check_cancel, checked_fixed_bytes, checked_varlen_bytes, compare_decimals, f64_canonical_bits,
     f64_cmp, format_decimal, is_active, list_ref_at, list_ref_elem, list_ref_len, map_ref_at,
-    pool_size, read_bool, read_date, read_decimal, read_f64, read_i64, read_interval, read_scalar,
-    read_str, read_timestamp, reconcile_output, rollback_to, try_reserve,
+    pool_size, read_bool, read_date, read_decimal, read_f64, read_i64, read_interval, read_str,
+    read_timestamp, reconcile_output, rollback_to, try_reserve,
 };
 use crate::fn_time::{format_date_days, format_timestamp_ns};
 use crate::ir::{EvalContext, ScalarFn};
 
 const CANCEL_CHECK_MASK: usize = 1023;
+const JSON_DOM_MULTIPLIER: usize = 6;
+const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
 
 /// Concatenates two list columns element-wise (`||` on `List(T)`).
 ///
@@ -60,9 +63,21 @@ pub fn eval_misc_fn(
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
+    pool: Option<&mut Reservation>,
+) -> Result<Column, QueryError> {
+    let refs: Vec<&Column> = args.iter().collect();
+    eval_misc_fn_refs(func, &refs, len, active, ctx, pool)
+}
+
+pub(crate) fn eval_misc_fn_refs(
+    func: ScalarFn,
+    args: &[&Column],
+    len: usize,
+    active: Option<&Bitmap>,
+    ctx: &EvalContext,
     mut pool: Option<&mut Reservation>,
 ) -> Result<Column, QueryError> {
-    for arg in args {
+    for &arg in args {
         if arg.len() != len {
             return Err(ColumnError::InvalidBatch {
                 reason: "column length mismatch",
@@ -125,7 +140,7 @@ fn all_inactive(active: Option<&Bitmap>) -> bool {
 
 fn eval_misc_fn_inner(
     func: ScalarFn,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -184,17 +199,9 @@ fn resolve_list_concat_item_type(
     right: &DataType,
 ) -> Result<DataType, QueryError> {
     match (left, right) {
-        (DataType::List(lt), DataType::List(rt)) => {
-            if lt == rt || matches!(rt.as_ref(), DataType::Null) {
-                Ok((**lt).clone())
-            } else if matches!(lt.as_ref(), DataType::Null) {
-                Ok((**rt).clone())
-            } else {
-                Err(QueryError::failed(
-                    "list concatenation requires matching element types",
-                ))
-            }
-        }
+        (DataType::List(lt), DataType::List(rt)) => unify_pair(lt, rt).ok_or_else(|| {
+            QueryError::failed("list concatenation requires matching element types")
+        }),
         (DataType::List(lt), DataType::Null) => Ok((**lt).clone()),
         (DataType::Null, DataType::List(rt)) => Ok((**rt).clone()),
         (DataType::Null, DataType::Null) => Ok(DataType::Null),
@@ -293,7 +300,7 @@ fn eval_list_concat_inner(
 // Math functions
 // ---------------------------------------------------------------------------
 
-fn expect_arity(func: ScalarFn, args: &[Column], expected: usize) -> Result<(), QueryError> {
+fn expect_arity(func: ScalarFn, args: &[&Column], expected: usize) -> Result<(), QueryError> {
     if args.len() != expected {
         return Err(QueryError::failed(format!(
             "{} expects {expected} arguments, got {}",
@@ -305,7 +312,7 @@ fn expect_arity(func: ScalarFn, args: &[Column], expected: usize) -> Result<(), 
 }
 
 fn eval_abs(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -313,7 +320,7 @@ fn eval_abs(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(ScalarFn::Abs, args, 1)?;
-    let arg = &args[0];
+    let arg = args[0];
     let dt = arg.data_type();
     if all_inactive(active) || matches!(dt, DataType::Null) {
         return Ok(null_const(dt, len));
@@ -392,7 +399,7 @@ fn eval_abs(
 }
 
 fn eval_round(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -402,8 +409,8 @@ fn eval_round(
     if args.is_empty() || args.len() > 2 {
         return Err(QueryError::failed("round expects 1 or 2 arguments"));
     }
-    let val_col = &args[0];
-    let dp_col = args.get(1);
+    let val_col = args[0];
+    let dp_col = args.get(1).copied();
     let val_dt = val_col.data_type();
     if let Some(dp) = dp_col
         && !matches!(dp.data_type(), DataType::I64 | DataType::Null)
@@ -547,7 +554,7 @@ fn round_i64(v: i64, dp: i64) -> Result<i64, QueryError> {
 
 fn eval_floor_ceil(
     func: ScalarFn,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -555,7 +562,7 @@ fn eval_floor_ceil(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(func, args, 1)?;
-    let arg = &args[0];
+    let arg = args[0];
     let dt = arg.data_type();
     if all_inactive(active) || matches!(dt, DataType::Null) {
         return Ok(null_const(dt, len));
@@ -620,7 +627,7 @@ fn read_as_f64(col: &Column, row: usize) -> Result<Option<f64>, QueryError> {
 
 fn eval_unary_f64_math(
     func: ScalarFn,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -628,7 +635,7 @@ fn eval_unary_f64_math(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(func, args, 1)?;
-    let arg = &args[0];
+    let arg = args[0];
     let dt = arg.data_type();
     if !matches!(dt, DataType::F64 | DataType::I64 | DataType::Null) {
         return Err(QueryError::failed(format!(
@@ -666,7 +673,7 @@ fn eval_unary_f64_math(
 }
 
 fn eval_power(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -674,8 +681,8 @@ fn eval_power(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(ScalarFn::Power, args, 2)?;
-    let base_col = &args[0];
-    let exp_col = &args[1];
+    let base_col = args[0];
+    let exp_col = args[1];
     if !matches!(
         base_col.data_type(),
         DataType::F64 | DataType::I64 | DataType::Null
@@ -714,7 +721,7 @@ fn eval_power(
 
 fn eval_float_pred(
     func: ScalarFn,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -722,7 +729,7 @@ fn eval_float_pred(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(func, args, 1)?;
-    let arg = &args[0];
+    let arg = args[0];
     if !matches!(
         arg.data_type(),
         DataType::F64 | DataType::I64 | DataType::Null
@@ -765,48 +772,39 @@ fn eval_float_pred(
 // Null helpers: Coalesce, Nullif, Greatest, Least
 // ---------------------------------------------------------------------------
 
-fn unify_common_type(func: ScalarFn, args: &[Column]) -> Result<DataType, QueryError> {
-    let mut resolved: Option<DataType> = None;
-    for arg in args {
-        let dt = arg.data_type();
-        if matches!(dt, DataType::Null) {
-            continue;
-        }
-        match &mut resolved {
-            None => resolved = Some(dt),
-            Some(cur) => {
-                if *cur == dt {
-                    continue;
-                }
-                match (cur.clone(), dt) {
-                    (DataType::TimestampNs { utc: u1 }, DataType::TimestampNs { utc: u2 }) => {
-                        *cur = DataType::TimestampNs { utc: u1 || u2 };
-                    }
-                    (DataType::List(a), DataType::List(b)) => {
-                        if matches!(a.as_ref(), DataType::Null) {
-                            *cur = DataType::List(b);
-                        } else if !matches!(b.as_ref(), DataType::Null) && a != b {
-                            return Err(QueryError::failed(format!(
-                                "{} arguments have incompatible list types",
-                                func.name()
-                            )));
-                        }
-                    }
-                    _ => {
-                        return Err(QueryError::failed(format!(
-                            "{} arguments must share a common type",
-                            func.name()
-                        )));
-                    }
-                }
-            }
-        }
+fn unify_pair(a: &DataType, b: &DataType) -> Option<DataType> {
+    if a == b {
+        return Some(a.clone());
     }
-    Ok(resolved.unwrap_or(DataType::Null))
+    match (a, b) {
+        (DataType::Null, other) | (other, DataType::Null) => Some(other.clone()),
+        (DataType::TimestampNs { utc: u1 }, DataType::TimestampNs { utc: u2 }) => {
+            Some(DataType::TimestampNs { utc: *u1 || *u2 })
+        }
+        (DataType::List(la), DataType::List(lb)) => {
+            let inner = unify_pair(la, lb)?;
+            Some(DataType::List(Box::new(inner)))
+        }
+        _ => None,
+    }
+}
+
+fn unify_common_type(func: ScalarFn, args: &[&Column]) -> Result<DataType, QueryError> {
+    let mut resolved = DataType::Null;
+    for &arg in args {
+        let dt = arg.data_type();
+        resolved = unify_pair(&resolved, &dt).ok_or_else(|| {
+            QueryError::failed(format!(
+                "{} arguments must share a common type",
+                func.name()
+            ))
+        })?;
+    }
+    Ok(resolved)
 }
 
 fn eval_coalesce(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -834,14 +832,18 @@ fn eval_coalesce(
             sources.push(None);
             continue;
         }
-        let found = args.iter().find(|c| !c.is_null(row)).map(|c| (c, row));
+        let found = args
+            .iter()
+            .copied()
+            .find(|c| !c.is_null(row))
+            .map(|c| (c, row));
         sources.push(found);
     }
     build_flat_from_sources(&out_dt, &sources, pool, ctx, before)
 }
 
 fn eval_nullif(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -849,19 +851,11 @@ fn eval_nullif(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(ScalarFn::Nullif, args, 2)?;
-    let a = &args[0];
-    let b = &args[1];
+    let a = args[0];
+    let b = args[1];
     let out_dt = unify_common_type(ScalarFn::Nullif, args)?;
-    let a_dt = a.data_type();
-    if all_inactive(active) || matches!(a_dt, DataType::Null) {
-        return Ok(null_const(
-            if matches!(a_dt, DataType::Null) {
-                out_dt
-            } else {
-                a_dt
-            },
-            len,
-        ));
+    if all_inactive(active) || matches!(a.data_type(), DataType::Null) {
+        return Ok(null_const(out_dt, len));
     }
 
     try_reserve(
@@ -883,12 +877,12 @@ fn eval_nullif(
             sources.push(Some((a, row)));
         }
     }
-    build_flat_from_sources(&a_dt, &sources, pool, ctx, before)
+    build_flat_from_sources(&out_dt, &sources, pool, ctx, before)
 }
 
 fn eval_extremum(
     func: ScalarFn,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -926,7 +920,7 @@ fn eval_extremum(
             continue;
         }
         let mut best: Option<(&Column, usize)> = None;
-        for arg in args {
+        for &arg in args {
             if arg.is_null(row) {
                 continue;
             }
@@ -959,7 +953,7 @@ fn validate_list_arg(dt: &DataType, fn_name: &str) -> Result<Option<DataType>, Q
 }
 
 fn eval_array_has(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -967,8 +961,8 @@ fn eval_array_has(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(ScalarFn::ArrayHas, args, 2)?;
-    let list_col = &args[0];
-    let elem_col = &args[1];
+    let list_col = args[0];
+    let elem_col = args[1];
     let item_dt = validate_list_arg(&list_col.data_type(), "array_has")?;
     let elem_dt = elem_col.data_type();
     if let Some(ref it) = item_dt
@@ -1018,7 +1012,7 @@ fn eval_array_has(
 }
 
 fn eval_array_has_all(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1026,8 +1020,8 @@ fn eval_array_has_all(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(ScalarFn::ArrayHasAll, args, 2)?;
-    let list_col = &args[0];
-    let sub_col = &args[1];
+    let list_col = args[0];
+    let sub_col = args[1];
     let l_item = validate_list_arg(&list_col.data_type(), "array_has_all")?;
     let r_item = validate_list_arg(&sub_col.data_type(), "array_has_all")?;
     if let (Some(lt), Some(rt)) = (&l_item, &r_item)
@@ -1075,7 +1069,7 @@ fn eval_array_has_all(
 }
 
 fn eval_array_length(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1085,8 +1079,8 @@ fn eval_array_length(
     if args.is_empty() || args.len() > 2 {
         return Err(QueryError::failed("array_length expects 1 or 2 arguments"));
     }
-    let list_col = &args[0];
-    let dim_col = args.get(1);
+    let list_col = args[0];
+    let dim_col = args.get(1).copied();
     let item_dt = validate_list_arg(&list_col.data_type(), "array_length")?;
     if let Some(dc) = dim_col
         && !matches!(dc.data_type(), DataType::I64 | DataType::Null)
@@ -1111,16 +1105,37 @@ fn eval_array_length(
         if !is_active(active, row) {
             continue;
         }
-        let Some(lref) = list_ref_at(list_col, row) else {
+        let Some(mut cur) = list_ref_at(list_col, row) else {
             continue;
         };
-        if let Some(dc) = dim_col {
-            match read_i64(dc, row) {
-                Some(1) => {}
-                _ => continue,
+        let dim = match dim_col {
+            Some(dc) => match read_i64(dc, row) {
+                Some(d) => d,
+                None => continue,
+            },
+            None => 1,
+        };
+        if !(1..=MAX_NESTING_DEPTH as i64).contains(&dim) {
+            continue;
+        }
+        let mut valid = true;
+        for _ in 1..dim {
+            if list_ref_len(cur) == 0 {
+                valid = false;
+                break;
+            }
+            match list_ref_elem(cur, 0).as_list_ref() {
+                Some(inner) => cur = inner,
+                None => {
+                    valid = false;
+                    break;
+                }
             }
         }
-        *slot = i64::try_from(list_ref_len(lref)).map_err(|_| ColumnError::Overflow {
+        if !valid {
+            continue;
+        }
+        *slot = i64::try_from(list_ref_len(cur)).map_err(|_| ColumnError::Overflow {
             reason: "array length exceeds i64::MAX",
         })?;
         let _ = nulls.set(row, true);
@@ -1133,7 +1148,7 @@ fn eval_array_length(
 }
 
 fn eval_array_element(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1141,8 +1156,8 @@ fn eval_array_element(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(ScalarFn::ArrayElement, args, 2)?;
-    let list_col = &args[0];
-    let idx_col = &args[1];
+    let list_col = args[0];
+    let idx_col = args[1];
     let item_dt = validate_list_arg(&list_col.data_type(), "array_element")?;
     if !matches!(idx_col.data_type(), DataType::I64 | DataType::Null) {
         return Err(QueryError::failed("array_element index must be integer"));
@@ -1189,8 +1204,79 @@ fn eval_array_element(
     build_flat_from_elem_refs(&item_dt, &elem_refs, pool, ctx, before)
 }
 
+struct Utf8BudgetWriter<'a, 'b, 'p> {
+    bytes: &'a mut Vec<u8>,
+    pool: &'b mut Option<&'p mut Reservation>,
+    scratch: &'a mut String,
+}
+
+impl Utf8BudgetWriter<'_, '_, '_> {
+    fn reserve_bytes(&mut self, add: usize) -> Result<(), QueryError> {
+        let next_len = self
+            .bytes
+            .len()
+            .checked_add(add)
+            .ok_or(ColumnError::Overflow {
+                reason: "array_to_string byte length overflow",
+            })?;
+        let _ = u32::try_from(next_len).map_err(|_| ColumnError::Overflow {
+            reason: "utf8 byte length exceeds u32::MAX",
+        })?;
+        try_reserve(self.pool, add)
+    }
+
+    fn push_str(&mut self, s: &str) -> Result<(), QueryError> {
+        if s.is_empty() {
+            return Ok(());
+        }
+        self.reserve_bytes(s.len())?;
+        self.bytes.extend_from_slice(s.as_bytes());
+        Ok(())
+    }
+
+    fn push_byte(&mut self, b: u8) -> Result<(), QueryError> {
+        self.reserve_bytes(1)?;
+        self.bytes.push(b);
+        Ok(())
+    }
+
+    fn push_fmt(&mut self, args: std::fmt::Arguments<'_>) -> Result<(), QueryError> {
+        use std::fmt::Write as _;
+        self.scratch.clear();
+        let _ = self.scratch.write_fmt(args);
+        let add = self.scratch.len();
+        if add == 0 {
+            return Ok(());
+        }
+        self.reserve_bytes(add)?;
+        self.bytes.extend_from_slice(self.scratch.as_bytes());
+        Ok(())
+    }
+
+    fn push_hex(&mut self, raw: &[u8]) -> Result<(), QueryError> {
+        if raw.is_empty() {
+            return Ok(());
+        }
+        let hex_len = raw.len().checked_mul(2).ok_or(ColumnError::Overflow {
+            reason: "array_to_string byte length overflow",
+        })?;
+        self.reserve_bytes(hex_len)?;
+        let mut chunk = [0u8; 512];
+        for piece in raw.chunks(chunk.len() / 2) {
+            let mut pos = 0usize;
+            for &b in piece {
+                chunk[pos] = HEX_LOWER[(b >> 4) as usize];
+                chunk[pos + 1] = HEX_LOWER[(b & 0x0f) as usize];
+                pos += 2;
+            }
+            self.bytes.extend_from_slice(&chunk[..pos]);
+        }
+        Ok(())
+    }
+}
+
 fn eval_array_to_string(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1202,9 +1288,9 @@ fn eval_array_to_string(
             "array_to_string expects 2 or 3 arguments",
         ));
     }
-    let list_col = &args[0];
-    let delim_col = &args[1];
-    let null_str_col = args.get(2);
+    let list_col = args[0];
+    let delim_col = args[1];
+    let null_str_col = args.get(2).copied();
     let item_dt = validate_list_arg(&list_col.data_type(), "array_to_string")?;
     if !matches!(delim_col.data_type(), DataType::Utf8 | DataType::Null) {
         return Err(QueryError::failed(
@@ -1227,34 +1313,14 @@ fn eval_array_to_string(
         return Ok(null_const(DataType::Utf8, len));
     }
 
-    // Pre-reserve header + amplification bytes + active leaf payload bytes before streaming.
     let header_bytes = checked_varlen_bytes(len, 0, true)?;
-    let max_delim = max_active_str_len(delim_col, len, active, ctx, pool, before)?;
-    let max_null_str = match null_str_col {
-        Some(nc) => max_active_str_len(nc, len, active, ctx, pool, before)?,
-        None => 0,
-    };
-    let (leaf_count, active_payload_bytes) =
-        active_list_leaf_stats(list_col, len, active, ctx, pool, before)?;
-    let amp_bytes = max_delim
-        .checked_add(max_null_str)
-        .and_then(|s| s.checked_mul(leaf_count))
-        .ok_or(QueryError::TooLarge)?;
-    let mut reserved_data = amp_bytes
-        .checked_add(active_payload_bytes)
-        .ok_or(QueryError::TooLarge)?;
-    try_reserve(
-        pool,
-        header_bytes
-            .checked_add(reserved_data)
-            .ok_or(QueryError::TooLarge)?,
-    )?;
+    try_reserve(pool, header_bytes)?;
 
     let mut offsets = Vec::with_capacity(len + 1);
     offsets.push(0u32);
     let mut bytes = Vec::new();
     let mut nulls = Bitmap::new_zeroed(len);
-    let mut buf = String::new();
+    let mut scratch = String::with_capacity(64);
 
     for row in 0..len {
         if (row & CANCEL_CHECK_MASK) == 0 {
@@ -1265,23 +1331,13 @@ fn eval_array_to_string(
                 (list_ref_at(list_col, row), read_str(delim_col, row))
         {
             let null_str = null_str_col.and_then(|nc| read_str(nc, row));
-            buf.clear();
             let mut first = true;
-            append_list_to_string(lref, delim, null_str, &mut first, &mut buf)?;
-            let next_len = bytes
-                .len()
-                .checked_add(buf.len())
-                .ok_or(ColumnError::Overflow {
-                    reason: "array_to_string byte length overflow",
-                })?;
-            let _ = u32::try_from(next_len).map_err(|_| ColumnError::Overflow {
-                reason: "utf8 byte length exceeds u32::MAX",
-            })?;
-            if next_len > reserved_data {
-                try_reserve(pool, next_len - reserved_data)?;
-                reserved_data = next_len;
-            }
-            bytes.extend_from_slice(buf.as_bytes());
+            let mut writer = Utf8BudgetWriter {
+                bytes: &mut bytes,
+                pool: &mut *pool,
+                scratch: &mut scratch,
+            };
+            append_list_to_string(lref, delim, null_str, &mut first, &mut writer)?;
             let _ = nulls.set(row, true);
         }
         let end = u32::try_from(bytes.len()).map_err(|_| ColumnError::Overflow {
@@ -1297,137 +1353,12 @@ fn eval_array_to_string(
     )?))
 }
 
-fn max_active_str_len(
-    col: &Column,
-    len: usize,
-    active: Option<&Bitmap>,
-    ctx: &EvalContext,
-    pool: &mut Option<&mut Reservation>,
-    before: usize,
-) -> Result<usize, QueryError> {
-    if let Column::Const { value, .. } = col {
-        return Ok(match value {
-            ScalarValue::Utf8(s) => s.len(),
-            _ => 0,
-        });
-    }
-    let mut max_len = 0usize;
-    for row in 0..len {
-        if (row & CANCEL_CHECK_MASK) == 0 {
-            check_cancel(ctx, pool, before)?;
-        }
-        if is_active(active, row)
-            && let Some(s) = read_str(col, row)
-        {
-            max_len = max_len.max(s.len());
-        }
-    }
-    Ok(max_len)
-}
-
-fn active_list_leaf_stats(
-    col: &Column,
-    len: usize,
-    active: Option<&Bitmap>,
-    ctx: &EvalContext,
-    pool: &mut Option<&mut Reservation>,
-    before: usize,
-) -> Result<(usize, usize), QueryError> {
-    let mut count = 0usize;
-    let mut payload_bytes = 0usize;
-    for row in 0..len {
-        if (row & CANCEL_CHECK_MASK) == 0 {
-            check_cancel(ctx, pool, before)?;
-        }
-        if is_active(active, row)
-            && let Some(lref) = list_ref_at(col, row)
-        {
-            let (c, p) = count_list_ref_stats(lref)?;
-            count = count.checked_add(c).ok_or(QueryError::TooLarge)?;
-            payload_bytes = payload_bytes.checked_add(p).ok_or(QueryError::TooLarge)?;
-        }
-    }
-    Ok((count, payload_bytes))
-}
-
-fn count_list_ref_stats(lref: ListRef<'_>) -> Result<(usize, usize), QueryError> {
-    match lref {
-        ListRef::Const(slice) => {
-            let mut count = 0usize;
-            let mut bytes = 0usize;
-            for sv in slice {
-                let (c, b) = count_scalar_stats(sv)?;
-                count = count.checked_add(c).ok_or(QueryError::TooLarge)?;
-                bytes = bytes.checked_add(b).ok_or(QueryError::TooLarge)?;
-            }
-            Ok((count, bytes))
-        }
-        ListRef::Flat { values, start, end } => {
-            if matches!(values.data_type(), DataType::List(_)) {
-                let mut count = 0usize;
-                let mut bytes = 0usize;
-                for idx in start..end {
-                    let (c, b) = match list_ref_at(values, idx) {
-                        Some(inner) => count_list_ref_stats(inner)?,
-                        None => (1, 0),
-                    };
-                    count = count.checked_add(c).ok_or(QueryError::TooLarge)?;
-                    bytes = bytes.checked_add(b).ok_or(QueryError::TooLarge)?;
-                }
-                Ok((count, bytes))
-            } else {
-                let n = end - start;
-                let mut bytes = 0usize;
-                match values.data_type() {
-                    DataType::Utf8 => {
-                        for idx in start..end {
-                            if let Some(s) = read_str(values, idx) {
-                                bytes = bytes.checked_add(s.len()).ok_or(QueryError::TooLarge)?;
-                            }
-                        }
-                    }
-                    DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16 => {
-                        for idx in start..end {
-                            if let Some(b) = crate::eval::read_bytes(values, idx) {
-                                let hex_len = b.len().checked_mul(2).ok_or(QueryError::TooLarge)?;
-                                bytes = bytes.checked_add(hex_len).ok_or(QueryError::TooLarge)?;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                Ok((n, bytes))
-            }
-        }
-    }
-}
-
-fn count_scalar_stats(sv: &ScalarValue) -> Result<(usize, usize), QueryError> {
-    match sv {
-        ScalarValue::List { values, .. } => {
-            let mut count = 0usize;
-            let mut bytes = 0usize;
-            for v in values {
-                let (c, b) = count_scalar_stats(v)?;
-                count = count.checked_add(c).ok_or(QueryError::TooLarge)?;
-                bytes = bytes.checked_add(b).ok_or(QueryError::TooLarge)?;
-            }
-            Ok((count, bytes))
-        }
-        ScalarValue::Utf8(s) => Ok((1, s.len())),
-        ScalarValue::Binary(b) => Ok((1, b.len().checked_mul(2).ok_or(QueryError::TooLarge)?)),
-        ScalarValue::FixedBytes8(_) => Ok((1, 16)),
-        ScalarValue::FixedBytes16(_) => Ok((1, 32)),
-        _ => Ok((1, 0)),
-    }
-}
-
 fn append_list_to_string(
     lref: ListRef<'_>,
     delim: &str,
     null_str: Option<&str>,
     first: &mut bool,
-    out: &mut String,
+    out: &mut Utf8BudgetWriter<'_, '_, '_>,
 ) -> Result<(), QueryError> {
     let n = list_ref_len(lref);
     for i in 0..n {
@@ -1435,10 +1366,10 @@ fn append_list_to_string(
         if elem.is_null() {
             if let Some(ns) = null_str {
                 if !*first {
-                    out.push_str(delim);
+                    out.push_str(delim)?;
                 }
                 *first = false;
-                out.push_str(ns);
+                out.push_str(ns)?;
             }
             continue;
         }
@@ -1446,7 +1377,7 @@ fn append_list_to_string(
             append_list_to_string(nested, delim, null_str, first, out)?;
         } else {
             if !*first {
-                out.push_str(delim);
+                out.push_str(delim)?;
             }
             *first = false;
             append_elem_formatted(elem, out)?;
@@ -1455,59 +1386,114 @@ fn append_list_to_string(
     Ok(())
 }
 
-fn append_elem_formatted(elem: ElemRef<'_>, out: &mut String) -> Result<(), QueryError> {
-    use std::fmt::Write;
+fn append_map_formatted(
+    mref: MapRef<'_>,
+    out: &mut Utf8BudgetWriter<'_, '_, '_>,
+) -> Result<(), QueryError> {
+    out.push_byte(b'{')?;
+    match mref {
+        MapRef::Flat { data, start, end } => {
+            for idx in start..end {
+                if idx > start {
+                    out.push_str(", ")?;
+                }
+                let key = data
+                    .keys()
+                    .get(idx)
+                    .ok_or_else(|| QueryError::internal("map key out of bounds"))?;
+                out.push_str(key)?;
+                out.push_byte(b':')?;
+                if data.value_nulls().is_some_and(|bm| !bm.get(idx)) {
+                    out.push_str("null")?;
+                } else {
+                    let val = data
+                        .values()
+                        .get(idx)
+                        .ok_or_else(|| QueryError::internal("map value out of bounds"))?;
+                    out.push_str(val)?;
+                }
+            }
+        }
+        MapRef::Const(entries) => {
+            for (i, (k, v)) in entries.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ")?;
+                }
+                out.push_str(k)?;
+                out.push_byte(b':')?;
+                match v {
+                    Some(val) => out.push_str(val)?,
+                    None => out.push_str("null")?,
+                }
+            }
+        }
+    }
+    out.push_byte(b'}')
+}
+
+fn append_elem_formatted(
+    elem: ElemRef<'_>,
+    out: &mut Utf8BudgetWriter<'_, '_, '_>,
+) -> Result<(), QueryError> {
+    if let Some(mref) = elem.as_map_ref() {
+        return append_map_formatted(mref, out);
+    }
     match elem {
         ElemRef::Null => {}
         ElemRef::Col(col, row) => match col.data_type() {
+            DataType::Null | DataType::MapUtf8 => {}
             DataType::Utf8 => {
                 if let Some(s) = read_str(col, row) {
-                    out.push_str(s);
+                    out.push_str(s)?;
                 }
             }
             DataType::Bool => {
                 if let Some(b) = read_bool(col, row) {
-                    let _ = write!(out, "{b}");
+                    out.push_str(if b { "true" } else { "false" })?;
                 }
             }
             DataType::I64 => {
                 if let Some(v) = read_i64(col, row) {
-                    let _ = write!(out, "{v}");
+                    out.push_fmt(format_args!("{v}"))?;
                 }
             }
             DataType::F64 => {
                 if let Some(v) = read_f64(col, row) {
-                    let _ = write!(out, "{v}");
+                    out.push_fmt(format_args!("{v}"))?;
                 }
             }
             DataType::Decimal128 { scale, .. } => {
                 if let Some(v) = read_decimal(col, row) {
-                    out.push_str(&format_decimal(v, scale));
+                    out.push_str(&format_decimal(v, scale))?;
                 }
             }
             DataType::TimestampNs { utc } => {
                 if let Some(ns) = read_timestamp(col, row) {
-                    out.push_str(&format_timestamp_ns(ns, utc));
+                    out.push_str(&format_timestamp_ns(ns, utc))?;
                 }
             }
             DataType::Date => {
                 if let Some(d) = read_date(col, row) {
-                    out.push_str(&format_date_days(d));
+                    out.push_str(&format_date_days(d))?;
                 }
             }
             DataType::Interval => {
                 if let Some(iv) = read_interval(col, row) {
-                    let _ = write!(out, "{} months {} days {} ns", iv.months, iv.days, iv.nanos);
+                    out.push_fmt(format_args!(
+                        "{} months {} days {} ns",
+                        iv.months, iv.days, iv.nanos
+                    ))?;
                 }
             }
             DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16 => {
                 if let Some(b) = crate::eval::read_bytes(col, row) {
-                    out.push_str(&hex::encode(b));
+                    out.push_hex(b)?;
                 }
             }
-            _ => {
-                let sv = read_scalar(col, row);
-                append_scalar_formatted(&sv, out)?;
+            DataType::List(_) | DataType::Events | DataType::Links => {
+                return Err(QueryError::failed(
+                    "unsupported element type in array_to_string",
+                ));
             }
         },
         ElemRef::Scalar(sv) => append_scalar_formatted(sv, out)?,
@@ -1515,48 +1501,33 @@ fn append_elem_formatted(elem: ElemRef<'_>, out: &mut String) -> Result<(), Quer
     Ok(())
 }
 
-fn append_scalar_formatted(sv: &ScalarValue, out: &mut String) -> Result<(), QueryError> {
-    use std::fmt::Write;
+fn append_scalar_formatted(
+    sv: &ScalarValue,
+    out: &mut Utf8BudgetWriter<'_, '_, '_>,
+) -> Result<(), QueryError> {
     match sv {
         ScalarValue::Null(_) => {}
-        ScalarValue::Utf8(s) => out.push_str(s),
-        ScalarValue::Bool(b) => {
-            let _ = write!(out, "{b}");
-        }
-        ScalarValue::I64(v) => {
-            let _ = write!(out, "{v}");
-        }
-        ScalarValue::F64(v) => {
-            let _ = write!(out, "{v}");
-        }
+        ScalarValue::Utf8(s) => out.push_str(s)?,
+        ScalarValue::Bool(b) => out.push_str(if *b { "true" } else { "false" })?,
+        ScalarValue::I64(v) => out.push_fmt(format_args!("{v}"))?,
+        ScalarValue::F64(v) => out.push_fmt(format_args!("{v}"))?,
         ScalarValue::Decimal128 { value, scale, .. } => {
-            out.push_str(&format_decimal(*value, *scale));
+            out.push_str(&format_decimal(*value, *scale))?;
         }
         ScalarValue::TimestampNs { value, utc } => {
-            out.push_str(&format_timestamp_ns(*value, *utc));
+            out.push_str(&format_timestamp_ns(*value, *utc))?;
         }
-        ScalarValue::Date(d) => out.push_str(&format_date_days(*d)),
+        ScalarValue::Date(d) => out.push_str(&format_date_days(*d))?,
         ScalarValue::Interval(iv) => {
-            let _ = write!(out, "{} months {} days {} ns", iv.months, iv.days, iv.nanos);
+            out.push_fmt(format_args!(
+                "{} months {} days {} ns",
+                iv.months, iv.days, iv.nanos
+            ))?;
         }
-        ScalarValue::Binary(b) => out.push_str(&hex::encode(b)),
-        ScalarValue::FixedBytes8(b) => out.push_str(&hex::encode(b)),
-        ScalarValue::FixedBytes16(b) => out.push_str(&hex::encode(b)),
-        ScalarValue::MapUtf8(entries) => {
-            out.push('{');
-            for (i, (k, v)) in entries.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                out.push_str(k);
-                out.push(':');
-                match v {
-                    Some(val) => out.push_str(val),
-                    None => out.push_str("null"),
-                }
-            }
-            out.push('}');
-        }
+        ScalarValue::Binary(b) => out.push_hex(b)?,
+        ScalarValue::FixedBytes8(b) => out.push_hex(b)?,
+        ScalarValue::FixedBytes16(b) => out.push_hex(b)?,
+        ScalarValue::MapUtf8(entries) => append_map_formatted(MapRef::Const(entries), out)?,
         ScalarValue::List { .. } | ScalarValue::Events(_) | ScalarValue::Links(_) => {
             return Err(QueryError::failed(
                 "unsupported element type in array_to_string",
@@ -1567,7 +1538,7 @@ fn append_scalar_formatted(sv: &ScalarValue, out: &mut String) -> Result<(), Que
 }
 
 fn eval_array_distinct(
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1575,7 +1546,7 @@ fn eval_array_distinct(
     before: usize,
 ) -> Result<Column, QueryError> {
     expect_arity(ScalarFn::ArrayDistinct, args, 1)?;
-    let list_col = &args[0];
+    let list_col = args[0];
     let dt = list_col.data_type();
     let Some(item_dt) = validate_list_arg(&dt, "array_distinct")? else {
         return Ok(null_const(DataType::Null, len));
@@ -1648,7 +1619,7 @@ enum DistinctKey<'a> {
     I64(i64),
     F64(u64),
     Decimal(i128),
-    Interval(Interval),
+    Interval(i128),
     Str(&'a str),
     Bytes(&'a [u8]),
 }
@@ -1667,7 +1638,9 @@ fn elem_distinct_key<'a>(elem: ElemRef<'a>, dt: &DataType) -> Option<DistinctKey
         DataType::Decimal128 { .. } => elem.read_decimal().map(|(v, _)| DistinctKey::Decimal(v)),
         DataType::TimestampNs { .. } => elem.read_timestamp().map(DistinctKey::I64),
         DataType::Date => elem.read_date().map(|d| DistinctKey::I64(i64::from(d))),
-        DataType::Interval => elem.read_interval().map(DistinctKey::Interval),
+        DataType::Interval => elem
+            .read_interval()
+            .map(|iv| DistinctKey::Interval(iv.canonical_key())),
         DataType::Utf8 => elem.read_str().map(DistinctKey::Str),
         DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16 => {
             elem.read_bytes().map(DistinctKey::Bytes)
@@ -1774,7 +1747,7 @@ fn collect_distinct_elems<'a>(
 
 fn eval_map_extract(
     keys_only: bool,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -1787,7 +1760,7 @@ fn eval_map_extract(
         ScalarFn::MapValues
     };
     expect_arity(fn_sym, args, 1)?;
-    let map_col = &args[0];
+    let map_col = args[0];
     let dt = map_col.data_type();
     if !matches!(dt, DataType::MapUtf8 | DataType::Null) {
         return Err(QueryError::failed(format!(
@@ -2043,7 +2016,7 @@ fn write_json_result(
 
 fn eval_json_get(
     as_text: bool,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -2056,8 +2029,8 @@ fn eval_json_get(
         ScalarFn::JsonGet
     };
     expect_arity(fn_sym, args, 2)?;
-    let json_col = &args[0];
-    let key_col = &args[1];
+    let json_col = args[0];
+    let key_col = args[1];
     if !matches!(json_col.data_type(), DataType::Utf8 | DataType::Null) {
         return Err(QueryError::failed(format!(
             "{} requires string JSON input",
@@ -2083,7 +2056,7 @@ fn eval_json_get(
     let const_parsed: Option<Option<JsonValue>> = match json_col {
         Column::Const { value, .. } => match value {
             ScalarValue::Utf8(s) => {
-                try_reserve(pool, s.len())?;
+                try_reserve(pool, s.len().saturating_mul(JSON_DOM_MULTIPLIER))?;
                 Some(serde_json::from_str::<JsonValue>(s).ok())
             }
             _ => Some(None),
@@ -2107,7 +2080,7 @@ fn eval_json_get(
                 Some(opt) => opt.as_ref(),
                 None => match read_str(json_col, row) {
                     Some(s) => {
-                        dom_reserved = s.len();
+                        dom_reserved = s.len().saturating_mul(JSON_DOM_MULTIPLIER);
                         try_reserve(pool, dom_reserved)?;
                         parsed_owned = serde_json::from_str::<JsonValue>(s).ok();
                         parsed_owned.as_ref()
@@ -2163,7 +2136,7 @@ fn eval_json_get(
 
 fn eval_json_extract(
     as_text: bool,
-    args: &[Column],
+    args: &[&Column],
     len: usize,
     active: Option<&Bitmap>,
     ctx: &EvalContext,
@@ -2176,8 +2149,8 @@ fn eval_json_extract(
         ScalarFn::JsonExtract
     };
     expect_arity(fn_sym, args, 2)?;
-    let json_col = &args[0];
-    let path_col = &args[1];
+    let json_col = args[0];
+    let path_col = args[1];
     if !matches!(json_col.data_type(), DataType::Utf8 | DataType::Null) {
         return Err(QueryError::failed(format!(
             "{} requires string JSON input",
@@ -2194,19 +2167,41 @@ fn eval_json_extract(
         || all_inactive(active)
         || matches!(json_col.data_type(), DataType::Null)
         || matches!(path_col.data_type(), DataType::Null)
+        || matches!(
+            json_col,
+            Column::Const {
+                value: ScalarValue::Null(_),
+                ..
+            }
+        )
+        || matches!(
+            path_col,
+            Column::Const {
+                value: ScalarValue::Null(_),
+                ..
+            }
+        )
     {
         return Ok(null_const(DataType::Utf8, len));
     }
 
+    let cached_const_path: Option<Arc<JsonPath>> = match path_col {
+        Column::Const {
+            value: ScalarValue::Utf8(p),
+            ..
+        } => Some(ctx.cache.get_or_insert_json_path(p, || {
+            JsonPath::parse(p).map_err(|_| QueryError::failed("invalid JSONPath expression"))
+        })?),
+        _ => None,
+    };
+    let mut last_dyn_path: Option<(&str, Arc<JsonPath>)> = None;
+
     try_reserve(pool, checked_varlen_bytes(len, 0, true)?)?;
-    let path_is_const = matches!(path_col, Column::Const { .. });
-    let mut cached_const_path: Option<JsonPath> = None;
-    let mut last_dyn_path: Option<(&str, JsonPath)> = None;
 
     let const_parsed: Option<Option<JsonValue>> = match json_col {
         Column::Const { value, .. } => match value {
             ScalarValue::Utf8(s) => {
-                try_reserve(pool, s.len())?;
+                try_reserve(pool, s.len().saturating_mul(JSON_DOM_MULTIPLIER))?;
                 Some(serde_json::from_str::<JsonValue>(s).ok())
             }
             _ => Some(None),
@@ -2223,35 +2218,28 @@ fn eval_json_extract(
         if (row & CANCEL_CHECK_MASK) == 0 {
             check_cancel(ctx, pool, before)?;
         }
-        if is_active(active, row)
-            && let Some(path_str) = read_str(path_col, row)
-        {
-            let compiled_path: &JsonPath = if path_is_const {
-                if let Some(ref p) = cached_const_path {
-                    p
-                } else {
-                    let parsed = JsonPath::parse(path_str)
-                        .map_err(|_| QueryError::failed("invalid JSONPath expression"))?;
-                    cached_const_path = Some(parsed);
-                    match cached_const_path.as_ref() {
-                        Some(p) => p,
-                        None => {
-                            return Err(QueryError::failed("invalid JSONPath expression"));
-                        }
-                    }
-                }
+        if is_active(active, row) {
+            let compiled_path: Arc<JsonPath> = if let Some(p) = &cached_const_path {
+                Arc::clone(p)
             } else {
-                let hit = matches!(last_dyn_path.as_ref(), Some((prev, _)) if *prev == path_str);
-                if !hit {
-                    let parsed = JsonPath::parse(path_str)
-                        .map_err(|_| QueryError::failed("invalid JSONPath expression"))?;
-                    last_dyn_path = Some((path_str, parsed));
-                }
-                match last_dyn_path.as_ref() {
-                    Some((_, p)) => p,
-                    None => {
-                        return Err(QueryError::failed("invalid JSONPath expression"));
-                    }
+                let Some(path_str) = read_str(path_col, row) else {
+                    let end = u32::try_from(bytes.len()).map_err(|_| ColumnError::Overflow {
+                        reason: "utf8 byte length exceeds u32::MAX",
+                    })?;
+                    offsets.push(end);
+                    continue;
+                };
+                if let Some((prev, p)) = &last_dyn_path
+                    && *prev == path_str
+                {
+                    Arc::clone(p)
+                } else {
+                    let parsed = ctx.cache.get_or_insert_json_path(path_str, || {
+                        JsonPath::parse(path_str)
+                            .map_err(|_| QueryError::failed("invalid JSONPath expression"))
+                    })?;
+                    last_dyn_path = Some((path_str, Arc::clone(&parsed)));
+                    parsed
                 }
             };
 
@@ -2261,7 +2249,7 @@ fn eval_json_extract(
                 Some(opt) => opt.as_ref(),
                 None => match read_str(json_col, row) {
                     Some(s) => {
-                        dom_reserved = s.len();
+                        dom_reserved = s.len().saturating_mul(JSON_DOM_MULTIPLIER);
                         try_reserve(pool, dom_reserved)?;
                         parsed_owned = serde_json::from_str::<JsonValue>(s).ok();
                         parsed_owned.as_ref()
@@ -2272,13 +2260,13 @@ fn eval_json_extract(
 
             if let Some(root) = val_ref {
                 let nodes = compiled_path.query(root).all();
-                match nodes.as_slice() {
-                    [] => {}
-                    [one] => {
-                        if write_json_result(one, as_text, &mut bytes, pool)? {
-                            let _ = nulls.set(row, true);
-                        }
-                    }
+                let nodes_bytes = nodes.len().saturating_mul(size_of::<&JsonValue>());
+                if nodes_bytes > 0 {
+                    try_reserve(pool, nodes_bytes)?;
+                }
+                let write_res = match nodes.as_slice() {
+                    [] => Ok(false),
+                    [one] => write_json_result(one, as_text, &mut bytes, pool),
                     many => {
                         let mut writer = JsonBudgetWriter {
                             bytes: &mut bytes,
@@ -2286,12 +2274,23 @@ fn eval_json_extract(
                             err: None,
                         };
                         if serde_json::to_writer(&mut writer, many).is_err() {
-                            return Err(writer.err.take().unwrap_or_else(|| {
-                                QueryError::failed("json serialization failed")
-                            }));
+                            Err(writer
+                                .err
+                                .take()
+                                .unwrap_or_else(|| QueryError::failed("json serialization failed")))
+                        } else {
+                            Ok(true)
                         }
-                        let _ = nulls.set(row, true);
                     }
+                };
+                drop(nodes);
+                if nodes_bytes > 0
+                    && let Some(res) = pool.as_deref_mut()
+                {
+                    res.shrink(nodes_bytes);
+                }
+                if write_res? {
+                    let _ = nulls.set(row, true);
                 }
             }
 
@@ -2455,7 +2454,10 @@ fn elems_equal(a: ElemRef<'_>, b: ElemRef<'_>) -> Result<bool, QueryError> {
             Ok(a.read_timestamp() == b.read_timestamp())
         }
         (DataType::Date, DataType::Date) => Ok(a.read_date() == b.read_date()),
-        (DataType::Interval, DataType::Interval) => Ok(a.read_interval() == b.read_interval()),
+        (DataType::Interval, DataType::Interval) => {
+            Ok(a.read_interval().map(|iv| iv.canonical_key())
+                == b.read_interval().map(|iv| iv.canonical_key()))
+        }
         (DataType::Utf8, DataType::Utf8) => Ok(a.read_str() == b.read_str()),
         (
             DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16,
@@ -2518,7 +2520,7 @@ fn compare_elems(a: ElemRef<'_>, b: ElemRef<'_>) -> Result<Ordering, QueryError>
         }
         (DataType::Date, DataType::Date) => Ok(a.read_date().cmp(&b.read_date())),
         (DataType::Interval, DataType::Interval) => match (a.read_interval(), b.read_interval()) {
-            (Some(x), Some(y)) => Ok((x.months, x.days, x.nanos).cmp(&(y.months, y.days, y.nanos))),
+            (Some(x), Some(y)) => Ok(x.canonical_key().cmp(&y.canonical_key())),
             _ => Err(QueryError::failed("invalid interval comparison")),
         },
         (DataType::Utf8, DataType::Utf8) => Ok(a.read_str().cmp(&b.read_str())),
@@ -2551,10 +2553,7 @@ mod tests {
     use super::*;
 
     fn ctx() -> EvalContext {
-        EvalContext {
-            now_ns: 1_700_000_000_000_000_000,
-            cancel: CancelToken::new(),
-        }
+        EvalContext::new(1_700_000_000_000_000_000, CancelToken::new())
     }
 
     fn i64_col(vals: &[Option<i64>]) -> Column {
@@ -3017,12 +3016,13 @@ mod tests {
             vec![Some("1,NA,2".into()), Some("".into()), None]
         );
 
-        // Tight reservation amplification check on array_to_string
-        let big_delim = Column::try_new_const(ScalarValue::Utf8("x".repeat(3000)), 3).unwrap();
+        // Tight reservation check on array_to_string: output > 4,096 B returns TooLarge and rolls back,
+        // while a large unused delimiter over single-element/empty/null lists succeeds.
+        let big_delim = Column::try_new_const(ScalarValue::Utf8("x".repeat(5000)), 3).unwrap();
         let before = res.size();
         let err = eval_misc_fn(
             ScalarFn::ArrayToString,
-            &[ats_list, big_delim],
+            &[ats_list, big_delim.clone()],
             3,
             None,
             &c,
@@ -3030,6 +3030,24 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, QueryError::TooLarge));
+        assert_eq!(res.size(), before);
+
+        let single_elem_list = list_i64_col(&[Some(&[Some(1)]), Some(&[]), Some(&[None])]);
+        let ok_unused_delim = eval_misc_fn(
+            ScalarFn::ArrayToString,
+            &[single_elem_list, big_delim],
+            3,
+            None,
+            &c,
+            Some(&mut res),
+        )
+        .unwrap();
+        assert_eq!(
+            collect_strs(&ok_unused_delim),
+            vec![Some("1".into()), Some("".into()), Some("".into())]
+        );
+        assert_eq!(res.size(), before + ok_unused_delim.memory_bytes());
+        res.shrink(ok_unused_delim.memory_bytes());
         assert_eq!(res.size(), before);
 
         // array_distinct: preserves first-seen order and deduplicates NULLs
@@ -3447,10 +3465,7 @@ mod tests {
         assert_eq!(collect_strs(&nested_ats), vec![Some("1,2,3".into())]);
 
         // Cancellation returns Cancelled and rolls back Reservation
-        let cancelled = EvalContext {
-            now_ns: 0,
-            cancel: CancelToken::new(),
-        };
+        let cancelled = EvalContext::new(0, CancelToken::new());
         cancelled.cancel.cancel();
         let pool = GlobalPool::standalone(1 << 20);
         let mut res = pool.register("cancel", false);
@@ -3628,10 +3643,7 @@ mod tests {
         assert_eq!(dist_res.size(), 0);
 
         // CancelToken inside list_ref_has_all and collect_distinct_elems
-        let cancelled = EvalContext {
-            now_ns: 0,
-            cancel: CancelToken::new(),
-        };
+        let cancelled = EvalContext::new(0, CancelToken::new());
         cancelled.cancel.cancel();
         assert!(matches!(
             eval_misc_fn(
@@ -3683,5 +3695,314 @@ mod tests {
             QueryError::TooLarge
         ));
         assert_eq!(ats_res.size(), 0);
+    }
+
+    #[test]
+    fn json_dom_multiplier_oom_and_canonical_interval_distinct() {
+        // 100-byte JSON payload requires 600 bytes DOM pre-reserve (6x multiplier); 300-byte pool must OOM.
+        let payload = format!(r#"{{"k":"{}"}}"#, "a".repeat(90));
+        let json_col = Column::try_new_const(ScalarValue::Utf8(payload), 1).unwrap();
+        let path_col = Column::try_new_const(ScalarValue::Utf8("$.k".into()), 1).unwrap();
+        let pool = GlobalPool::standalone(300);
+        let mut res = pool.register("json_dom_6x", false);
+        let err = eval_misc_fn(
+            ScalarFn::JsonExtract,
+            &[json_col, path_col],
+            1,
+            None,
+            &ctx(),
+            Some(&mut res),
+        )
+        .unwrap_err();
+        assert!(matches!(err, QueryError::TooLarge));
+        assert_eq!(res.size(), 0);
+
+        // array_distinct deduplicates canonical Intervals (1 month == 30 days)
+        let iv_list = Column::try_new_const(
+            ScalarValue::List {
+                item_type: DataType::Interval,
+                values: vec![
+                    ScalarValue::Interval(cetra_column::Interval {
+                        months: 1,
+                        days: 0,
+                        nanos: 0,
+                    }),
+                    ScalarValue::Interval(cetra_column::Interval {
+                        months: 0,
+                        days: 30,
+                        nanos: 0,
+                    }),
+                ],
+            },
+            1,
+        )
+        .unwrap();
+        let distinct =
+            eval_misc_fn(ScalarFn::ArrayDistinct, &[iv_list], 1, None, &ctx(), None).unwrap();
+        let ScalarValue::List { values, .. } = distinct.get_scalar(0).unwrap() else {
+            panic!("expected List");
+        };
+        assert_eq!(values.len(), 1);
+    }
+
+    #[test]
+    fn array_to_string_streams_binary_and_map_within_budget() {
+        let c = ctx();
+        // Flat List<Binary> with 600-byte blob -> 1200 hex chars streamed without temp hex::encode String.
+        let blob = vec![0x0f_u8; 600];
+        let bin_elems = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Binary(
+                    cetra_column::BinaryData::try_from_slices([blob.as_slice()]).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+        );
+        let bin_list = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Binary,
+                    offsets: vec![0, 1],
+                    values: Box::new(bin_elems),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let delim = Column::try_new_const(ScalarValue::Utf8(",".into()), 1).unwrap();
+
+        let tight = GlobalPool::standalone(512);
+        let mut tight_res = tight.register("ats_bin_tight", false);
+        let err = eval_misc_fn(
+            ScalarFn::ArrayToString,
+            &[bin_list.clone(), delim.clone()],
+            1,
+            None,
+            &c,
+            Some(&mut tight_res),
+        )
+        .unwrap_err();
+        assert!(matches!(err, QueryError::TooLarge));
+        assert_eq!(tight_res.size(), 0);
+
+        let roomy = GlobalPool::standalone(2048);
+        let mut roomy_res = roomy.register("ats_bin_roomy", false);
+        let out_bin = eval_misc_fn(
+            ScalarFn::ArrayToString,
+            &[bin_list, delim.clone()],
+            1,
+            None,
+            &c,
+            Some(&mut roomy_res),
+        )
+        .unwrap();
+        assert_eq!(collect_strs(&out_bin), vec![Some("0f".repeat(600))]);
+        assert_eq!(roomy_res.size(), out_bin.memory_bytes());
+
+        // Flat List<MapUtf8> streamed via MapRef without cloning into ScalarValue.
+        let map_elems = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::MapUtf8(Box::new(
+                    MapData::try_new(
+                        vec![0, 2],
+                        Utf8Data::try_from_slices(["k1", "k2"]).unwrap(),
+                        Utf8Data::try_from_slices(["v1", ""]).unwrap(),
+                        Some(Bitmap::from_bools(&[true, false])),
+                    )
+                    .unwrap(),
+                )),
+                None,
+            )
+            .unwrap(),
+        );
+        let map_list = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::MapUtf8,
+                    offsets: vec![0, 1],
+                    values: Box::new(map_elems),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let out_map = eval_misc_fn(
+            ScalarFn::ArrayToString,
+            &[map_list, delim],
+            1,
+            None,
+            &c,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            collect_strs(&out_map),
+            vec![Some("{k1:v1, k2:null}".into())]
+        );
+    }
+
+    #[test]
+    fn recursive_unify_nullif_out_dt_and_multidim_array_length() {
+        let c = ctx();
+
+        // Recursive unify_common_type: List(List(Null)) + List(List(Utf8)) -> List(List(Utf8))
+        let null_2d = Column::try_new_const(
+            ScalarValue::List {
+                item_type: DataType::List(Box::new(DataType::Null)),
+                values: vec![ScalarValue::List {
+                    item_type: DataType::Null,
+                    values: vec![ScalarValue::Null(DataType::Null)],
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        let str_2d = Column::try_new_const(
+            ScalarValue::List {
+                item_type: DataType::List(Box::new(DataType::Utf8)),
+                values: vec![ScalarValue::List {
+                    item_type: DataType::Utf8,
+                    values: vec![ScalarValue::Utf8("hi".into())],
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        let coal = eval_misc_fn(
+            ScalarFn::Coalesce,
+            &[null_2d.clone(), str_2d.clone()],
+            1,
+            None,
+            &c,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            coal.data_type(),
+            DataType::List(Box::new(DataType::List(Box::new(DataType::Utf8))))
+        );
+        let concat_2d = eval_list_concat(&null_2d, &str_2d, None, &c, None).unwrap();
+        assert_eq!(
+            concat_2d.data_type(),
+            DataType::List(Box::new(DataType::List(Box::new(DataType::Utf8))))
+        );
+
+        // eval_nullif returns unified out_dt (TimestampNs utc: true even when first arg is utc: false,
+        // and both active + inactive early-return paths preserve out_dt).
+        let ts_local = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![100, 200],
+                    utc: false,
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let ts_utc = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![100, 300],
+                    utc: true,
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let nif = eval_misc_fn(
+            ScalarFn::Nullif,
+            &[ts_local.clone(), ts_utc.clone()],
+            2,
+            None,
+            &c,
+            None,
+        )
+        .unwrap();
+        assert_eq!(nif.data_type(), DataType::TimestampNs { utc: true });
+        assert!(nif.is_null(0));
+        assert_eq!(
+            nif.get_scalar(1).unwrap(),
+            ScalarValue::TimestampNs {
+                value: 200,
+                utc: true,
+            }
+        );
+
+        let all_zero = Bitmap::new_zeroed(2);
+        let nif_inactive = eval_misc_fn(
+            ScalarFn::Nullif,
+            &[ts_local, ts_utc],
+            2,
+            Some(&all_zero),
+            &c,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            nif_inactive.data_type(),
+            DataType::TimestampNs { utc: true }
+        );
+
+        // Multi-dimensional array_length: 2D and 3D lists, empty/null inner, dim <= 0, dim > MAX_NESTING_DEPTH.
+        let inner_vals = list_i64_col(&[
+            Some(&[Some(1), Some(2), Some(3)]),
+            Some(&[Some(4)]),
+            Some(&[]),
+            None,
+        ]);
+        // Row 0: [[1, 2, 3], [4]] -> dim 1 = 2, dim 2 = 3, dim 3 = NULL
+        // Row 1: [[]] -> dim 1 = 1, dim 2 = 0
+        // Row 2: [NULL] -> dim 1 = 1, dim 2 = NULL
+        // Row 3: [] -> dim 1 = 0, dim 2 = NULL
+        let mat = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::List(Box::new(DataType::I64)),
+                    offsets: vec![0, 2, 3, 4, 4],
+                    values: Box::new(inner_vals),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let d1 = eval_misc_fn(
+            ScalarFn::ArrayLength,
+            &[mat.clone(), i64_col(&[Some(1), Some(1), Some(1), Some(1)])],
+            4,
+            None,
+            &c,
+            None,
+        )
+        .unwrap();
+        assert_eq!(collect_i64s(&d1), vec![Some(2), Some(1), Some(1), Some(0)]);
+        let d2 = eval_misc_fn(
+            ScalarFn::ArrayLength,
+            &[mat.clone(), i64_col(&[Some(2), Some(2), Some(2), Some(2)])],
+            4,
+            None,
+            &c,
+            None,
+        )
+        .unwrap();
+        assert_eq!(collect_i64s(&d2), vec![Some(3), Some(0), None, None]);
+        let d_bad = eval_misc_fn(
+            ScalarFn::ArrayLength,
+            &[
+                mat,
+                i64_col(&[
+                    Some(3),
+                    Some(0),
+                    Some(-1),
+                    Some(MAX_NESTING_DEPTH as i64 + 1),
+                ]),
+            ],
+            4,
+            None,
+            &c,
+            None,
+        )
+        .unwrap();
+        assert_eq!(collect_i64s(&d_bad), vec![None, None, None, None]);
     }
 }

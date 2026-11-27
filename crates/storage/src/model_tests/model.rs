@@ -1,7 +1,7 @@
 //! The oracle: a plain-Rust model of the rows every read must return.
 //!
 //! It re-implements only the spec rules it needs, over plain structs. It must not call the
-//! engine's merge, view, read or query code, or DataFusion: a model that reuses the engine's
+//! engine's merge, view, read or query code: a model that reuses the engine's
 //! code checks nothing.
 
 use std::collections::{BTreeMap, BTreeSet};

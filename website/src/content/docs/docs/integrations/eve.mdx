@@ -1,0 +1,115 @@
+---
+title: eve
+description: "Trace Vercel's eve agents with cetra from TypeScript: agent turns, steps, model calls and tool calls, exported by eve's OpenTelemetry integration."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces eve agents from TypeScript. eve's `otelIntegration` sends the agent, step, model call and tool spans of each turn to cetra over OTLP.
+
+<Backing fixtures={["genai/eve-agent-tool"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```bash
+npm install eve @vercel/otel @ai-sdk/openai-compatible zod
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+An eve project is a folder with a `package.json` and an `agent/` directory. The `package.json` name sets the agent and service names on the spans, and the project must declare `eve` as a dependency: eve bundles the files under `agent/` at startup and resolves their imports from the project. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
+
+The `agent/` directory holds `instructions.md` (the system prompt), `agent.ts` (the model), `tools/*.ts` and `instrumentation/*.ts`. The instrumentation file wires the export to cetra.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+{/* untested: runs inside eve's dev server and needs CETRA_API_KEY */}
+```ts
+import { OTLPHttpProtoTraceExporter } from "@vercel/otel";
+import { otelIntegration } from "eve/instrumentation/otel";
+
+export default otelIntegration({
+  traceExporter: new OTLPHttpProtoTraceExporter({
+    url: "http://<HOST>:8080/v1/traces",
+    headers: { Authorization: `Bearer ${process.env.CETRA_API_KEY}` },
+  }),
+});
+```
+
+The agent names its model provider:
+
+{/* untested: runs inside eve's dev server and needs OPENAI_API_KEY */}
+```ts
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { defineAgent } from "eve";
+
+const openai = createOpenAICompatible({
+  name: "openai",
+  baseURL: "https://api.openai.com/v1",
+  apiKey: process.env.OPENAI_API_KEY,
+  includeUsage: true,
+});
+
+export default defineAgent({
+  model: openai("gpt-4o-mini"),
+  modelContextWindowTokens: 64_000,
+});
+```
+
+Keep the provider name `openai`: it makes the model call spans carry the provider name that cetra prices. A tool returns a JSON value:
+
+{/* untested: runs inside eve's dev server */}
+```ts
+import { readFileSync } from "node:fs";
+import { defineTool } from "eve/tools";
+import { z } from "zod";
+
+export default defineTool({
+  description: "Read a text file and return its contents.",
+  inputSchema: z.object({ path: z.string().min(1) }),
+  async execute({ path }) {
+    return { path, text: readFileSync(path, "utf8") };
+  },
+});
+```
+
+Run the dev server from the project folder and talk to the agent through its UI or its session endpoint:
+
+```bash
+npx eve dev
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+With one tool call, a turn produces:
+
+- an `agent` span named `invoke_agent <PACKAGE_NAME>` (the `package.json` name), with the prompt as its input and the answer as its output, and `turn.started` and `turn.completed` events;
+- a `span` named `agent.step` for each model call step;
+- an `llm` span named `chat gpt-4o-mini` for each model call, with the provider `openai`, the request and response models, the token counts, the cost computed from the built-in prices, the messages, the system instructions from `agent/instructions.md`, and the tool definitions, eve's built-in tools beside yours;
+- a `tool` span named `execute_tool read_file`, with the arguments as its input and the result as its output.
+
+The turn's conversation id (`gen_ai.conversation.id`) becomes the trace's session.
+
+## Limits
+
+- eve runs on Vercel's Workflow SDK, which emits its own spans: scope `workflow`, names starting `workflow.`, `step.` or `queue.`. cetra drops them, and a trace that holds only Workflow SDK spans does not appear.
+- The agent span sums the turn's token counts in its attributes; cetra counts tokens on model calls only, so nothing is counted twice.
+- The fixture was captured with eve 1.0.1 and `@vercel/otel` 2.3.0, run by `eve dev`.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

@@ -1,0 +1,109 @@
+---
+title: openai-go
+description: "Trace openai-go v3 model calls with cetra through OpenInference Go's middleware. Setup only: not captured; the wiring is the spike's run."
+---
+
+openai-go has no telemetry of its own. OpenInference Go's middleware records each API call as a span with OpenInference attributes, and cetra reads those spans. This page is setup only: no fixture is captured for it. The wiring below is the spike's working program, run once against a mock provider; the rest comes from the middleware's source.
+
+## Install
+
+```bash
+go get github.com/openai/openai-go/v3@v3.100.0
+go get github.com/Arize-ai/openinference/go/openinference-instrumentation-openai-go@v0.1.2
+```
+
+The middleware is written against openai-go v1 and imports it, so your binary links both v1 and v3. The v3 client accepts the middleware unchanged.
+
+## Set up
+
+Build the OTLP/HTTP exporter and the tracer provider, then pass the middleware to the client. Make one chat call and shut the provider down to flush:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+
+	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/shared"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	sdkresource "go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+
+	openaiotel "github.com/Arize-ai/openinference/go/openinference-instrumentation-openai-go"
+)
+
+func main() {
+	ctx := context.Background()
+
+	exp, err := otlptracehttp.New(ctx,
+		otlptracehttp.WithEndpointURL("http://localhost:8080/v1/traces"),
+		otlptracehttp.WithHeaders(map[string]string{"Authorization": "Bearer sk-cetra-…"}),
+	)
+	if err != nil {
+		log.Fatalf("exporter: %v", err)
+	}
+	res, err := sdkresource.New(ctx, sdkresource.WithAttributes(attribute.String("service.name", "my-app")))
+	if err != nil {
+		log.Fatalf("resource: %v", err)
+	}
+	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exp), sdktrace.WithResource(res))
+	otel.SetTracerProvider(tp)
+
+	client := openai.NewClient(
+		option.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+		option.WithBaseURL("https://api.openai.com/v1/"),
+		option.WithMiddleware(openaiotel.Middleware(otel.Tracer("my-app"))),
+	)
+
+	completion, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model: shared.ChatModel("gpt-4o-mini"),
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.UserMessage("What is the weather in Lyon?"),
+		},
+	})
+	if err != nil {
+		log.Fatalf("call: %v", err)
+	}
+	fmt.Println("answer:", completion.Choices[0].Message.Content)
+
+	if err := tp.Shutdown(ctx); err != nil {
+		log.Printf("shutdown: %v", err)
+	}
+}
+```
+
+Content is on by default: the messages and `input.value` and `output.value` land on the span as attributes. Set `OPENINFERENCE_HIDE_INPUTS=true` and `OPENINFERENCE_HIDE_OUTPUTS=true` to hide it; finer-grained `OPENINFERENCE_HIDE_*` variables exist for the messages, the tool definitions and the invocation parameters.
+
+Each middleware span is a root. Open your own span and pass its context to get one trace per request:
+
+```go
+// Needs the import "go.opentelemetry.io/otel/trace" for trace.Span.
+var appSpan trace.Span
+ctx, appSpan = otel.Tracer("my-app").Start(ctx, "app.request")
+defer appSpan.End()
+```
+
+## What you get
+
+- One `llm` span per API call, named `openai.chat.completions.create` (or `openai.responses.create` on the Responses API), with the provider `openai`, the model, the token counts and the cost computed from the built-in prices, and by default the input and output messages.
+- No tool span: the middleware sees the HTTP call only, so tool calls appear inside the messages.
+
+## Limits
+
+- Not captured: no fixture for openai-go is captured in the repository. The code above is the spike's program and the span facts are that run's; every other fact comes from the middleware's source.
+- The middleware imports openai-go v1, so the binary links both v1 and v3 of the SDK.
+- The middleware sets no span kind (the spans arrive as INTERNAL); cetra reads `openinference.span.kind` instead.
+- Spans are roots unless your program opens a span and passes its context.
+
+## Next
+
+- [OpenInference](/docs/integrations/openinference/): the other OpenInference instrumentors cetra reads.
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.

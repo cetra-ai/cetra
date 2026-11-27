@@ -1,0 +1,176 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "my-app"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "workflow"
+          },
+          "spans": [
+            {
+              "traceId": "3f18774f5d9926624c9050c77c84f601",
+              "spanId": "1111111111111111",
+              "name": "workflow.start",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590050000000",
+              "attributes": [
+                {
+                  "key": "workflow.id",
+                  "value": {
+                    "stringValue": "wrun_1"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "3f18774f5d9926624c9050c77c84f601",
+              "spanId": "2222222222222222",
+              "name": "step.execute",
+              "kind": 1,
+              "startTimeUnixNano": "1767225591000000000",
+              "endTimeUnixNano": "1767225596000000000",
+              "attributes": [
+                {
+                  "key": "step.name",
+                  "value": {
+                    "stringValue": "agent"
+                  }
+                }
+              ],
+              "parentSpanId": "1111111111111111"
+            },
+            {
+              "traceId": "3f18774f5d9926624c9050c77c84f601",
+              "spanId": "3333333333333333",
+              "name": "queue.publish",
+              "kind": 1,
+              "startTimeUnixNano": "1767225596000000000",
+              "endTimeUnixNano": "1767225596100000000",
+              "attributes": [
+                {
+                  "key": "queue.name",
+                  "value": {
+                    "stringValue": "deliveries"
+                  }
+                }
+              ],
+              "parentSpanId": "1111111111111111"
+            }
+          ]
+        },
+        {
+          "scope": {
+            "name": "eve.agent"
+          },
+          "spans": [
+            {
+              "traceId": "3f18774f5d9926624c9050c77c84f601",
+              "spanId": "4444444444444444",
+              "name": "invoke_agent capture-eve",
+              "kind": 1,
+              "startTimeUnixNano": "1767225591500000000",
+              "endTimeUnixNano": "1767225595500000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "capture-eve"
+                  }
+                }
+              ],
+              "parentSpanId": "2222222222222222"
+            },
+            {
+              "traceId": "3f18774f5d9926624c9050c77c84f601",
+              "spanId": "5555555555555555",
+              "name": "chat gpt-4o-mini",
+              "kind": 3,
+              "startTimeUnixNano": "1767225592000000000",
+              "endTimeUnixNano": "1767225593000000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai.chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "82"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "17"
+                  }
+                }
+              ],
+              "parentSpanId": "4444444444444444"
+            }
+          ]
+        },
+        {
+          "scope": {
+            "name": "workflow"
+          },
+          "spans": [
+            {
+              "traceId": "3f18774f5d9926624c9050c77c84f601",
+              "spanId": "6666666666666666",
+              "name": "step.generate",
+              "kind": 1,
+              "startTimeUnixNano": "1767225594000000000",
+              "endTimeUnixNano": "1767225595000000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                }
+              ],
+              "parentSpanId": "2222222222222222"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

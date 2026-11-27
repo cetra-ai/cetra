@@ -1,0 +1,441 @@
+{
+  "label": "vm-noq",
+  "passed": false,
+  "rules": [
+    {
+      "name": "rss_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: 95th percentiles per quarter grow: [7664128000.000, 8555515904.000, 8793137152.000, 8991109120.000]"
+    },
+    {
+      "name": "fd_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "thread_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "wal_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "memtable_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "l0_growth",
+      "verdict": "info",
+      "detail": "not enforced in this run: no growth"
+    },
+    {
+      "name": "query_growth_list",
+      "verdict": "skipped",
+      "detail": "no samples after the warm-up"
+    },
+    {
+      "name": "query_growth_filter",
+      "verdict": "skipped",
+      "detail": "no samples after the warm-up"
+    },
+    {
+      "name": "query_growth_detail",
+      "verdict": "skipped",
+      "detail": "no samples after the warm-up"
+    },
+    {
+      "name": "query_growth_sessions",
+      "verdict": "skipped",
+      "detail": "no samples after the warm-up"
+    },
+    {
+      "name": "query_growth_metrics",
+      "verdict": "skipped",
+      "detail": "no samples after the warm-up"
+    },
+    {
+      "name": "query_growth_scores",
+      "verdict": "skipped",
+      "detail": "no samples after the warm-up"
+    },
+    {
+      "name": "rss_max",
+      "verdict": "fail",
+      "detail": "peak RSS 8.59 GiB above 8 GiB"
+    },
+    {
+      "name": "ingest_rate",
+      "verdict": "fail",
+      "detail": "ingest below 0.99 of target in windows: 26100s–29700s: 0.9898, 29700s–33300s: 0.9885, 33300s–36900s: 0.9885"
+    },
+    {
+      "name": "compaction_lag",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "day_close",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "retention",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "deletion_lag",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "orphans",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "wal_failed",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "sampling",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "appends",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "queries",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "deletions",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "retention_calls",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "log_errors",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "oracle",
+      "verdict": "pass",
+      "detail": ""
+    },
+    {
+      "name": "settled",
+      "verdict": "pass",
+      "detail": ""
+    }
+  ],
+  "stats": {
+    "elapsed_s": 44008.497108691,
+    "spans_per_s": 974.8990721959271,
+    "payload_bytes_per_span": 4632.408553961341,
+    "payload_total": 201776042941,
+    "scores_written": 852250,
+    "deletions": {
+      "registered": 84,
+      "applied": 84,
+      "pending_at_end": 0,
+      "lag_s": {
+        "p50": 420.416041978,
+        "p95": 1020.378617519,
+        "max": 1379.814651427
+      }
+    },
+    "retention_reports": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "shutdown_s": 2.443960717,
+    "reopen_s": 0.484350773,
+    "compaction_passes": 3,
+    "queries": {
+      "list": {
+        "n": 0,
+        "p50_ms_median_of_samples": 0.0,
+        "p95_ms_p95_of_samples": 0.0,
+        "max_ms": 0.0
+      },
+      "filter": {
+        "n": 0,
+        "p50_ms_median_of_samples": 0.0,
+        "p95_ms_p95_of_samples": 0.0,
+        "max_ms": 0.0
+      },
+      "detail": {
+        "n": 0,
+        "p50_ms_median_of_samples": 0.0,
+        "p95_ms_p95_of_samples": 0.0,
+        "max_ms": 0.0
+      },
+      "sessions": {
+        "n": 0,
+        "p50_ms_median_of_samples": 0.0,
+        "p95_ms_p95_of_samples": 0.0,
+        "max_ms": 0.0
+      },
+      "metrics": {
+        "n": 0,
+        "p50_ms_median_of_samples": 0.0,
+        "p95_ms_p95_of_samples": 0.0,
+        "max_ms": 0.0
+      },
+      "scores": {
+        "n": 0,
+        "p50_ms_median_of_samples": 0.0,
+        "p95_ms_p95_of_samples": 0.0,
+        "max_ms": 0.0
+      }
+    },
+    "rss_bytes": {
+      "min": 6773297152.0,
+      "median": 8521326592.0,
+      "p95": 8826339328.0,
+      "max": 9221603328.0
+    },
+    "fds": {
+      "min": 20.0,
+      "median": 20.0,
+      "p95": 23.0,
+      "max": 28.0
+    },
+    "wal_bytes": {
+      "min": 12209669.0,
+      "median": 129739362.0,
+      "p95": 187576029.0,
+      "max": 222791215.0
+    },
+    "memtable_bytes": {
+      "min": 0.0,
+      "median": 145922656.0,
+      "p95": 267386744.0,
+      "max": 359325330.0
+    },
+    "l0_files": {
+      "min": 0.0,
+      "median": 16.0,
+      "p95": 32.0,
+      "max": 32.0
+    },
+    "l0_oldest_age_s": {
+      "min": 0.0,
+      "median": 186.688791304,
+      "p95": 371.931018814,
+      "max": 411.810981371
+    },
+    "objects_bytes": {
+      "min": 4516055978.0,
+      "median": 23247908463.0,
+      "p95": 40016179729.0,
+      "max": 42224607731.0
+    },
+    "warn_messages_top20": []
+  }
+}

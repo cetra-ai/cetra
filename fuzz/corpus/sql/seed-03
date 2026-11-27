@@ -1,0 +1,1 @@
+SELECT t.release, s.name, avg(s.value_num) AS avg_score FROM scores s JOIN traces t ON s.trace_id = t.trace_id WHERE s.source = 'llm_judge' GROUP BY t.release, s.name ORDER BY t.release, s.name

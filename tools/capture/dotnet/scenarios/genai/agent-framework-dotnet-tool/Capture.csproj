@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Microsoft Agent Framework .NET 1.28.0 with one tool round against the capture
+       mock (IN8.4). Versions are exact pins; packages.lock.json records the resolved
+       graph. OpenAI is taken transitively (2.14.0 in the spike lock): no direct reference. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NoWarn>$(NoWarn);MAAI001;MEAI001;OPENAI001</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Agents.AI" Version="1.28.0" />
+    <PackageReference Include="Microsoft.Agents.AI.OpenAI" Version="1.28.0" />
+    <PackageReference Include="OpenTelemetry" Version="1.21.0" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.21.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../Harness/Harness.csproj" />
+  </ItemGroup>
+
+</Project>

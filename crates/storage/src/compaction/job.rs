@@ -6,8 +6,8 @@ use std::io::{Read as _, Seek as _, SeekFrom};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use arrow::array::RecordBatch;
-use cetra_core::schema::{scores_schema, spans_schema};
+use cetra_column::Batch;
+use cetra_query::tombstone::{TombstoneTable, covered_predicate};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -17,12 +17,12 @@ use crate::compaction::merge::{MergeContext, merge_slice};
 use crate::compaction::plan::{Job, JobKind, Policy, plan};
 use crate::compaction::slice::{slice_count, slices, time_values};
 use crate::counters::CompactionOutcome;
-use crate::deletion::covered_predicate;
+use crate::deletion::to_tombstone_specs;
 use crate::disk::Disk;
 use crate::error::{CommitError, CompactionError, ObjectError};
+use crate::file_format::{BatchFileWriter, footer_size_from_tail, time_column, write_file_batch};
 use crate::hooks::{HookPoint, Hooks};
 use crate::objects::Objects;
-use crate::parquet::{FileWriter, footer_size_from_tail, time_column, write_file};
 use crate::read_state::{Published, publish_catalog};
 use crate::verify::{VerifyQueue, may_be_corrupt};
 
@@ -221,9 +221,8 @@ impl Compactor {
                 let outcome = compactor.run(job, policy).await;
                 if let Err(error) = &outcome {
                     // A conflict's text is its static reason. Every other error
-                    // is named by its label only: a DataFusion error raised by a
-                    // plan holding the covered-row predicate may quote its
-                    // literals (spec 03 §7).
+                    // is named by its label only, so covered-row predicates
+                    // never leak literals into logs (spec 03 §7).
                     if matches!(error, CompactionError::Commit(CommitError::Conflict { .. })) {
                         tracing::info!(
                             table,
@@ -352,21 +351,20 @@ impl Compactor {
         // stays a candidate for the rewriter.
         let tombstones = Arc::clone(&self.published.load().tombstones);
         let known = tombstones.known_seq();
-        let covered = covered_predicate(
-            job.table,
-            &match job.table {
-                FileTable::Spans => spans_schema(),
-                FileTable::Scores => scores_schema(),
-                FileTable::Traces => {
-                    return Err(CompactionError::Input {
-                        reason: "traces are not merged",
-                    });
-                }
-            },
-            &tombstones.for_project(job.project),
-        )
-        .map_err(|_| CompactionError::Deletion {
-            reason: "building the deletion filter",
+        let (tombstone_table, col_schema) = match job.table {
+            FileTable::Spans => (TombstoneTable::Spans, job.table.column_schema()),
+            FileTable::Scores => (TombstoneTable::Scores, job.table.column_schema()),
+            FileTable::Traces => {
+                return Err(CompactionError::Input {
+                    reason: "traces are not merged",
+                });
+            }
+        };
+        let specs = to_tombstone_specs(&tombstones.for_project(job.project));
+        let covered = covered_predicate(tombstone_table, &col_schema, &specs).map_err(|_| {
+            CompactionError::Deletion {
+                reason: "building the deletion filter",
+            }
         })?;
         // A rewrite keeps its input's level: it replaces one file, not a
         // partition. Every other job writes level 1.
@@ -461,7 +459,7 @@ impl Compactor {
             }
 
             let (target, file) = self.objects.create_output(&path).await?;
-            let writer = match FileWriter::new(
+            let writer = match BatchFileWriter::new(
                 job.table,
                 level,
                 file,
@@ -565,9 +563,9 @@ impl Compactor {
                         reason: "traces are not merged",
                     });
                 };
-                let partials: Vec<Arc<RecordBatch>> = partials.into_iter().map(Arc::new).collect();
+                let partials: Vec<Arc<Batch>> = partials;
                 let written = tokio::task::spawn_blocking(move || {
-                    write_file(FileTable::Traces, level, &partials)
+                    write_file_batch(FileTable::Traces, level, &partials)
                 })
                 .await
                 .map_err(|_| CompactionError::Task)??;
@@ -686,11 +684,11 @@ pub(crate) mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use arrow::array::{AsArray, RecordBatch};
-    use cetra_core::batch::scores_to_record_batch;
+    use cetra_column::Batch;
+    use cetra_core::batch::scores_to_batch;
     use cetra_core::ids::ProjectId;
     use chrono::{Datelike, NaiveDate};
-    use datafusion::execution::context::{SessionConfig, SessionContext};
+    use serde_json::{Map, Value};
     use uuid::Uuid;
 
     use crate::Storage;
@@ -701,7 +699,8 @@ pub(crate) mod tests {
         WalConfig,
     };
     use crate::hooks::HookPoint;
-    use crate::test_support::{rows, span_row, span_rows};
+    use crate::reads::columns::{bool_at, i64_at, require_col, string_at};
+    use crate::test_support::{object_rows, rows, span_row, span_rows};
     use crate::views::QueryContext;
 
     const DAY_NS: i64 = 86_400_000_000_000;
@@ -763,7 +762,7 @@ pub(crate) mod tests {
     pub(crate) async fn flush_cycle(
         config: &StorageConfig,
         storage: Storage,
-        batch: RecordBatch,
+        batch: Batch,
     ) -> Storage {
         storage.append_spans(project(), batch).await.unwrap();
         storage.shutdown().await.unwrap();
@@ -773,7 +772,7 @@ pub(crate) mod tests {
     pub(crate) async fn flush_scores(
         config: &StorageConfig,
         storage: Storage,
-        batch: RecordBatch,
+        batch: Batch,
     ) -> Storage {
         storage.append_scores(project(), batch).await.unwrap();
         storage.shutdown().await.unwrap();
@@ -807,65 +806,44 @@ pub(crate) mod tests {
         text_rows(&rows(&ctx, sql).await)
     }
 
-    fn text_rows(batches: &[RecordBatch]) -> Vec<Vec<String>> {
-        let mut out = Vec::new();
-        for batch in batches {
-            let formatters: Vec<_> = (0..batch.num_columns())
-                .map(|index| {
-                    arrow::util::display::ArrayFormatter::try_new(
-                        batch.column(index),
-                        &arrow::util::display::FormatOptions::default(),
-                    )
-                    .unwrap()
-                })
-                .collect();
-            for row in 0..batch.num_rows() {
-                out.push(
-                    formatters
-                        .iter()
-                        .map(|column| column.value(row).to_string())
-                        .collect(),
-                );
-            }
-        }
-        out
+    fn text_rows(json_rows: &[Map<String, Value>]) -> Vec<Vec<String>> {
+        json_rows
+            .iter()
+            .map(|row| row.values().map(ToString::to_string).collect())
+            .collect()
     }
 
-    /// Rows of the raw provider behind the `traces` view, read with SQL.
-    async fn raw_traces(storage: &Storage, columns: &str) -> Vec<RecordBatch> {
+    /// `(trace_id, partial_count, span_count)` from the raw `traces` source.
+    async fn partial_counts(storage: &Storage) -> Vec<(Vec<u8>, i32, i64)> {
         let query = storage
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
-        let ctx =
-            SessionContext::new_with_config_rt(SessionConfig::new(), Arc::clone(&query.runtime));
-        ctx.register_table("traces", Arc::clone(&query.traces))
+        let (batches, _) = query
+            .engine()
+            .collect_batches(
+                Arc::clone(&query.engine().traces) as _,
+                cetra_query::exec::ScanSpec::default(),
+                Duration::from_secs(30),
+            )
+            .await
             .unwrap();
-        ctx.sql(&format!("SELECT {columns} FROM traces"))
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap()
-    }
-
-    /// `(trace_id, partial_count, span_count)` from the raw traces provider.
-    async fn partial_counts(storage: &Storage) -> Vec<(Vec<u8>, i32, i64)> {
-        let batches = raw_traces(storage, "trace_id, partial_count, span_count").await;
         let mut out = Vec::new();
         for batch in batches {
-            let ids = batch.column(0).as_fixed_size_binary();
-            let partials = batch
-                .column(1)
-                .as_primitive::<arrow::datatypes::Int32Type>();
-            let spans = batch
-                .column(2)
-                .as_primitive::<arrow::datatypes::Int64Type>();
+            let ids = batch
+                .column_by_name(cetra_core::schema::traces::TRACE_ID)
+                .unwrap();
+            let partials = require_col(&batch, cetra_core::schema::traces::PARTIAL_COUNT).unwrap();
+            let spans = require_col(&batch, cetra_core::schema::traces::SPAN_COUNT).unwrap();
             for row in 0..batch.num_rows() {
+                let id = match ids.get_scalar(row).unwrap() {
+                    cetra_column::ScalarValue::FixedBytes16(b) => b.to_vec(),
+                    other => panic!("unexpected trace_id: {other:?}"),
+                };
                 out.push((
-                    ids.value(row).to_vec(),
-                    partials.value(row),
-                    spans.value(row),
+                    id,
+                    i32::try_from(i64_at(&batch, partials, row).unwrap()).unwrap(),
+                    i64_at(&batch, spans, row).unwrap(),
                 ));
             }
         }
@@ -892,27 +870,14 @@ pub(crate) mod tests {
     pub(crate) fn score_file_rows(dir: &Path, storage: &Storage) -> Vec<(String, bool)> {
         let mut out = Vec::new();
         for file in storage.catalog_files(crate::wal::Table::Scores) {
-            let object = std::fs::File::open(dir.join("objects").join(&file.path)).unwrap();
-            let builder =
-                parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(object)
-                    .unwrap();
-            let schema = Arc::clone(builder.schema());
-            let batches: Vec<RecordBatch> = builder
-                .build()
-                .unwrap()
-                .map(|batch| batch.unwrap())
-                .collect();
-            let combined = arrow::compute::concat_batches(&schema, &batches).unwrap();
-            let ids = combined
-                .column_by_name(cetra_core::schema::scores::SCORE_ID)
-                .unwrap()
-                .as_string::<i32>();
-            let deleted = combined
-                .column_by_name(cetra_core::schema::scores::DELETED)
-                .unwrap()
-                .as_boolean();
+            let combined = object_rows(dir, &file);
+            let ids = require_col(&combined, cetra_core::schema::scores::SCORE_ID).unwrap();
+            let deleted = require_col(&combined, cetra_core::schema::scores::DELETED).unwrap();
             for row in 0..combined.num_rows() {
-                out.push((ids.value(row).to_owned(), deleted.value(row)));
+                out.push((
+                    string_at(&combined, ids, row).unwrap().unwrap(),
+                    bool_at(&combined, deleted, row).unwrap().unwrap(),
+                ));
             }
         }
         out.sort();
@@ -1026,7 +991,7 @@ pub(crate) mod tests {
             .parse_and_finish(&bytes::Bytes::from(bytes))
             .unwrap();
         assert_eq!(
-            crate::parquet::file_format_version(&metadata),
+            crate::file_format::file_format_version(&metadata),
             Some(crate::format::FORMAT_VERSION),
             "the L1 output carries the format version"
         );
@@ -1265,7 +1230,7 @@ pub(crate) mod tests {
             )],
         ];
         for batch in batches {
-            storage = flush_scores(config, storage, scores_to_record_batch(&batch).unwrap()).await;
+            storage = flush_scores(config, storage, scores_to_batch(&batch).unwrap()).await;
         }
         storage
     }

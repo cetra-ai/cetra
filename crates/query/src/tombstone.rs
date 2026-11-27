@@ -5,9 +5,11 @@
 
 use std::fmt;
 
-use cetra_column::{Batch, DataType, Reservation, ScalarValue, Schema};
+use cetra_column::{Batch, DataType, Reservation, ScalarValue, Schema, Selection};
 
-use crate::eval::{eval_filter, pool_size, reconcile_output, rollback_to, try_reserve};
+use crate::eval::{
+    bitmap_mem_bytes, eval_filter, pool_size, reconcile_output, rollback_to, try_reserve,
+};
 use crate::{BinaryOp, EvalContext, Expr, QueryError, UnaryOp};
 
 const COL_TRACE_ID: &str = "trace_id";
@@ -73,7 +75,7 @@ pub fn covered_predicate(
     schema: &Schema,
     deletions: &[TombstoneSpec],
 ) -> Result<Option<Expr>, QueryError> {
-    let mut covered: Option<Expr> = None;
+    let mut clauses: Vec<Expr> = Vec::with_capacity(deletions.len());
     for deletion in deletions {
         let mut terms: Vec<Expr> = Vec::new();
         if !deletion.trace_ids.is_empty() {
@@ -104,7 +106,7 @@ pub fn covered_predicate(
             sessions.dedup();
             terms.push(redacted_utf8_term(schema, COL_SESSION_ID, &sessions)?);
         }
-        let Some(mut expression) = or_together(terms) else {
+        let Some(mut expression) = or_balanced(terms) else {
             continue;
         };
         if table != TombstoneTable::Traces {
@@ -131,17 +133,9 @@ pub fn covered_predicate(
                 data_type: DataType::Bool,
             };
         }
-        covered = Some(match covered {
-            None => expression,
-            Some(existing) => Expr::Binary {
-                left: Box::new(existing),
-                op: BinaryOp::Or,
-                right: Box::new(expression),
-                data_type: DataType::Bool,
-            },
-        });
+        clauses.push(expression);
     }
-    Ok(covered)
+    Ok(or_balanced(clauses))
 }
 
 /// Drops rows matched by `predicate` from `batch` (updating `batch`'s `Selection` mask without copying payloads).
@@ -171,6 +165,14 @@ pub fn filter_uncovered(
     drop(covered);
     if let Some(res) = pool.as_deref_mut() {
         res.shrink(covered_bytes);
+    }
+    let out_sel_bytes = match batch.selection() {
+        Selection::Indices(idx) => idx.len().saturating_mul(size_of::<u32>()),
+        Selection::All | Selection::Mask(_) => bitmap_mem_bytes(batch.raw_len()),
+    };
+    if let Err(err) = try_reserve(&mut pool, out_sel_bytes) {
+        rollback_to(&mut pool, before);
+        return Err(err);
     }
     let out = match batch.filter_mask(&keep) {
         Ok(b) => b,
@@ -218,15 +220,28 @@ fn guarded_in_list(col: Expr, list: Vec<Expr>, redacted: bool) -> Expr {
     }
 }
 
-fn or_together(terms: Vec<Expr>) -> Option<Expr> {
-    let mut iter = terms.into_iter();
-    let first = iter.next()?;
-    Some(iter.fold(first, |acc, term| Expr::Binary {
-        left: Box::new(acc),
-        op: BinaryOp::Or,
-        right: Box::new(term),
-        data_type: DataType::Bool,
-    }))
+fn or_balanced(mut exprs: Vec<Expr>) -> Option<Expr> {
+    if exprs.is_empty() {
+        return None;
+    }
+    while exprs.len() > 1 {
+        let mut next = Vec::with_capacity(exprs.len().div_ceil(2));
+        let mut iter = exprs.into_iter();
+        while let Some(left) = iter.next() {
+            if let Some(right) = iter.next() {
+                next.push(Expr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::Or,
+                    right: Box::new(right),
+                    data_type: DataType::Bool,
+                });
+            } else {
+                next.push(left);
+            }
+        }
+        exprs = next;
+    }
+    exprs.pop()
 }
 
 fn column_index(schema: &Schema, name: &str) -> Result<usize, QueryError> {
@@ -282,10 +297,7 @@ mod tests {
     use crate::eval::eval_expr;
 
     fn ctx() -> EvalContext {
-        EvalContext {
-            now_ns: 0,
-            cancel: CancelToken::new(),
-        }
+        EvalContext::new(0, CancelToken::new())
     }
 
     fn tid(b: u8) -> [u8; 16] {
@@ -641,5 +653,52 @@ mod tests {
             Err(QueryError::TooLarge)
         ));
         assert_eq!(inv_res.size(), 0);
+    }
+
+    #[test]
+    fn covered_predicate_balances_many_deletions_without_stack_overflow() {
+        let schema = traces_stored_schema();
+        let count = 2_000usize;
+        let specs: Vec<TombstoneSpec> = (0..count)
+            .map(|i| {
+                let mut id = [0u8; 16];
+                id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                TombstoneSpec {
+                    cutoff: i as i64,
+                    trace_ids: vec![id],
+                    users: vec![],
+                    sessions: vec![],
+                }
+            })
+            .collect();
+        let pred = covered_predicate(TombstoneTable::Traces, &schema, &specs)
+            .unwrap()
+            .unwrap();
+
+        fn or_tree_depth(e: &Expr) -> usize {
+            match e {
+                Expr::Binary {
+                    left,
+                    op: BinaryOp::Or,
+                    right,
+                    ..
+                } => 1 + or_tree_depth(left).max(or_tree_depth(right)),
+                _ => 0,
+            }
+        }
+        assert!(or_tree_depth(&pred) <= 12, "OR tree depth was unbalanced");
+
+        let mut hit = [0u8; 16];
+        hit[..8].copy_from_slice(&((count - 1) as u64).to_be_bytes());
+        let miss = [0xffu8; 16];
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![Column::Flat(
+                FlatColumn::try_new(FlatData::FixedBytes16(vec![hit, miss]), None).unwrap(),
+            )],
+            2,
+        )
+        .unwrap();
+        assert_eq!(eval_bools(&pred, &batch), vec![Some(true), Some(false)]);
     }
 }

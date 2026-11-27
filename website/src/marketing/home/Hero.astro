@@ -1,28 +1,31 @@
 ---
-import traceView from "../../assets/screenshots/marketing-trace-view.png";
 import Button from "../components/Button.astro";
 import CopyCommand from "../components/CopyCommand.astro";
-import Frame from "../components/Frame.astro";
 import Section from "../components/Section.astro";
+import StoryPicture from "../components/StoryPicture.astro";
 import { CLOUD, DEMO_URL, INSTALL_COMMANDS } from "../site";
 ---
 
 <Section tone="ink" pad="lg" id="top" labelledby="hero-title">
   <div class="hero">
-    <div class="text">
+    <div class="title">
       <p class="eyebrow">Open-source LLM observability</p>
       <h1 id="hero-title" class="hero-title">LLM observability you run yourself.<br /><span class="accent">In a minute.</span></h1>
+    </div>
+    <div class="pitch">
       <p class="lede">Traces, evaluations, prompts, issues and alerts for your AI app, in one binary. Nothing else to install or babysit, and your data stays on your server. Or let us run it in cetra Cloud.</p>
       <div class="actions">
         <Button href={DEMO_URL} size="lg" external>Try the demo</Button>
         <Button href={CLOUD.signup} size="lg" variant="secondary" external>Start free</Button>
       </div>
       <p class="small muted">The demo is the real cetra UI on sample data. No sign-up.</p>
-      <p class="eyebrow self-host">Or self-host it</p>
+    </div>
+    <div class="install">
+      <p class="eyebrow">Or self-host it</p>
       <CopyCommand id="hero-install" commands={INSTALL_COMMANDS} note="What does this run?" noteHref="/docs/self-hosting/install/" />
     </div>
     <div class="visual">
-      <Frame src={traceView} alt="The cetra trace view: the span tree of a handoff trace with durations and costs, and the root span's input and output." label="Traces · Support bot" bleed eager />
+      <StoryPicture picture="hero" fade={false} eager />
     </div>
   </div>
 </Section>
@@ -32,7 +35,9 @@ import { CLOUD, DEMO_URL, INSTALL_COMMANDS } from "../site";
     display: grid;
     grid-template-columns: minmax(0, 1fr);
   }
-  .text,
+  .title,
+  .pitch,
+  .install,
   .visual {
     min-width: 0;
   }
@@ -57,14 +62,45 @@ import { CLOUD, DEMO_URL, INSTALL_COMMANDS } from "../site";
     font-size: var(--text-xs);
     margin-top: var(--space-3);
   }
-  .self-host {
+  .install {
     margin-top: var(--space-7);
   }
-  .text :global(.copy) {
+  .install :global(.copy) {
     max-width: 640px;
-    margin-top: var(--space-6);
+    margin-top: var(--space-4);
   }
   .visual {
     margin-top: var(--space-8);
+  }
+  /* Wide screens: the title on the left and the pitch beside it; the install command and the story picture below,
+     across both. "LLM observability", about 8.1em wide, shrinks to stay on one line. */
+  @media (min-width: 1100px) {
+    .hero {
+      grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+      column-gap: var(--space-8);
+      align-items: end;
+    }
+    .title {
+      container-type: inline-size;
+    }
+    .hero-title {
+      font-size: min(var(--text-hero), 100cqi / 8.2);
+    }
+    .lede {
+      margin-top: 0;
+    }
+    .install,
+    .visual {
+      grid-column: 1 / -1;
+    }
+    /* The install command is centred, like the story tabs and picture under it. */
+    .install {
+      justify-self: center;
+      width: min(100%, 640px);
+      text-align: center;
+    }
+    .install :global(.copy) {
+      text-align: left;
+    }
   }
 </style>

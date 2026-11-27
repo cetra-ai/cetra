@@ -25,6 +25,17 @@ pub struct Interval {
     pub nanos: i64,
 }
 
+impl Interval {
+    /// Canonical nanosecond key (`30` days per month, `86_400_000_000_000` ns per day)
+    /// for Postgres/DataFusion-compatible interval comparison and hashing while preserving
+    /// exact `(months, days, nanos)` fields for serialization and calendar arithmetic.
+    pub const fn canonical_key(&self) -> i128 {
+        self.months as i128 * 30 * 86_400_000_000_000
+            + self.days as i128 * 86_400_000_000_000
+            + self.nanos as i128
+    }
+}
+
 /// Concrete data types supported by `cetra-column`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DataType {
@@ -630,5 +641,53 @@ mod tests {
             values: vec![ScalarValue::Utf8("wrong".into())],
         };
         assert!(bad_list.validate(MAX_NESTING_DEPTH).is_err());
+    }
+
+    #[test]
+    fn interval_canonical_key_matches_equivalent_durations() {
+        let one_day = Interval {
+            months: 0,
+            days: 1,
+            nanos: 0,
+        };
+        let day_nanos = Interval {
+            months: 0,
+            days: 0,
+            nanos: 86_400_000_000_000,
+        };
+        assert_eq!(one_day.canonical_key(), day_nanos.canonical_key());
+
+        let one_month = Interval {
+            months: 1,
+            days: 0,
+            nanos: 0,
+        };
+        let thirty_days = Interval {
+            months: 0,
+            days: 30,
+            nanos: 0,
+        };
+        assert_eq!(one_month.canonical_key(), thirty_days.canonical_key());
+
+        let min_iv = Interval {
+            months: i32::MIN,
+            days: i32::MIN,
+            nanos: i64::MIN,
+        };
+        let max_iv = Interval {
+            months: i32::MAX,
+            days: i32::MAX,
+            nanos: i64::MAX,
+        };
+        let expected_min = (i32::MIN as i128) * 30 * 86_400_000_000_000
+            + (i32::MIN as i128) * 86_400_000_000_000
+            + (i64::MIN as i128);
+        let expected_max = (i32::MAX as i128) * 30 * 86_400_000_000_000
+            + (i32::MAX as i128) * 86_400_000_000_000
+            + (i64::MAX as i128);
+        assert_eq!(min_iv.canonical_key(), expected_min);
+        assert_eq!(max_iv.canonical_key(), expected_max);
+        assert!(min_iv.canonical_key() < 0);
+        assert!(max_iv.canonical_key() > 0);
     }
 }

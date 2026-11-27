@@ -891,13 +891,6 @@
   ],
   "functions": [
     {
-      "name": "now",
-      "signature": "now() -> timestamp",
-      "description": "Current time.",
-      "in_filter": true,
-      "in_sql": true
-    },
-    {
       "name": "lower",
       "signature": "lower(value: string) -> string",
       "description": "Lowercase a string.",
@@ -914,28 +907,126 @@
     {
       "name": "length",
       "signature": "length(value: string) -> integer",
-      "description": "Number of characters.",
+      "description": "Number of UTF-8 characters.",
       "in_filter": true,
       "in_sql": true
     },
     {
-      "name": "coalesce",
-      "signature": "coalesce(value: any, fallback: any) -> any",
-      "description": "First non-null argument.",
-      "in_filter": true,
+      "name": "substr",
+      "signature": "substr(value: string, start: integer [, count: integer]) -> string",
+      "description": "Extract a substring (1-based start).",
+      "in_filter": false,
       "in_sql": true
     },
     {
-      "name": "array_has",
-      "signature": "array_has(array: string_list, value: string) -> boolean",
-      "description": "Whether the list contains the value.",
-      "in_filter": true,
+      "name": "trim",
+      "signature": "trim(value: string [, chars: string]) -> string",
+      "description": "Trim leading and trailing characters.",
+      "in_filter": false,
       "in_sql": true
     },
     {
-      "name": "array_length",
-      "signature": "array_length(array: string_list) -> integer",
-      "description": "Number of elements.",
+      "name": "ltrim",
+      "signature": "ltrim(value: string [, chars: string]) -> string",
+      "description": "Trim leading characters.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "rtrim",
+      "signature": "rtrim(value: string [, chars: string]) -> string",
+      "description": "Trim trailing characters.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "left",
+      "signature": "left(value: string, n: integer) -> string",
+      "description": "First n characters of a string.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "right",
+      "signature": "right(value: string, n: integer) -> string",
+      "description": "Last n characters of a string.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "split_part",
+      "signature": "split_part(value: string, delimiter: string, part: integer) -> string",
+      "description": "Split a string and return the 1-based part.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "concat",
+      "signature": "concat(value: any, ...) -> string",
+      "description": "Concatenate values as a string.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "concat_ws",
+      "signature": "concat_ws(separator: string, value: any, ...) -> string",
+      "description": "Concatenate non-null values with a separator.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "starts_with",
+      "signature": "starts_with(value: string, prefix: string) -> boolean",
+      "description": "Whether value starts with prefix.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "ends_with",
+      "signature": "ends_with(value: string, suffix: string) -> boolean",
+      "description": "Whether value ends with suffix.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "contains",
+      "signature": "contains(value: string, substring: string) -> boolean",
+      "description": "Whether value contains substring.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "strpos",
+      "signature": "strpos(value: string, substring: string) -> integer",
+      "description": "1-based position of substring, or 0 if absent.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "regexp_like",
+      "signature": "regexp_like(value: string, pattern: string [, flags: string]) -> boolean",
+      "description": "Whether value matches a regular expression.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "regexp_extract",
+      "signature": "regexp_extract(value: string, pattern: string [, flags: string]) -> string",
+      "description": "Extract the first match or capture group.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "encode",
+      "signature": "encode(value: binary | string, encoding: string) -> string",
+      "description": "Encode bytes using hex or base64.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "now",
+      "signature": "now() -> timestamp",
+      "description": "Current query timestamp.",
       "in_filter": true,
       "in_sql": true
     },
@@ -947,10 +1038,325 @@
       "in_sql": true
     },
     {
+      "name": "date_bin",
+      "signature": "date_bin(stride: interval, time: timestamp [, origin: timestamp]) -> timestamp",
+      "description": "Bin a timestamp to fixed stride boundaries.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "extract",
+      "signature": "extract(field: string, value: timestamp | date | interval) -> integer | float",
+      "description": "Extract a calendar field from a timestamp, date, or interval.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "to_timestamp",
+      "signature": "to_timestamp(value: integer | float | string | timestamp) -> timestamp",
+      "description": "Convert epoch seconds or string to a UTC timestamp.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
       "name": "abs",
-      "signature": "abs(value: float) -> float",
+      "signature": "abs(value: number) -> number",
       "description": "Absolute value.",
       "in_filter": true,
+      "in_sql": true
+    },
+    {
+      "name": "round",
+      "signature": "round(value: number [, digits: integer]) -> number",
+      "description": "Round a number to digits decimal places.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "floor",
+      "signature": "floor(value: number) -> number",
+      "description": "Largest integer not greater than value.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "ceil",
+      "signature": "ceil(value: number) -> number",
+      "description": "Smallest integer not less than value.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "sqrt",
+      "signature": "sqrt(value: float) -> float",
+      "description": "Square root.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "ln",
+      "signature": "ln(value: float) -> float",
+      "description": "Natural logarithm.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "log10",
+      "signature": "log10(value: float) -> float",
+      "description": "Base-10 logarithm.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "power",
+      "signature": "power(base: float, exponent: float) -> float",
+      "description": "Raise base to exponent.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "coalesce",
+      "signature": "coalesce(value: any, fallback: any, ...) -> any",
+      "description": "First non-null argument.",
+      "in_filter": true,
+      "in_sql": true
+    },
+    {
+      "name": "nullif",
+      "signature": "nullif(a: any, b: any) -> any",
+      "description": "Return null when a equals b, else a.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "greatest",
+      "signature": "greatest(value: any, ...) -> any",
+      "description": "Largest non-null argument.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "least",
+      "signature": "least(value: any, ...) -> any",
+      "description": "Smallest non-null argument.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "isnan",
+      "signature": "isnan(value: float) -> boolean",
+      "description": "Whether value is IEEE NaN.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "isfinite",
+      "signature": "isfinite(value: float) -> boolean",
+      "description": "Whether value is finite (not NaN or infinite).",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "array_has",
+      "signature": "array_has(array: list, value: any) -> boolean",
+      "description": "Whether the list contains the value.",
+      "in_filter": true,
+      "in_sql": true
+    },
+    {
+      "name": "array_has_all",
+      "signature": "array_has_all(array: list, subset: list) -> boolean",
+      "description": "Whether array contains every element of subset.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "array_length",
+      "signature": "array_length(array: list [, dim: integer]) -> integer",
+      "description": "Number of elements.",
+      "in_filter": true,
+      "in_sql": true
+    },
+    {
+      "name": "array_element",
+      "signature": "array_element(array: list, index: integer) -> any",
+      "description": "1-based element of a list.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "array_to_string",
+      "signature": "array_to_string(array: list, delimiter: string [, null_str: string]) -> string",
+      "description": "Join list elements into a string.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "array_distinct",
+      "signature": "array_distinct(array: list) -> list",
+      "description": "Remove duplicate elements from a list.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "map_keys",
+      "signature": "map_keys(map: string_map) -> string_list",
+      "description": "Sorted keys of a string map.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "map_values",
+      "signature": "map_values(map: string_map) -> string_list",
+      "description": "Values of a string map in key order.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "json_get",
+      "signature": "json_get(json: string, key: string | integer) -> string",
+      "description": "Get JSON object field or array element as JSON text.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "json_get_text",
+      "signature": "json_get_text(json: string, key: string | integer) -> string",
+      "description": "Get JSON object field or array element as unquoted text.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "json_extract",
+      "signature": "json_extract(json: string, path: string) -> string",
+      "description": "Extract JSONPath value as JSON text.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "json_extract_text",
+      "signature": "json_extract_text(json: string, path: string) -> string",
+      "description": "Extract JSONPath value as unquoted text.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "count",
+      "signature": "count([DISTINCT] value: any | *) -> integer",
+      "description": "Count rows or non-null values.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "sum",
+      "signature": "sum(value: number) -> number",
+      "description": "Sum of non-null values.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "avg",
+      "signature": "avg(value: number) -> float | decimal",
+      "description": "Arithmetic mean of non-null values.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "min",
+      "signature": "min(value: any) -> any",
+      "description": "Minimum non-null value.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "max",
+      "signature": "max(value: any) -> any",
+      "description": "Maximum non-null value.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "approx_percentile_cont",
+      "signature": "approx_percentile_cont(value: number, quantile: float) -> float",
+      "description": "Approximate continuous percentile via DDSketch.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "percentile_cont",
+      "signature": "percentile_cont(quantile: float) WITHIN GROUP (ORDER BY value) -> float",
+      "description": "Exact interpolated continuous percentile.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "bool_or",
+      "signature": "bool_or(value: boolean) -> boolean",
+      "description": "True if any non-null value is true.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "bool_and",
+      "signature": "bool_and(value: boolean) -> boolean",
+      "description": "True if all non-null values are true.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "array_agg",
+      "signature": "array_agg([DISTINCT] value: any) -> list",
+      "description": "Collect non-null values into a list.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "row_number",
+      "signature": "row_number() OVER (...) -> integer",
+      "description": "Sequential 1-based row number within each partition.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "rank",
+      "signature": "rank() OVER (...) -> integer",
+      "description": "1-based rank with gaps for ties.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "dense_rank",
+      "signature": "dense_rank() OVER (...) -> integer",
+      "description": "1-based rank without gaps for ties.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "lag",
+      "signature": "lag(value: any [, offset: integer [, default: any]]) OVER (...) -> any",
+      "description": "Value from a preceding row in the partition.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "lead",
+      "signature": "lead(value: any [, offset: integer [, default: any]]) OVER (...) -> any",
+      "description": "Value from a following row in the partition.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "first_value",
+      "signature": "first_value(value: any) OVER (...) -> any",
+      "description": "Value at the first row of the window frame.",
+      "in_filter": false,
+      "in_sql": true
+    },
+    {
+      "name": "last_value",
+      "signature": "last_value(value: any) OVER (...) -> any",
+      "description": "Value at the last row of the window frame.",
+      "in_filter": false,
       "in_sql": true
     },
     {

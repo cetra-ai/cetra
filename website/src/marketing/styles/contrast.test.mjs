@@ -75,6 +75,10 @@ const pairs = [
   ["--c-stone-400", "--c-ink-0"],
   ["--c-paper", "#2a2a2a"],
   ["--c-stone-400", "#2a2a2a"],
+  ["--c-code-string", "--c-ink-2"],
+  ["--c-code-constant", "--c-ink-2"],
+  ["--c-code-function", "--c-ink-2"],
+  ["--c-stone-300", "--c-ink-2"],
 ];
 
 test("text pairs meet 4.5:1", () => {

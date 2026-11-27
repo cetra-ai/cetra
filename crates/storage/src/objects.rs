@@ -4,8 +4,7 @@
 //! reads only. Local `put_durable` writes a temp file, `sync_all`s it, renames
 //! it into place, and fsyncs the directory. Remote writes go through the store.
 //!
-//! `Storage::open` builds one [`Objects`], removes leftover local temp files,
-//! and registers the store on the shared query runtime.
+//! `Storage::open` builds one [`Objects`] and removes leftover local temp files.
 
 #![allow(dead_code)]
 
@@ -19,8 +18,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bytes::Bytes;
 use cetra_core::ids::ProjectId;
 use chrono::NaiveDate;
-use datafusion::execution::object_store::ObjectStoreUrl as RegisteredUrl;
-use datafusion::execution::runtime_env::RuntimeEnv;
 use object_store::aws::AmazonS3Builder;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
@@ -37,13 +34,6 @@ use crate::fs::{self, OpenOptions};
 use crate::hooks::{HookPoint, Hooks};
 use crate::read_cache::{CacheStore, ReadCache, cached_name};
 use tokio::io::AsyncReadExt;
-
-/// DataFusion keys a registered store by scheme, host, and port. The path is
-/// not part of that key, and [`RegisteredUrl::parse`] rejects any path other
-/// than empty or `/`.
-///
-/// File URLs used by the providers are `cetra://objects/tables/...`.
-pub(crate) const OBJECT_STORE_URL: &str = "cetra://objects";
 
 /// The marker [`Objects::probe`] HEADs and, if that fails, writes (D-N-36). Outside
 /// `tables/` and `media/`, so GC, orphan collection and backups never see it.
@@ -81,12 +71,11 @@ pub(crate) struct Objects {
     kind: Kind,
     /// The store itself: S3, or a test store standing in for it.
     raw: Arc<dyn ObjectStore>,
-    /// `raw` behind the read cache (spec 03 §6), or `raw` itself. Registered
-    /// with DataFusion, so queries, compaction and GC read through the cache.
+    /// `raw` behind the read cache (spec 03 §6), or `raw` itself. Used by
+    /// queries, compaction and GC so reads go through the cache.
     store: Arc<dyn ObjectStore>,
     /// Set by [`Self::with_read_cache`], remote stores only.
     cache: Option<Arc<ReadCache>>,
-    url: RegisteredUrl,
     /// `<data_dir>/tmp/compaction`, where remote outputs spill before upload.
     spill_dir: PathBuf,
     hooks: Hooks,
@@ -115,7 +104,6 @@ impl Objects {
     /// directory of the chain is fsynced, new or not (see `create_dir_chain`).
     /// Blocking work runs on `spawn_blocking`.
     pub(crate) async fn new(config: &StorageConfig, hooks: Hooks) -> Result<Self, ObjectError> {
-        let url = registered_url()?;
         let spill_dir = config.data_dir.join("tmp").join("compaction");
         match config.object_store_url() {
             ObjectStoreUrl::Local(root) => {
@@ -136,7 +124,6 @@ impl Objects {
                     raw: Arc::clone(&store),
                     store,
                     cache: None,
-                    url,
                     spill_dir,
                     hooks,
                     sync_failed: Arc::new(AtomicBool::new(false)),
@@ -151,7 +138,6 @@ impl Objects {
                     raw: Arc::clone(&store),
                     store,
                     cache: None,
-                    url,
                     spill_dir,
                     hooks,
                     sync_failed: Arc::new(AtomicBool::new(false)),
@@ -199,7 +185,6 @@ impl Objects {
             raw: Arc::clone(&store),
             store,
             cache: None,
-            url: registered_url()?,
             spill_dir: data_dir.join("tmp").join("compaction"),
             hooks,
             sync_failed: Arc::new(AtomicBool::new(false)),
@@ -252,16 +237,6 @@ impl Objects {
                 Err(ProbeError::Unreachable)
             }
         }
-    }
-
-    /// Registers `store` under [`OBJECT_STORE_URL`].
-    pub(crate) fn register(&self, runtime: &RuntimeEnv) {
-        runtime.register_object_store(self.url.as_ref(), Arc::clone(&self.store));
-    }
-
-    /// The URL passed to [`Self::register`].
-    pub(crate) fn url(&self) -> &RegisteredUrl {
-        &self.url
     }
 
     /// The object store, for async Parquet reads at open.
@@ -742,10 +717,6 @@ impl OutputTarget {
 #[allow(clippy::clone_on_copy)]
 fn clone_hooks(hooks: &Hooks) -> Hooks {
     hooks.clone()
-}
-
-fn registered_url() -> Result<RegisteredUrl, ObjectError> {
-    RegisteredUrl::parse(OBJECT_STORE_URL).map_err(|_| ObjectError::InvalidPath)
 }
 
 fn prepare_local_root(
@@ -1304,11 +1275,10 @@ mod tests {
     use bytes::Bytes;
     use cetra_core::ids::ProjectId;
     use chrono::NaiveDate;
-    use datafusion::execution::runtime_env::RuntimeEnv;
     use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
 
-    use super::{OBJECT_STORE_URL, PutSizes, is_temp_name, put_multi};
+    use super::{PutSizes, is_temp_name, put_multi};
     use crate::catalog::FileTable;
     use crate::config::{
         FlushConfig, MemtableConfig, ObjectStoreUrl, QueryConfig, S3Config, StorageConfig,
@@ -1369,11 +1339,15 @@ mod tests {
     }
 
     async fn read_registered(objects: &Objects, key: &str) -> Bytes {
-        let runtime = RuntimeEnv::default();
-        objects.register(&runtime);
-        let store = runtime.object_store(objects.url()).unwrap();
         let location = object_store::path::Path::parse(key).unwrap();
-        store.get(&location).await.unwrap().bytes().await.unwrap()
+        objects
+            .store()
+            .get(&location)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
     }
 
     fn temps(root: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -1583,7 +1557,6 @@ mod tests {
         let landed = read_registered(&objects, "tables/spans/f.parquet").await;
         assert_eq!(landed.len(), SIZES.single_max + 1);
         assert_eq!(objects.remove_temp_files().unwrap(), 0);
-        assert_eq!(OBJECT_STORE_URL, "cetra://objects");
     }
 
     #[tokio::test]

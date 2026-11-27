@@ -120,6 +120,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "sql"
+path = "fuzz_targets/sql.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "statam_file"
 path = "fuzz_targets/statam_file.rs"
 test = false

@@ -1,0 +1,70 @@
+---
+title: Vertex AI
+description: "Trace Gemini on Vertex AI with cetra from Python, through the Google Gen AI SDK."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace Gemini on Vertex AI with cetra from Python, through the Google Gen AI SDK.
+
+<Backing fixtures={["openinference/vertex-ai-chat"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[google-genai]" google-genai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls Vertex AI and needs GOOGLE_CLOUD_PROJECT */}
+```python
+import os
+
+import cetra
+from google import genai
+
+cetra.init(instrument=["google-genai"])
+
+client = genai.Client(vertexai=True, project=os.environ["GOOGLE_CLOUD_PROJECT"], location="us-central1")
+response = client.models.generate_content(
+    model="gemini-2.5-flash",
+    contents="What is the capital of France?",
+)
+print(response.text)
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- Each `generateContent` call is an `llm` span with the provider `gcp.gen_ai`.
+- Input and output token counts come from the response.
+- Cost comes from the built-in Gemini or Vertex AI price for the model.
+
+## Limits
+
+- The provider is `gcp.gen_ai`, the same as for the Gemini API: the spans do not say which Google endpoint served the call.
+- Through Vertex AI's OpenAI-compatible endpoint on a regional host (`<REGION>-aiplatform.googleapis.com`), the provider shows as `openai`; only the global `aiplatform.googleapis.com` host is mapped.
+- Calling Vertex AI needs a Google Cloud project and credentials. The fixtures were captured against cetra's mock.
+- The fixtures were captured with google-genai 2.34.0 and openinference-instrumentation-google-genai 1.5.0.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.

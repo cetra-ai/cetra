@@ -314,7 +314,8 @@ export const FEATURE_GROUPS = [
         selfHosted: BOTH,
       },
       {
-        label: "Tracing for Claude Code, Codex, Gemini CLI and Copilot",
+        label:
+          "Tracing for Claude Code, Codex, Gemini CLI, Copilot, Qwen Code, Pi, OpenClaw, OpenCode, Goose and Oh My Pi",
         doc: "integrations",
         cloud: ALL,
         selfHosted: BOTH,

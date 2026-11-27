@@ -15,7 +15,7 @@ it("keeps query placeholders byte for byte", () => {
   expect(formatted).toContain("{limit:Int64}");
 });
 
-it("keeps DataFusion syntax intact", () => {
+it("keeps SQL syntax intact", () => {
   const formatted = formatSql(
     "select approx_percentile_cont(duration_ms, 0.5), metadata['key'], date_trunc('day', start_time), x::BIGINT from spans",
     ["approx_percentile_cont"],

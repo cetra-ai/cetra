@@ -1,0 +1,1105 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "python"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.45.2"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "openinference.instrumentation.beeai",
+            "version": "0.1.85",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "2c033fcebdf10ec5eecd67b6b33cf061",
+              "spanId": "5a3f4fa075ee196f",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "weather-agent",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590262000000",
+              "attributes": [
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"input\": \"What is the weather in Paris?\"}"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "metadata.class_name",
+                  "value": {
+                    "stringValue": "RequirementAgent"
+                  }
+                },
+                {
+                  "key": "agent.name",
+                  "value": {
+                    "stringValue": "weather-agent"
+                  }
+                },
+                {
+                  "key": "metadata.agent_description",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "metadata.memory.name",
+                  "value": {
+                    "stringValue": "UnconstrainedMemory"
+                  }
+                },
+                {
+                  "key": "metadata.steps.0.id",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "metadata.steps.0.iteration",
+                  "value": {
+                    "stringValue": "1"
+                  }
+                },
+                {
+                  "key": "metadata.steps.0.tool.name",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "metadata.steps.0.tool.description",
+                  "value": {
+                    "stringValue": "Look up the weather for a city."
+                  }
+                },
+                {
+                  "key": "metadata.steps.0.tool.input_schema.properties.city.title",
+                  "value": {
+                    "stringValue": "City"
+                  }
+                },
+                {
+                  "key": "metadata.steps.0.tool.input_schema.properties.city.type",
+                  "value": {
+                    "stringValue": "string"
+                  }
+                },
+                {
+                  "key": "metadata.steps.0.tool.input_schema.required.0",
+                  "value": {
+                    "stringValue": "city"
+                  }
+                },
+                {
+                  "key": "metadata.steps.0.tool.input_schema.title",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "metadata.steps.0.tool.input_schema.type",
+                  "value": {
+                    "stringValue": "object"
+                  }
+                },
+                {
+                  "key": "metadata.steps.0.input.city",
+                  "value": {
+                    "stringValue": "Paris"
+                  }
+                },
+                {
+                  "key": "metadata.steps.0.output",
+                  "value": {
+                    "stringValue": "sunny in Paris"
+                  }
+                },
+                {
+                  "key": "metadata.steps.1.id",
+                  "value": {
+                    "stringValue": "capture-volatile-2"
+                  }
+                },
+                {
+                  "key": "metadata.steps.1.iteration",
+                  "value": {
+                    "stringValue": "2"
+                  }
+                },
+                {
+                  "key": "metadata.steps.1.tool.name",
+                  "value": {
+                    "stringValue": "final_answer"
+                  }
+                },
+                {
+                  "key": "metadata.steps.1.tool.description",
+                  "value": {
+                    "stringValue": "Sends the final answer to the user"
+                  }
+                },
+                {
+                  "key": "metadata.steps.1.tool.input_schema.properties.response.description",
+                  "value": {
+                    "stringValue": "The final answer to the user"
+                  }
+                },
+                {
+                  "key": "metadata.steps.1.tool.input_schema.properties.response.title",
+                  "value": {
+                    "stringValue": "Response"
+                  }
+                },
+                {
+                  "key": "metadata.steps.1.tool.input_schema.properties.response.type",
+                  "value": {
+                    "stringValue": "string"
+                  }
+                },
+                {
+                  "key": "metadata.steps.1.tool.input_schema.required.0",
+                  "value": {
+                    "stringValue": "response"
+                  }
+                },
+                {
+                  "key": "metadata.steps.1.tool.input_schema.title",
+                  "value": {
+                    "stringValue": "FinalAnswerToolSchema"
+                  }
+                },
+                {
+                  "key": "metadata.steps.1.tool.input_schema.type",
+                  "value": {
+                    "stringValue": "object"
+                  }
+                },
+                {
+                  "key": "metadata.steps.1.input.response",
+                  "value": {
+                    "stringValue": "Sunny in Paris"
+                  }
+                },
+                {
+                  "key": "metadata.steps.1.output",
+                  "value": {
+                    "stringValue": "Message has been sent"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "Sunny in Paris"
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "text/plain"
+                  }
+                },
+                {
+                  "key": "metadata.result.response",
+                  "value": {
+                    "stringValue": "Sunny in Paris"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "AGENT"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590026000000",
+                  "name": "start (agent.requirement.start)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590215000000",
+                  "name": "success (agent.requirement.success)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590215000000",
+                  "name": "start (agent.requirement.start)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590259000000",
+                  "name": "final_answer (agent.requirement.final_answer)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590261000000",
+                  "name": "success (agent.requirement.success)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "2c033fcebdf10ec5eecd67b6b33cf061",
+              "spanId": "21f43c26607a4563",
+              "traceState": "",
+              "parentSpanId": "5a3f4fa075ee196f",
+              "flags": 256,
+              "name": "OpenAIChatModel",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590027000000",
+              "endTimeUnixNano": "1767225590214000000",
+              "attributes": [
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"input\": [{\"role\": \"system\", \"content\": \"# Role\\nAssume the role of a helpful AI assistant.\\n\\n# Instructions\\nYou are a weather assistant.\\nWhen the user sends a message, figure out a solution and provide a final answer to the user by calling the 'final_answer' tool.\\n\\nIMPORTANT: The facts mentioned in the final answer must be backed by evidence provided by relevant tool outputs.\\n\\n# Tools\\nYou must use a tool to retrieve factual or historical information.\\nNever use the tool twice with the same input if not stated otherwise.\\n\\nName: get_weather\\nDescription: Look up the weather for a city.\\nAllowed: True\\n\\nName: final_answer\\nDescription: Sends the final answer to the user\\nAllowed: True\\n\\n\\n# Notes\\n- Use markdown syntax to format code snippets, links, JSON, tables, images, and files.\\n- If the provided task is unclear, ask the user for clarification.\\n- Do not refer to tools or tool outputs by name when responding.\\n- Always take it one step at a time. Don't try to do multiple things at once.\\n- When the tool doesn't give you what you were asking for, you must either use another tool or a different tool input.\\n- You should always try a few different approaches before declaring the problem unsolvable.\\n- If you can't fully answer the user's question, answer partially and describe what you couldn't achieve.\\n- You cannot do complex calculations, computations, or data manipulations without using tools.\\n- The current date and time is: 2026-11-23\\n\"}, {\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Your task: What is the weather in Paris?\"}]}], \"fallback_tool\": {\"name\": \"final_answer\", \"description\": \"Sends the final answer to the user\", \"input_schema\": {\"properties\": {\"response\": {\"description\": \"The final answer to the user\", \"title\": \"Response\", \"type\": \"string\"}}, \"required\": [\"response\"], \"title\": \"FinalAnswerToolSchema\", \"type\": \"object\"}}, \"cache_control_injection_points\": [{\"location\": \"message\", \"index\": 0}, {\"location\": \"message\", \"index\": 1}], \"max_retries\": 3, \"tool_choice\": \"required\", \"tools\": [{\"name\": \"get_weather\", \"description\": \"Look up the weather for a city.\", \"input_schema\": {\"properties\": {\"city\": {\"title\": \"City\", \"type\": \"string\"}}, \"required\": [\"city\"], \"title\": \"get_weather\", \"type\": \"object\"}}, {\"name\": \"final_answer\", \"description\": \"Sends the final answer to the user\", \"input_schema\": {\"properties\": {\"response\": {\"description\": \"The final answer to the user\", \"title\": \"Response\", \"type\": \"string\"}}, \"required\": [\"response\"], \"title\": \"FinalAnswerToolSchema\", \"type\": \"object\"}}], \"stream_partial_tool_calls\": true}"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "metadata.class_name",
+                  "value": {
+                    "stringValue": "OpenAIChatModel"
+                  }
+                },
+                {
+                  "key": "llm.model_name",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "llm.provider",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.role",
+                  "value": {
+                    "stringValue": "system"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.contents.0.message_content.type",
+                  "value": {
+                    "stringValue": "text"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.contents.0.message_content.text",
+                  "value": {
+                    "stringValue": "# Role\nAssume the role of a helpful AI assistant.\n\n# Instructions\nYou are a weather assistant.\nWhen the user sends a message, figure out a solution and provide a final answer to the user by calling the 'final_answer' tool.\n\nIMPORTANT: The facts mentioned in the final answer must be backed by evidence provided by relevant tool outputs.\n\n# Tools\nYou must use a tool to retrieve factual or historical information.\nNever use the tool twice with the same input if not stated otherwise.\n\nName: get_weather\nDescription: Look up the weather for a city.\nAllowed: True\n\nName: final_answer\nDescription: Sends the final answer to the user\nAllowed: True\n\n\n# Notes\n- Use markdown syntax to format code snippets, links, JSON, tables, images, and files.\n- If the provided task is unclear, ask the user for clarification.\n- Do not refer to tools or tool outputs by name when responding.\n- Always take it one step at a time. Don't try to do multiple things at once.\n- When the tool doesn't give you what you were asking for, you must either use another tool or a different tool input.\n- You should always try a few different approaches before declaring the problem unsolvable.\n- If you can't fully answer the user's question, answer partially and describe what you couldn't achieve.\n- You cannot do complex calculations, computations, or data manipulations without using tools.\n- The current date and time is: 2026-11-23\n"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.role",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.contents.0.message_content.type",
+                  "value": {
+                    "stringValue": "text"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.contents.0.message_content.text",
+                  "value": {
+                    "stringValue": "Your task: What is the weather in Paris?"
+                  }
+                },
+                {
+                  "key": "llm.tools.0.tool.json_schema",
+                  "value": {
+                    "stringValue": "{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Look up the weather for a city.\", \"parameters\": {\"properties\": {\"city\": {\"title\": \"City\", \"type\": \"string\"}}, \"required\": [\"city\"], \"title\": \"get_weather\", \"type\": \"object\"}}}"
+                  }
+                },
+                {
+                  "key": "llm.tools.1.tool.json_schema",
+                  "value": {
+                    "stringValue": "{\"type\": \"function\", \"function\": {\"name\": \"final_answer\", \"description\": \"Sends the final answer to the user\", \"parameters\": {\"properties\": {\"response\": {\"description\": \"The final answer to the user\", \"title\": \"Response\", \"type\": \"string\"}}, \"required\": [\"response\"], \"title\": \"FinalAnswerToolSchema\", \"type\": \"object\"}}}"
+                  }
+                },
+                {
+                  "key": "llm.invocation_parameters",
+                  "value": {
+                    "stringValue": "{\"temperature\": 0.0, \"tool_choice\": \"required\", \"max_retries\": 3, \"response_format\": {\"type\": \"json_schema\", \"json_schema\": {\"name\": \"ToolCall\", \"schema\": {\"properties\": {\"item\": {\"anyOf\": [{\"additionalProperties\": false, \"properties\": {\"name\": {\"const\": \"get_weather\", \"description\": \"Tool Name\", \"title\": \"Name\", \"type\": \"string\"}, \"parameters\": {\"properties\": {\"city\": {\"title\": \"City\", \"type\": \"string\"}}, \"required\": [\"city\"], \"title\": \"get_weather\", \"type\": \"object\", \"description\": \"Tool Parameters\"}}, \"required\": [\"name\", \"parameters\"], \"title\": \"get_weather\", \"type\": \"object\"}, {\"additionalProperties\": false, \"properties\": {\"name\": {\"const\": \"final_answer\", \"description\": \"Tool Name\", \"title\": \"Name\", \"type\": \"string\"}, \"parameters\": {\"properties\": {\"response\": {\"description\": \"The final answer to the user\", \"title\": \"Response\", \"type\": \"string\"}}, \"required\": [\"response\"], \"title\": \"FinalAnswerToolSchema\", \"type\": \"object\", \"description\": \"Tool Parameters\"}}, \"required\": [\"name\", \"parameters\"], \"title\": \"final_answer\", \"type\": \"object\"}], \"title\": \"Item\"}}, \"required\": [\"item\"], \"title\": \"AvailableTools\", \"type\": \"object\"}}}, \"validate_response_format\": true, \"stream_partial_tool_calls\": true, \"fallback_tool\": {\"name\": \"final_answer\", \"description\": \"Sends the final answer to the user\", \"input_schema\": {\"properties\": {\"response\": {\"description\": \"The final answer to the user\", \"title\": \"Response\", \"type\": \"string\"}}, \"required\": [\"response\"], \"title\": \"FinalAnswerToolSchema\", \"type\": \"object\"}}, \"cache_control_injection_points\": [{\"location\": \"message\", \"index\": 0}, {\"location\": \"message\", \"index\": 1}]}"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.role",
+                  "value": {
+                    "stringValue": "assistant"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.tool_calls.0.tool_call.id",
+                  "value": {
+                    "stringValue": "call_00000001"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.tool_calls.0.tool_call.function.name",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments",
+                  "value": {
+                    "stringValue": "{\"city\": \"Paris\"}"
+                  }
+                },
+                {
+                  "key": "llm.token_count.total",
+                  "value": {
+                    "intValue": "99"
+                  }
+                },
+                {
+                  "key": "llm.token_count.prompt",
+                  "value": {
+                    "intValue": "82"
+                  }
+                },
+                {
+                  "key": "llm.token_count.completion",
+                  "value": {
+                    "intValue": "17"
+                  }
+                },
+                {
+                  "key": "llm.cost.completion",
+                  "value": {
+                    "doubleValue": 0.0000102
+                  }
+                },
+                {
+                  "key": "llm.cost.prompt",
+                  "value": {
+                    "doubleValue": 0.0000123
+                  }
+                },
+                {
+                  "key": "llm.cost.total",
+                  "value": {
+                    "doubleValue": 0.0000225
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "text/plain"
+                  }
+                },
+                {
+                  "key": "metadata.chunks_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "metadata.usage.prompt_tokens",
+                  "value": {
+                    "stringValue": "82"
+                  }
+                },
+                {
+                  "key": "metadata.usage.completion_tokens",
+                  "value": {
+                    "stringValue": "17"
+                  }
+                },
+                {
+                  "key": "metadata.usage.total_tokens",
+                  "value": {
+                    "stringValue": "99"
+                  }
+                },
+                {
+                  "key": "metadata.usage.cached_prompt_tokens",
+                  "value": {
+                    "stringValue": "0"
+                  }
+                },
+                {
+                  "key": "metadata.usage.cached_creation_tokens",
+                  "value": {
+                    "stringValue": "0"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "LLM"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590032000000",
+                  "name": "start (backend.openai.chat.start)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590211000000",
+                  "name": "success (backend.openai.chat.success)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590213000000",
+                  "name": "finish (backend.openai.chat.finish)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "2c033fcebdf10ec5eecd67b6b33cf061",
+              "spanId": "2cc1649ddbd18e64",
+              "traceState": "",
+              "parentSpanId": "5a3f4fa075ee196f",
+              "flags": 256,
+              "name": "get_weather",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590214000000",
+              "endTimeUnixNano": "1767225590215000000",
+              "attributes": [
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"input\": {\"city\": \"Paris\"}, \"options\": null}"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "metadata.class_name",
+                  "value": {
+                    "stringValue": "FunctionTool"
+                  }
+                },
+                {
+                  "key": "tool.name",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "tool.description",
+                  "value": {
+                    "stringValue": "Look up the weather for a city."
+                  }
+                },
+                {
+                  "key": "tool.json_schema",
+                  "value": {
+                    "stringValue": "{\"properties\": {\"city\": {\"title\": \"City\", \"type\": \"string\"}}, \"required\": [\"city\"], \"title\": \"get_weather\", \"type\": \"object\"}"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "sunny in Paris"
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "text/plain"
+                  }
+                },
+                {
+                  "key": "metadata.output_class",
+                  "value": {
+                    "stringValue": "StringToolOutput"
+                  }
+                },
+                {
+                  "key": "metadata.is_empty",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "TOOL"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590214000000",
+                  "name": "start (tool.custom.get_weather.start)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590215000000",
+                  "name": "success (tool.custom.get_weather.success)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590215000000",
+                  "name": "finish (tool.custom.get_weather.finish)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "2c033fcebdf10ec5eecd67b6b33cf061",
+              "spanId": "9e23cec79dc8109d",
+              "traceState": "",
+              "parentSpanId": "5a3f4fa075ee196f",
+              "flags": 256,
+              "name": "OpenAIChatModel",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590216000000",
+              "endTimeUnixNano": "1767225590260000000",
+              "attributes": [
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"input\": [{\"role\": \"system\", \"content\": \"# Role\\nAssume the role of a helpful AI assistant.\\n\\n# Instructions\\nYou are a weather assistant.\\nWhen the user sends a message, figure out a solution and provide a final answer to the user by calling the 'final_answer' tool.\\n\\nIMPORTANT: The facts mentioned in the final answer must be backed by evidence provided by relevant tool outputs.\\n\\n# Tools\\nYou must use a tool to retrieve factual or historical information.\\nNever use the tool twice with the same input if not stated otherwise.\\n\\nName: get_weather\\nDescription: Look up the weather for a city.\\nAllowed: True\\n\\nName: final_answer\\nDescription: Sends the final answer to the user\\nAllowed: True\\n\\n\\n# Notes\\n- Use markdown syntax to format code snippets, links, JSON, tables, images, and files.\\n- If the provided task is unclear, ask the user for clarification.\\n- Do not refer to tools or tool outputs by name when responding.\\n- Always take it one step at a time. Don't try to do multiple things at once.\\n- When the tool doesn't give you what you were asking for, you must either use another tool or a different tool input.\\n- You should always try a few different approaches before declaring the problem unsolvable.\\n- If you can't fully answer the user's question, answer partially and describe what you couldn't achieve.\\n- You cannot do complex calculations, computations, or data manipulations without using tools.\\n- The current date and time is: 2026-11-23\\n\"}, {\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"Your task: What is the weather in Paris?\"}]}, {\"role\": \"assistant\", \"content\": [{\"type\": \"tool-call\", \"id\": \"call_00000001\", \"tool_name\": \"get_weather\", \"args\": \"{\\\"city\\\": \\\"Paris\\\"}\"}]}, {\"role\": \"tool\", \"content\": [{\"type\": \"tool-result\", \"result\": \"sunny in Paris\", \"tool_name\": \"get_weather\", \"tool_call_id\": \"call_00000001\"}]}], \"fallback_tool\": {\"name\": \"final_answer\", \"description\": \"Sends the final answer to the user\", \"input_schema\": {\"properties\": {\"response\": {\"description\": \"The final answer to the user\", \"title\": \"Response\", \"type\": \"string\"}}, \"required\": [\"response\"], \"title\": \"FinalAnswerToolSchema\", \"type\": \"object\"}}, \"cache_control_injection_points\": [{\"location\": \"message\", \"index\": 0}, {\"location\": \"message\", \"index\": 3}], \"max_retries\": 3, \"tool_choice\": \"required\", \"tools\": [{\"name\": \"get_weather\", \"description\": \"Look up the weather for a city.\", \"input_schema\": {\"properties\": {\"city\": {\"title\": \"City\", \"type\": \"string\"}}, \"required\": [\"city\"], \"title\": \"get_weather\", \"type\": \"object\"}}, {\"name\": \"final_answer\", \"description\": \"Sends the final answer to the user\", \"input_schema\": {\"properties\": {\"response\": {\"description\": \"The final answer to the user\", \"title\": \"Response\", \"type\": \"string\"}}, \"required\": [\"response\"], \"title\": \"FinalAnswerToolSchema\", \"type\": \"object\"}}], \"stream_partial_tool_calls\": true}"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "metadata.class_name",
+                  "value": {
+                    "stringValue": "OpenAIChatModel"
+                  }
+                },
+                {
+                  "key": "llm.model_name",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "llm.provider",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.role",
+                  "value": {
+                    "stringValue": "system"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.contents.0.message_content.type",
+                  "value": {
+                    "stringValue": "text"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.0.message.contents.0.message_content.text",
+                  "value": {
+                    "stringValue": "# Role\nAssume the role of a helpful AI assistant.\n\n# Instructions\nYou are a weather assistant.\nWhen the user sends a message, figure out a solution and provide a final answer to the user by calling the 'final_answer' tool.\n\nIMPORTANT: The facts mentioned in the final answer must be backed by evidence provided by relevant tool outputs.\n\n# Tools\nYou must use a tool to retrieve factual or historical information.\nNever use the tool twice with the same input if not stated otherwise.\n\nName: get_weather\nDescription: Look up the weather for a city.\nAllowed: True\n\nName: final_answer\nDescription: Sends the final answer to the user\nAllowed: True\n\n\n# Notes\n- Use markdown syntax to format code snippets, links, JSON, tables, images, and files.\n- If the provided task is unclear, ask the user for clarification.\n- Do not refer to tools or tool outputs by name when responding.\n- Always take it one step at a time. Don't try to do multiple things at once.\n- When the tool doesn't give you what you were asking for, you must either use another tool or a different tool input.\n- You should always try a few different approaches before declaring the problem unsolvable.\n- If you can't fully answer the user's question, answer partially and describe what you couldn't achieve.\n- You cannot do complex calculations, computations, or data manipulations without using tools.\n- The current date and time is: 2026-11-23\n"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.role",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.contents.0.message_content.type",
+                  "value": {
+                    "stringValue": "text"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.1.message.contents.0.message_content.text",
+                  "value": {
+                    "stringValue": "Your task: What is the weather in Paris?"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.2.message.role",
+                  "value": {
+                    "stringValue": "assistant"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.2.message.tool_calls.0.tool_call.id",
+                  "value": {
+                    "stringValue": "call_00000001"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.2.message.tool_calls.0.tool_call.function.name",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.2.message.tool_calls.0.tool_call.function.arguments",
+                  "value": {
+                    "stringValue": "{\"city\": \"Paris\"}"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.3.message.role",
+                  "value": {
+                    "stringValue": "tool"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.3.message.contents.0.message.tool_call_id",
+                  "value": {
+                    "stringValue": "call_00000001"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.3.message.contents.0.message_content.type",
+                  "value": {
+                    "stringValue": "text"
+                  }
+                },
+                {
+                  "key": "llm.input_messages.3.message.contents.0.message_content.text",
+                  "value": {
+                    "stringValue": "sunny in Paris"
+                  }
+                },
+                {
+                  "key": "llm.tools.0.tool.json_schema",
+                  "value": {
+                    "stringValue": "{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Look up the weather for a city.\", \"parameters\": {\"properties\": {\"city\": {\"title\": \"City\", \"type\": \"string\"}}, \"required\": [\"city\"], \"title\": \"get_weather\", \"type\": \"object\"}}}"
+                  }
+                },
+                {
+                  "key": "llm.tools.1.tool.json_schema",
+                  "value": {
+                    "stringValue": "{\"type\": \"function\", \"function\": {\"name\": \"final_answer\", \"description\": \"Sends the final answer to the user\", \"parameters\": {\"properties\": {\"response\": {\"description\": \"The final answer to the user\", \"title\": \"Response\", \"type\": \"string\"}}, \"required\": [\"response\"], \"title\": \"FinalAnswerToolSchema\", \"type\": \"object\"}}}"
+                  }
+                },
+                {
+                  "key": "llm.invocation_parameters",
+                  "value": {
+                    "stringValue": "{\"temperature\": 0.0, \"tool_choice\": \"required\", \"max_retries\": 3, \"response_format\": {\"type\": \"json_schema\", \"json_schema\": {\"name\": \"ToolCall\", \"schema\": {\"properties\": {\"item\": {\"anyOf\": [{\"additionalProperties\": false, \"properties\": {\"name\": {\"const\": \"get_weather\", \"description\": \"Tool Name\", \"title\": \"Name\", \"type\": \"string\"}, \"parameters\": {\"properties\": {\"city\": {\"title\": \"City\", \"type\": \"string\"}}, \"required\": [\"city\"], \"title\": \"get_weather\", \"type\": \"object\", \"description\": \"Tool Parameters\"}}, \"required\": [\"name\", \"parameters\"], \"title\": \"get_weather\", \"type\": \"object\"}, {\"additionalProperties\": false, \"properties\": {\"name\": {\"const\": \"final_answer\", \"description\": \"Tool Name\", \"title\": \"Name\", \"type\": \"string\"}, \"parameters\": {\"properties\": {\"response\": {\"description\": \"The final answer to the user\", \"title\": \"Response\", \"type\": \"string\"}}, \"required\": [\"response\"], \"title\": \"FinalAnswerToolSchema\", \"type\": \"object\", \"description\": \"Tool Parameters\"}}, \"required\": [\"name\", \"parameters\"], \"title\": \"final_answer\", \"type\": \"object\"}], \"title\": \"Item\"}}, \"required\": [\"item\"], \"title\": \"AvailableTools\", \"type\": \"object\"}}}, \"validate_response_format\": true, \"stream_partial_tool_calls\": true, \"fallback_tool\": {\"name\": \"final_answer\", \"description\": \"Sends the final answer to the user\", \"input_schema\": {\"properties\": {\"response\": {\"description\": \"The final answer to the user\", \"title\": \"Response\", \"type\": \"string\"}}, \"required\": [\"response\"], \"title\": \"FinalAnswerToolSchema\", \"type\": \"object\"}}, \"cache_control_injection_points\": [{\"location\": \"message\", \"index\": 0}, {\"location\": \"message\", \"index\": 3}]}"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.role",
+                  "value": {
+                    "stringValue": "assistant"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.tool_calls.0.tool_call.id",
+                  "value": {
+                    "stringValue": "call_00000002"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.tool_calls.0.tool_call.function.name",
+                  "value": {
+                    "stringValue": "final_answer"
+                  }
+                },
+                {
+                  "key": "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments",
+                  "value": {
+                    "stringValue": "{\"response\": \"Sunny in Paris\"}"
+                  }
+                },
+                {
+                  "key": "llm.token_count.total",
+                  "value": {
+                    "intValue": "143"
+                  }
+                },
+                {
+                  "key": "llm.token_count.prompt",
+                  "value": {
+                    "intValue": "131"
+                  }
+                },
+                {
+                  "key": "llm.token_count.completion",
+                  "value": {
+                    "intValue": "12"
+                  }
+                },
+                {
+                  "key": "llm.cost.completion",
+                  "value": {
+                    "doubleValue": 7.2e-6
+                  }
+                },
+                {
+                  "key": "llm.cost.prompt",
+                  "value": {
+                    "doubleValue": 0.00001965
+                  }
+                },
+                {
+                  "key": "llm.cost.total",
+                  "value": {
+                    "doubleValue": 0.00002685
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "text/plain"
+                  }
+                },
+                {
+                  "key": "metadata.chunks_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "metadata.usage.prompt_tokens",
+                  "value": {
+                    "stringValue": "131"
+                  }
+                },
+                {
+                  "key": "metadata.usage.completion_tokens",
+                  "value": {
+                    "stringValue": "12"
+                  }
+                },
+                {
+                  "key": "metadata.usage.total_tokens",
+                  "value": {
+                    "stringValue": "143"
+                  }
+                },
+                {
+                  "key": "metadata.usage.cached_prompt_tokens",
+                  "value": {
+                    "stringValue": "0"
+                  }
+                },
+                {
+                  "key": "metadata.usage.cached_creation_tokens",
+                  "value": {
+                    "stringValue": "0"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "LLM"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590221000000",
+                  "name": "start (backend.openai.chat.start)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590258000000",
+                  "name": "success (backend.openai.chat.success)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590260000000",
+                  "name": "finish (backend.openai.chat.finish)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "2c033fcebdf10ec5eecd67b6b33cf061",
+              "spanId": "a4a984cbcbf2f55c",
+              "traceState": "",
+              "parentSpanId": "5a3f4fa075ee196f",
+              "flags": 256,
+              "name": "final_answer",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590259000000",
+              "endTimeUnixNano": "1767225590259000000",
+              "attributes": [
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"delta\": \"Sunny in Paris\", \"output\": \"Sunny in Paris\", \"output_structured\": null, \"state\": {\"answer\": null, \"cost\": {\"completion_tokens_cost_usd\": 1.0199999999999999e-05, \"prompt_tokens_usd\": 1.2299999999999999e-05, \"total_cost_usd\": 2.2499999999999998e-05}, \"iteration\": 2, \"memory\": {\"messages\": [{\"content\": [{\"text\": \"Your task: What is the weather in Paris?\", \"type\": \"text\"}], \"role\": \"user\"}, {\"content\": [{\"args\": \"{\\\"city\\\": \\\"Paris\\\"}\", \"id\": \"call_00000001\", \"tool_name\": \"get_weather\", \"type\": \"tool-call\"}], \"role\": \"assistant\"}, {\"content\": [{\"result\": \"sunny in Paris\", \"tool_call_id\": \"call_00000001\", \"tool_name\": \"get_weather\", \"type\": \"tool-result\"}], \"role\": \"tool\"}], \"name\": \"UnconstrainedMemory\"}, \"result\": null, \"steps\": [{\"error\": null, \"id\": \"capture-volatile-1\", \"input\": {\"city\": \"Paris\"}, \"iteration\": 1, \"output\": \"sunny in Paris\", \"tool\": {\"description\": \"Look up the weather for a city.\", \"input_schema\": {\"properties\": {\"city\": {\"title\": \"City\", \"type\": \"string\"}}, \"required\": [\"city\"], \"title\": \"get_weather\", \"type\": \"object\"}, \"name\": \"get_weather\"}}], \"usage\": {\"cached_creation_tokens\": 0, \"cached_prompt_tokens\": 0, \"completion_tokens\": 17, \"prompt_tokens\": 82, \"total_tokens\": 99}}}"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "metadata.id",
+                  "value": {
+                    "stringValue": "capture-volatile-3"
+                  }
+                },
+                {
+                  "key": "metadata.path",
+                  "value": {
+                    "stringValue": "agent.requirement.final_answer"
+                  }
+                },
+                {
+                  "key": "metadata.trace.id",
+                  "value": {
+                    "stringValue": "capture-volatile-4"
+                  }
+                },
+                {
+                  "key": "metadata.trace.run_id",
+                  "value": {
+                    "stringValue": "capture-volatile-5"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "AGENT"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "2c033fcebdf10ec5eecd67b6b33cf061",
+              "spanId": "993f5d933e610975",
+              "traceState": "",
+              "parentSpanId": "5a3f4fa075ee196f",
+              "flags": 256,
+              "name": "final_answer",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590260000000",
+              "endTimeUnixNano": "1767225590261000000",
+              "attributes": [
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"input\": {\"response\": \"Sunny in Paris\"}, \"options\": null}"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "metadata.class_name",
+                  "value": {
+                    "stringValue": "FinalAnswerTool"
+                  }
+                },
+                {
+                  "key": "tool.name",
+                  "value": {
+                    "stringValue": "final_answer"
+                  }
+                },
+                {
+                  "key": "tool.description",
+                  "value": {
+                    "stringValue": "Sends the final answer to the user"
+                  }
+                },
+                {
+                  "key": "tool.json_schema",
+                  "value": {
+                    "stringValue": "{\"properties\": {\"response\": {\"description\": \"The final answer to the user\", \"title\": \"Response\", \"type\": \"string\"}}, \"required\": [\"response\"], \"title\": \"FinalAnswerToolSchema\", \"type\": \"object\"}"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "Message has been sent"
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "text/plain"
+                  }
+                },
+                {
+                  "key": "metadata.output_class",
+                  "value": {
+                    "stringValue": "StringToolOutput"
+                  }
+                },
+                {
+                  "key": "metadata.is_empty",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "TOOL"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590261000000",
+                  "name": "start (tool.final_answer.start)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590261000000",
+                  "name": "success (tool.final_answer.success)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                },
+                {
+                  "timeUnixNano": "1767225590261000000",
+                  "name": "finish (tool.final_answer.finish)",
+                  "attributes": [],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

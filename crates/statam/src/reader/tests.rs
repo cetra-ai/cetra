@@ -629,8 +629,8 @@ fn cold_open_is_1_get_and_point_lookup_is_le_2_gets_on_simulated_s3() {
     };
     let replace_input = |batch: Batch, seed: u64| -> Batch {
         let (sc, mut cols, raw_len, sel) = batch.into_parts();
-        cols[15] = make_incompressible_col(seed, raw_len);
-        Batch::try_new(sc, cols, raw_len, sel).unwrap()
+        cols[15] = Arc::new(make_incompressible_col(seed, raw_len));
+        Batch::try_new_shared(sc, cols, raw_len, sel).unwrap()
     };
     base_b0 = replace_input(base_b0, 0x1111_2222_3333_4444);
     base_b1 = replace_input(base_b1, 0x5555_6666_7777_8888);
@@ -2626,7 +2626,7 @@ fn take_rows_scattered_matches_full_scan() {
             }
             bm
         };
-        let masked_100 = Batch::try_new(
+        let masked_100 = Batch::try_new_shared(
             Arc::clone(&spans_schema),
             full.columns().to_vec(),
             1200,
@@ -2665,7 +2665,7 @@ fn take_rows_scattered_matches_full_scan() {
             }
             bm
         };
-        let masked_1000 = Batch::try_new(
+        let masked_1000 = Batch::try_new_shared(
             Arc::clone(&spans_schema),
             full.columns().to_vec(),
             1200,
@@ -3703,7 +3703,7 @@ fn take_rows_random_access_schema_compact_selection_all_and_min_savings_parity()
             }
             bm
         };
-        let masked = Batch::try_new(
+        let masked = Batch::try_new_shared(
             Arc::clone(&schema),
             full.columns().to_vec(),
             n,

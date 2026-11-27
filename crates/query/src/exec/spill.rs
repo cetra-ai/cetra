@@ -7,7 +7,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cetra_column::frame::{FRAME_HEADER_LEN, MAX_PAYLOAD, decode_batch, encode_batch};
+use cetra_column::frame::{
+    FLAG_LZ4, FRAME_HEADER_LEN, FRAME_MAGIC, FRAME_VERSION, LZ4_MAX_RATIO, LZ4_SLACK,
+    MAX_DECODED_BYTES, MAX_PAYLOAD, decode_batch, encode_batch,
+};
 use cetra_column::{Batch, ColumnError, Reservation, Schema};
 
 use crate::error::QueryError;
@@ -44,6 +47,25 @@ fn reserve_spill_bytes(
             Ok(_) => return Ok(()),
             Err(actual) => cur = actual,
         }
+    }
+}
+
+const MAX_SPILL_CREATE_ATTEMPTS: usize = 1024;
+const MAX_SCRATCH_BUF_KEEP_CAP: usize = 64 * 1024;
+
+fn trim_scratch_buf(buf: &mut Vec<u8>) {
+    if buf.capacity() > MAX_SCRATCH_BUF_KEEP_CAP {
+        *buf = Vec::new();
+    } else {
+        buf.clear();
+    }
+}
+
+struct ScratchTrimGuard<'a>(&'a mut Vec<u8>);
+
+impl Drop for ScratchTrimGuard<'_> {
+    fn drop(&mut self) {
+        trim_scratch_buf(self.0);
     }
 }
 
@@ -92,11 +114,25 @@ impl SpillManager {
         self.spilled_bytes.load(Ordering::Acquire)
     }
 
+    /// Creates a lazy spill appender inside `dir` (0 FDs and 0 files on disk until first `append_batch`).
+    pub fn create_appender(&self) -> SpillAppender {
+        SpillAppender {
+            created: false,
+            poisoned: false,
+            inner: None,
+            root: self.root.clone(),
+            next_id: Arc::clone(&self.next_id),
+            spilled_bytes: Arc::clone(&self.spilled_bytes),
+            cap: Arc::clone(&self.cap),
+            scratch_buf: Vec::new(),
+        }
+    }
+
     /// Opens a new unique spill writer inside `dir` (deleted + bytes subtracted on drop if uncommitted).
     pub fn create_file(&self) -> Result<SpillWriter, QueryError> {
         fs::create_dir_all(&self.root).map_err(|e| map_spill_io_err(&e))?;
         let pid = std::process::id();
-        loop {
+        for attempt in 0..MAX_SPILL_CREATE_ATTEMPTS {
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             let path = self.root.join(format!("spill-{pid}-{id}.cbm"));
             match OpenOptions::new().write(true).create_new(true).open(&path) {
@@ -108,13 +144,20 @@ impl SpillManager {
                         spilled_bytes: Arc::clone(&self.spilled_bytes),
                         cap: Arc::clone(&self.cap),
                         committed: false,
+                        poisoned: false,
                         scratch_buf: Vec::new(),
                     });
                 }
-                Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+                Err(err)
+                    if err.kind() == ErrorKind::AlreadyExists
+                        && attempt + 1 < MAX_SPILL_CREATE_ATTEMPTS =>
+                {
+                    continue;
+                }
                 Err(err) => return Err(map_spill_io_err(&err)),
             }
         }
+        Err(QueryError::internal("failed to allocate unique spill file"))
     }
 }
 
@@ -126,6 +169,7 @@ pub struct SpillWriter {
     spilled_bytes: Arc<AtomicU64>,
     cap: SpillCapFn,
     committed: bool,
+    poisoned: bool,
     scratch_buf: Vec<u8>,
 }
 
@@ -134,6 +178,7 @@ impl fmt::Debug for SpillWriter {
         f.debug_struct("SpillWriter")
             .field("bytes_written", &self.bytes_written)
             .field("committed", &self.committed)
+            .field("poisoned", &self.poisoned)
             .finish()
     }
 }
@@ -143,9 +188,15 @@ impl SpillWriter {
     /// before writing. Maps `StorageFull`/`QuotaExceeded`/cap-exceeded to `QueryError::TooLarge`
     /// and other I/O errors to `QueryError::Internal(...)`.
     pub fn write_batch(&mut self, batch: &Batch) -> Result<(), QueryError> {
-        self.scratch_buf.clear();
-        encode_batch(batch, &mut self.scratch_buf)?;
-        let frame_len = u64::try_from(self.scratch_buf.len()).map_err(|_| QueryError::TooLarge)?;
+        if self.poisoned {
+            return Err(QueryError::internal(
+                "spill writer is poisoned after write failure",
+            ));
+        }
+        let scratch = ScratchTrimGuard(&mut self.scratch_buf);
+        scratch.0.clear();
+        encode_batch(batch, scratch.0, None)?;
+        let frame_len = u64::try_from(scratch.0.len()).map_err(|_| QueryError::TooLarge)?;
         reserve_spill_bytes(&self.spilled_bytes, &self.cap, frame_len)?;
 
         let Some(file) = self.file.as_mut() else {
@@ -153,7 +204,8 @@ impl SpillWriter {
             return Err(QueryError::internal("spill writer already closed"));
         };
 
-        if let Err(err) = file.write_all(&self.scratch_buf) {
+        if let Err(err) = file.write_all(scratch.0) {
+            self.poisoned = true;
             self.spilled_bytes.fetch_sub(frame_len, Ordering::AcqRel);
             return Err(map_spill_io_err(&err));
         }
@@ -164,14 +216,21 @@ impl SpillWriter {
 
     /// Flushes and converts into a readable [`SpillFile`] (auto-deleted on `SpillFile::drop`).
     pub fn finish(mut self) -> Result<SpillFile, QueryError> {
+        if self.poisoned {
+            return Err(QueryError::internal(
+                "spill writer is poisoned after write failure",
+            ));
+        }
         if let Some(mut file) = self.file.take() {
             file.flush().map_err(|e| map_spill_io_err(&e))?;
         }
         self.committed = true;
         Ok(SpillFile {
-            path: std::mem::take(&mut self.path),
-            byte_len: self.bytes_written,
-            spilled_bytes: Arc::clone(&self.spilled_bytes),
+            inner: Arc::new(SpillFileInner {
+                path: std::mem::take(&mut self.path),
+                byte_len: AtomicU64::new(self.bytes_written),
+                spilled_bytes: Arc::clone(&self.spilled_bytes),
+            }),
         })
     }
 }
@@ -189,18 +248,164 @@ impl Drop for SpillWriter {
     }
 }
 
-/// Handle to a completed temporary spill file; deletes the file and subtracts its bytes from
-/// `SpillManager::spilled_bytes()` on `Drop`.
-pub struct SpillFile {
+struct SpillFileInner {
     path: PathBuf,
-    byte_len: u64,
+    byte_len: AtomicU64,
     spilled_bytes: Arc<AtomicU64>,
+}
+
+impl Drop for SpillFileInner {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+        let len = self.byte_len.load(Ordering::Relaxed);
+        if len > 0 {
+            self.spilled_bytes.fetch_sub(len, Ordering::AcqRel);
+        }
+    }
+}
+
+/// Lazy, zero-idle-FD streaming appender writing `cetra_column::Batch` frames on demand.
+///
+/// Holds no file descriptor between `append_batch` calls and creates no file on disk if unused.
+pub struct SpillAppender {
+    created: bool,
+    poisoned: bool,
+    inner: Option<Arc<SpillFileInner>>,
+    root: PathBuf,
+    next_id: Arc<AtomicU64>,
+    spilled_bytes: Arc<AtomicU64>,
+    cap: SpillCapFn,
+    scratch_buf: Vec<u8>,
+}
+
+impl fmt::Debug for SpillAppender {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SpillAppender")
+            .field("created", &self.created)
+            .field("poisoned", &self.poisoned)
+            .field("byte_len", &self.byte_len())
+            .finish()
+    }
+}
+
+impl SpillAppender {
+    /// Bytes written so far to this appender.
+    pub fn byte_len(&self) -> u64 {
+        self.inner
+            .as_ref()
+            .map_or(0, |inner| inner.byte_len.load(Ordering::Acquire))
+    }
+
+    /// Encodes and appends `batch` as one LZ4+CRC-32C frame, opening the file only for the duration
+    /// of the write (0 idle FDs). Marks `self` poisoned on any partial write error.
+    pub fn append_batch(
+        &mut self,
+        batch: &Batch,
+        pool: Option<&mut Reservation>,
+    ) -> Result<(), QueryError> {
+        if self.poisoned {
+            return Err(QueryError::internal(
+                "spill appender is poisoned after write failure",
+            ));
+        }
+        let scratch = ScratchTrimGuard(&mut self.scratch_buf);
+        scratch.0.clear();
+        encode_batch(batch, scratch.0, pool)?;
+        let frame_len = u64::try_from(scratch.0.len()).map_err(|_| QueryError::TooLarge)?;
+        reserve_spill_bytes(&self.spilled_bytes, &self.cap, frame_len)?;
+
+        let mut file = if !self.created {
+            if let Err(err) = fs::create_dir_all(&self.root) {
+                self.spilled_bytes.fetch_sub(frame_len, Ordering::AcqRel);
+                return Err(map_spill_io_err(&err));
+            }
+            let pid = std::process::id();
+            let mut opened = None;
+            for attempt in 0..MAX_SPILL_CREATE_ATTEMPTS {
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                let path = self.root.join(format!("spill-{pid}-{id}.cbm"));
+                match OpenOptions::new().write(true).create_new(true).open(&path) {
+                    Ok(f) => {
+                        self.inner = Some(Arc::new(SpillFileInner {
+                            path,
+                            byte_len: AtomicU64::new(0),
+                            spilled_bytes: Arc::clone(&self.spilled_bytes),
+                        }));
+                        self.created = true;
+                        opened = Some(f);
+                        break;
+                    }
+                    Err(err)
+                        if err.kind() == ErrorKind::AlreadyExists
+                            && attempt + 1 < MAX_SPILL_CREATE_ATTEMPTS =>
+                    {
+                        continue;
+                    }
+                    Err(err) => {
+                        self.spilled_bytes.fetch_sub(frame_len, Ordering::AcqRel);
+                        return Err(map_spill_io_err(&err));
+                    }
+                }
+            }
+            match opened {
+                Some(f) => f,
+                None => {
+                    self.spilled_bytes.fetch_sub(frame_len, Ordering::AcqRel);
+                    return Err(QueryError::internal("failed to allocate unique spill file"));
+                }
+            }
+        } else {
+            let Some(inner) = self.inner.as_ref() else {
+                self.spilled_bytes.fetch_sub(frame_len, Ordering::AcqRel);
+                return Err(QueryError::internal("spill appender missing inner state"));
+            };
+            match OpenOptions::new().append(true).open(&inner.path) {
+                Ok(f) => f,
+                Err(err) => {
+                    self.spilled_bytes.fetch_sub(frame_len, Ordering::AcqRel);
+                    return Err(map_spill_io_err(&err));
+                }
+            }
+        };
+
+        if let Err(err) = file.write_all(scratch.0).and_then(|()| file.flush()) {
+            self.poisoned = true;
+            self.spilled_bytes.fetch_sub(frame_len, Ordering::AcqRel);
+            drop(file);
+            return Err(map_spill_io_err(&err));
+        }
+        drop(file);
+
+        if let Some(inner) = &self.inner {
+            inner.byte_len.fetch_add(frame_len, Ordering::AcqRel);
+        }
+        Ok(())
+    }
+
+    /// Consumes this appender and returns `Some(SpillFile)` if any batch was written, `None` if unused
+    /// (or poisoned).
+    pub fn finish(mut self) -> Option<SpillFile> {
+        if self.poisoned {
+            self.inner = None;
+            return None;
+        }
+        self.inner
+            .take()
+            .filter(|inner| inner.byte_len.load(Ordering::Acquire) > 0)
+            .map(|inner| SpillFile { inner })
+    }
+}
+
+/// Handle to a completed temporary spill file; deletes the file and subtracts its bytes from
+/// `SpillManager::spilled_bytes()` when the last [`SpillFile`] and all [`SpillReader`]s drop.
+pub struct SpillFile {
+    inner: Arc<SpillFileInner>,
 }
 
 impl fmt::Debug for SpillFile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SpillFile")
-            .field("byte_len", &self.byte_len)
+            .field("byte_len", &self.byte_len())
             .finish()
     }
 }
@@ -208,33 +413,26 @@ impl fmt::Debug for SpillFile {
 impl SpillFile {
     /// Bytes on disk.
     pub fn byte_len(&self) -> u64 {
-        self.byte_len
+        self.inner.byte_len.load(Ordering::Acquire)
     }
 
     /// Opens a sequential frame reader validating against `schema`.
     pub fn open_reader(&self, schema: Arc<Schema>) -> Result<SpillReader, QueryError> {
-        let file = File::open(&self.path).map_err(|e| map_spill_io_err(&e))?;
+        let file = File::open(&self.inner.path).map_err(|e| map_spill_io_err(&e))?;
         Ok(SpillReader {
             reader: BufReader::with_capacity(64 * 1024, file),
+            _inner: Arc::clone(&self.inner),
             schema,
             frame_buf: Vec::new(),
         })
     }
 }
 
-impl Drop for SpillFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-        if self.byte_len > 0 {
-            self.spilled_bytes
-                .fetch_sub(self.byte_len, Ordering::AcqRel);
-        }
-    }
-}
-
 /// Sequential frame reader yielding `Option<Batch>` from a [`SpillFile`].
 pub struct SpillReader {
+    // Declared before `_inner` so the OS file descriptor closes before unlink & byte decrement.
     reader: BufReader<File>,
+    _inner: Arc<SpillFileInner>,
     schema: Arc<Schema>,
     frame_buf: Vec<u8>,
 }
@@ -280,20 +478,12 @@ impl SpillReader {
             }
         }
 
-        let payload_len = u32::from_le_bytes([header[12], header[13], header[14], header[15]]);
-        if payload_len > MAX_PAYLOAD {
-            rollback_res(res, before);
-            return Err(ColumnError::InvalidFrame {
-                reason: "payload length exceeds MAX_PAYLOAD",
+        let total_len = match validate_spill_header(&header) {
+            Ok(len) => len,
+            Err(err) => {
+                rollback_res(res, before);
+                return Err(err.into());
             }
-            .into());
-        }
-        let Some(total_len) = FRAME_HEADER_LEN.checked_add(payload_len as usize) else {
-            rollback_res(res, before);
-            return Err(ColumnError::Overflow {
-                reason: "spill frame length overflows usize",
-            }
-            .into());
         };
 
         self.frame_buf.resize(total_len, 0);
@@ -321,6 +511,63 @@ impl SpillReader {
             }
         }
     }
+}
+
+fn validate_spill_header(header: &[u8; FRAME_HEADER_LEN]) -> Result<usize, ColumnError> {
+    if header[0..4] != FRAME_MAGIC {
+        return Err(ColumnError::InvalidFrame {
+            reason: "invalid spill frame magic",
+        });
+    }
+    if header[4] != FRAME_VERSION {
+        return Err(ColumnError::InvalidFrame {
+            reason: "unsupported spill frame version",
+        });
+    }
+    let flags = header[5];
+    if flags & !FLAG_LZ4 != 0 {
+        return Err(ColumnError::InvalidFrame {
+            reason: "unknown spill frame flags",
+        });
+    }
+    let reserved = u16::from_le_bytes([header[6], header[7]]);
+    if reserved != 0 {
+        return Err(ColumnError::InvalidFrame {
+            reason: "non-zero spill frame reserved bytes",
+        });
+    }
+    let uncompressed_len = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+    let payload_len = u32::from_le_bytes([header[12], header[13], header[14], header[15]]);
+    if uncompressed_len > MAX_DECODED_BYTES {
+        return Err(ColumnError::InvalidFrame {
+            reason: "uncompressed length exceeds MAX_DECODED_BYTES",
+        });
+    }
+    if payload_len > MAX_PAYLOAD {
+        return Err(ColumnError::InvalidFrame {
+            reason: "payload length exceeds MAX_PAYLOAD",
+        });
+    }
+    if flags == 0 && payload_len != uncompressed_len {
+        return Err(ColumnError::InvalidFrame {
+            reason: "uncompressed frame payload_len differs from uncompressed_len",
+        });
+    }
+    if (flags & FLAG_LZ4) != 0
+        && u64::from(uncompressed_len)
+            > u64::from(payload_len)
+                .saturating_mul(LZ4_MAX_RATIO)
+                .saturating_add(LZ4_SLACK)
+    {
+        return Err(ColumnError::InvalidFrame {
+            reason: "spill frame LZ4 expansion ratio exceeds limit",
+        });
+    }
+    FRAME_HEADER_LEN
+        .checked_add(payload_len as usize)
+        .ok_or(ColumnError::Overflow {
+            reason: "spill frame length overflows usize",
+        })
 }
 
 fn rollback_res(res: Option<&mut Reservation>, before: usize) {
@@ -495,5 +742,240 @@ mod tests {
             !reader_dbg.contains("frame_buf:"),
             "leaked raw frame_buf in {reader_dbg}"
         );
+    }
+
+    #[test]
+    fn spill_file_dropped_while_reader_open_keeps_spilled_bytes_until_reader_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let spill = SpillManager::with_fixed_cap(dir.path().to_path_buf(), 1024 * 1024);
+        let b1 = sample_batch(16);
+        let b2 = sample_batch(8);
+
+        let sf = {
+            let mut w = spill.create_file().unwrap();
+            w.write_batch(&b1).unwrap();
+            w.write_batch(&b2).unwrap();
+            w.finish().unwrap()
+        };
+        let expected_len = sf.byte_len();
+        assert!(expected_len > 0);
+        assert_eq!(spill.spilled_bytes(), expected_len);
+
+        let mut reader = sf.open_reader(Arc::clone(b1.schema())).unwrap();
+        // Drop SpillFile while SpillReader is still open!
+        drop(sf);
+        assert_eq!(spill.spilled_bytes(), expected_len);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+
+        let got1 = reader.next_batch(None).unwrap().unwrap();
+        assert!(got1.semantic_eq(&b1));
+        let got2 = reader.next_batch(None).unwrap().unwrap();
+        assert!(got2.semantic_eq(&b2));
+        assert!(reader.next_batch(None).unwrap().is_none());
+
+        // Dropping SpillReader closes FD and unlinks + subtracts bytes.
+        drop(reader);
+        assert_eq!(spill.spilled_bytes(), 0);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn spill_appender_lazy_creation_poison_on_error_and_zero_idle_fds() {
+        let dir = tempfile::tempdir().unwrap();
+        let spill = SpillManager::with_fixed_cap(dir.path().to_path_buf(), 1024 * 1024);
+        let b1 = sample_batch(16);
+        let b2 = sample_batch(12);
+
+        // Unused appender creates 0 files and returns None
+        let unused = spill.create_appender();
+        assert_eq!(unused.byte_len(), 0);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert!(unused.finish().is_none());
+        assert_eq!(spill.spilled_bytes(), 0);
+
+        // Creating 100 appenders opens 0 FDs and creates 0 files
+        let mut appenders: Vec<_> = (0..100).map(|_| spill.create_appender()).collect();
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        // Appending to one creates only 1 file and holds 0 idle FDs into `dir` between calls
+        let count_dir_fds = || -> Option<usize> {
+            let entries = fs::read_dir("/proc/self/fd").ok()?;
+            Some(
+                entries
+                    .filter_map(Result::ok)
+                    .filter_map(|e| fs::read_link(e.path()).ok())
+                    .filter(|target| target.starts_with(dir.path()))
+                    .count(),
+            )
+        };
+        if let Some(n) = count_dir_fds() {
+            assert_eq!(n, 0);
+        }
+        appenders[0].append_batch(&b1, None).unwrap();
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        if let Some(n) = count_dir_fds() {
+            assert_eq!(n, 0, "appender held an idle FD after first append");
+        }
+        appenders[0].append_batch(&b2, None).unwrap();
+        if let Some(n) = count_dir_fds() {
+            assert_eq!(n, 0, "appender held an idle FD after second append");
+        }
+        assert_eq!(spill.spilled_bytes(), appenders[0].byte_len());
+
+        let app0 = appenders.remove(0);
+        for unused_app in appenders {
+            assert!(unused_app.finish().is_none());
+        }
+        let sf = app0
+            .finish()
+            .expect("used appender should produce SpillFile");
+        assert_eq!(spill.spilled_bytes(), sf.byte_len());
+        let mut reader = sf.open_reader(Arc::clone(b1.schema())).unwrap();
+        assert!(reader.next_batch(None).unwrap().unwrap().semantic_eq(&b1));
+        assert!(reader.next_batch(None).unwrap().unwrap().semantic_eq(&b2));
+        assert!(reader.next_batch(None).unwrap().is_none());
+        drop(reader);
+        drop(sf);
+        assert_eq!(spill.spilled_bytes(), 0);
+
+        // Poisoned appender rejects subsequent appends and cleans up on finish/drop
+        let mut poisoned_app = spill.create_appender();
+        poisoned_app.append_batch(&b1, None).unwrap();
+        poisoned_app.poisoned = true;
+        let err = poisoned_app.append_batch(&b2, None).unwrap_err();
+        assert!(matches!(err, QueryError::Internal(_)));
+        assert!(poisoned_app.finish().is_none());
+        assert_eq!(spill.spilled_bytes(), 0);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        // Uncommitted appender drop cleans up file and resets spilled_bytes
+        {
+            let mut uncommitted = spill.create_appender();
+            uncommitted.append_batch(&b1, None).unwrap();
+            assert!(spill.spilled_bytes() > 0);
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
+        assert_eq!(spill.spilled_bytes(), 0);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn spill_writer_poison_rejects_writes_and_finish_and_trims_large_scratch() {
+        let dir = tempfile::tempdir().unwrap();
+        let spill = SpillManager::with_fixed_cap(dir.path().to_path_buf(), 16 * 1024 * 1024);
+
+        // Large batch (>64 KiB encoded) triggers ScratchTrimGuard after write_batch
+        let large = sample_batch(8192);
+        let mut w = spill.create_file().unwrap();
+        w.write_batch(&large).unwrap();
+        assert!(
+            w.scratch_buf.capacity() <= MAX_SCRATCH_BUF_KEEP_CAP,
+            "scratch_buf was not trimmed: cap={}",
+            w.scratch_buf.capacity()
+        );
+        let sf = w.finish().unwrap();
+        drop(sf);
+        assert_eq!(spill.spilled_bytes(), 0);
+
+        // Poisoned SpillWriter rejects subsequent write_batch and finish(), and cleans up on drop
+        let mut pw = spill.create_file().unwrap();
+        pw.write_batch(&sample_batch(8)).unwrap();
+        assert!(spill.spilled_bytes() > 0);
+        pw.poisoned = true;
+        assert!(matches!(
+            pw.write_batch(&sample_batch(4)),
+            Err(QueryError::Internal(_))
+        ));
+        assert!(matches!(pw.finish(), Err(QueryError::Internal(_))));
+        assert_eq!(spill.spilled_bytes(), 0);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn spill_reader_validates_header_before_resizing_frame_buf() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Schema::try_new_arc(vec![Field::new("id", DataType::I64, false)]).unwrap();
+        let scope = GlobalPool::standalone(1024 * 1024);
+
+        let make_header = |magic: [u8; 4],
+                           version: u8,
+                           flags: u8,
+                           reserved: u16,
+                           uncompressed_len: u32,
+                           payload_len: u32|
+         -> [u8; FRAME_HEADER_LEN] {
+            let mut h = [0u8; FRAME_HEADER_LEN];
+            h[0..4].copy_from_slice(&magic);
+            h[4] = version;
+            h[5] = flags;
+            h[6..8].copy_from_slice(&reserved.to_le_bytes());
+            h[8..12].copy_from_slice(&uncompressed_len.to_le_bytes());
+            h[12..16].copy_from_slice(&payload_len.to_le_bytes());
+            h
+        };
+
+        let cases: Vec<(&str, [u8; FRAME_HEADER_LEN])> = vec![
+            (
+                "bad_magic",
+                make_header(*b"XXXX", FRAME_VERSION, 0, 0, 1024, 1024),
+            ),
+            (
+                "bad_version",
+                make_header(FRAME_MAGIC, FRAME_VERSION + 1, 0, 0, 1024, 1024),
+            ),
+            (
+                "unknown_flags",
+                make_header(FRAME_MAGIC, FRAME_VERSION, 0x02, 0, 1024, 1024),
+            ),
+            (
+                "non_zero_reserved",
+                make_header(FRAME_MAGIC, FRAME_VERSION, 0, 1, 1024, 1024),
+            ),
+            (
+                "uncompressed_exceeds_max",
+                make_header(
+                    FRAME_MAGIC,
+                    FRAME_VERSION,
+                    FLAG_LZ4,
+                    0,
+                    MAX_DECODED_BYTES + 1,
+                    128 * 1024 * 1024,
+                ),
+            ),
+            (
+                "uncompressed_len_mismatch",
+                make_header(FRAME_MAGIC, FRAME_VERSION, 0, 0, 100, 64 * 1024 * 1024),
+            ),
+            (
+                "lz4_bomb_ratio",
+                make_header(FRAME_MAGIC, FRAME_VERSION, FLAG_LZ4, 0, 10_000_000, 16),
+            ),
+        ];
+
+        for (label, hdr) in cases {
+            let path = dir.path().join(format!("corrupt-{label}.cbm"));
+            fs::write(&path, hdr).unwrap();
+            let sf = SpillFile {
+                inner: Arc::new(SpillFileInner {
+                    path,
+                    byte_len: AtomicU64::new(FRAME_HEADER_LEN as u64),
+                    spilled_bytes: Arc::new(AtomicU64::new(FRAME_HEADER_LEN as u64)),
+                }),
+            };
+            let mut reader = sf.open_reader(Arc::clone(&schema)).unwrap();
+            let mut res = scope.register("hdr_check", true);
+            res.try_grow(64).unwrap();
+            let err = reader.next_batch(Some(&mut res)).unwrap_err();
+            assert!(
+                matches!(err, QueryError::Column(ColumnError::InvalidFrame { .. })),
+                "case {label} returned unexpected err: {err:?}"
+            );
+            assert_eq!(
+                reader.frame_buf.capacity(),
+                0,
+                "case {label} allocated frame_buf before header validation"
+            );
+            assert_eq!(res.size(), 64, "case {label} leaked reservation");
+        }
     }
 }

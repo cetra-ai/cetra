@@ -88,7 +88,7 @@ enum Command {
         #[command(subcommand)]
         command: Box<projects::ProjectsCommand>,
     },
-    /// Connect coding agents (Claude Code, Codex, Gemini CLI, Copilot) to cetra.
+    /// Connect coding agents (Claude Code, Codex, Gemini CLI, Copilot, Pi, Qwen Code, OpenClaw, OpenCode, Goose, Oh My Pi) to cetra.
     Agents {
         #[command(subcommand)]
         command: Box<agents::AgentsCommand>,
@@ -229,7 +229,7 @@ enum EntitlementsCommand {
 
 fn main() {
     let code = match tokio::runtime::Builder::new_multi_thread()
-        // A2 asks for at least 8 MiB per worker: DataFusion plans recursively (A2 plan § Boundaries).
+        // Keep at least 8 MiB per worker: recursive SQL planning and deep filter trees.
         .thread_stack_size(8 * 1024 * 1024)
         .enable_all()
         .build()

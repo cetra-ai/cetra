@@ -303,6 +303,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ("get", "/api/v1/projects/{project}/traces", "list_traces"),
     (
         "get",
+        "/api/v1/projects/{project}/traces/totals",
+        "get_trace_totals",
+    ),
+    (
+        "get",
         "/api/v1/projects/{project}/traces/stream",
         "stream_traces",
     ),
@@ -544,6 +549,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "get",
         "/api/v1/projects/{project}/alert-rules/{id}",
         "get_alert_rule",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/alert-rules/issue-preview",
+        "get_alert_issue_preview",
     ),
     (
         "patch",
@@ -1226,6 +1236,7 @@ const QUERY_OR_BODY: &[&str] = &[
 /// Read operations with a handler (D-G-23): their errors include 422.
 const READ_OPERATIONS: &[&str] = &[
     "list_traces",
+    "get_trace_totals",
     "stream_traces",
     "get_trace",
     "get_span",
@@ -1243,6 +1254,7 @@ const READ_OPERATIONS: &[&str] = &[
     "list_issues",
     "get_issue",
     "get_issue_occurrences",
+    "get_alert_issue_preview",
     "get_prompt_metrics",
 ];
 
@@ -2007,6 +2019,7 @@ fn check_property_names(schema: &Value, owner: &str) {
 fn assert_exclusions(document: &Value) {
     const EXPECTED: &[&str] = &[
         "get_session",
+        "get_trace_totals",
         "get_user",
         "list_sessions",
         "list_spans",
@@ -2063,8 +2076,8 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         ("Message", &["finish_reason", "name"]),
         ("ToolCallPart", &["id"]),
         ("ToolCallResponsePart", &["id"]),
-        ("UriPart", &["mime_type", "modality"]),
-        ("BlobPart", &["mime_type", "modality"]),
+        ("UriPart", &["mime_type", "modality", "transcript"]),
+        ("BlobPart", &["mime_type", "modality", "transcript"]),
         ("TextPart", &[]),
         ("ReasoningPart", &[]),
         ("UnknownPart", &[]),

@@ -2,6 +2,7 @@
 //! and bounded-memory `TopKSink`.
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -17,9 +18,11 @@ use crate::eval::{
 };
 use crate::ir::Expr;
 
-use super::pipeline::{ControlFlow, ExecContext, PushOperator, PushSink};
-use super::sort_key::{SortKey, compare_rows_across};
-use super::source::{IdLookupHint, PartitionStream, ScanSource, ScanSpec, SortHint, SubstringHint};
+use super::pipeline::{ControlFlow, ExecContext, PushOperator, PushSink, transfer_or_grow};
+use super::sort_key::{SortKey, compare_rows_across_borrowed};
+use super::source::{
+    IdLookupHint, MapProjection, PartitionStream, ScanSource, ScanSpec, SortHint, SubstringHint,
+};
 
 fn reconcile_res(res: &mut Reservation, target_bytes: usize) -> Result<(), QueryError> {
     let cur = res.size();
@@ -96,7 +99,8 @@ impl PushOperator for FilterOp {
     fn push(
         &mut self,
         batch: Batch,
-        emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+        batch_res: &mut Reservation,
+        emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
     ) -> Result<ControlFlow, QueryError> {
         if self.ctx.eval.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
@@ -134,22 +138,28 @@ impl PushOperator for FilterOp {
 
         let active = filtered.num_rows();
         let raw_len = filtered.raw_len();
-        let out = if active.saturating_mul(4) < raw_len {
+        if active.saturating_mul(4) < raw_len {
             self.scratch.free();
-            match filtered.compact(Some(&mut self.scratch)) {
+            let out = match filtered.compact(Some(&mut self.scratch)) {
                 Ok(b) => b,
                 Err(err) => {
                     self.scratch.free();
                     return Err(err.into());
                 }
+            };
+            drop(filtered);
+            batch_res.free();
+            if let Err(err) = reconcile_res(&mut self.scratch, out.memory_bytes()) {
+                self.scratch.free();
+                return Err(err);
             }
+            let flow = emit(out, &mut self.scratch);
+            self.scratch.free();
+            flow
         } else {
-            filtered
-        };
-
-        let flow = emit(out);
-        self.scratch.free();
-        flow
+            self.scratch.free();
+            emit(filtered, batch_res)
+        }
     }
 }
 
@@ -178,6 +188,37 @@ impl ProjectOp {
         }
     }
 
+    /// Creates a [`ProjectOp`] whose output batches conform to `schema` (preserving explicit field nullability).
+    pub fn with_schema(
+        exprs: Vec<Expr>,
+        schema: Arc<Schema>,
+        ctx: ExecContext,
+    ) -> Result<Self, QueryError> {
+        if exprs.len() != schema.fields().len() {
+            return Err(ColumnError::InvalidBatch {
+                reason: "projection expression count does not match schema",
+            }
+            .into());
+        }
+        let mut named = Vec::with_capacity(exprs.len());
+        for (expr, field) in exprs.into_iter().zip(schema.fields()) {
+            if expr.data_type() != field.data_type {
+                return Err(ColumnError::InvalidBatch {
+                    reason: "projection expression type does not match schema field",
+                }
+                .into());
+            }
+            named.push((field.name.clone(), expr));
+        }
+        let scratch = ctx.pool.register("project", false);
+        Ok(Self {
+            exprs: named,
+            ctx,
+            scratch,
+            output_schema: Some(schema),
+        })
+    }
+
     fn output_schema(&mut self) -> Result<Arc<Schema>, QueryError> {
         if let Some(schema) = &self.output_schema {
             return Ok(Arc::clone(schema));
@@ -201,7 +242,8 @@ impl PushOperator for ProjectOp {
     fn push(
         &mut self,
         batch: Batch,
-        emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+        batch_res: &mut Reservation,
+        emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
     ) -> Result<ControlFlow, QueryError> {
         if self.ctx.eval.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
@@ -222,19 +264,30 @@ impl PushOperator for ProjectOp {
         let selection = batch.selection().clone();
         drop(batch);
 
-        let out = match Batch::try_new(schema, cols, raw_len, selection) {
+        let out = match Batch::try_new_shared(schema, cols, raw_len, selection) {
             Ok(b) => b,
             Err(err) => {
                 self.scratch.free();
                 return Err(err.into());
             }
         };
-        if let Err(err) = reconcile_res(&mut self.scratch, out.memory_bytes()) {
+        let out_bytes = out.memory_bytes();
+        let xfer = batch_res
+            .size()
+            .min(out_bytes.saturating_sub(self.scratch.size()));
+        if xfer > 0
+            && let Err(err) = batch_res.transfer_to(&mut self.scratch, xfer)
+        {
+            self.scratch.free();
+            return Err(err.into());
+        }
+        batch_res.free();
+        if let Err(err) = reconcile_res(&mut self.scratch, out_bytes) {
             self.scratch.free();
             return Err(err);
         }
 
-        let flow = emit(out);
+        let flow = emit(out, &mut self.scratch);
         self.scratch.free();
         flow
     }
@@ -253,20 +306,36 @@ pub struct LimitOp {
     offset_remaining: usize,
     limit_remaining: Option<usize>,
     shared_remaining: Option<Arc<AtomicUsize>>,
+    stop_cancel: Option<CancelToken>,
 }
 
 impl LimitOp {
     /// Creates a [`LimitOp`] skipping `offset` rows and emitting at most `limit` rows.
+    ///
+    /// When `shared_remaining` is `Some`, `offset` MUST be `0` because per-partition offsets
+    /// cannot coordinate globally across concurrent workers.
     pub fn new(
         offset: usize,
         limit: Option<usize>,
         shared_remaining: Option<Arc<AtomicUsize>>,
     ) -> Self {
+        debug_assert!(
+            shared_remaining.is_none() || offset == 0,
+            "LimitOp with shared_remaining requires offset == 0"
+        );
         Self {
             offset_remaining: offset,
             limit_remaining: limit,
             shared_remaining,
+            stop_cancel: None,
         }
+    }
+
+    /// Attaches a pipeline-local `stop_cancel` token cancelled once `shared_remaining` / `limit`
+    /// reaches `0` (after emitting the final slice) to stop sibling partitions early.
+    pub fn with_stop_cancel(mut self, stop_cancel: CancelToken) -> Self {
+        self.stop_cancel = Some(stop_cancel);
+        self
     }
 }
 
@@ -307,9 +376,18 @@ impl PushOperator for LimitOp {
     fn push(
         &mut self,
         batch: Batch,
-        emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+        batch_res: &mut Reservation,
+        emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
     ) -> Result<ControlFlow, QueryError> {
         if self.limit_remaining == Some(0) {
+            if self
+                .shared_remaining
+                .as_ref()
+                .is_none_or(|rem| rem.load(AtomicOrdering::Acquire) == 0)
+                && let Some(stop_cancel) = &self.stop_cancel
+            {
+                stop_cancel.cancel();
+            }
             return Ok(ControlFlow::Stop);
         }
 
@@ -326,7 +404,7 @@ impl PushOperator for LimitOp {
         self.offset_remaining = 0;
         let avail = active - skip;
 
-        let (take, exhausted) = if let Some(rem) = &self.shared_remaining {
+        let (take, global_exhausted, local_exhausted) = if let Some(rem) = &self.shared_remaining {
             let max_claim = match self.limit_remaining {
                 Some(l) => avail.min(l),
                 None => avail,
@@ -346,23 +424,27 @@ impl PushOperator for LimitOp {
                 }
             });
             if claimed == 0 {
+                if global_exhausted && let Some(stop_cancel) = &self.stop_cancel {
+                    stop_cancel.cancel();
+                }
                 return Ok(ControlFlow::Stop);
             }
+            let mut local_exhausted = false;
             if let Some(local) = &mut self.limit_remaining {
                 *local -= claimed;
                 if *local == 0 {
-                    global_exhausted = true;
+                    local_exhausted = true;
                 }
             }
-            (claimed, global_exhausted)
+            (claimed, global_exhausted, local_exhausted)
         } else {
             match &mut self.limit_remaining {
                 Some(rem) => {
                     let take = avail.min(*rem);
                     *rem -= take;
-                    (take, *rem == 0)
+                    (take, *rem == 0, *rem == 0)
                 }
-                None => (avail, false),
+                None => (avail, false, false),
             }
         };
 
@@ -371,8 +453,11 @@ impl PushOperator for LimitOp {
         }
 
         let out = slice_active_batch(batch, skip, take)?;
-        let flow = emit(out)?;
-        if flow == ControlFlow::Stop || exhausted {
+        let flow = emit(out, batch_res)?;
+        if global_exhausted && let Some(stop_cancel) = &self.stop_cancel {
+            stop_cancel.cancel();
+        }
+        if flow == ControlFlow::Stop || global_exhausted || local_exhausted {
             Ok(ControlFlow::Stop)
         } else {
             Ok(ControlFlow::Continue)
@@ -478,7 +563,7 @@ impl UnnestOp {
         plan: &UnnestSchemaPlan,
         chunk_rows: &[u32],
         unnest_refs: &[Vec<ElemRef<'_>>],
-        emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+        emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
     ) -> Result<ControlFlow, QueryError> {
         let chunk_len = chunk_rows.len();
         if chunk_len == 0 {
@@ -512,7 +597,7 @@ impl UnnestOp {
 
         let out_batch = Batch::try_new_all(Arc::clone(&plan.output_schema), out_cols, chunk_len)?;
         reconcile_res(&mut self.scratch, out_batch.memory_bytes())?;
-        let flow = emit(out_batch);
+        let flow = emit(out_batch, &mut self.scratch);
         self.scratch.free();
         flow
     }
@@ -526,7 +611,8 @@ impl PushOperator for UnnestOp {
     fn push(
         &mut self,
         batch: Batch,
-        emit: &mut dyn FnMut(Batch) -> Result<ControlFlow, QueryError>,
+        batch_res: &mut Reservation,
+        emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
     ) -> Result<ControlFlow, QueryError> {
         if self.ctx.eval.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
@@ -536,7 +622,7 @@ impl PushOperator for UnnestOp {
             return Ok(ControlFlow::Continue);
         }
         if self.unnest_cols.is_empty() {
-            return emit(batch);
+            return emit(batch, batch_res);
         }
 
         let chunk_limit = self.ctx.batch_size.max(1);
@@ -661,6 +747,27 @@ impl UnionSource {
         }
         Ok(Self { schema, sources })
     }
+    fn effective_child_spec<'a>(
+        &self,
+        src: &Arc<dyn ScanSource>,
+        spec: &'a ScanSpec,
+    ) -> std::borrow::Cow<'a, ScanSpec> {
+        let child_full_schema = src.schema();
+        let names_differ = child_full_schema
+            .fields()
+            .iter()
+            .zip(self.schema.fields())
+            .any(|(c, u)| c.name != u.name);
+        if names_differ {
+            std::borrow::Cow::Owned(remap_scan_spec_hints(
+                spec,
+                &self.schema,
+                &child_full_schema,
+            ))
+        } else {
+            std::borrow::Cow::Borrowed(spec)
+        }
+    }
 }
 
 impl ScanSource for UnionSource {
@@ -683,25 +790,10 @@ impl ScanSource for UnionSource {
         let target_proj_schema = self.projected_schema(spec)?;
         let mut all_parts: Vec<Box<dyn PartitionStream>> = Vec::new();
         for src in &self.sources {
-            let child_full_schema = src.schema();
-            let names_differ = child_full_schema
-                .fields()
-                .iter()
-                .zip(self.schema.fields())
-                .any(|(c, u)| c.name != u.name);
-            let remapped = if names_differ {
-                Some(remap_scan_spec_hints(
-                    spec,
-                    &self.schema,
-                    &child_full_schema,
-                ))
-            } else {
-                None
-            };
-            let effective_spec = remapped.as_ref().unwrap_or(spec);
-            let child_proj_schema = src.projected_schema(effective_spec)?;
+            let effective_spec = self.effective_child_spec(src, spec);
+            let child_proj_schema = src.projected_schema(effective_spec.as_ref())?;
             let needs_retag = child_proj_schema.as_ref() != target_proj_schema.as_ref();
-            for part in src.open_partitions(effective_spec, ctx)? {
+            for part in src.open_partitions(effective_spec.as_ref(), ctx)? {
                 if needs_retag {
                     all_parts.push(Box::new(RetagPartitionStream {
                         inner: part,
@@ -732,8 +824,16 @@ impl ScanSource for UnionSource {
             .collect())
     }
 
-    fn explain_summary(&self, _spec: &ScanSpec) -> String {
-        format!("UnionSource(sources={})", self.sources.len())
+    fn explain_summary(&self, spec: &ScanSpec) -> String {
+        let children: Vec<String> = self
+            .sources
+            .iter()
+            .map(|src| {
+                let effective = self.effective_child_spec(src, spec);
+                src.explain_summary(effective.as_ref())
+            })
+            .collect();
+        format!("UnionSource([{}])", children.join(", "))
     }
 }
 
@@ -744,17 +844,134 @@ fn remap_col_name(name: &str, union_schema: &Schema, child_schema: &Schema) -> S
     }
 }
 
+fn remap_expr_column_names(expr: &mut Expr, child_schema: &Schema) {
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Column {
+                index,
+                name,
+                data_type: _,
+            } => {
+                if let Some(field) = child_schema.fields().get(*index)
+                    && *name != field.name
+                {
+                    *name = field.name.clone();
+                }
+            }
+            Expr::Literal(_) => {}
+            Expr::Unary {
+                op: _,
+                expr,
+                data_type: _,
+            } => stack.push(expr),
+            Expr::Binary {
+                left,
+                op: _,
+                right,
+                data_type: _,
+            } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            Expr::Cast {
+                expr,
+                target: _,
+                mode: _,
+            } => stack.push(expr),
+            Expr::Between {
+                expr,
+                low,
+                high,
+                negated: _,
+            } => {
+                stack.push(high);
+                stack.push(low);
+                stack.push(expr);
+            }
+            Expr::InList {
+                expr,
+                list,
+                negated: _,
+                redacted: _,
+            } => {
+                for item in list {
+                    stack.push(item);
+                }
+                stack.push(expr);
+            }
+            Expr::Like {
+                expr,
+                pattern,
+                escape: _,
+                case_insensitive: _,
+                negated: _,
+            } => {
+                stack.push(pattern);
+                stack.push(expr);
+            }
+            Expr::Case {
+                operand,
+                when_then,
+                else_expr,
+                data_type: _,
+            } => {
+                if let Some(el) = else_expr {
+                    stack.push(el);
+                }
+                for (when, then) in when_then {
+                    stack.push(then);
+                    stack.push(when);
+                }
+                if let Some(op) = operand {
+                    stack.push(op);
+                }
+            }
+            Expr::MapIndex { map, key } => {
+                stack.push(key);
+                stack.push(map);
+            }
+            Expr::MakeArray {
+                elems,
+                item_type: _,
+            } => {
+                for elem in elems {
+                    stack.push(elem);
+                }
+            }
+            Expr::Call {
+                func: _,
+                args,
+                data_type: _,
+            } => {
+                for arg in args {
+                    stack.push(arg);
+                }
+            }
+        }
+    }
+}
+
 fn remap_scan_spec_hints(
     spec: &ScanSpec,
     union_schema: &Schema,
     child_schema: &Schema,
 ) -> ScanSpec {
     let mut out = spec.clone();
-    out.map_keys = spec
-        .map_keys
-        .iter()
-        .map(|(col, k)| (remap_col_name(col, union_schema, child_schema), k.clone()))
-        .collect();
+    for filter in &mut out.filters {
+        remap_expr_column_names(filter, child_schema);
+    }
+    let mut remapped_maps: BTreeMap<String, MapProjection> = BTreeMap::new();
+    for (col, proj) in &spec.map_projections {
+        let name = remap_col_name(col, union_schema, child_schema);
+        match remapped_maps.get_mut(&name) {
+            Some(existing) => existing.merge(proj.clone()),
+            None => {
+                remapped_maps.insert(name, proj.clone());
+            }
+        }
+    }
+    out.map_projections = remapped_maps;
     out.id_lookups = spec
         .id_lookups
         .iter()
@@ -776,10 +993,15 @@ fn remap_scan_spec_hints(
     out.substrings = spec
         .substrings
         .iter()
-        .map(|s| SubstringHint {
-            column: remap_col_name(&s.column, union_schema, child_schema),
-            needle: s.needle.clone(),
-            case_insensitive: s.case_insensitive,
+        .map(|clause| {
+            clause
+                .iter()
+                .map(|s| SubstringHint {
+                    column: remap_col_name(&s.column, union_schema, child_schema),
+                    needle: s.needle.clone(),
+                    case_insensitive: s.case_insensitive,
+                })
+                .collect()
         })
         .collect();
     out.sort_hints = spec
@@ -812,18 +1034,19 @@ impl PartitionStream for RetagPartitionStream {
             return Ok(Some(batch));
         }
         let (_old_schema, columns, raw_len, selection) = batch.into_parts();
-        let retagged = match Batch::try_new(Arc::clone(&self.schema), columns, raw_len, selection) {
-            Ok(b) => b,
-            Err(err) => {
-                if let Some(r) = res {
-                    let cur = r.size();
-                    if cur > before {
-                        r.shrink(cur - before);
+        let retagged =
+            match Batch::try_new_shared(Arc::clone(&self.schema), columns, raw_len, selection) {
+                Ok(b) => b,
+                Err(err) => {
+                    if let Some(r) = res {
+                        let cur = r.size();
+                        if cur > before {
+                            r.shrink(cur - before);
+                        }
                     }
+                    return Err(err.into());
                 }
-                return Err(err.into());
-            }
-        };
+            };
         Ok(Some(retagged))
     }
 }
@@ -910,8 +1133,8 @@ where
 fn compare_heap_items(
     a: &HeapItem,
     b: &HeapItem,
-    key_batches: &[Vec<Column>],
-    incoming_keys: &[Column],
+    key_batches: &[Vec<Arc<Column>>],
+    incoming_keys: &[Arc<Column>],
     keys: &[SortKey],
 ) -> Ordering {
     let (cols_a, row_a) = match a.source {
@@ -922,23 +1145,36 @@ fn compare_heap_items(
         HeapSource::Stored { batch_idx, row_idx } => (key_batches[batch_idx].as_slice(), row_idx),
         HeapSource::Incoming { row_idx } => (incoming_keys, row_idx),
     };
-    compare_rows_across(cols_a, row_a, cols_b, row_b, keys).then_with(|| a.seq.cmp(&b.seq))
+    compare_rows_across_borrowed(cols_a, row_a, cols_b, row_b, keys).then_with(|| a.seq.cmp(&b.seq))
 }
 
-fn kept_bytes(row_batches: &[Batch], key_batches: &[Vec<Column>]) -> usize {
+fn unshared_key_bytes(batch: &Batch, key_cols: &[Arc<Column>]) -> usize {
+    let mut total = 0usize;
+    for (k_idx, kcol) in key_cols.iter().enumerate() {
+        let shared_with_batch = batch.columns().iter().any(|bcol| Arc::ptr_eq(bcol, kcol));
+        let shared_with_prev = key_cols[..k_idx].iter().any(|prev| Arc::ptr_eq(prev, kcol));
+        if !shared_with_batch && !shared_with_prev {
+            total = total.saturating_add(kcol.memory_bytes());
+        }
+    }
+    total
+}
+
+fn kept_bytes(row_batches: &[Batch], key_batches: &[Vec<Arc<Column>>], heap: &[HeapItem]) -> usize {
     let batch_bytes: usize = row_batches.iter().map(Batch::memory_bytes).sum();
-    let key_bytes: usize = key_batches
+    let key_bytes: usize = row_batches
         .iter()
-        .flat_map(|cols| cols.iter())
-        .map(Column::memory_bytes)
+        .zip(key_batches.iter())
+        .map(|(batch, cols)| unshared_key_bytes(batch, cols))
         .sum();
-    batch_bytes + key_bytes
+    let heap_bytes = heap.len().saturating_mul(size_of::<HeapItem>());
+    batch_bytes + key_bytes + heap_bytes
 }
 
 /// Bounded-memory `ORDER BY ... LIMIT ... OFFSET ...` partition sink (`PushSink`).
 ///
 /// Maintains a bounded binary max-heap of size `offset.saturating_add(limit)` using
-/// [`compare_rows_across`], tracking kept-row bytes in an unspillable [`Reservation`].
+/// [`compare_rows_across_borrowed`], tracking kept-row bytes in an unspillable [`Reservation`].
 pub struct TopKSink {
     schema: Arc<Schema>,
     keys: Vec<SortKey>,
@@ -948,7 +1184,7 @@ pub struct TopKSink {
     ctx: ExecContext,
     heap: Vec<HeapItem>,
     row_batches: Vec<Batch>,
-    key_batches: Vec<Vec<Column>>,
+    key_batches: Vec<Vec<Arc<Column>>>,
     stored_rows: usize,
     next_seq: u64,
     res: Reservation,
@@ -987,8 +1223,8 @@ impl TopKSink {
             limit,
             offset,
             keep,
+            heap: Vec::with_capacity(keep.min(ctx.batch_size)),
             ctx,
-            heap: Vec::new(),
             row_batches: Vec::new(),
             key_batches: Vec::new(),
             stored_rows: 0,
@@ -1017,7 +1253,8 @@ impl TopKSink {
             self.row_batches.clear();
             self.key_batches.clear();
             self.stored_rows = 0;
-            reconcile_res(&mut self.res, 0)?;
+            let target = kept_bytes(&self.row_batches, &self.key_batches, &self.heap);
+            reconcile_res(&mut self.res, target)?;
             return Ok(());
         }
         if self.stored_rows <= live_stored {
@@ -1025,12 +1262,12 @@ impl TopKSink {
         }
 
         let before = self.res.size();
-        let built = (|| -> Result<(Batch, Vec<Column>), QueryError> {
+        let built = (|| -> Result<(Batch, Vec<Arc<Column>>), QueryError> {
             let mut new_cols = Vec::with_capacity(self.schema.len());
             for (col_idx, field) in self.schema.fields().iter().enumerate() {
                 let sources: Vec<Option<(&Column, usize)>> = live_refs
                     .iter()
-                    .map(|&(b, r)| Some((&self.row_batches[b].columns()[col_idx], r)))
+                    .map(|&(b, r)| Some((self.row_batches[b].columns()[col_idx].as_ref(), r)))
                     .collect();
                 let col = build_flat_from_sources(
                     &field.data_type,
@@ -1046,10 +1283,16 @@ impl TopKSink {
             let mut new_key_cols = Vec::with_capacity(self.keys.len());
             let key_batch_sample = live_refs[0].0;
             for k_idx in 0..self.keys.len() {
+                if let Expr::Column { index, .. } = &self.keys[k_idx].expr
+                    && let Some(shared_col) = new_batch.columns().get(*index)
+                {
+                    new_key_cols.push(Arc::clone(shared_col));
+                    continue;
+                }
                 let dt = self.key_batches[key_batch_sample][k_idx].data_type();
                 let sources: Vec<Option<(&Column, usize)>> = live_refs
                     .iter()
-                    .map(|&(b, r)| Some((&self.key_batches[b][k_idx], r)))
+                    .map(|&(b, r)| Some((self.key_batches[b][k_idx].as_ref(), r)))
                     .collect();
                 let col = build_flat_from_sources(
                     &dt,
@@ -1058,7 +1301,7 @@ impl TopKSink {
                     &self.ctx.eval,
                     before,
                 )?;
-                new_key_cols.push(col);
+                new_key_cols.push(Arc::new(col));
             }
             Ok((new_batch, new_key_cols))
         })();
@@ -1074,8 +1317,9 @@ impl TopKSink {
             }
         };
 
+        let heap_bytes = self.heap.len().saturating_mul(size_of::<HeapItem>());
         let target_bytes =
-            new_batch.memory_bytes() + new_key_cols.iter().map(Column::memory_bytes).sum::<usize>();
+            new_batch.memory_bytes() + unshared_key_bytes(&new_batch, &new_key_cols) + heap_bytes;
         if let Err(err) = reconcile_res(&mut self.res, target_bytes) {
             let cur = self.res.size();
             if cur > before {
@@ -1103,9 +1347,9 @@ impl TopKSink {
     fn take_winners(
         &mut self,
         batch: &Batch,
-        key_cols: &[Column],
+        key_cols: &[Arc<Column>],
         winner_rows: &[u32],
-    ) -> Result<(Batch, Vec<Column>), QueryError> {
+    ) -> Result<(Batch, Vec<Arc<Column>>), QueryError> {
         let before = self.res.size();
         let mut out_cols = Vec::with_capacity(self.schema.len());
         for col in batch.columns() {
@@ -1133,9 +1377,31 @@ impl TopKSink {
             };
 
         let mut out_keys = Vec::with_capacity(key_cols.len());
-        for kcol in key_cols {
+        for (k_idx, kcol) in key_cols.iter().enumerate() {
+            if let Expr::Column { index, .. } = &self.keys[k_idx].expr
+                && let Some(shared_col) = out_batch.columns().get(*index)
+            {
+                out_keys.push(Arc::clone(shared_col));
+                continue;
+            }
+            if let Some(col_idx) = batch
+                .columns()
+                .iter()
+                .position(|bcol| Arc::ptr_eq(bcol, kcol))
+                && let Some(shared_col) = out_batch.columns().get(col_idx)
+            {
+                out_keys.push(Arc::clone(shared_col));
+                continue;
+            }
+            if let Some(prev_idx) = key_cols[..k_idx]
+                .iter()
+                .position(|prev| Arc::ptr_eq(prev, kcol))
+            {
+                out_keys.push(Arc::clone(&out_keys[prev_idx]));
+                continue;
+            }
             match kcol.take(winner_rows, Some(&mut self.res)) {
-                Ok(fc) => out_keys.push(Column::Flat(fc)),
+                Ok(fc) => out_keys.push(Arc::new(Column::Flat(fc))),
                 Err(err) => {
                     let cur = self.res.size();
                     if cur > before {
@@ -1206,7 +1472,7 @@ impl TopKSink {
 
         let keep_total = offset.saturating_add(limit).min(entries.len());
         let cmp = |a: &MergeEntry, b: &MergeEntry| {
-            compare_rows_across(
+            compare_rows_across_borrowed(
                 &sinks[a.sink_idx].key_batches[a.batch_idx],
                 a.row_idx,
                 &sinks[b.sink_idx].key_batches[b.batch_idx],
@@ -1224,6 +1490,7 @@ impl TopKSink {
 
         // Drop sort-key columns across all sinks before allocating output batches.
         for sink in &mut sinks {
+            sink.heap.clear();
             sink.key_batches.clear();
             let batch_bytes: usize = sink.row_batches.iter().map(Batch::memory_bytes).sum();
             reconcile_res(&mut sink.res, batch_bytes)?;
@@ -1258,7 +1525,7 @@ impl TopKSink {
                     .iter()
                     .map(|e| {
                         Some((
-                            &sinks[e.sink_idx].row_batches[e.batch_idx].columns()[col_idx],
+                            sinks[e.sink_idx].row_batches[e.batch_idx].columns()[col_idx].as_ref(),
                             e.row_idx,
                         ))
                     })
@@ -1295,7 +1562,11 @@ impl TopKSink {
 }
 
 impl PushSink for TopKSink {
-    fn consume(&mut self, batch: Batch) -> Result<ControlFlow, QueryError> {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
         if self.limit == 0 {
             return Ok(ControlFlow::Stop);
         }
@@ -1377,52 +1648,130 @@ impl PushSink for TopKSink {
         }
 
         if !winner_rows.is_empty() {
+            let batch_res_before = batch_res.size();
+            let winner_bytes = winner_rows.capacity().saturating_mul(size_of::<u32>());
+            if let Err(err) = self.res.try_grow(winner_bytes) {
+                self.scratch.free();
+                return Err(err.into());
+            }
+            let rollback_consume = |this: &mut Self, batch_res: &mut Reservation| {
+                let xfer = batch_res_before.saturating_sub(batch_res.size());
+                if xfer > 0 {
+                    let _ = this.res.transfer_to(batch_res, xfer);
+                }
+                this.scratch.free();
+                let target = kept_bytes(&this.row_batches, &this.key_batches, &this.heap);
+                if this.res.size() > target {
+                    this.res.shrink(this.res.size() - target);
+                }
+            };
             let live_stored_count = self
                 .heap
                 .iter()
                 .filter(|item| matches!(item.source, HeapSource::Stored { .. }))
                 .count();
-            let (won_batch, won_keys) = match self.take_winners(&batch, &key_cols, &winner_rows) {
-                Ok(pair) => pair,
-                Err(QueryError::TooLarge) if self.stored_rows > live_stored_count => {
-                    // Evicted rows are holding memory; compact them before failing.
-                    self.compact_kept().inspect_err(|_| self.scratch.free())?;
-                    self.take_winners(&batch, &key_cols, &winner_rows)
-                        .inspect_err(|_| self.scratch.free())?
-                }
-                Err(err) => {
-                    self.scratch.free();
+            let all_rows_won =
+                winner_rows.len() == batch.raw_len() && batch.selection().is_all(batch.raw_len());
+            if all_rows_won {
+                let batch_bytes = batch.memory_bytes();
+                let key_bytes = unshared_key_bytes(&batch, &key_cols);
+                let transfer_all = |this: &mut Self,
+                                    batch_res: &mut Reservation|
+                 -> Result<(), QueryError> {
+                    transfer_or_grow(batch_res, &mut this.res, batch_bytes)?;
+                    if let Err(err) = transfer_or_grow(&mut this.scratch, &mut this.res, key_bytes)
+                    {
+                        let xfer = batch_res_before.saturating_sub(batch_res.size());
+                        if xfer > 0 {
+                            let _ = this.res.transfer_to(batch_res, xfer);
+                        }
+                        return Err(err.into());
+                    }
+                    Ok(())
+                };
+                let transfer_res = match transfer_all(self, batch_res) {
+                    Ok(()) => Ok(()),
+                    Err(QueryError::TooLarge) if self.stored_rows > live_stored_count => {
+                        if let Err(err) = self.compact_kept() {
+                            rollback_consume(self, batch_res);
+                            return Err(err);
+                        }
+                        transfer_all(self, batch_res)
+                    }
+                    Err(err) => Err(err),
+                };
+                if let Err(err) = transfer_res {
+                    rollback_consume(self, batch_res);
                     return Err(err);
                 }
-            };
-
-            let updated_batch_idx = self.row_batches.len();
-            self.row_batches.push(won_batch);
-            self.key_batches.push(won_keys);
-            self.stored_rows += winner_rows.len();
-
-            let mut pos = 0usize;
-            for item in &mut self.heap {
-                if matches!(item.source, HeapSource::Incoming { .. }) {
-                    item.source = HeapSource::Stored {
-                        batch_idx: updated_batch_idx,
-                        row_idx: pos,
-                    };
-                    pos += 1;
+                let updated_batch_idx = self.row_batches.len();
+                let won_count = winner_rows.len();
+                self.row_batches.push(batch);
+                self.key_batches.push(key_cols);
+                self.stored_rows += won_count;
+                for item in &mut self.heap {
+                    if let HeapSource::Incoming { row_idx } = item.source {
+                        item.source = HeapSource::Stored {
+                            batch_idx: updated_batch_idx,
+                            row_idx,
+                        };
+                    }
                 }
+            } else {
+                let (won_batch, won_keys) = match self.take_winners(&batch, &key_cols, &winner_rows)
+                {
+                    Ok(pair) => pair,
+                    Err(QueryError::TooLarge) if self.stored_rows > live_stored_count => {
+                        // Evicted rows are holding memory; compact them before failing.
+                        if let Err(err) = self.compact_kept() {
+                            rollback_consume(self, batch_res);
+                            return Err(err);
+                        }
+                        match self.take_winners(&batch, &key_cols, &winner_rows) {
+                            Ok(pair) => pair,
+                            Err(err) => {
+                                rollback_consume(self, batch_res);
+                                return Err(err);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        rollback_consume(self, batch_res);
+                        return Err(err);
+                    }
+                };
+
+                let updated_batch_idx = self.row_batches.len();
+                self.row_batches.push(won_batch);
+                self.key_batches.push(won_keys);
+                self.stored_rows += winner_rows.len();
+
+                let mut pos = 0usize;
+                for item in &mut self.heap {
+                    if matches!(item.source, HeapSource::Incoming { .. }) {
+                        item.source = HeapSource::Stored {
+                            batch_idx: updated_batch_idx,
+                            row_idx: pos,
+                        };
+                        pos += 1;
+                    }
+                }
+                drop(key_cols);
+                drop(batch);
             }
+        } else {
+            drop(key_cols);
+            drop(batch);
         }
 
         self.scratch.free();
-        drop(key_cols);
-        drop(batch);
 
         if self.stored_rows > self.keep.saturating_mul(2).max(64) {
             self.compact_kept()?;
         } else {
             reconcile_res(
                 &mut self.res,
-                kept_bytes(&self.row_batches, &self.key_batches),
+                kept_bytes(&self.row_batches, &self.key_batches, &self.heap),
             )?;
         }
 
@@ -1447,10 +1796,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ExecContext {
             pool: GlobalPool::standalone(cap),
-            eval: EvalContext {
-                now_ns: 0,
-                cancel: CancelToken::new(),
-            },
+            eval: EvalContext::new(0, CancelToken::new()),
             spill: Arc::new(SpillManager::with_fixed_cap(
                 dir.path().to_path_buf(),
                 1024 * 1024,
@@ -1511,11 +1857,13 @@ mod tests {
         )
         .unwrap();
 
+        let mut dummy_res = ctx.pool.register("test_in", false);
+
         // Filter id > 4 -> 4 active out of 8 (4 * 4 < 8 is false -> keeps Selection::Mask, zero-copy)
         let mut f_dense = FilterOp::new(gt_i64(col_expr(0, "id", DataType::I64), 4), ctx.clone());
         let mut dense_out = Vec::new();
         let flow = f_dense
-            .push(b_dense.clone(), &mut |out| {
+            .push(b_dense.clone(), &mut dummy_res, &mut |out, _res| {
                 dense_out.push(out);
                 Ok(ControlFlow::Continue)
             })
@@ -1531,7 +1879,7 @@ mod tests {
         let mut f_sparse = FilterOp::new(gt_i64(col_expr(0, "id", DataType::I64), 7), ctx.clone());
         let mut sparse_out = Vec::new();
         f_sparse
-            .push(b_dense.clone(), &mut |out| {
+            .push(b_dense.clone(), &mut dummy_res, &mut |out, _res| {
                 sparse_out.push(out);
                 Ok(ControlFlow::Continue)
             })
@@ -1546,7 +1894,7 @@ mod tests {
         let mut f_empty = FilterOp::new(gt_i64(col_expr(0, "id", DataType::I64), 100), ctx.clone());
         let mut empty_out = Vec::new();
         f_empty
-            .push(b_dense.clone(), &mut |out| {
+            .push(b_dense.clone(), &mut dummy_res, &mut |out, _res| {
                 empty_out.push(out);
                 Ok(ControlFlow::Continue)
             })
@@ -1568,12 +1916,17 @@ mod tests {
             ctx.clone(),
         );
         let mut proj_out = Vec::new();
-        proj.push(dense_out.pop().unwrap(), &mut |out| {
-            // While inside emit, scratch reservation is active.
-            assert!(ctx.pool.reserved() >= out.memory_bytes());
-            proj_out.push(out);
-            Ok(ControlFlow::Continue)
-        })
+        proj.push(
+            dense_out.pop().unwrap(),
+            &mut dummy_res,
+            &mut |out, out_res| {
+                // While inside emit, scratch reservation is active.
+                assert!(out_res.size() >= out.memory_bytes());
+                assert!(ctx.pool.reserved() >= out.memory_bytes());
+                proj_out.push(out);
+                Ok(ControlFlow::Continue)
+            },
+        )
         .unwrap();
         assert_eq!(ctx.pool.reserved(), 0);
         assert_eq!(proj_out.len(), 1);
@@ -1593,7 +1946,7 @@ mod tests {
         let mut lim_zero = LimitOp::new(2, Some(0), None);
         let mut zero_out = Vec::new();
         let flow_zero = lim_zero
-            .push(b_dense.clone(), &mut |out| {
+            .push(b_dense.clone(), &mut dummy_res, &mut |out, _res| {
                 zero_out.push(out);
                 Ok(ControlFlow::Continue)
             })
@@ -1604,7 +1957,7 @@ mod tests {
         let mut lim_off = LimitOp::new(3, Some(2), None);
         let mut off_out = Vec::new();
         let flow_off = lim_off
-            .push(b_dense, &mut |out| {
+            .push(b_dense, &mut dummy_res, &mut |out, _res| {
                 off_out.push(out);
                 Ok(ControlFlow::Continue)
             })
@@ -1717,7 +2070,11 @@ mod tests {
             1,
         )
         .unwrap();
-        assert_eq!(sink_zero.consume(b_one).unwrap(), ControlFlow::Stop);
+        let mut dummy_res = ctx.pool.register("test_in", false);
+        assert_eq!(
+            sink_zero.consume(b_one, &mut dummy_res).unwrap(),
+            ControlFlow::Stop
+        );
         assert_eq!(sink_zero.reserved_bytes(), 0);
         let merged_zero =
             TopKSink::merge(vec![sink_zero], Arc::clone(&schema), &[], 2, 0, &ctx).unwrap();
@@ -1924,6 +2281,7 @@ mod tests {
             0,
             ctx.clone(),
         );
+        let mut dummy_res = ctx.pool.register("test_in", false);
         for round in (0..200).rev() {
             let b = Batch::try_new_all(
                 Arc::clone(&small_schema),
@@ -1933,7 +2291,10 @@ mod tests {
                 1,
             )
             .unwrap();
-            assert_eq!(sink_compact.consume(b).unwrap(), ControlFlow::Continue);
+            assert_eq!(
+                sink_compact.consume(b, &mut dummy_res).unwrap(),
+                ControlFlow::Continue
+            );
         }
         assert!(sink_compact.stored_rows <= 64);
         let merged_small = TopKSink::merge(
@@ -2051,10 +2412,12 @@ mod tests {
         };
 
         // preserve_nulls = true -> 3 + 1 + 2 + 1 = 7 rows across chunk_size=3 batches (3, 3, 1)
+        let mut dummy_res = ctx.pool.register("test_in", false);
         let mut op_preserve = UnnestOp::new(vec![1, 2], true, ctx.clone());
         let mut out_preserve = Vec::new();
         op_preserve
-            .push(batch.clone(), &mut |b| {
+            .push(batch.clone(), &mut dummy_res, &mut |b, out_res| {
+                assert!(out_res.size() >= b.memory_bytes());
                 assert!(ctx.pool.reserved() >= b.memory_bytes());
                 assert!(b.num_rows() <= 3);
                 out_preserve.push(b);
@@ -2080,7 +2443,8 @@ mod tests {
         let mut op_drop = UnnestOp::new(vec![1, 2], false, ctx.clone());
         let mut out_drop = Vec::new();
         op_drop
-            .push(batch, &mut |b| {
+            .push(batch, &mut dummy_res, &mut |b, out_res| {
+                assert!(out_res.size() >= b.memory_bytes());
                 assert!(ctx.pool.reserved() >= b.memory_bytes());
                 assert!(b.num_rows() <= 3);
                 out_drop.push(b);
@@ -2231,13 +2595,17 @@ mod tests {
 
         // Measure memory footprint of 3 stored rows (2 dead + 1 live) + 1 live row + 2 new rows.
         let (probe_ctx, _probe_dir) = test_ctx(1024 * 1024, 1);
+        let mut probe_in_res = probe_ctx.pool.register("probe_in", false);
         let mut probe = TopKSink::new(Arc::clone(&schema), keys.clone(), 3, 0, probe_ctx.clone());
-        probe.consume(make_batch(&[50, 40, 30])).unwrap();
-        probe.consume(make_batch(&[20])).unwrap();
+        probe
+            .consume(make_batch(&[50, 40, 30]), &mut probe_in_res)
+            .unwrap();
+        probe.consume(make_batch(&[20]), &mut probe_in_res).unwrap();
         let bytes_before_b3 = probe.reserved_bytes(); // 4 stored rows: 50 (dead), 40, 30, 20
         assert_eq!(probe.stored_rows, 4);
-        probe.consume(make_batch(&[15])).unwrap();
+        probe.consume(make_batch(&[15]), &mut probe_in_res).unwrap();
         let bytes_5_rows = probe.reserved_bytes(); // 5 stored rows (30..50 dead, 20 & 15 live)
+        drop(probe_in_res);
         drop(probe);
 
         // Case 1: Pool fits (4 stored rows + 1 compacted live row), so take_winners on [10, 5]
@@ -2246,12 +2614,18 @@ mod tests {
         let one_row_est = bytes_5_rows - bytes_before_b3;
         let tight_ok_cap = bytes_before_b3 + one_row_est + 64;
         let (ok_ctx, _d_ok) = test_ctx(tight_ok_cap, 1);
+        let mut ok_in_res = ok_ctx.pool.register("ok_in", false);
         let mut sink_compact_ok =
             TopKSink::new(Arc::clone(&schema), keys.clone(), 3, 0, ok_ctx.clone());
-        sink_compact_ok.consume(make_batch(&[50, 40, 30])).unwrap();
-        sink_compact_ok.consume(make_batch(&[20])).unwrap();
+        sink_compact_ok
+            .consume(make_batch(&[50, 40, 30]), &mut ok_in_res)
+            .unwrap();
+        sink_compact_ok
+            .consume(make_batch(&[20]), &mut ok_in_res)
+            .unwrap();
         assert_eq!(sink_compact_ok.stored_rows, 4);
-        let res_b3 = sink_compact_ok.consume(make_batch(&[10, 5]));
+        let res_b3 = sink_compact_ok.consume(make_batch(&[10, 5]), &mut ok_in_res);
+        drop(ok_in_res);
         assert!(
             matches!(res_b3, Ok(ControlFlow::Continue)),
             "expected Ok after compaction, got {res_b3:?}"
@@ -2282,6 +2656,7 @@ mod tests {
 
         // Case 2: All stored rows are evicted by incoming batch (live_stored == 0) under tight cap
         let (zero_live_ctx, _d_zero) = test_ctx(bytes_before_b3 + 64, 1);
+        let mut zero_in_res = zero_live_ctx.pool.register("zero_in", false);
         let mut sink_zero_live = TopKSink::new(
             Arc::clone(&schema),
             keys.clone(),
@@ -2289,9 +2664,14 @@ mod tests {
             0,
             zero_live_ctx.clone(),
         );
-        sink_zero_live.consume(make_batch(&[50, 40, 30])).unwrap();
-        sink_zero_live.consume(make_batch(&[20])).unwrap();
-        let res_evict_all = sink_zero_live.consume(make_batch(&[3, 2, 1]));
+        sink_zero_live
+            .consume(make_batch(&[50, 40, 30]), &mut zero_in_res)
+            .unwrap();
+        sink_zero_live
+            .consume(make_batch(&[20]), &mut zero_in_res)
+            .unwrap();
+        let res_evict_all = sink_zero_live.consume(make_batch(&[3, 2, 1]), &mut zero_in_res);
+        drop(zero_in_res);
         assert!(
             matches!(res_evict_all, Ok(ControlFlow::Continue)),
             "expected Ok when all stored rows evicted, got {res_evict_all:?}"
@@ -2302,11 +2682,19 @@ mod tests {
 
         // Case 3: Ultra-tight cap where even compact_kept cannot fit -> clean TooLarge, NEVER Internal
         let (too_tight_ctx, _d_tight) = test_ctx(bytes_before_b3 + 16, 1);
+        let mut tight_in_res = too_tight_ctx.pool.register("tight_in", false);
         let mut sink_too_tight =
             TopKSink::new(Arc::clone(&schema), keys, 3, 0, too_tight_ctx.clone());
-        sink_too_tight.consume(make_batch(&[50, 40, 30])).unwrap();
-        sink_too_tight.consume(make_batch(&[20])).unwrap();
-        let err = sink_too_tight.consume(make_batch(&[10, 5])).unwrap_err();
+        sink_too_tight
+            .consume(make_batch(&[50, 40, 30]), &mut tight_in_res)
+            .unwrap();
+        sink_too_tight
+            .consume(make_batch(&[20]), &mut tight_in_res)
+            .unwrap();
+        let err = sink_too_tight
+            .consume(make_batch(&[10, 5]), &mut tight_in_res)
+            .unwrap_err();
+        drop(tight_in_res);
         assert!(
             matches!(err, QueryError::TooLarge),
             "expected QueryError::TooLarge, got {err:?}"
@@ -2369,16 +2757,19 @@ mod tests {
 
         let spec = ScanSpec {
             projection: Some(vec![0, 1]),
-            map_keys: vec![("note".to_owned(), "k".to_owned())],
+            map_projections: BTreeMap::from([(
+                "note".to_owned(),
+                MapProjection::Keys(std::collections::BTreeSet::from(["k".to_owned()])),
+            )]),
             id_lookups: vec![IdLookupHint::Utf8 {
                 column: "note".to_owned(),
                 values: vec!["u1".to_owned()],
             }],
-            substrings: vec![SubstringHint {
+            substrings: vec![vec![SubstringHint {
                 column: "note".to_owned(),
                 needle: "abc".to_owned(),
                 case_insensitive: true,
-            }],
+            }]],
             sort_hints: vec![SortHint {
                 column: "id".to_owned(),
                 descending: true,
@@ -2389,8 +2780,11 @@ mod tests {
         let _ = union.open_partitions(&spec, &ctx).unwrap();
         let got = captured.lock().unwrap().take().unwrap();
         assert_eq!(
-            got.map_keys,
-            vec![("child_note".to_owned(), "k".to_owned())]
+            got.map_projections,
+            BTreeMap::from([(
+                "child_note".to_owned(),
+                MapProjection::Keys(std::collections::BTreeSet::from(["k".to_owned()])),
+            )])
         );
         assert_eq!(
             got.id_lookups,
@@ -2401,11 +2795,11 @@ mod tests {
         );
         assert_eq!(
             got.substrings,
-            vec![SubstringHint {
+            vec![vec![SubstringHint {
                 column: "child_note".to_owned(),
                 needle: "abc".to_owned(),
                 case_insensitive: true,
-            }]
+            }]]
         );
         assert_eq!(
             got.sort_hints,
@@ -2414,5 +2808,506 @@ mod tests {
                 descending: true,
             }]
         );
+    }
+
+    #[test]
+    fn project_op_with_schema_preserves_nullability() {
+        let (ctx, _dir) = test_ctx(1024 * 1024, 1);
+        let in_schema = Schema::try_new_arc(vec![
+            Field::new("a", DataType::I64, false),
+            Field::new("b", DataType::Utf8, true),
+        ])
+        .unwrap();
+        let out_schema = Schema::try_new_arc(vec![
+            Field::new("a_out", DataType::I64, false),
+            Field::new("b_out", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        // Validation errors: count mismatch & type mismatch.
+        assert!(ProjectOp::with_schema(vec![], Arc::clone(&out_schema), ctx.clone()).is_err());
+        assert!(
+            ProjectOp::with_schema(
+                vec![
+                    Expr::Column {
+                        index: 0,
+                        name: "a".to_owned(),
+                        data_type: DataType::I64,
+                    },
+                    Expr::Column {
+                        index: 0,
+                        name: "a".to_owned(),
+                        data_type: DataType::I64,
+                    },
+                ],
+                Arc::clone(&out_schema),
+                ctx.clone(),
+            )
+            .is_err()
+        );
+
+        let mut op = ProjectOp::with_schema(
+            vec![
+                Expr::Column {
+                    index: 0,
+                    name: "a".to_owned(),
+                    data_type: DataType::I64,
+                },
+                Expr::Column {
+                    index: 1,
+                    name: "b".to_owned(),
+                    data_type: DataType::Utf8,
+                },
+            ],
+            Arc::clone(&out_schema),
+            ctx.clone(),
+        )
+        .unwrap();
+
+        let batch = Batch::try_new_all(
+            Arc::clone(&in_schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![10, 20]), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(["x", ""]).unwrap()),
+                        Some(Bitmap::from_bools(&[true, false])),
+                    )
+                    .unwrap(),
+                ),
+            ],
+            2,
+        )
+        .unwrap();
+
+        let mut emitted = Vec::new();
+        let mut dummy_res = ctx.pool.register("test_in", false);
+        op.push(batch, &mut dummy_res, &mut |b, _res| {
+            emitted.push(b);
+            Ok(ControlFlow::Continue)
+        })
+        .unwrap();
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].schema().as_ref(), out_schema.as_ref());
+        assert!(!emitted[0].schema().fields()[0].nullable);
+        assert!(emitted[0].schema().fields()[1].nullable);
+
+        // Non-null schema field rejects a null value at runtime.
+        let strict_schema =
+            Schema::try_new_arc(vec![Field::new("b_strict", DataType::Utf8, false)]).unwrap();
+        let mut strict_op = ProjectOp::with_schema(
+            vec![Expr::Column {
+                index: 1,
+                name: "b".to_owned(),
+                data_type: DataType::Utf8,
+            }],
+            strict_schema,
+            ctx,
+        )
+        .unwrap();
+        let batch_with_null = Batch::try_new_all(
+            in_schema,
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![1]), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices([""]).unwrap()),
+                        Some(Bitmap::from_bools(&[false])),
+                    )
+                    .unwrap(),
+                ),
+            ],
+            1,
+        )
+        .unwrap();
+        let err = strict_op
+            .push(batch_with_null, &mut dummy_res, &mut |_, _| {
+                Ok(ControlFlow::Continue)
+            })
+            .unwrap_err();
+        assert!(matches!(err, QueryError::Column(_)));
+        drop(dummy_res);
+
+        // ProjectOp shares passthrough Column Arc zero-copy via try_new_shared.
+        let (ctx2, _dir2) = test_ctx(64 * 1024, 1);
+        let pass_schema = Schema::try_new_arc(vec![Field::new("a", DataType::I64, false)]).unwrap();
+        let mut pass_op = ProjectOp::with_schema(
+            vec![Expr::Column {
+                index: 0,
+                name: "a".to_owned(),
+                data_type: DataType::I64,
+            }],
+            Arc::clone(&pass_schema),
+            ctx2.clone(),
+        )
+        .unwrap();
+        let shared_in = Batch::try_new_all(
+            Arc::clone(&pass_schema),
+            vec![Column::Flat(
+                FlatColumn::try_new(FlatData::I64(vec![42, 99]), None).unwrap(),
+            )],
+            2,
+        )
+        .unwrap();
+        let mut pass_in_res = ctx2.pool.register("pass_in", false);
+        pass_in_res.try_grow(shared_in.memory_bytes()).unwrap();
+        let mut out_batches = Vec::new();
+        pass_op
+            .push(shared_in.clone(), &mut pass_in_res, &mut |b, out_res| {
+                assert_eq!(out_res.size(), b.memory_bytes());
+                assert_eq!(ctx2.pool.reserved(), b.memory_bytes());
+                out_batches.push(b);
+                Ok(ControlFlow::Continue)
+            })
+            .unwrap();
+        assert_eq!(ctx2.pool.reserved(), 0);
+        assert!(Arc::ptr_eq(
+            out_batches[0].column_arc(0).unwrap(),
+            shared_in.column_arc(0).unwrap()
+        ));
+    }
+
+    #[test]
+    fn limit_op_two_token_early_stop_halts_sibling_without_cancelled_error() {
+        use crate::exec::run_pipeline_with_stop;
+        use std::sync::Barrier;
+
+        struct FastAndSlowStream {
+            batches: Vec<Batch>,
+            barrier: Arc<Barrier>,
+            is_slow: bool,
+            step: usize,
+        }
+
+        impl PartitionStream for FastAndSlowStream {
+            fn next_batch(
+                &mut self,
+                cancel: &CancelToken,
+                res: Option<&mut Reservation>,
+            ) -> Result<Option<Batch>, QueryError> {
+                if self.is_slow {
+                    if self.step == 0 {
+                        self.barrier.wait();
+                    }
+                    self.step += 1;
+                    // Wait until stop_cancel cancels this sibling partition.
+                    while !cancel.is_cancelled() {
+                        std::thread::sleep(std::time::Duration::from_micros(200));
+                    }
+                    return Err(QueryError::Cancelled);
+                }
+                if self.step == 0 {
+                    self.barrier.wait();
+                }
+                if cancel.is_cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
+                if self.step < self.batches.len() {
+                    let b = self.batches[self.step].clone();
+                    if let Some(r) = res {
+                        r.try_grow(b.memory_bytes())?;
+                    }
+                    self.step += 1;
+                    Ok(Some(b))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+
+        let (ctx, _dir) = test_ctx(1024 * 1024, 2);
+        let schema = Schema::try_new_arc(vec![Field::new("v", DataType::I64, false)]).unwrap();
+        let b = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![Column::Flat(
+                FlatColumn::try_new(FlatData::I64(vec![1, 2, 3, 4, 5]), None).unwrap(),
+            )],
+            5,
+        )
+        .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let streams: Vec<Box<dyn PartitionStream>> = vec![
+            Box::new(FastAndSlowStream {
+                batches: vec![b],
+                barrier: Arc::clone(&barrier),
+                is_slow: false,
+                step: 0,
+            }),
+            Box::new(FastAndSlowStream {
+                batches: Vec::new(),
+                barrier,
+                is_slow: true,
+                step: 0,
+            }),
+        ];
+
+        let shared_rem = Arc::new(AtomicUsize::new(3));
+        let stop_cancel = CancelToken::new();
+        let pool_c = Arc::clone(&ctx.pool);
+        let sinks = run_pipeline_with_stop(
+            &ctx,
+            Some(stop_cancel.clone()),
+            streams,
+            move |_| {
+                Ok(vec![Box::new(
+                    LimitOp::new(0, Some(3), Some(Arc::clone(&shared_rem)))
+                        .with_stop_cancel(stop_cancel.clone()),
+                ) as Box<dyn PushOperator>])
+            },
+            move |_| Ok(CollectSink::new(&pool_c)),
+        )
+        .unwrap();
+
+        assert!(!ctx.eval.cancel.is_cancelled());
+        let total_rows: usize = sinks
+            .iter()
+            .flat_map(|s| s.batches())
+            .map(Batch::num_rows)
+            .sum();
+        assert_eq!(total_rows, 3);
+        drop(sinks);
+        assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn topk_caps_initial_heap_capacity_and_tracks_heap_bytes() {
+        let (ctx, _dir) = test_ctx(64 * 1024, 1);
+        let schema = Schema::try_new_arc(vec![Field::new("v", DataType::I64, false)]).unwrap();
+        let keys = vec![SortKey {
+            expr: col_expr(0, "v", DataType::I64),
+            descending: false,
+            nulls_first: false,
+        }];
+        let mut sink = TopKSink::new(Arc::clone(&schema), keys, usize::MAX, 0, ctx.clone());
+        assert!(sink.heap.capacity() <= ctx.batch_size);
+
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![Column::Flat(
+                FlatColumn::try_new(FlatData::I64(vec![3, 1, 2]), None).unwrap(),
+            )],
+            3,
+        )
+        .unwrap();
+        let expected_batch_bytes = batch.memory_bytes();
+        let mut in_res = ctx.pool.register("in", false);
+        in_res.try_grow(expected_batch_bytes).unwrap();
+        sink.consume(batch, &mut in_res).unwrap();
+        drop(in_res);
+
+        // Reservation includes stored batch, key column, and heap item bytes.
+        assert!(sink.reserved_bytes() >= expected_batch_bytes + 3 * size_of::<HeapItem>());
+        drop(sink);
+        assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn union_source_remaps_filter_expr_column_names_recursively() {
+        use std::sync::Mutex;
+
+        #[derive(Debug)]
+        struct CaptureFilterSource {
+            inner: BatchSource,
+            captured: Arc<Mutex<Option<ScanSpec>>>,
+        }
+
+        impl ScanSource for CaptureFilterSource {
+            fn schema(&self) -> Arc<Schema> {
+                self.inner.schema()
+            }
+
+            fn projected_schema(&self, spec: &ScanSpec) -> Result<Arc<Schema>, QueryError> {
+                self.inner.projected_schema(spec)
+            }
+
+            fn open_partitions(
+                &self,
+                spec: &ScanSpec,
+                ctx: &ExecContext,
+            ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+                *self.captured.lock().unwrap() = Some(spec.clone());
+                self.inner.open_partitions(spec, ctx)
+            }
+
+            fn explain_summary(&self, spec: &ScanSpec) -> String {
+                self.inner.explain_summary(spec)
+            }
+        }
+
+        let (ctx, _dir) = test_ctx(1024 * 1024, 1);
+        let union_schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("note", DataType::Utf8, true),
+        ])
+        .unwrap();
+        let child_schema = Schema::try_new_arc(vec![
+            Field::new("child_id", DataType::I64, false),
+            Field::new("child_note", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        let captured = Arc::new(Mutex::new(None));
+        let child = Arc::new(CaptureFilterSource {
+            inner: BatchSource::empty(child_schema),
+            captured: Arc::clone(&captured),
+        });
+        let union = UnionSource::new(union_schema, vec![child]).unwrap();
+
+        let filter = Expr::Binary {
+            left: Box::new(Expr::Between {
+                expr: Box::new(col_expr(0, "id", DataType::I64)),
+                low: Box::new(Expr::Literal(ScalarValue::I64(1))),
+                high: Box::new(Expr::Literal(ScalarValue::I64(10))),
+                negated: false,
+            }),
+            op: BinaryOp::And,
+            right: Box::new(Expr::InList {
+                expr: Box::new(col_expr(1, "note", DataType::Utf8)),
+                list: vec![Expr::Literal(ScalarValue::Utf8("ok".to_owned()))],
+                negated: false,
+                redacted: false,
+            }),
+            data_type: DataType::Bool,
+        };
+        let spec = ScanSpec {
+            filters: vec![filter],
+            ..ScanSpec::default()
+        };
+
+        let _ = union.open_partitions(&spec, &ctx).unwrap();
+        let got = captured.lock().unwrap().take().unwrap();
+        assert_eq!(got.filters.len(), 1);
+        let rendered = got.filters[0].fmt_plan();
+        assert!(
+            rendered.contains("child_id") && rendered.contains("child_note"),
+            "expected remapped child column names in filter: {rendered}"
+        );
+    }
+
+    #[test]
+    fn topk_avoids_double_counting_shared_column_and_duplicate_sort_keys() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("v", DataType::I64, false),
+            Field::new("payload", DataType::Utf8, false),
+        ])
+        .unwrap();
+        let vals: Vec<i64> = (0..256).collect();
+        let payloads: Vec<String> = vals.iter().map(|v| format!("row-{v:0>40}")).collect();
+        let payload_refs: Vec<&str> = payloads.iter().map(String::as_str).collect();
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vals), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(payload_refs).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            256,
+        )
+        .unwrap();
+        let batch_bytes = batch.memory_bytes();
+
+        // Duplicate column sort keys on both columns
+        let keys = vec![
+            SortKey {
+                expr: col_expr(0, "v", DataType::I64),
+                descending: false,
+                nulls_first: false,
+            },
+            SortKey {
+                expr: col_expr(1, "payload", DataType::Utf8),
+                descending: false,
+                nulls_first: false,
+            },
+            SortKey {
+                expr: col_expr(1, "payload", DataType::Utf8),
+                descending: true,
+                nulls_first: false,
+            },
+        ];
+
+        // Cap strictly below 2 * batch_bytes: all_rows_won must succeed without double-counting keys
+        let cap = batch_bytes + 256 * size_of::<HeapItem>() + 4096;
+        assert!(cap < batch_bytes * 2);
+        let (ctx, _dir) = test_ctx(cap, 1);
+        let mut sink = TopKSink::new(Arc::clone(&schema), keys.clone(), 512, 0, ctx.clone());
+        let mut in_res = ctx.pool.register("in", false);
+        in_res.try_grow(batch_bytes).unwrap();
+        sink.consume(batch.clone(), &mut in_res).unwrap();
+        drop(in_res);
+        assert_eq!(
+            sink.reserved_bytes(),
+            batch_bytes + 256 * size_of::<HeapItem>()
+        );
+        assert!(Arc::ptr_eq(
+            &sink.row_batches[0].columns()[0],
+            &sink.key_batches[0][0]
+        ));
+        assert!(Arc::ptr_eq(
+            &sink.row_batches[0].columns()[1],
+            &sink.key_batches[0][1]
+        ));
+        assert!(Arc::ptr_eq(
+            &sink.key_batches[0][1],
+            &sink.key_batches[0][2]
+        ));
+        drop(sink);
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        // Partial winners (take_winners) and compact_kept also share Arcs and avoid double-counting
+        let (ctx2, _dir2) = test_ctx(1024 * 1024, 1);
+        let mut sink2 = TopKSink::new(Arc::clone(&schema), keys, 4, 0, ctx2.clone());
+        let mut in_res2 = ctx2.pool.register("in2", false);
+        sink2.consume(batch, &mut in_res2).unwrap();
+        assert!(Arc::ptr_eq(
+            &sink2.row_batches[0].columns()[0],
+            &sink2.key_batches[0][0]
+        ));
+        assert!(Arc::ptr_eq(
+            &sink2.row_batches[0].columns()[1],
+            &sink2.key_batches[0][1]
+        ));
+        assert_eq!(
+            sink2.reserved_bytes(),
+            sink2.row_batches[0].memory_bytes() + 4 * size_of::<HeapItem>()
+        );
+        // Trigger compact_kept after evicting some rows
+        let smaller = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![-2, -1]), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(["a", "b"]).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            2,
+        )
+        .unwrap();
+        sink2.consume(smaller, &mut in_res2).unwrap();
+        sink2.compact_kept().unwrap();
+        assert!(Arc::ptr_eq(
+            &sink2.row_batches[0].columns()[0],
+            &sink2.key_batches[0][0]
+        ));
+        assert!(Arc::ptr_eq(
+            &sink2.row_batches[0].columns()[1],
+            &sink2.key_batches[0][1]
+        ));
+        assert_eq!(
+            sink2.reserved_bytes(),
+            sink2.row_batches[0].memory_bytes() + 4 * size_of::<HeapItem>()
+        );
+        drop(in_res2);
+        drop(sink2);
+        assert_eq!(ctx2.pool.reserved(), 0);
     }
 }

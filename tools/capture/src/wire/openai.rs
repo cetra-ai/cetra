@@ -605,6 +605,8 @@ mod tests {
         Turn {
             api: Api::OpenaiChat,
             model: "gpt-4o-mini-2024-07-18".to_owned(),
+            auxiliary: false,
+            host: None,
             message: body,
             finish: Some(finish),
             usage: Usage {
