@@ -2,12 +2,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasherDefault;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use bytes::Bytes;
 use cetra_column::Bitmap;
 use memchr::memmem;
 
 use crate::StatamError;
-use crate::format::MAX_ROW_PAYLOAD_BYTES;
+use crate::format::{ChunkLoc, MAX_ROW_PAYLOAD_BYTES};
 use crate::payload::pack::ChunkPackReader;
 use crate::payload::{
     FLAT_REF_CHUNKS, FLAT_REF_INLINE, FLAT_REF_NULL, FlatPayloadRefs, PayloadRefRow,
@@ -17,6 +20,229 @@ use crate::simd::trigram::{TrigramBloom, ascii_lowercase_into, extract_trigram_h
 /// Maximum needle byte length guaranteed to span at most two adjacent `>= 256 B` chunks
 /// and lie completely inside `tail_63(left) || head_63(right)` when crossing a boundary.
 const MAX_EDGE_NEEDLE_LEN: usize = 64;
+/// Maximum total `.stpk` chunk bytes retained from Phase-1 substring scans for Phase-2 reuse (`64 MiB`).
+pub(crate) const PHASE1_RETAINED_CHUNKS_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Thread-safe, strictly bounded cache of `.stpk` chunk bytes retained during Phase-1 substring
+/// evaluation so Phase-2 materialization can skip re-reading matched chunks from `.stpk`.
+///
+/// Peak retained + in-flight reserved bytes across all concurrent frames, mini-blocks, and
+/// row-groups sharing this instance can never exceed `max_bytes` (default `64 MiB`).
+pub(crate) struct RetainedPackChunks {
+    #[cfg(test)]
+    max_bytes: usize,
+    remaining: AtomicUsize,
+    chunks: Mutex<HashMap<([u8; 16], u32), Bytes>>,
+}
+
+impl Default for RetainedPackChunks {
+    fn default() -> Self {
+        Self::new(PHASE1_RETAINED_CHUNKS_MAX_BYTES)
+    }
+}
+
+impl RetainedPackChunks {
+    pub(crate) fn new(max_bytes: usize) -> Self {
+        Self {
+            #[cfg(test)]
+            max_bytes,
+            remaining: AtomicUsize::new(max_bytes),
+            chunks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn remaining_bytes(&self) -> usize {
+        self.remaining.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    #[cfg(test)]
+    pub(crate) fn used_bytes(&self) -> usize {
+        self.max_bytes.saturating_sub(self.remaining_bytes())
+    }
+
+    /// Atomically reserves `len` bytes from the remaining retention budget.
+    #[inline]
+    pub(crate) fn try_reserve(&self, len: usize) -> bool {
+        self.remaining
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                cur.checked_sub(len)
+            })
+            .is_ok()
+    }
+
+    /// Releases `len` previously reserved bytes back to the retention budget.
+    #[inline]
+    pub(crate) fn release(&self, len: usize) {
+        self.remaining.fetch_add(len, Ordering::AcqRel);
+    }
+
+    /// Inserts `(pack_id, cid) -> data` if `data.len()` fits within the remaining budget.
+    ///
+    /// If `(pack_id, cid)` is already retained, drops `data` and refunds its reservation.
+    pub(crate) fn insert_if_fits(&self, pack_id: [u8; 16], cid: u32, data: Bytes) -> bool {
+        let len = data.len();
+        if !self.try_reserve(len) {
+            return false;
+        }
+        let mut guard = self.chunks.lock().unwrap_or_else(|p| p.into_inner());
+        let key = (pack_id, cid);
+        if let std::collections::hash_map::Entry::Vacant(e) = guard.entry(key) {
+            e.insert(data);
+            true
+        } else {
+            drop(guard);
+            drop(data);
+            self.release(len);
+            true
+        }
+    }
+
+    /// Inserts chunks whose byte lengths were already reserved via [`Self::try_reserve`],
+    /// refunding the byte budget for any chunk keys that were already retained.
+    fn insert_reserved_batch(&self, pack_id: [u8; 16], items: Vec<(u32, Bytes)>) {
+        if items.is_empty() {
+            return;
+        }
+        let mut refund = 0usize;
+        let mut guard = self.chunks.lock().unwrap_or_else(|p| p.into_inner());
+        for (cid, data) in items {
+            let len = data.len();
+            if let std::collections::hash_map::Entry::Vacant(e) = guard.entry((pack_id, cid)) {
+                e.insert(data);
+            } else {
+                drop(data);
+                refund = refund.saturating_add(len);
+            }
+        }
+        drop(guard);
+        if refund > 0 {
+            self.release(refund);
+        }
+    }
+
+    pub(crate) fn into_map(self) -> HashMap<([u8; 16], u32), Bytes> {
+        self.chunks.into_inner().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+/// RAII guard for per-frame reserved chunk copies that automatically refunds its atomic
+/// budget if the frame callback exits early with an error before committing.
+struct ReservedFrameChunks<'a> {
+    retained: &'a RetainedPackChunks,
+    items: Vec<(u32, Bytes)>,
+    reserved_bytes: usize,
+}
+
+impl<'a> ReservedFrameChunks<'a> {
+    fn new(retained: &'a RetainedPackChunks) -> Self {
+        Self {
+            retained,
+            items: Vec::new(),
+            reserved_bytes: 0,
+        }
+    }
+
+    fn try_push(&mut self, cid: u32, slice: &[u8]) -> bool {
+        let len = slice.len();
+        if !self.retained.try_reserve(len) {
+            return false;
+        }
+        self.reserved_bytes = self.reserved_bytes.saturating_add(len);
+        self.items.push((cid, Bytes::copy_from_slice(slice)));
+        true
+    }
+
+    fn commit(mut self, pack_id: [u8; 16]) {
+        let items = std::mem::take(&mut self.items);
+        self.reserved_bytes = 0;
+        self.retained.insert_reserved_batch(pack_id, items);
+    }
+}
+
+impl Drop for ReservedFrameChunks<'_> {
+    fn drop(&mut self) {
+        if self.reserved_bytes > 0 {
+            self.items.clear();
+            self.retained.release(self.reserved_bytes);
+            self.reserved_bytes = 0;
+        }
+    }
+}
+
+/// Compact O(total_chunk_refs) index of chunks sharing a `(row, frame_id)` group so matched
+/// multi-chunk rows can retain their same-frame sibling chunks without O(K^2) expansion.
+struct SameFrameSiblings {
+    groups: Vec<Vec<u32>>,
+    cid_to_groups: HashMap<u32, Vec<usize>>,
+}
+
+impl SameFrameSiblings {
+    fn build<S: PayloadRefSource>(
+        row_refs: &S,
+        chunk_rows: &[usize],
+        pack_idx: u16,
+        toc_chunks: &[ChunkLoc],
+    ) -> Self {
+        let mut groups: Vec<Vec<u32>> = Vec::new();
+        let mut cid_to_groups: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut by_frame: Vec<(u32, u32)> = Vec::new();
+
+        for &row_idx in chunk_rows {
+            by_frame.clear();
+            let _ = row_refs.for_each_chunk(row_idx, &mut |p, cid| {
+                if p == pack_idx {
+                    by_frame.push((toc_chunks[cid as usize].frame_id, cid));
+                }
+                Ok(())
+            });
+            if by_frame.len() <= 1 {
+                continue;
+            }
+            by_frame.sort_unstable();
+            by_frame.dedup();
+            let mut i = 0usize;
+            while i < by_frame.len() {
+                let fid = by_frame[i].0;
+                let mut j = i + 1;
+                while j < by_frame.len() && by_frame[j].0 == fid {
+                    j += 1;
+                }
+                if j - i > 1 {
+                    let group_idx = groups.len();
+                    let mut group = Vec::with_capacity(j - i);
+                    for &(_, cid) in &by_frame[i..j] {
+                        group.push(cid);
+                        cid_to_groups.entry(cid).or_default().push(group_idx);
+                    }
+                    groups.push(group);
+                }
+                i = j;
+            }
+        }
+
+        Self {
+            groups,
+            cid_to_groups,
+        }
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+    }
+
+    #[inline]
+    fn group_indices(&self, cid: u32) -> Option<&[usize]> {
+        self.cid_to_groups.get(&cid).map(Vec::as_slice)
+    }
+
+    #[inline]
+    fn group(&self, group_idx: usize) -> &[u32] {
+        &self.groups[group_idx]
+    }
+}
 
 /// Context-free Unicode lowercasing for `ILIKE` matching.
 ///
@@ -176,7 +402,16 @@ pub fn search_pack_rows(
     needle: &[u8],
     case_insensitive: bool,
 ) -> Result<Bitmap, StatamError> {
-    search_pack_rows_impl(pack, &row_refs, None, pack_idx, needle, case_insensitive, 1)
+    search_pack_rows_impl(
+        pack,
+        &row_refs,
+        None,
+        pack_idx,
+        needle,
+        case_insensitive,
+        1,
+        None,
+    )
 }
 
 /// Exact row-level substring search restricted to rows active in `active_mask`,
@@ -199,11 +434,14 @@ pub(crate) fn search_pack_rows_masked_with_threads(
         needle,
         case_insensitive,
         read_threads,
+        None,
     )
 }
 
 /// Zero-allocation exact row-level substring search over [`FlatPayloadRefs`] restricted to
-/// rows active in `active_mask`.
+/// rows active in `active_mask`, optionally retaining matched chunks (and same-frame siblings)
+/// into `retain` within its atomic byte budget.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn search_pack_rows_flat_masked_with_threads(
     pack: &ChunkPackReader,
     row_refs: &FlatPayloadRefs,
@@ -212,6 +450,7 @@ pub(crate) fn search_pack_rows_flat_masked_with_threads(
     needle: &[u8],
     case_insensitive: bool,
     read_threads: usize,
+    retain: Option<([u8; 16], &RetainedPackChunks)>,
 ) -> Result<Bitmap, StatamError> {
     search_pack_rows_impl(
         pack,
@@ -221,6 +460,7 @@ pub(crate) fn search_pack_rows_flat_masked_with_threads(
         needle,
         case_insensitive,
         read_threads,
+        retain,
     )
 }
 
@@ -452,6 +692,7 @@ fn visit_active_rows(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn search_pack_rows_impl<S: PayloadRefSource>(
     pack: &ChunkPackReader,
     row_refs: &S,
@@ -460,6 +701,7 @@ fn search_pack_rows_impl<S: PayloadRefSource>(
     needle: &[u8],
     case_insensitive: bool,
     read_threads: usize,
+    retain: Option<([u8; 16], &RetainedPackChunks)>,
 ) -> Result<Bitmap, StatamError> {
     let row_count = row_refs.row_count();
     let mut results = Bitmap::new_zeroed(row_count);
@@ -571,6 +813,7 @@ fn search_pack_rows_impl<S: PayloadRefSource>(
             &chunk_rows,
             &needed_bits,
             &mut results,
+            retain,
         )?;
     } else {
         search_long_needle_rows(
@@ -582,6 +825,7 @@ fn search_pack_rows_impl<S: PayloadRefSource>(
             &chunk_rows,
             &needed_bits,
             &mut results,
+            retain,
         )?;
     }
 
@@ -601,6 +845,7 @@ fn search_short_needle_rows<S: PayloadRefSource>(
     chunk_rows: &[usize],
     needed_bits: &[u64],
     results: &mut Bitmap,
+    retain: Option<([u8; 16], &RetainedPackChunks)>,
 ) -> Result<(), StatamError> {
     if pack.postscript().edge_table_len == 0 {
         for &row_idx in chunk_rows {
@@ -641,7 +886,88 @@ fn search_short_needle_rows<S: PayloadRefSource>(
     let mut matched_bits = vec![0u64; needed_bits.len()];
     let mut any_matched = false;
     if !surviving_chunks.is_empty() {
-        if read_threads.clamp(1, crate::parallel::MAX_PARALLEL_THREADS) > 1 {
+        if let Some((pack_id, retained)) = retain
+            && retained.remaining_bytes() > 0
+        {
+            let toc_chunks = &pack.toc().chunks;
+            let same_frame_siblings =
+                SameFrameSiblings::build(row_refs, chunk_rows, pack_idx, toc_chunks);
+            let frame_results = pack.scan_frames_parallel(
+                &surviving_chunks,
+                read_threads,
+                || Ok(NeedleMatcher::new(needle, case_insensitive)),
+                |m, _fid, decoded, cids| {
+                    let mut matched_cids = Vec::new();
+                    for &cid in cids {
+                        let loc = &toc_chunks[cid as usize];
+                        let start = loc.offset_in_frame as usize;
+                        let end = start + loc.raw_len as usize;
+                        let slice = decoded.get(start..end).ok_or(StatamError::Corrupt {
+                            reason: "chunk slice out of decoded frame bounds",
+                        })?;
+                        if m.matches(slice) {
+                            matched_cids.push(cid);
+                        }
+                    }
+                    if matched_cids.is_empty() {
+                        return Ok(None);
+                    }
+                    if retained.remaining_bytes() > 0 {
+                        let mut kept = ReservedFrameChunks::new(retained);
+                        let mut seen_in_frame: HashSet<u32> = if same_frame_siblings.is_empty() {
+                            HashSet::new()
+                        } else {
+                            HashSet::with_capacity(matched_cids.len())
+                        };
+                        let mut visited_groups: HashSet<usize> = HashSet::new();
+                        'retain: for &cid in &matched_cids {
+                            if retained.remaining_bytes() == 0 {
+                                break;
+                            }
+                            if same_frame_siblings.is_empty() || seen_in_frame.insert(cid) {
+                                let loc = &toc_chunks[cid as usize];
+                                let start = loc.offset_in_frame as usize;
+                                let end = start + loc.raw_len as usize;
+                                let slice = decoded.get(start..end).ok_or(StatamError::Corrupt {
+                                    reason: "chunk slice out of decoded frame bounds",
+                                })?;
+                                let _ = kept.try_push(cid, slice);
+                            }
+                            if let Some(group_idxs) = same_frame_siblings.group_indices(cid) {
+                                for &gidx in group_idxs {
+                                    if visited_groups.insert(gidx) {
+                                        for &sib_cid in same_frame_siblings.group(gidx) {
+                                            if retained.remaining_bytes() == 0 {
+                                                break 'retain;
+                                            }
+                                            if seen_in_frame.insert(sib_cid) {
+                                                let loc = &toc_chunks[sib_cid as usize];
+                                                let start = loc.offset_in_frame as usize;
+                                                let end = start + loc.raw_len as usize;
+                                                let slice = decoded.get(start..end).ok_or(
+                                                    StatamError::Corrupt {
+                                                        reason: "sibling chunk slice out of decoded frame bounds",
+                                                    },
+                                                )?;
+                                                let _ = kept.try_push(sib_cid, slice);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        kept.commit(pack_id);
+                    }
+                    Ok(Some(matched_cids))
+                },
+            )?;
+            for matched_cids in frame_results {
+                for cid in matched_cids {
+                    bitset_set(&mut matched_bits, cid as usize);
+                    any_matched = true;
+                }
+            }
+        } else if read_threads.clamp(1, crate::parallel::MAX_PARALLEL_THREADS) > 1 {
             let matched = pack.scan_chunks_in_frames_parallel(
                 &surviving_chunks,
                 read_threads,
@@ -765,23 +1091,28 @@ fn search_long_needle_rows<S: PayloadRefSource>(
     chunk_rows: &[usize],
     needed_bits: &[u64],
     results: &mut Bitmap,
+    retain: Option<([u8; 16], &RetainedPackChunks)>,
 ) -> Result<(), StatamError> {
     let all_needed = collect_set_bits(needed_bits);
     let mut total_chunk_bytes = 0usize;
     let mut total_frame_bytes = 0usize;
     pack.check_chunks_budget(&all_needed, &mut total_chunk_bytes, &mut total_frame_bytes)?;
-    let fetched: HashMap<u32, Vec<u8>> =
+    let fetched: HashMap<u32, Bytes> =
         if read_threads.clamp(1, crate::parallel::MAX_PARALLEL_THREADS) > 1 {
             pack.scan_chunks_in_frames_parallel(
                 &all_needed,
                 read_threads,
                 || Ok(()),
-                |(), cid, bytes| Some((cid, bytes.to_vec())),
+                |(), cid, bytes| Some((cid, Bytes::copy_from_slice(bytes))),
             )?
             .into_iter()
             .collect()
         } else {
-            pack.read_chunks(&all_needed)?
+            let mut map = HashMap::with_capacity(all_needed.len());
+            pack.scan_chunks_in_frames(&all_needed, |cid, bytes| {
+                map.insert(cid, Bytes::copy_from_slice(bytes));
+            })?;
+            map
         };
 
     let mut seq_cache: HashMap<SeqKey<'_>, bool> = HashMap::new();
@@ -837,6 +1168,18 @@ fn search_long_needle_rows<S: PayloadRefSource>(
         seq_cache.insert(key, hit);
         if hit {
             let _ = results.set(row_idx, true);
+            if let Some((pack_id, retained)) = retain
+                && retained.remaining_bytes() > 0
+            {
+                let _ = row_refs.for_each_chunk(row_idx, &mut |p, cid| {
+                    if p == pack_idx
+                        && let Some(bytes) = fetched.get(&cid)
+                    {
+                        let _ = retained.insert_if_fits(pack_id, cid, bytes.clone());
+                    }
+                    Ok(())
+                });
+            }
         }
     }
 
@@ -1852,8 +2195,6 @@ mod tests {
 
     #[test]
     fn unicode_ilike_trigram_pruning_alienacion_and_flat_search_parity() {
-        use crate::payload::decode_payload_refs_flat;
-
         let mut builder = ChunkPackBuilder::new(
             [0xA1u8; 16],
             PackWriteOptions {
@@ -1918,14 +2259,16 @@ mod tests {
         ];
         let mut encoded = Vec::new();
         crate::payload::encode_payload_refs(&rows, &mut encoded).unwrap();
-        let flat = decode_payload_refs_flat(&encoded, rows.len(), 64 * 1024).unwrap();
+        let flat =
+            crate::payload::decode_payload_refs_flat(&encoded, rows.len(), 64 * 1024).unwrap();
         let mask = Bitmap::new_ones(rows.len());
 
         for needle in ["Alienación".as_bytes(), "ALIENACIÓN".as_bytes()] {
             let bm_rows = search_pack_rows(&pack, &rows, 0, needle, true).unwrap();
-            let bm_flat =
-                search_pack_rows_flat_masked_with_threads(&pack, &flat, &mask, 0, needle, true, 1)
-                    .unwrap();
+            let bm_flat = search_pack_rows_flat_masked_with_threads(
+                &pack, &flat, &mask, 0, needle, true, 1, None,
+            )
+            .unwrap();
             assert_eq!(bm_rows.iter_ones().collect::<Vec<_>>(), vec![0, 1, 3]);
             assert_eq!(bm_flat.iter_ones().collect::<Vec<_>>(), vec![0, 1, 3]);
         }
@@ -1940,6 +2283,7 @@ mod tests {
             "Desaparición".as_bytes(),
             true,
             1,
+            None,
         )
         .unwrap();
         let after = s3.counters();
@@ -2166,5 +2510,209 @@ mod tests {
             .iter_ones()
             .collect::<Vec<_>>();
         assert_eq!(hit_split, vec![0]);
+    }
+
+    #[test]
+    fn search_retaining_unicode_ilike_mid_codepoint_split_matches_lossy() {
+        // B1 regression: when a multi-chunk UTF-8 payload splits a codepoint across CDC chunks,
+        // individual chunk slices fail `std::str::from_utf8`. Both short-needle and long-needle
+        // retaining searches must match Unicode ILIKE identically to non-retaining search.
+        let pack_id = [0xB1; 16];
+        let mut builder = ChunkPackBuilder::new(
+            pack_id,
+            PackWriteOptions {
+                codec: Codec::None,
+                enable_trigram_skip: true,
+                ..PackWriteOptions::default()
+            },
+        );
+
+        // Chunk 0 ends with the first byte (0xC3) of 'é' (0xC3 0xA9), making chunk 0 invalid UTF-8
+        // on its own while containing uppercase "CAFÉ" in its interior.
+        let mut c0 = Vec::new();
+        c0.extend_from_slice(&b"a".repeat(260));
+        c0.extend_from_slice("CAFÉ ".as_bytes());
+        c0.extend_from_slice(&b"b".repeat(80));
+        c0.push(0xC3); // incomplete leading byte of 'é'
+
+        // Chunk 1 starts with continuation byte 0xA9 of 'é', also invalid standalone UTF-8,
+        // and contains a >64 B uppercase Unicode needle segment.
+        let long_tail_upper =
+            "LONG_UNICODE_NEEDLE_CAFÉ_EXCEEDING_SIXTY_FOUR_BYTES_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let long_tail_lower =
+            "long_unicode_needle_café_exceeding_sixty_four_bytes_abcdefghijklmnopqrstuvwxyz";
+        assert!(long_tail_lower.len() > MAX_EDGE_NEEDLE_LEN);
+        let mut c1 = Vec::new();
+        c1.push(0xA9); // trailing continuation byte of 'é'
+        c1.extend_from_slice(&b"c".repeat(120));
+        c1.extend_from_slice(long_tail_upper.as_bytes());
+        c1.extend_from_slice(&b"d".repeat(120));
+
+        // Chunk 2 has no match.
+        let c2 = b"zzzzzzzzzzzzzzzz".repeat(20);
+
+        // Verify chunks 0 and 1 are genuinely invalid standalone UTF-8, while c0 || c1 is valid UTF-8.
+        assert!(std::str::from_utf8(&c0).is_err());
+        assert!(std::str::from_utf8(&c1).is_err());
+        let mut joined = c0.clone();
+        joined.extend_from_slice(&c1);
+        assert!(std::str::from_utf8(&joined).is_ok());
+
+        let cid0 = builder.intern_chunk(&c0).unwrap();
+        let cid1 = builder.intern_chunk(&c1).unwrap();
+        let cid2 = builder.intern_chunk(&c2).unwrap();
+
+        let mut pack_bytes = Vec::new();
+        builder.finish(&mut pack_bytes).unwrap();
+        let pack = ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes))).unwrap();
+
+        let rows = vec![
+            PayloadRefRow::Chunks(vec![(0, cid0), (0, cid1)]),
+            PayloadRefRow::Chunks(vec![(0, cid2)]),
+        ];
+        let mut encoded = Vec::new();
+        crate::payload::encode_payload_refs(&rows, &mut encoded).unwrap();
+        let flat =
+            crate::payload::decode_payload_refs_flat(&encoded, rows.len(), 64 * 1024).unwrap();
+        let mask = Bitmap::new_ones(rows.len());
+
+        for needle in ["café".as_bytes(), long_tail_lower.as_bytes()] {
+            for threads in [1usize, 2] {
+                let bm_no_retain = search_pack_rows_flat_masked_with_threads(
+                    &pack, &flat, &mask, 0, needle, true, threads, None,
+                )
+                .unwrap();
+                let retained = RetainedPackChunks::default();
+                let bm_retain = search_pack_rows_flat_masked_with_threads(
+                    &pack,
+                    &flat,
+                    &mask,
+                    0,
+                    needle,
+                    true,
+                    threads,
+                    Some((pack_id, &retained)),
+                )
+                .unwrap();
+                assert_eq!(bm_no_retain.iter_ones().collect::<Vec<_>>(), vec![0]);
+                assert_eq!(bm_retain.iter_ones().collect::<Vec<_>>(), vec![0]);
+                let map = retained.into_map();
+                assert!(map.contains_key(&(pack_id, cid0)));
+                assert!(map.contains_key(&(pack_id, cid1)));
+            }
+        }
+    }
+
+    #[test]
+    fn retained_pack_chunks_enforces_strict_cap_across_parallel_frames() {
+        // B2 regression: even across many concurrent frames matching a broad needle,
+        // retained bytes never exceed the configured atomic budget.
+        let pack_id = [0xB2; 16];
+        let mut builder = ChunkPackBuilder::new(
+            pack_id,
+            PackWriteOptions {
+                codec: Codec::None,
+                target_frame_raw_bytes: 32 * 1024,
+                enable_trigram_skip: true,
+                ..PackWriteOptions::default()
+            },
+        );
+        let mut rows = Vec::new();
+        for i in 0..40u32 {
+            let mut payload = format!("BROAD_HIT_{i:04}_").into_bytes();
+            payload.resize(16 * 1024, b'x');
+            let cid = builder.intern_chunk(&payload).unwrap();
+            rows.push(PayloadRefRow::Chunks(vec![(0, cid)]));
+        }
+        let mut pack_bytes = Vec::new();
+        builder.finish(&mut pack_bytes).unwrap();
+        let pack = ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes))).unwrap();
+        assert!(pack.toc().frames.len() >= 10);
+
+        let mut encoded = Vec::new();
+        crate::payload::encode_payload_refs(&rows, &mut encoded).unwrap();
+        let flat = crate::payload::decode_payload_refs_flat(&encoded, rows.len(), 2 * 1024 * 1024)
+            .unwrap();
+        let mask = Bitmap::new_ones(rows.len());
+
+        let cap = 64 * 1024usize;
+        for threads in [1usize, 4] {
+            let retained = RetainedPackChunks::new(cap);
+            let bm = search_pack_rows_flat_masked_with_threads(
+                &pack,
+                &flat,
+                &mask,
+                0,
+                b"BROAD_HIT_",
+                false,
+                threads,
+                Some((pack_id, &retained)),
+            )
+            .unwrap();
+            assert_eq!(bm.count_ones(), rows.len());
+            assert!(
+                retained.used_bytes() <= cap,
+                "used_bytes {} exceeded cap {} (threads={threads})",
+                retained.used_bytes(),
+                cap
+            );
+            let map = retained.into_map();
+            let total_retained: usize = map.values().map(Bytes::len).sum();
+            assert!(total_retained <= cap);
+            assert!(total_retained > 0);
+        }
+    }
+
+    #[test]
+    fn same_frame_siblings_high_density_row_is_linear() {
+        // B3 regression: a row placing K=2_000 distinct 256 B chunks into a single frame must
+        // build and query same-frame siblings in O(K) time and memory without O(K^3) blowup.
+        let pack_id = [0xB3; 16];
+        let mut builder = ChunkPackBuilder::new(
+            pack_id,
+            PackWriteOptions {
+                codec: Codec::None,
+                target_frame_raw_bytes: 1024 * 1024,
+                enable_trigram_skip: true,
+                ..PackWriteOptions::default()
+            },
+        );
+        let k = 2_000usize;
+        let mut row_refs_cids = Vec::with_capacity(k);
+        for i in 0..k {
+            let mut chunk = format!("SIB_HIT_{i:05}_").into_bytes();
+            chunk.resize(256, b'q');
+            let cid = builder.intern_chunk(&chunk).unwrap();
+            row_refs_cids.push((0u16, cid));
+        }
+        let mut pack_bytes = Vec::new();
+        builder.finish(&mut pack_bytes).unwrap();
+        let pack = ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes))).unwrap();
+        assert_eq!(pack.toc().frames.len(), 1);
+
+        let rows = vec![PayloadRefRow::Chunks(row_refs_cids)];
+        let mut encoded = Vec::new();
+        crate::payload::encode_payload_refs(&rows, &mut encoded).unwrap();
+        let flat =
+            crate::payload::decode_payload_refs_flat(&encoded, rows.len(), 1024 * 1024).unwrap();
+        let mask = Bitmap::new_ones(rows.len());
+
+        let cap = 32 * 1024usize;
+        let retained = RetainedPackChunks::new(cap);
+        let bm = search_pack_rows_flat_masked_with_threads(
+            &pack,
+            &flat,
+            &mask,
+            0,
+            b"SIB_HIT_",
+            false,
+            1,
+            Some((pack_id, &retained)),
+        )
+        .unwrap();
+        assert_eq!(bm.iter_ones().collect::<Vec<_>>(), vec![0]);
+        assert_eq!(retained.used_bytes(), cap);
+        let map = retained.into_map();
+        assert_eq!(map.values().map(Bytes::len).sum::<usize>(), cap);
     }
 }

@@ -3519,7 +3519,15 @@ fn reader_rejects_multi_chunk_payload_referencing_pack_without_edge_table() {
     let crafted_flat = decode_payload_refs_flat(&ref_bytes, 2, MAX_BATCH_DECODED_BYTES).unwrap();
     let mask = Bitmap::new_ones(2);
     let err_eval = reader
-        .eval_payload_refs_substring(&crafted_flat, &mask, b"XYZ_ABSENT_999", false, None, 1)
+        .eval_payload_refs_substring(
+            &crafted_flat,
+            &mask,
+            b"XYZ_ABSENT_999",
+            false,
+            None,
+            1,
+            None,
+        )
         .unwrap_err();
     assert!(matches!(
         err_eval,
@@ -5653,5 +5661,1705 @@ fn estimate_column_bytes_is_conservative_for_const_dict_and_rle() {
     assert!(
         estimate_column_bytes(&rle_col) >= 100 * 1024 * 1024,
         "Rle binary estimate must account for materialized bytes"
+    );
+}
+
+#[test]
+fn pass13a_multi_rg_take_rows_and_scans_collapse_waves() {
+    // 4-RG L1Compact file with dict columns + ExternalPayload `.stpk` column.
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("status", DataType::Utf8, false),
+        Field::new("category", DataType::Utf8, false),
+        Field::new("note", DataType::Utf8, false),
+        Field::new("payload", DataType::Utf8, true),
+    ])
+    .unwrap();
+
+    let n = 2048usize;
+    let ids: Vec<i64> = (0..n as i64).collect();
+    let statuses: Vec<&str> = (0..n)
+        .map(|i| if i % 16 == 0 { "ERR" } else { "OK" })
+        .collect();
+    let categories: Vec<String> = (0..n).map(|i| format!("cat_{:03}", i % 24)).collect();
+    let notes: Vec<String> = (0..n).map(|i| format!("note_row_{i:05}_value")).collect();
+    let payloads: Vec<String> = (0..n)
+        .map(|i| format!("payload_row_{i:05}_{}", "P".repeat(320)))
+        .collect();
+    let cat_refs: Vec<&str> = categories.iter().map(String::as_str).collect();
+    let note_refs: Vec<&str> = notes.iter().map(String::as_str).collect();
+    let payload_refs: Vec<&str> = payloads.iter().map(String::as_str).collect();
+
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(statuses).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(cat_refs).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(note_refs).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(payload_refs).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        n,
+    )
+    .unwrap();
+
+    let pack_id = [0xD1u8; 16];
+    let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+    opts.row_group_size = 512;
+    opts.mini_block_size = 256;
+    opts.payload_cols = vec!["payload".to_owned()];
+    opts.pack_id = Some(pack_id);
+
+    let mut pb = ChunkPackBuilder::new(pack_id, test_pack_opts());
+    let mut file_bytes = Vec::new();
+    let mut writer = StatamWriter::new(
+        std::io::Cursor::new(&mut file_bytes),
+        Arc::clone(&schema),
+        opts,
+        Some(&mut pb),
+    )
+    .unwrap();
+    writer.write_batch(&batch).unwrap();
+    let stats = writer.finish().unwrap();
+    assert_eq!(stats.num_row_groups, 4);
+    let mut pack_bytes = Vec::new();
+    pb.finish(&mut pack_bytes).unwrap();
+
+    let no_cache_cfg = SimulatedS3Config {
+        cache_capacity_blocks: 0,
+        ..SimulatedS3Config::default()
+    };
+
+    // 1. Multi-RG take_rows across all 4 RGs (dict + scalar columns): 1 wave after open (<= 2 total)!
+    let s3_data = Arc::new(SimulatedS3Reader::from_bytes(
+        file_bytes.clone(),
+        no_cache_cfg,
+    ));
+    let s3_pack = Arc::new(SimulatedS3Reader::from_bytes(
+        pack_bytes.clone(),
+        no_cache_cfg,
+    ));
+    let pack_reader = Arc::new(ChunkPackReader::open(s3_pack.clone()).unwrap());
+    let mut resolver = InMemoryPackResolver::new();
+    resolver.insert(pack_id, pack_reader);
+    let reader = StatamReader::open(s3_data.clone(), Some(Arc::new(resolver))).unwrap();
+    assert_eq!(s3_data.counters().waves, 1);
+
+    let pick_rows = [5u64, 520, 1030, 1550, 2040];
+    let taken_no_payload = reader
+        .take_rows(&pick_rows, Some(&[0, 1, 2, 3]), 1)
+        .unwrap();
+    assert!(
+        s3_data.counters().waves <= 2,
+        "4-RG take_rows + open must take <= 2 waves, got {}",
+        s3_data.counters().waves
+    );
+    let merged_take = concat_scanned_batches(
+        &Arc::new(schema.project(&[0, 1, 2, 3]).unwrap()),
+        &taken_no_payload,
+    );
+    assert_eq!(merged_take.num_rows(), pick_rows.len());
+
+    // 2. Multi-RG take_rows WITH ExternalPayload across all 4 RGs: 1 data wave + 1 pack wave!
+    s3_data.reset_counters();
+    s3_pack.reset_counters();
+    let taken_with_payload = reader.take_rows(&pick_rows, None, 1).unwrap();
+    assert_eq!(
+        s3_data.counters().waves,
+        1,
+        "4-RG take_rows with payload must take 1 data wave"
+    );
+    assert_eq!(
+        s3_pack.counters().waves,
+        1,
+        "4-RG take_rows with payload must resolve all 4 RGs' .stpk chunks in 1 pack wave"
+    );
+    let merged_full = concat_scanned_batches(&schema, &taken_with_payload);
+    assert_eq!(merged_full.num_rows(), pick_rows.len());
+    let got_payload = merged_full.column(4).unwrap().materialize(None).unwrap();
+    let FlatData::Utf8(got_u) = got_payload.data() else {
+        panic!("expected Utf8 payload");
+    };
+    for (pos, &r) in pick_rows.iter().enumerate() {
+        assert_eq!(got_u.get(pos).unwrap(), payloads[r as usize].as_str());
+    }
+
+    // 3. Multi-RG unfiltered scan across all 4 RGs (dict + scalar): <= 1 wave after open!
+    s3_data.reset_counters();
+    let unfiltered = reader
+        .scan(&ScanRequest {
+            projection: Some(vec![0, 1, 2, 3]),
+            ..ScanRequest::default()
+        })
+        .unwrap();
+    assert!(
+        s3_data.counters().waves <= 1,
+        "4-RG unfiltered scan must take <= 1 wave after open, got {}",
+        s3_data.counters().waves
+    );
+    assert_eq!(unfiltered.iter().map(Batch::num_rows).sum::<usize>(), n);
+
+    // 4. Multi-RG filtered scan across all 4 RGs (filter on Phase-1 dict, project Phase-2 dict + wide):
+    // <= 2 waves after open (1 Phase-1 wave + 1 Phase-2 wave)!
+    s3_data.reset_counters();
+    let filtered = reader
+        .scan(&ScanRequest {
+            projection: Some(vec![0, 2, 3]),
+            predicates: vec![Predicate::new(
+                "status",
+                ZonePred::Eq(ZoneValue::Bytes(b"ERR".to_vec())),
+            )],
+            ..ScanRequest::default()
+        })
+        .unwrap();
+    assert!(
+        s3_data.counters().waves <= 2,
+        "4-RG filtered scan must take <= 2 waves after open, got {}",
+        s3_data.counters().waves
+    );
+    assert_eq!(filtered.iter().map(Batch::num_rows).sum::<usize>(), n / 16);
+}
+
+#[test]
+fn pass13a_inline_lazy_index_slicing_from_statam_tail() {
+    // Construct a file with a dictionary large enough to spill out of the 120 KiB Hot Tail soft
+    // budget into `lazy_dir`, yet small enough (< 400 KiB) to be captured inside the 512 KiB
+    // `DEFAULT_TAIL_HINT` prefetch!
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("big_dict", DataType::Utf8, false),
+    ])
+    .unwrap();
+
+    // ~2,500 distinct ~72-byte strings repeated 4x (~10,000 rows, ~180 KiB raw dict -> spills to
+    // lazy_dir, sits right before hot_tail_start well within 512 KiB of EOF!).
+    let distinct = 2_500usize;
+    let n = distinct * 4;
+    let mut rng = 0x1234_5678_9abc_def0u64;
+    let mut vocab = Vec::with_capacity(distinct);
+    for i in 0..distinct {
+        let mut s = format!("d_{i:05}_");
+        for _ in 0..64 {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            s.push((b'a' + ((rng >> 56) as u8 % 26)) as char);
+        }
+        vocab.push(s);
+    }
+    let ids: Vec<i64> = (0..n as i64).collect();
+    let vals: Vec<&str> = (0..n).map(|i| vocab[i % distinct].as_str()).collect();
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(vals).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        n,
+    )
+    .unwrap();
+
+    let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+    opts.row_group_size = 5_000;
+    opts.mini_block_size = 2_500;
+    let mut file_bytes = Vec::new();
+    let mut w = StatamWriter::new(
+        std::io::Cursor::new(&mut file_bytes),
+        Arc::clone(&schema),
+        opts,
+        None,
+    )
+    .unwrap();
+    w.write_batch(&batch).unwrap();
+    w.finish().unwrap();
+
+    let s3 = Arc::new(SimulatedS3Reader::from_bytes(
+        file_bytes,
+        SimulatedS3Config {
+            cache_capacity_blocks: 0,
+            ..SimulatedS3Config::default()
+        },
+    ));
+    let reader = StatamReader::open(s3.clone(), None).unwrap();
+    assert_eq!(s3.counters().waves, 1);
+    assert_eq!(s3.counters().gets, 1);
+
+    let lazy_dict_idx = reader
+        .meta()
+        .lazy_dir
+        .iter()
+        .enumerate()
+        .find(|(_, e)| e.kind == LazyIndexKind::Dict && e.phys_col_id == 1)
+        .map(|(idx, _)| idx);
+    let lazy_dict_idx = lazy_dict_idx.expect("expected big_dict to spill into lazy_dir");
+    assert!(
+        reader.meta().inline_lazy.contains_key(&lazy_dict_idx),
+        "expected lazy dict within 512 KiB tail to be sliced into inline_lazy"
+    );
+
+    // Loading the lazy dict must take 0 extra waves and 0 extra GETs!
+    reader.ensure_dicts_loaded(&[1]).unwrap();
+    assert_eq!(
+        s3.counters().waves,
+        1,
+        "inline_lazy dict decode must issue 0 extra waves"
+    );
+    assert_eq!(
+        s3.counters().gets,
+        1,
+        "inline_lazy dict decode must issue 0 extra GETs"
+    );
+    assert!(reader.get_cached_dict(1).is_some());
+}
+
+#[test]
+fn pass13a_phase1_to_phase2_stpk_chunk_reuse_avoids_reread() {
+    // Build an L1Compact file + `.stpk` pack with both single-chunk and multi-chunk JSON-array
+    // ExternalPayload rows, and verify searching + projecting the same `.stpk` column reads the
+    // `.stpk` frames ONLY ONCE (in Phase 1), with 0 `.stpk` re-reads in Phase 2!
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("input", DataType::Utf8, true),
+    ])
+    .unwrap();
+
+    let n = 128usize;
+    let ids: Vec<i64> = (0..n as i64).collect();
+    let long_needle =
+        "LONG_PHASE1_REUSE_NEEDLE_EXCEEDING_64_BYTES_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789";
+    assert!(long_needle.len() > 64);
+
+    let mut inputs = Vec::with_capacity(n);
+    let words = [
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+        "juliet", "kilo", "lima", "mike", "november", "oscar", "papa", "quebec", "romeo",
+    ];
+    let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+    let mut gen_text = |count: usize| -> String {
+        let mut s = String::with_capacity(count * 7);
+        for _ in 0..count {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            s.push_str(words[((rng >> 56) as usize) % words.len()]);
+            s.push(' ');
+        }
+        s
+    };
+    for i in 0..n {
+        if i == 17 {
+            // Single-chunk hit for short needle.
+            inputs.push(format!(
+                "single_chunk_payload_{i}_UNIQUE_PHASE1_HIT_{}",
+                gen_text(60)
+            ));
+        } else if i == 42 {
+            // Multi-chunk JSON array where chunk 0 does NOT match and chunk 1 DOES match,
+            // both residing in the same `.stpk` frame -> both chunks must be retained!
+            let m0 = format!("{{\"role\":\"system\",\"content\":\"{}\"}}", gen_text(50));
+            let m1 = format!(
+                "{{\"role\":\"user\",\"content\":\"UNIQUE_PHASE1_HIT_{}\"}}",
+                gen_text(50)
+            );
+            inputs.push(format!("[{m0},{m1}]"));
+        } else if i == 99 {
+            // Long-needle (> 64 B) multi-chunk hit.
+            let m0 = format!("{{\"role\":\"system\",\"content\":\"{}\"}}", gen_text(50));
+            let m1 = format!(
+                "{{\"role\":\"user\",\"content\":\"{long_needle}_{}\"}}",
+                gen_text(50)
+            );
+            inputs.push(format!("[{m0},{m1}]"));
+        } else {
+            inputs.push(format!("non_matching_row_{i:04}_{}", gen_text(60)));
+        }
+    }
+    let in_refs: Vec<&str> = inputs.iter().map(String::as_str).collect();
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(in_refs).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        n,
+    )
+    .unwrap();
+
+    let pack_id = [0xD2u8; 16];
+    let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+    opts.row_group_size = 128;
+    opts.mini_block_size = 128;
+    opts.payload_cols = vec!["input".to_owned()];
+    opts.pack_id = Some(pack_id);
+
+    // Use 32 KiB frames so row 42's two chunks stay in one frame while non-matching frames are
+    // pruned by the trigram bloom.
+    let mut pack_opts = test_pack_opts();
+    pack_opts.target_frame_raw_bytes = 32 * 1024;
+    let mut pb = ChunkPackBuilder::new(pack_id, pack_opts);
+    let mut file_bytes = Vec::new();
+    let mut w = StatamWriter::new(
+        std::io::Cursor::new(&mut file_bytes),
+        Arc::clone(&schema),
+        opts,
+        Some(&mut pb),
+    )
+    .unwrap();
+    w.write_batch(&batch).unwrap();
+    w.finish().unwrap();
+    let mut pack_bytes = Vec::new();
+    pb.finish(&mut pack_bytes).unwrap();
+
+    let no_cache_cfg = SimulatedS3Config {
+        cache_capacity_blocks: 0,
+        ..SimulatedS3Config::default()
+    };
+
+    // Short needle (single-chunk + multi-chunk same-frame hits), tested at 1T and 4T:
+    for threads in [1usize, 4] {
+        // Baseline: search `input` WITHOUT projecting `input` (measures pure Phase-1 pack waves).
+        let pack_s3_base = Arc::new(SimulatedS3Reader::from_bytes(
+            pack_bytes.clone(),
+            no_cache_cfg,
+        ));
+        let pack_reader_base = Arc::new(ChunkPackReader::open(pack_s3_base.clone()).unwrap());
+        let mut resolver_base = InMemoryPackResolver::new();
+        resolver_base.insert(pack_id, pack_reader_base);
+        let reader_base = StatamReader::open(
+            Arc::new(SliceReader::new(file_bytes.clone())),
+            Some(Arc::new(resolver_base)),
+        )
+        .unwrap();
+        pack_s3_base.reset_counters();
+        let base_batches = reader_base
+            .scan(&ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![SubstringQuery::like("input", "UNIQUE_PHASE1_HIT")],
+                read_threads: threads,
+                ..ScanRequest::default()
+            })
+            .unwrap();
+        assert_eq!(base_batches.iter().map(Batch::num_rows).sum::<usize>(), 2);
+        let phase1_only_waves = pack_s3_base.counters().waves;
+        let phase1_only_gets = pack_s3_base.counters().gets;
+        assert_eq!(phase1_only_waves, 1);
+
+        // Now search AND project `input`: Phase 2 MUST add 0 extra pack waves and 0 extra GETs!
+        let pack_s3 = Arc::new(SimulatedS3Reader::from_bytes(
+            pack_bytes.clone(),
+            no_cache_cfg,
+        ));
+        let pack_reader = Arc::new(ChunkPackReader::open(pack_s3.clone()).unwrap());
+        let mut resolver = InMemoryPackResolver::new();
+        resolver.insert(pack_id, pack_reader);
+        let reader = StatamReader::open(
+            Arc::new(SliceReader::new(file_bytes.clone())),
+            Some(Arc::new(resolver)),
+        )
+        .unwrap();
+
+        pack_s3.reset_counters();
+        let batches = reader
+            .scan(&ScanRequest {
+                projection: Some(vec![0, 1]),
+                substrings: vec![SubstringQuery::like("input", "UNIQUE_PHASE1_HIT")],
+                read_threads: threads,
+                ..ScanRequest::default()
+            })
+            .unwrap();
+        let merged = concat_scanned_batches(&schema, &batches);
+        assert_eq!(merged.num_rows(), 2);
+        let id_col = merged.column(0).unwrap().materialize(None).unwrap();
+        let in_col = merged.column(1).unwrap().materialize(None).unwrap();
+        let FlatData::I64(got_ids) = id_col.data() else {
+            panic!("expected I64");
+        };
+        let FlatData::Utf8(got_in) = in_col.data() else {
+            panic!("expected Utf8");
+        };
+        assert_eq!(got_ids, &[17, 42]);
+        assert_eq!(got_in.get(0).unwrap(), inputs[17].as_str());
+        assert_eq!(got_in.get(1).unwrap(), inputs[42].as_str());
+
+        assert_eq!(
+            pack_s3.counters().waves,
+            phase1_only_waves,
+            "Phase 2 must reuse Phase-1 .stpk chunks with 0 re-reads (threads={threads})"
+        );
+        assert_eq!(
+            pack_s3.counters().gets,
+            phase1_only_gets,
+            "Phase 2 must incur 0 extra .stpk GETs (threads={threads})"
+        );
+    }
+
+    // Long needle (> 64 B): also reuses Phase-1 fetched chunks with 0 Phase-2 re-reads!
+    let pack_s3_long = Arc::new(SimulatedS3Reader::from_bytes(pack_bytes, no_cache_cfg));
+    let pack_reader_long = Arc::new(ChunkPackReader::open(pack_s3_long.clone()).unwrap());
+    let mut resolver_long = InMemoryPackResolver::new();
+    resolver_long.insert(pack_id, pack_reader_long);
+    let reader_long = StatamReader::open(
+        Arc::new(SliceReader::new(file_bytes)),
+        Some(Arc::new(resolver_long)),
+    )
+    .unwrap();
+
+    pack_s3_long.reset_counters();
+    let long_batches = reader_long
+        .scan(&ScanRequest {
+            projection: Some(vec![0, 1]),
+            substrings: vec![SubstringQuery::like("input", long_needle)],
+            ..ScanRequest::default()
+        })
+        .unwrap();
+    let long_merged = concat_scanned_batches(&schema, &long_batches);
+    assert_eq!(long_merged.num_rows(), 1);
+    let long_in = long_merged.column(1).unwrap().materialize(None).unwrap();
+    let FlatData::Utf8(got_long) = long_in.data() else {
+        panic!("expected Utf8");
+    };
+    assert_eq!(got_long.get(0).unwrap(), inputs[99].as_str());
+    // 1 MB -> 1 Phase-1 long-needle wave, 0 Phase-2 re-reads!
+    assert_eq!(
+        pack_s3_long.counters().waves,
+        1,
+        "long-needle Phase 2 must reuse Phase-1 chunks with 0 extra waves"
+    );
+}
+
+#[test]
+fn pass13_fix_b1_unicode_ilike_mid_codepoint_chunk_with_projection() {
+    // B1 end-to-end regression: a multi-chunk UTF-8 ExternalPayload split mid-codepoint across
+    // CDC chunks must match Unicode ILIKE identically whether the payload column is projected
+    // (chunk-retaining Phase-1 search) or unprojected.
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("input", DataType::Utf8, true),
+    ])
+    .unwrap();
+
+    // Find a deterministic padding (0 or 1 ASCII byte) so FastCDC splits a 2-byte 'é' mid-codepoint
+    // at chunk 0's end, making chunk 0 invalid standalone UTF-8 while holding "CAFÉ" in its interior.
+    let base_body = "é".repeat(12_000);
+    let mut target_payload = String::new();
+    for pad in 0..8usize {
+        let candidate = format!("{}CAFÉ {}", "x".repeat(128 + pad), base_body);
+        let mut chunks = Vec::new();
+        crate::chunk_payload(candidate.as_bytes(), &mut chunks);
+        if chunks.len() >= 2 && std::str::from_utf8(chunks[0]).is_err() {
+            target_payload = candidate;
+            break;
+        }
+    }
+    assert!(
+        !target_payload.is_empty(),
+        "expected FastCDC to split at least one padding variant mid-codepoint"
+    );
+    let other_payload = "z".repeat(20_000);
+
+    let pack_id = [0xB1; 16];
+    let mut pack_builder = ChunkPackBuilder::new(pack_id, test_pack_opts());
+    let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+    opts.row_group_size = 16;
+    opts.mini_block_size = 16;
+    opts.pack_id = Some(pack_id);
+    let mut file_bytes = Vec::new();
+    let mut w = StatamWriter::new(
+        std::io::Cursor::new(&mut file_bytes),
+        Arc::clone(&schema),
+        opts,
+        Some(&mut pack_builder),
+    )
+    .unwrap();
+
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(vec![0, 1]), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices([
+                            target_payload.as_str(),
+                            other_payload.as_str(),
+                        ])
+                        .unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        2,
+    )
+    .unwrap();
+    w.write_batch(&batch).unwrap();
+    w.finish().unwrap();
+
+    let mut pack_bytes = Vec::new();
+    pack_builder.finish(&mut pack_bytes).unwrap();
+    let mut resolver = InMemoryPackResolver::new();
+    resolver.insert_bytes(pack_id, pack_bytes).unwrap();
+    let reader = StatamReader::open(
+        Arc::new(SliceReader::new(file_bytes)),
+        Some(Arc::new(resolver)),
+    )
+    .unwrap();
+
+    for threads in [1usize, 2] {
+        // Unprojected (non-retaining path)
+        let unproj = reader
+            .scan(&ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![SubstringQuery::ilike("input", "café")],
+                read_threads: threads,
+                ..ScanRequest::default()
+            })
+            .unwrap();
+        let unproj_merged =
+            concat_scanned_batches(&Arc::new(schema.project(&[0]).unwrap()), &unproj);
+        assert_eq!(unproj_merged.num_rows(), 1);
+
+        // Projected (retaining path) — previously dropped row 0 silently!
+        let proj = reader
+            .scan(&ScanRequest {
+                projection: Some(vec![0, 1]),
+                substrings: vec![SubstringQuery::ilike("input", "café")],
+                read_threads: threads,
+                ..ScanRequest::default()
+            })
+            .unwrap();
+        let proj_merged = concat_scanned_batches(&schema, &proj);
+        assert_eq!(
+            proj_merged.num_rows(),
+            1,
+            "projected Unicode ILIKE on mid-codepoint split must not drop match (threads={threads})"
+        );
+        let in_col = proj_merged.column(1).unwrap().materialize(None).unwrap();
+        let FlatData::Utf8(u) = in_col.data() else {
+            panic!("expected Utf8");
+        };
+        assert_eq!(u.get(0).unwrap(), target_payload.as_str());
+    }
+}
+
+#[test]
+fn pass13_fix_b2_partial_cache_hit_and_multi_rg_shared_retention() {
+    // Part A: Partial cache hit on a multi-chunk row spanning 2 frames in `.stpk`:
+    // frame 0 matches interior and is retained in Phase 1; frame 1 has no match and is
+    // fetched in Phase 2 without re-reading frame 0!
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("input", DataType::Utf8, true),
+    ])
+    .unwrap();
+
+    let mut row0_payload = format!("PARTIAL_CACHE_NEEDLE_{}", "a".repeat(20_000));
+    row0_payload.push_str(&"b".repeat(20_000));
+    let pack_id = [0xB2; 16];
+    let mut pack_opts = test_pack_opts();
+    pack_opts.target_frame_raw_bytes = 12 * 1024;
+    let mut pack_builder = ChunkPackBuilder::new(pack_id, pack_opts);
+    let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+    opts.row_group_size = 8;
+    opts.mini_block_size = 8;
+    opts.pack_id = Some(pack_id);
+    let mut file_bytes = Vec::new();
+    let mut w = StatamWriter::new(
+        std::io::Cursor::new(&mut file_bytes),
+        Arc::clone(&schema),
+        opts,
+        Some(&mut pack_builder),
+    )
+    .unwrap();
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(vec![0, 1]), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices([row0_payload.as_str(), &"c".repeat(4_000)])
+                            .unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        2,
+    )
+    .unwrap();
+    w.write_batch(&batch).unwrap();
+    w.finish().unwrap();
+
+    let mut pack_bytes = Vec::new();
+    pack_builder.finish(&mut pack_bytes).unwrap();
+    let no_cache_cfg = SimulatedS3Config {
+        cache_capacity_blocks: 0,
+        ..SimulatedS3Config::default()
+    };
+    let pack_s3 = Arc::new(SimulatedS3Reader::from_bytes(pack_bytes, no_cache_cfg));
+    let pack_reader = Arc::new(ChunkPackReader::open(pack_s3.clone()).unwrap());
+    let total_pack_frames = pack_reader.toc().frames.len();
+    assert!(
+        total_pack_frames >= 2,
+        "expected row0 to span >= 2 frames in pack, got {total_pack_frames}"
+    );
+    let mut resolver = InMemoryPackResolver::new();
+    resolver.insert(pack_id, pack_reader);
+    let reader = StatamReader::open(
+        Arc::new(SliceReader::new(file_bytes)),
+        Some(Arc::new(resolver)),
+    )
+    .unwrap();
+
+    pack_s3.reset_counters();
+    let batches = reader
+        .scan(&ScanRequest {
+            projection: Some(vec![0, 1]),
+            substrings: vec![SubstringQuery::like("input", "PARTIAL_CACHE_NEEDLE")],
+            ..ScanRequest::default()
+        })
+        .unwrap();
+    let merged = concat_scanned_batches(&schema, &batches);
+    assert_eq!(merged.num_rows(), 1);
+    let in_col = merged.column(1).unwrap().materialize(None).unwrap();
+    let FlatData::Utf8(u) = in_col.data() else {
+        panic!("expected Utf8");
+    };
+    assert_eq!(u.get(0).unwrap(), row0_payload.as_str());
+    // Trigram + EdgeTable are inlined in pack tail; Phase 1 reads ONLY frame 0 (retaining its
+    // chunks), Phase 2 reads ONLY the remaining frames of row 0 — total GETs strictly <= frame count
+    // (never re-reading frame 0!).
+    assert!(
+        pack_s3.counters().gets <= total_pack_frames as u64,
+        "partial cache hit must never re-read retained frame 0 (gets={}, frames={})",
+        pack_s3.counters().gets,
+        total_pack_frames
+    );
+
+    // Part B: Multi-RG, multi-MB broad match > 64 MiB raw payload bytes (compressible so fast on
+    // disk/RAM) verifies strict 64 MiB wave-wide cap and exact materialization with read_threads=4.
+    let big_pack_id = [0xB3; 16];
+    let mut big_pack_opts = test_pack_opts();
+    big_pack_opts.target_frame_raw_bytes = 4 * 1024 * 1024;
+    let mut big_pack_builder = ChunkPackBuilder::new(big_pack_id, big_pack_opts);
+    let mut big_opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+    big_opts.row_group_size = 18;
+    big_opts.mini_block_size = 9;
+    big_opts.pack_id = Some(big_pack_id);
+    let mut big_file_bytes = Vec::new();
+    let mut bw = StatamWriter::new(
+        std::io::Cursor::new(&mut big_file_bytes),
+        Arc::clone(&schema),
+        big_opts,
+        Some(&mut big_pack_builder),
+    )
+    .unwrap();
+
+    // 72 rows across 4 RGs (8 MBs), each row ~1 MiB unique payload -> 72 MiB > 64 MiB cap!
+    let n_rows = 72usize;
+    let filler = "x".repeat(1024 * 1024 - 32);
+    let payloads: Vec<String> = (0..n_rows)
+        .map(|i| format!("CAP_TEST_HIT_{i:04}_{filler}"))
+        .collect();
+    let big_batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(
+                FlatColumn::try_new(FlatData::I64((0..n_rows as i64).collect()), None).unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(payloads.iter().map(String::as_str)).unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        n_rows,
+    )
+    .unwrap();
+    bw.write_batch(&big_batch).unwrap();
+    bw.finish().unwrap();
+
+    let mut big_pack_bytes = Vec::new();
+    big_pack_builder.finish(&mut big_pack_bytes).unwrap();
+    let mut big_resolver = InMemoryPackResolver::new();
+    big_resolver
+        .insert_bytes(big_pack_id, big_pack_bytes)
+        .unwrap();
+    let big_reader = StatamReader::open(
+        Arc::new(SliceReader::new(big_file_bytes)),
+        Some(Arc::new(big_resolver)),
+    )
+    .unwrap();
+    assert_eq!(big_reader.meta().rg_dir.len(), 4);
+
+    // Direct check: sharing one `RetainedPackChunks::default()` across all 4 RGs / 8 MBs
+    // strictly enforces `<= PHASE1_RETAINED_CHUNKS_MAX_BYTES` (64 MiB).
+    let sub_q = SubstringQuery::like("input", "CAP_TEST_HIT_");
+    let subs = vec![(1usize, &sub_q)];
+    let wave_retained = RetainedPackChunks::default();
+    let mut total_hits = 0usize;
+    for rg_idx in 0..big_reader.meta().rg_dir.len() {
+        let mbs: Vec<usize> = (0..big_reader.meta().rg_blocks(0, rg_idx).len()).collect();
+        let plan = big_reader.build_rg_io_plan(
+            rg_idx,
+            &mbs,
+            &[0, 1],
+            &HashMap::new(),
+            None,
+            TimeRange::ALL,
+            &[],
+            &[],
+            &subs,
+        );
+        let read_blk = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
+            Ok(Cow::Owned(big_reader.read_block_body(blk)?))
+        };
+        let active = big_reader
+            .eval_phase1_mbs(
+                rg_idx,
+                &mbs,
+                &plan,
+                &[0, 1],
+                None,
+                TimeRange::ALL,
+                &[],
+                &[],
+                &subs,
+                &[None],
+                None,
+                &read_blk,
+                None,
+                false,
+                4,
+                &wave_retained,
+            )
+            .unwrap();
+        total_hits += active.iter().map(|(_, m, _)| m.count_ones()).sum::<usize>();
+        assert!(
+            wave_retained.used_bytes() <= crate::payload::search::PHASE1_RETAINED_CHUNKS_MAX_BYTES,
+            "shared wave retention exceeded 64 MiB cap after RG {rg_idx}"
+        );
+    }
+    assert_eq!(total_hits, n_rows);
+    let retained_map = wave_retained.into_map();
+    let total_retained_bytes: usize = retained_map.values().map(Bytes::len).sum();
+    assert!(
+        total_retained_bytes <= crate::payload::search::PHASE1_RETAINED_CHUNKS_MAX_BYTES,
+        "retained bytes {total_retained_bytes} exceeded 64 MiB cap"
+    );
+    assert!(total_retained_bytes > 0);
+
+    // End-to-end scan across all 4 RGs with `read_threads = 4` succeeds with all 72 rows intact.
+    let scanned = big_reader
+        .scan(&ScanRequest {
+            projection: Some(vec![0, 1]),
+            substrings: vec![SubstringQuery::like("input", "CAP_TEST_HIT_")],
+            read_threads: 4,
+            ..ScanRequest::default()
+        })
+        .unwrap();
+    let got_rows: usize = scanned.iter().map(Batch::num_rows).sum();
+    assert_eq!(got_rows, n_rows);
+}
+
+#[test]
+fn pass13_fix_m1_duplicate_lazy_index_entry_uses_matching_inline_slice() {
+    // M1 regression: if a crafted file has two `LazyIndexEntry` records for the same
+    // `(kind, phys_col_id)` inside the prefetched tail, `inline_lazy` (keyed by `lazy_dir` index)
+    // must bind strictly 1-to-1 to the entry selected by `lazy_dir.iter().enumerate().find(...)`.
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("big_dict", DataType::Utf8, false),
+    ])
+    .unwrap();
+
+    let distinct = 2_500usize;
+    let n = distinct * 4;
+    let mut rng = 0x55aa_1234_9abc_def0u64;
+    let mut vocab = Vec::with_capacity(distinct);
+    for i in 0..distinct {
+        let mut s = format!("m1_{i:05}_");
+        for _ in 0..64 {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            s.push((b'a' + ((rng >> 56) as u8 % 26)) as char);
+        }
+        vocab.push(s);
+    }
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(
+                FlatColumn::try_new(FlatData::I64((0..n as i64).collect()), None).unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices((0..n).map(|i| vocab[i % distinct].as_str()))
+                            .unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        n,
+    )
+    .unwrap();
+
+    let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+    opts.row_group_size = 5_000;
+    opts.mini_block_size = 2_500;
+    let mut file_bytes = Vec::new();
+    let mut w = StatamWriter::new(
+        std::io::Cursor::new(&mut file_bytes),
+        Arc::clone(&schema),
+        opts,
+        None,
+    )
+    .unwrap();
+    w.write_batch(&batch).unwrap();
+    w.finish().unwrap();
+
+    // Decode the hot tail, append a bogus duplicate LazyIndexEntry for `(Dict, 1)` pointing
+    // inside the prefetched tail with a smaller `len` and bogus CRC, and rewrite the hot tail
+    // (uncompressed) + postscript + file header flags.
+    let ps_start = file_bytes.len() - POSTSCRIPT_LEN;
+    let mut ps = Postscript::decode(&file_bytes[ps_start..]).unwrap();
+    let hot_tail_start = file_bytes.len() - ps.hot_tail_len as usize;
+    let stored_body = &file_bytes[hot_tail_start..ps_start];
+    let hot_codec = if ps.flags & FLAG_HOT_TAIL_LZ4 != 0 {
+        Codec::Lz4
+    } else {
+        Codec::None
+    };
+    let mut raw_body = crate::format::decompress_checked(
+        stored_body,
+        hot_codec,
+        ps.hot_tail_raw_len as usize,
+        crate::format::MAX_HOT_TAIL_BYTES,
+    )
+    .unwrap();
+
+    let lazy_start = ps.lazy_dir_off as usize;
+    let lazy_len = ps.lazy_dir_len as usize;
+    assert!(lazy_len >= LAZY_INDEX_ENTRY_LEN);
+    assert_eq!(lazy_start + lazy_len, raw_body.len());
+
+    // Find the valid Dict lazy entry for col 1.
+    let mut orig_entry = None;
+    for chunk in raw_body[lazy_start..lazy_start + lazy_len]
+        .as_chunks::<LAZY_INDEX_ENTRY_LEN>()
+        .0
+    {
+        let e = LazyIndexEntry::decode(chunk).unwrap();
+        if e.kind == LazyIndexKind::Dict && e.phys_col_id == 1 {
+            orig_entry = Some(e);
+            break;
+        }
+    }
+    let orig = orig_entry.expect("expected lazy dict entry for col 1");
+    let dup = LazyIndexEntry {
+        kind: LazyIndexKind::Dict,
+        phys_col_id: 1,
+        offset: orig.offset,
+        len: 16,
+        crc32c: 0xDEAD_BEEF,
+        reserved: [0; 3],
+    };
+    raw_body.extend_from_slice(&dup.encode());
+
+    ps.flags &= !FLAG_HOT_TAIL_LZ4;
+    ps.lazy_dir_len += LAZY_INDEX_ENTRY_LEN as u32;
+    ps.hot_tail_raw_len = raw_body.len() as u32;
+    ps.hot_tail_len = (raw_body.len() + POSTSCRIPT_LEN) as u32;
+    ps.hot_tail_crc32c = crc32c::crc32c(&raw_body);
+
+    // Keep header flags in sync with postscript flags.
+    let mut crafted = file_bytes[..hot_tail_start].to_vec();
+    let mut hdr = FileHeader::decode(&crafted[..FILE_HEADER_LEN]).unwrap();
+    hdr.flags &= !FLAG_HOT_TAIL_LZ4;
+    crafted[..FILE_HEADER_LEN].copy_from_slice(&hdr.encode());
+    crafted.extend_from_slice(&raw_body);
+    crafted.extend_from_slice(&ps.encode());
+
+    let s3 = Arc::new(SimulatedS3Reader::from_bytes(
+        crafted,
+        SimulatedS3Config {
+            cache_capacity_blocks: 0,
+            ..SimulatedS3Config::default()
+        },
+    ));
+    let reader = StatamReader::open(s3.clone(), None).unwrap();
+    assert_eq!(
+        reader
+            .meta()
+            .lazy_dir
+            .iter()
+            .filter(|e| e.kind == LazyIndexKind::Dict && e.phys_col_id == 1)
+            .count(),
+        2
+    );
+
+    // Loading the lazy dict must decode entry 0 cleanly with 0 extra GETs (no spurious CRC error!).
+    reader.ensure_dicts_loaded(&[1]).unwrap();
+    assert_eq!(s3.counters().gets, 1);
+    assert!(reader.get_cached_dict(1).is_some());
+}
+
+#[test]
+fn pass13_fix_m3_take_rows_large_l0_payload_splits_waves() {
+    // M3 regression: `take_rows` on an L0-heavy RG exceeding `MAX_BATCH_DECODED_BYTES` (256 MiB)
+    // must measure L0 local payload bytes and split cleanly via `partition_payload_waves` instead
+    // of taking the external-only fast path and failing with `BoundsExceeded`.
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("input", DataType::Utf8, true),
+    ])
+    .unwrap();
+
+    // 180 rows × ~1.6 MiB moderately compressible L0 payloads (~288 MiB raw > 256 MiB
+    // MAX_BATCH_DECODED_BYTES, ~50:1 Zstd ratio so well within MAX_DECOMPRESS_RATIO -> ~6 MiB
+    // stored in a single Row Group!).
+    let n_rows = 180usize;
+    let mut rng = 0x1234_5678_9abc_def0u64;
+    let mut seed_block = String::with_capacity(32 * 1024);
+    for _ in 0..(32 * 1024) {
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        seed_block.push((b'a' + ((rng >> 56) as u8 % 26)) as char);
+    }
+    let payload_body = seed_block.repeat(50);
+    let payloads: Vec<String> = (0..n_rows)
+        .map(|i| format!("L0_ROW_{i:04}_{payload_body}"))
+        .collect();
+
+    let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L0Fast);
+    opts.row_group_size = 256;
+    opts.mini_block_size = 256;
+    opts.max_row_group_bytes = MAX_BATCH_DECODED_BYTES / 2;
+    let mut file_bytes = Vec::new();
+    let mut w = StatamWriter::new(
+        std::io::Cursor::new(&mut file_bytes),
+        Arc::clone(&schema),
+        opts,
+        None,
+    )
+    .unwrap();
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(
+                FlatColumn::try_new(FlatData::I64((0..n_rows as i64).collect()), None).unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(payloads.iter().map(String::as_str)).unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        n_rows,
+    )
+    .unwrap();
+    w.write_batch(&batch).unwrap();
+    w.finish().unwrap();
+
+    let reader = StatamReader::open(Arc::new(SliceReader::new(file_bytes)), None).unwrap();
+    assert_eq!(reader.meta().rg_dir.len(), 1);
+    assert!(reader.meta().rg_dir[0].l0_payload_len > 0);
+
+    let row_ids: Vec<u64> = (0..n_rows as u64).collect();
+    let batches = reader.take_rows(&row_ids, Some(&[0, 1]), 1).unwrap();
+
+    assert!(
+        batches.len() >= 2,
+        "expected > 256 MiB L0 RG to split into multiple batches, got {}",
+        batches.len()
+    );
+    let mut seen = 0usize;
+    for b in &batches {
+        let id_col = b.column(0).unwrap().materialize(None).unwrap();
+        let in_col = b.column(1).unwrap().materialize(None).unwrap();
+        let FlatData::I64(ids) = id_col.data() else {
+            panic!("expected I64");
+        };
+        let FlatData::Utf8(u) = in_col.data() else {
+            panic!("expected Utf8");
+        };
+        for (local, &id) in ids.iter().enumerate().take(b.num_rows()) {
+            assert_eq!(id, seen as i64);
+            let got = u.get(local).unwrap();
+            assert_eq!(got.len(), payloads[seen].len());
+            assert!(got.starts_with(&format!("L0_ROW_{seen:04}_")));
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, n_rows);
+
+    // Multi-RG L0 fallback sub-wave flush: 2 RGs × 80 MiB L0 payloads = 160 MiB > 128 MiB
+    // target -> exercises `flush_sub_rgs` sub-wave boundary split on L0 bytes.
+    let n_multi = 100usize; // 2 RGs × 50 rows × 1.6 MiB = 80 MiB per RG -> 160 MiB total
+    let mut multi_opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L0Fast);
+    multi_opts.row_group_size = 50;
+    multi_opts.mini_block_size = 50;
+    let mut multi_bytes = Vec::new();
+    let mut mw = StatamWriter::new(
+        std::io::Cursor::new(&mut multi_bytes),
+        Arc::clone(&schema),
+        multi_opts,
+        None,
+    )
+    .unwrap();
+    let multi_batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(
+                FlatColumn::try_new(FlatData::I64((0..n_multi as i64).collect()), None).unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(payloads[..n_multi].iter().map(String::as_str))
+                            .unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        n_multi,
+    )
+    .unwrap();
+    mw.write_batch(&multi_batch).unwrap();
+    mw.finish().unwrap();
+
+    let multi_reader = StatamReader::open(Arc::new(SliceReader::new(multi_bytes)), None).unwrap();
+    assert_eq!(multi_reader.meta().rg_dir.len(), 2);
+    let multi_row_ids: Vec<u64> = (0..n_multi as u64).collect();
+    let multi_out = multi_reader
+        .take_rows(&multi_row_ids, Some(&[0, 1]), 1)
+        .unwrap();
+    let multi_total_rows: usize = multi_out.iter().map(Batch::num_rows).sum();
+    assert_eq!(multi_total_rows, n_multi);
+}
+
+#[test]
+fn pass13_fix_m3_filtered_p1_raw_bytes_and_unfiltered_multi_wave_splits() {
+    // Part A (m3): `scan_rgs_filtered_batched` splits `p1_waves` when cumulative Phase-1
+    // decoded `raw_len` exceeds `P1_WAVE_MAX_RAW_BYTES` (128 MiB), even when compressed
+    // `stored_len` is tiny (<< 64 MiB).
+    let schema_raw = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("blob", DataType::Binary, false),
+    ])
+    .unwrap();
+
+    // 6 RGs × 1,500 rows × 16 KiB repetitive Binary = ~144 MiB raw (> 128 MiB P1_WAVE_MAX_RAW_BYTES),
+    // compressed with LZ4 to < 2 MiB stored (<< 64 MiB IO_WAVE_MAX_BYTES).
+    let n_rgs = 6usize;
+    let rows_per_rg = 1_500usize;
+    let filler = vec![b'A'; 16 * 1024];
+    let mut opts_raw = WriteOptions::for_table(TableKind::Generic, WriteProfile::L0Fast);
+    opts_raw.row_group_size = rows_per_rg;
+    opts_raw.mini_block_size = rows_per_rg;
+    let mut raw_file_bytes = Vec::new();
+    let mut wr = StatamWriter::new(
+        std::io::Cursor::new(&mut raw_file_bytes),
+        Arc::clone(&schema_raw),
+        opts_raw,
+        None,
+    )
+    .unwrap();
+    for rg in 0..n_rgs {
+        let start = (rg * rows_per_rg) as i64;
+        let ids: Vec<i64> = (start..start + rows_per_rg as i64).collect();
+        let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(rows_per_rg);
+        for local in 0..rows_per_rg {
+            let mut b = filler.clone();
+            // Place the unique row tag after byte 16 so every RG's 16-byte zone-map prefix is
+            // identical and all 6 RGs survive zone-map pruning into `scan_rgs_filtered_batched`.
+            b[32..40].copy_from_slice(&(start + local as i64).to_le_bytes());
+            blobs.push(b);
+        }
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema_raw),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Binary(
+                            BinaryData::try_from_slices(blobs.iter().map(Vec::as_slice)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            rows_per_rg,
+        )
+        .unwrap();
+        wr.write_batch(&batch).unwrap();
+    }
+    wr.finish().unwrap();
+
+    let s3_raw = Arc::new(SimulatedS3Reader::from_bytes(
+        raw_file_bytes,
+        SimulatedS3Config {
+            cache_capacity_blocks: 0,
+            ..SimulatedS3Config::default()
+        },
+    ));
+    let reader_raw = StatamReader::open(s3_raw.clone(), None).unwrap();
+    assert_eq!(reader_raw.meta().rg_dir.len(), n_rgs);
+    let mut total_p1_stored = 0u64;
+    let mut total_p1_raw = 0u64;
+    for rg in 0..n_rgs {
+        for blk in reader_raw.meta().rg_blocks(1, rg) {
+            total_p1_stored += u64::from(blk.stored_len);
+            total_p1_raw += u64::from(blk.raw_len);
+        }
+    }
+    assert!(
+        total_p1_stored < IO_WAVE_MAX_BYTES,
+        "expected stored bytes {total_p1_stored} < 64 MiB"
+    );
+    assert!(
+        total_p1_raw > P1_WAVE_MAX_RAW_BYTES,
+        "expected raw bytes {total_p1_raw} > 128 MiB"
+    );
+
+    // Filter on column 1 (`blob` is in Phase 1; `id` is projected in Phase 2).
+    // Because `total_p1_raw > 128 MiB`, `scan_rgs_filtered_batched` must split into >= 2 `p1_waves`!
+    s3_raw.reset_counters();
+    let target_blob = {
+        let mut b = filler;
+        b[32..40].copy_from_slice(&42i64.to_le_bytes());
+        b
+    };
+    let filtered = reader_raw
+        .scan(&ScanRequest {
+            projection: Some(vec![0]),
+            predicates: vec![Predicate::new(
+                "blob",
+                ZonePred::Eq(ZoneValue::Bytes(target_blob)),
+            )],
+            ..ScanRequest::default()
+        })
+        .unwrap();
+    let filtered_merged =
+        concat_scanned_batches(&Arc::new(schema_raw.project(&[0]).unwrap()), &filtered);
+    assert_eq!(filtered_merged.num_rows(), 1);
+    let id_col = filtered_merged
+        .column(0)
+        .unwrap()
+        .materialize(None)
+        .unwrap();
+    let FlatData::I64(got_ids) = id_col.data() else {
+        panic!("expected I64");
+    };
+    assert_eq!(got_ids, &[42]);
+    // >= 2 Phase-1 waves (wave 0 + wave 1) plus 1 Phase-2 wave for RG 0 = >= 3 waves total!
+    assert!(
+        s3_raw.counters().waves >= 2,
+        "expected >= 2 waves when Phase-1 decoded raw_len exceeds 128 MiB, got {}",
+        s3_raw.counters().waves
+    );
+
+    // Part B (m4): `scan_rgs_unfiltered_batched` splits across `IO_WAVE_MAX_BYTES` (64 MiB)
+    // when stored bytes exceed 64 MiB across multiple RGs.
+    let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+    let mut rand_chunk = vec![0u8; 256 * 1024];
+    for w in rand_chunk.as_chunks_mut::<8>().0 {
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *w = rng.to_le_bytes();
+    }
+
+    let n_unfilt_rgs = 3usize;
+    let rows_per_unfilt_rg = 96usize; // 96 × 256 KiB = 24 MiB/RG -> 72 MiB stored > 64 MiB!
+    let mut opts_u = WriteOptions::for_table(TableKind::Generic, WriteProfile::L0Fast);
+    opts_u.row_group_size = rows_per_unfilt_rg;
+    opts_u.mini_block_size = rows_per_unfilt_rg;
+    let mut unfilt_file_bytes = Vec::new();
+    let mut wu = StatamWriter::new(
+        std::io::Cursor::new(&mut unfilt_file_bytes),
+        Arc::clone(&schema_raw),
+        opts_u,
+        None,
+    )
+    .unwrap();
+    for rg in 0..n_unfilt_rgs {
+        let start = (rg * rows_per_unfilt_rg) as i64;
+        let ids: Vec<i64> = (start..start + rows_per_unfilt_rg as i64).collect();
+        let mut blobs = Vec::with_capacity(rows_per_unfilt_rg);
+        for local in 0..rows_per_unfilt_rg {
+            let mut b = rand_chunk.clone();
+            // Perturb bytes per row so LZ4 cannot compress across rows.
+            let salt = ((start + local as i64) as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+            for (k, chunk) in b.as_chunks_mut::<8>().0.iter_mut().enumerate() {
+                let v = u64::from_le_bytes(*chunk) ^ salt.wrapping_add(k as u64);
+                *chunk = v.to_le_bytes();
+            }
+            blobs.push(b);
+        }
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema_raw),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Binary(
+                            BinaryData::try_from_slices(blobs.iter().map(Vec::as_slice)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            rows_per_unfilt_rg,
+        )
+        .unwrap();
+        wu.write_batch(&batch).unwrap();
+    }
+    wu.finish().unwrap();
+
+    let s3_u = Arc::new(SimulatedS3Reader::from_bytes(
+        unfilt_file_bytes,
+        SimulatedS3Config {
+            cache_capacity_blocks: 0,
+            ..SimulatedS3Config::default()
+        },
+    ));
+    let reader_u = StatamReader::open(s3_u.clone(), None).unwrap();
+    assert_eq!(reader_u.meta().rg_dir.len(), n_unfilt_rgs);
+    let total_stored: u64 = (0..n_unfilt_rgs)
+        .flat_map(|rg| reader_u.meta().rg_blocks(1, rg))
+        .map(|b| u64::from(b.stored_len))
+        .sum();
+    assert!(
+        total_stored > IO_WAVE_MAX_BYTES,
+        "expected unfiltered stored bytes {total_stored} > 64 MiB"
+    );
+
+    s3_u.reset_counters();
+    let unfilt_batches = reader_u
+        .scan(&ScanRequest {
+            projection: Some(vec![0, 1]),
+            ..ScanRequest::default()
+        })
+        .unwrap();
+    let total_rows: usize = unfilt_batches.iter().map(Batch::num_rows).sum();
+    assert_eq!(total_rows, n_unfilt_rgs * rows_per_unfilt_rg);
+    assert!(
+        s3_u.counters().waves >= 2,
+        "expected unfiltered scan > 64 MiB stored to split into >= 2 waves, got {}",
+        s3_u.counters().waves
+    );
+}
+
+#[test]
+fn pass13_fix_n1_overlapping_lazy_index_entries_cap_inline_bytes() {
+    // N1 regression: a crafted file with many overlapping / duplicate in-tail LazyIndexEntry
+    // records must NEVER multiply allocations (`inline_lazy` total copied bytes <= tail.len()
+    // and only the first entry per `(kind, phys_col_id)` is inlined).
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("s1", DataType::Utf8, true),
+        Field::new("s2", DataType::Utf8, true),
+    ])
+    .unwrap();
+    let n = 4_000usize;
+    let s1: Vec<String> = (0..n)
+        .map(|i| format!("alpha_token_{i:05}_payload"))
+        .collect();
+    let s2: Vec<String> = (0..n)
+        .map(|i| format!("beta_token_{i:05}_payload"))
+        .collect();
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(
+                FlatColumn::try_new(FlatData::I64((0..n as i64).collect()), None).unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(s1.iter().map(String::as_str)).unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(s2.iter().map(String::as_str)).unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        n,
+    )
+    .unwrap();
+
+    let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+    opts.row_group_size = 4_000;
+    opts.mini_block_size = 2_000;
+    let mut file_bytes = Vec::new();
+    let mut w = StatamWriter::new(
+        std::io::Cursor::new(&mut file_bytes),
+        Arc::clone(&schema),
+        opts,
+        None,
+    )
+    .unwrap();
+    w.write_batch(&batch).unwrap();
+    w.finish().unwrap();
+
+    let ps_start = file_bytes.len() - POSTSCRIPT_LEN;
+    let mut ps = Postscript::decode(&file_bytes[ps_start..]).unwrap();
+    let hot_tail_start = file_bytes.len() - ps.hot_tail_len as usize;
+    let hot_codec = if ps.flags & FLAG_HOT_TAIL_LZ4 != 0 {
+        Codec::Lz4
+    } else {
+        Codec::None
+    };
+    let mut raw_body = crate::format::decompress_checked(
+        &file_bytes[hot_tail_start..ps_start],
+        hot_codec,
+        ps.hot_tail_raw_len as usize,
+        crate::format::MAX_HOT_TAIL_BYTES,
+    )
+    .unwrap();
+
+    // Craft 2,000 overlapping LazyIndexEntry records pointing at the entire data region
+    // `[FILE_HEADER_LEN .. hot_tail_start]` across distinct `(kind, phys_col_id)` pairs and
+    // duplicate keys. Without the `<= tail.len()` cap, copying 2,000 copies would blow up RAM.
+    let data_span_len = (hot_tail_start - FILE_HEADER_LEN) as u32;
+    let lazy_len = ps.lazy_dir_len as usize;
+    if lazy_len == 0 {
+        ps.lazy_dir_off = raw_body.len() as u32;
+    } else {
+        assert_eq!(ps.lazy_dir_off as usize + lazy_len, raw_body.len());
+    }
+
+    let num_bomb_entries = 2_000usize;
+    for i in 0..num_bomb_entries {
+        let kind = match i % 3 {
+            0 => LazyIndexKind::Dict,
+            1 => LazyIndexKind::Bloom,
+            _ => LazyIndexKind::NarrowTrigram,
+        };
+        let phys_col_id = (i % 3) as u32;
+        let bomb = LazyIndexEntry {
+            kind,
+            phys_col_id,
+            offset: FILE_HEADER_LEN as u64,
+            len: data_span_len,
+            crc32c: 0,
+            reserved: [0; 3],
+        };
+        raw_body.extend_from_slice(&bomb.encode());
+    }
+
+    ps.flags &= !FLAG_HOT_TAIL_LZ4;
+    ps.lazy_dir_len += (num_bomb_entries * LAZY_INDEX_ENTRY_LEN) as u32;
+    ps.hot_tail_raw_len = raw_body.len() as u32;
+    ps.hot_tail_len = (raw_body.len() + POSTSCRIPT_LEN) as u32;
+    ps.hot_tail_crc32c = crc32c::crc32c(&raw_body);
+
+    let mut crafted = file_bytes[..hot_tail_start].to_vec();
+    let mut hdr = FileHeader::decode(&crafted[..FILE_HEADER_LEN]).unwrap();
+    hdr.flags &= !FLAG_HOT_TAIL_LZ4;
+    crafted[..FILE_HEADER_LEN].copy_from_slice(&hdr.encode());
+    crafted.extend_from_slice(&raw_body);
+    crafted.extend_from_slice(&ps.encode());
+
+    let file_len = crafted.len();
+    let reader = StatamReader::open(Arc::new(SliceReader::new(crafted)), None).unwrap();
+    let tail_cap = file_len.min(crate::format::DEFAULT_TAIL_HINT as usize);
+    let inline_bytes: usize = reader.meta().inline_lazy.values().map(Bytes::len).sum();
+    assert!(
+        inline_bytes <= tail_cap,
+        "inline_lazy copied {inline_bytes} bytes, exceeding tail cap {tail_cap}"
+    );
+    assert!(
+        reader.meta().inline_lazy.len() <= 9,
+        "expected deduplicated inline_lazy entries, got {}",
+        reader.meta().inline_lazy.len()
+    );
+}
+
+#[test]
+fn pass13_fix_n2_take_rows_cdc_dedup_over_128_mib_splits_waves() {
+    // N2 regression: a CDC-deduplicated RG where 150 rows share the same 1 MiB chunk has
+    // ~1 MiB unique physical bytes (<= 128 MiB) but 150 MiB logical column bytes (> 128 MiB).
+    // `take_rows` must detect `max_mb_col_decoded_bytes > 128 MiB` and split cleanly via
+    // `partition_payload_waves` instead of failing with `BoundsExceeded` on the fast path.
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("input", DataType::Utf8, true),
+    ])
+    .unwrap();
+
+    // 1 MiB compressible prose payload repeated across 160 rows -> goes through CDC + BLAKE3
+    // dedup to a tiny physical `.stpk` (< 4 MiB), while logical column size is 160 MiB (> 128 MiB).
+    let base_sentence = "The quick brown fox jumps over the lazy dog in a structured observability span trace payload. ";
+    let mut one_mb = String::with_capacity(1024 * 1024 + 128);
+    let mut seq = 0u32;
+    while one_mb.len() < 1024 * 1024 {
+        one_mb.push_str(base_sentence);
+        one_mb.push_str(&format!("seg_{seq:05} "));
+        seq += 1;
+    }
+    one_mb.truncate(1024 * 1024);
+    let n_rows = 160usize; // 160 MiB logical (> 128 MiB wave target), < 4 MiB physical
+    let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+    opts.row_group_size = n_rows;
+    opts.mini_block_size = n_rows;
+
+    let pack_id = [0x92u8; 16];
+    opts.pack_id = Some(pack_id);
+    let mut pack_builder = ChunkPackBuilder::new(pack_id, test_pack_opts());
+    let mut file_bytes = Vec::new();
+    {
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut file_bytes),
+            Arc::clone(&schema),
+            opts,
+            Some(&mut pack_builder),
+        )
+        .unwrap();
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::I64((0..n_rows as i64).collect()), None).unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices((0..n_rows).map(|_| one_mb.as_str()))
+                                .unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n_rows,
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+    }
+    let mut pack_bytes = Vec::new();
+    pack_builder.finish(&mut pack_bytes).unwrap();
+    assert!(
+        pack_bytes.len() < 4 * 1024 * 1024,
+        "expected CDC deduped pack < 4 MiB, got {}",
+        pack_bytes.len()
+    );
+
+    let mut store = InMemoryPackResolver::new();
+    store.insert_bytes(pack_id, pack_bytes).unwrap();
+    let reader = StatamReader::open(
+        Arc::new(SliceReader::new(file_bytes)),
+        Some(Arc::new(store)),
+    )
+    .unwrap();
+    let row_ids: Vec<u64> = (0..n_rows as u64).collect();
+    let out = reader.take_rows(&row_ids, Some(&[0, 1]), 1).unwrap();
+    assert!(
+        out.len() >= 2,
+        "expected 160 MiB CDC-deduped take_rows to split into >= 2 waves, got {}",
+        out.len()
+    );
+    let total_rows: usize = out.iter().map(Batch::num_rows).sum();
+    assert_eq!(total_rows, n_rows);
+    for b in &out {
+        let u_col = b.column(1).unwrap().materialize(None).unwrap();
+        let FlatData::Utf8(u) = u_col.data() else {
+            panic!("expected Utf8");
+        };
+        for i in 0..b.num_rows() {
+            assert_eq!(u.get(i).unwrap().len(), one_mb.len());
+        }
+    }
+}
+
+#[test]
+fn pass13_single_flight_pack_open_trigram_and_edge_table_under_parallel_scan() {
+    // Regression: parallel mini-block substring evaluation (`read_threads = 8`) must open the
+    // `.stpk` pack, fetch its trigram section, and fetch its edge table at most ONCE across all
+    // worker threads (single-flight), never triggering an N-thread thundering herd of duplicate GETs.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingPackResolver {
+        pack_id: [u8; 16],
+        pack_s3: Arc<SimulatedS3Reader>,
+        resolve_calls: AtomicUsize,
+    }
+    impl PackResolver for CountingPackResolver {
+        fn resolve(&self, pack_id: [u8; 16]) -> Result<Arc<ChunkPackReader>, StatamError> {
+            assert_eq!(pack_id, self.pack_id);
+            self.resolve_calls.fetch_add(1, Ordering::Relaxed);
+            // Small artificial delay so concurrent threads race on `resolve_pack`.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            Ok(Arc::new(ChunkPackReader::open_with_tail_hint(
+                self.pack_s3.clone(),
+                Some(16 * 1024),
+            )?))
+        }
+    }
+
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("input", DataType::Utf8, true),
+    ])
+    .unwrap();
+    // 8 mini-blocks × 64 rows = 512 rows, multi-chunk payloads so edge_table & trigrams exist
+    // and lie outside the 16 KiB tail hint -> triggers network reads if not single-flighted.
+    let n_rows = 512usize;
+    let payloads: Vec<String> = (0..n_rows)
+        .map(|i| {
+            let mut s = format!("row_{i:04}_prefix_");
+            for k in 0..300 {
+                s.push_str(&format!("seg_{i}_{k}_abcdefghijklmnopqrstuvwxyz "));
+            }
+            if i == 250 {
+                s.push_str("UNIQUE_SINGLE_FLIGHT_NEEDLE_XYZ");
+            }
+            s
+        })
+        .collect();
+
+    let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+    opts.row_group_size = n_rows;
+    opts.mini_block_size = 64;
+    let pack_id = [0x93u8; 16];
+    opts.pack_id = Some(pack_id);
+    let mut pb = ChunkPackBuilder::new(pack_id, test_pack_opts());
+    let mut file_bytes = Vec::new();
+    {
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut file_bytes),
+            Arc::clone(&schema),
+            opts,
+            Some(&mut pb),
+        )
+        .unwrap();
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::I64((0..n_rows as i64).collect()), None).unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(payloads.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n_rows,
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+    }
+    let mut pack_bytes = Vec::new();
+    pb.finish(&mut pack_bytes).unwrap();
+
+    let pack_s3 = Arc::new(SimulatedS3Reader::from_bytes(
+        pack_bytes,
+        SimulatedS3Config {
+            cache_capacity_blocks: 0,
+            ..SimulatedS3Config::default()
+        },
+    ));
+    let resolver = Arc::new(CountingPackResolver {
+        pack_id,
+        pack_s3,
+        resolve_calls: AtomicUsize::new(0),
+    });
+    let reader = StatamReader::open(
+        Arc::new(SliceReader::new(file_bytes)),
+        Some(resolver.clone()),
+    )
+    .unwrap();
+
+    let out = reader
+        .scan(&ScanRequest {
+            projection: Some(vec![0]),
+            substrings: vec![SubstringQuery::like(
+                "input",
+                "UNIQUE_SINGLE_FLIGHT_NEEDLE_XYZ",
+            )],
+            read_threads: 8,
+            ..ScanRequest::default()
+        })
+        .unwrap();
+    let total_rows: usize = out.iter().map(Batch::num_rows).sum();
+    assert_eq!(total_rows, 1);
+    assert_eq!(
+        resolver.resolve_calls.load(Ordering::Relaxed),
+        1,
+        "resolve_pack must open each pack exactly once across 8 parallel threads"
     );
 }

@@ -16,7 +16,9 @@ use crate::format::{
 };
 use crate::parallel::MAX_PARALLEL_THREADS;
 use crate::payload::pack::ChunkPackReader;
-use crate::payload::search::{pack_short_circuits_all, search_pack_rows_flat_masked_with_threads};
+use crate::payload::search::{
+    RetainedPackChunks, pack_short_circuits_all, search_pack_rows_flat_masked_with_threads,
+};
 use crate::payload::{
     FLAT_REF_CHUNKS, FLAT_REF_INLINE, FLAT_REF_NULL, FlatPayloadRefs, PayloadRefRow,
     decode_payload_refs_flat, decode_payload_refs_selected,
@@ -28,7 +30,7 @@ use super::eval::Utf8Matcher;
 use super::plan::{ActiveMiniBlock, BlockReader, DecodedPhase1, RgIoPlan};
 
 /// Maximum projected `ExternalPayload` bytes resolved in a single Phase-2 wave (`128 MiB`).
-const PHASE2_PAYLOAD_WAVE_TARGET_BYTES: usize = MAX_BATCH_DECODED_BYTES / 2;
+pub(super) const PHASE2_PAYLOAD_WAVE_TARGET_BYTES: usize = MAX_BATCH_DECODED_BYTES / 2;
 
 impl StatamReader {
     #[allow(clippy::too_many_arguments)]
@@ -41,6 +43,7 @@ impl StatamReader {
         proj_schema: &Arc<Schema>,
         map_keys_by_col: &HashMap<usize, Vec<String>>,
         l0_local: Option<&ParsedL0Payload<'_>>,
+        pre_resolved: &HashMap<([u8; 16], u32), Bytes>,
         read_block: &BlockReader<'a>,
         read_threads: usize,
     ) -> Result<Vec<Batch>, StatamError> {
@@ -85,6 +88,7 @@ impl StatamReader {
                 &mut active_mbs,
                 proj_indices,
                 l0_local,
+                pre_resolved,
                 read_block,
                 read_threads,
             )?;
@@ -127,6 +131,7 @@ impl StatamReader {
                 &mut wave_mbs,
                 proj_indices,
                 l0_local,
+                pre_resolved,
                 read_block,
                 read_threads,
             )?;
@@ -147,7 +152,7 @@ impl StatamReader {
         Ok(out_batches)
     }
 
-    fn ensure_rg_payload_refs_decoded<'a>(
+    pub(super) fn ensure_rg_payload_refs_decoded<'a>(
         &self,
         rg_idx: usize,
         active_mbs: &mut [ActiveMiniBlock],
@@ -196,7 +201,7 @@ impl StatamReader {
     }
 
     #[allow(clippy::type_complexity)]
-    fn partition_payload_waves(
+    pub(super) fn partition_payload_waves(
         &self,
         active_mbs: &[ActiveMiniBlock],
         proj_payload_cols: &[usize],
@@ -437,12 +442,14 @@ impl StatamReader {
         Ok(waves)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn resolve_rg_payload_chunks<'a>(
         &self,
         rg_idx: usize,
         active_mbs: &mut [(usize, Bitmap, HashMap<usize, DecodedPhase1>)],
         proj_indices: &[usize],
         l0_local: Option<&ParsedL0Payload<'_>>,
+        pre_resolved: &HashMap<([u8; 16], u32), Bytes>,
         read_block: &BlockReader<'a>,
         read_threads: usize,
     ) -> Result<HashMap<(u16, u32), Bytes>, StatamError> {
@@ -501,6 +508,7 @@ impl StatamReader {
         let mut work_items = Vec::with_capacity(by_pack.len());
         let mut total_chunk_bytes = 0usize;
         let mut total_frame_bytes = 0usize;
+        let mut resolved_chunks: HashMap<(u16, u32), Bytes> = HashMap::new();
         for (pidx, cids_set) in by_pack {
             let cids: Vec<u32> = cids_set.into_iter().collect();
             if pidx == L0_LOCAL_PACK_IDX {
@@ -517,12 +525,25 @@ impl StatamReader {
                 )?;
                 let pack = self.resolve_pack(pack_id)?;
                 pack.check_chunks_budget(&cids, &mut total_chunk_bytes, &mut total_frame_bytes)?;
-                work_items.push(PackWork::External(pidx, pack, cids));
+                if pre_resolved.is_empty() {
+                    work_items.push(PackWork::External(pidx, pack, cids));
+                } else {
+                    let mut missing_cids = Vec::new();
+                    for cid in cids {
+                        if let Some(cached) = pre_resolved.get(&(pack_id, cid)) {
+                            resolved_chunks.insert((pidx, cid), cached.clone());
+                        } else {
+                            missing_cids.push(cid);
+                        }
+                    }
+                    if !missing_cids.is_empty() {
+                        work_items.push(PackWork::External(pidx, pack, missing_cids));
+                    }
+                }
             }
         }
 
         let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
-        let mut resolved_chunks: HashMap<(u16, u32), Bytes> = HashMap::new();
         for item in work_items {
             match item {
                 PackWork::L0(cids) => {
@@ -556,6 +577,238 @@ impl StatamReader {
         Ok(resolved_chunks)
     }
 
+    /// Collects all unique `(pack_idx, chunk_id)` references for `active_mbs` across
+    /// `proj_payload_cols`, separated into external `.stpk` chunks and local L0 chunks.
+    pub(super) fn collect_chunk_refs_for_mbs(
+        active_mbs: &[ActiveMiniBlock],
+        proj_payload_cols: &[usize],
+    ) -> (HashMap<u16, BTreeSet<u32>>, BTreeSet<u32>) {
+        let mut ext_by_pack: HashMap<u16, BTreeSet<u32>> = HashMap::new();
+        let mut l0_cids: BTreeSet<u32> = BTreeSet::new();
+        for (_, mask, decoded_p1) in active_mbs {
+            for &cidx in proj_payload_cols {
+                match decoded_p1.get(&cidx) {
+                    Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
+                        for r in mask.iter_ones() {
+                            if refs.row_kind(r) == FLAT_REF_CHUNKS {
+                                let (ps, cs) = refs.chunk_refs(r);
+                                for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                                    if pidx == L0_LOCAL_PACK_IDX {
+                                        l0_cids.insert(cid);
+                                    } else {
+                                        ext_by_pack.entry(pidx).or_default().insert(cid);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
+                        for (r, row) in selected {
+                            if !mask.get(*r) {
+                                continue;
+                            }
+                            if let PayloadRefRow::Chunks(chunks) = row {
+                                for &(pidx, cid) in chunks {
+                                    if pidx == L0_LOCAL_PACK_IDX {
+                                        l0_cids.insert(cid);
+                                    } else {
+                                        ext_by_pack.entry(pidx).or_default().insert(cid);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (ext_by_pack, l0_cids)
+    }
+
+    /// Computes cumulative unique `(chunk_bytes, frame_bytes)` for `ext_by_pack`, validating
+    /// every pack index and chunk ID against pack TOC bounds.
+    pub(super) fn measure_external_pack_bytes(
+        &self,
+        ext_by_pack: &HashMap<u16, BTreeSet<u32>>,
+    ) -> Result<(usize, usize), StatamError> {
+        let mut total_chunk_bytes = 0usize;
+        let mut total_frame_bytes = 0usize;
+        for (&pidx, cids_set) in ext_by_pack {
+            let pack_id =
+                *self
+                    .meta
+                    .schema_meta
+                    .pack_ids
+                    .get(pidx as usize)
+                    .ok_or(StatamError::Corrupt {
+                        reason: "payload ref pack_idx out of bounds",
+                    })?;
+            let pack = self.resolve_pack(pack_id)?;
+            let toc = pack.toc();
+            let mut seen_frames: BTreeSet<u32> = BTreeSet::new();
+            for &cid in cids_set {
+                let loc = toc.chunks.get(cid as usize).ok_or(StatamError::Corrupt {
+                    reason: "chunk_id out of bounds",
+                })?;
+                total_chunk_bytes = total_chunk_bytes.saturating_add(loc.raw_len as usize);
+                if seen_frames.insert(loc.frame_id) {
+                    total_frame_bytes = total_frame_bytes
+                        .saturating_add(toc.frames[loc.frame_id as usize].raw_len as usize);
+                }
+            }
+        }
+        Ok((total_chunk_bytes, total_frame_bytes))
+    }
+
+    /// Computes the maximum reconstructed logical byte size across all `(mini_block, payload_col)`
+    /// pairs in `active_mbs` (summing inline + referenced chunk `raw_len` for active rows).
+    /// Used by `take_rows` to detect CDC-deduplicated RGs whose unique physical chunk bytes fit
+    /// in <= 128 MiB but whose logical reconstructed column exceeds `PHASE2_PAYLOAD_WAVE_TARGET_BYTES`.
+    pub(super) fn max_mb_col_decoded_bytes(
+        &self,
+        active_mbs: &[ActiveMiniBlock],
+        proj_payload_cols: &[usize],
+        l0_local: Option<&ParsedL0Payload<'_>>,
+    ) -> Result<usize, StatamError> {
+        let mut pack_cache: HashMap<u16, Arc<ChunkPackReader>> = HashMap::new();
+        let mut chunk_raw_len = |pidx: u16, cid: u32| -> Result<usize, StatamError> {
+            if pidx == L0_LOCAL_PACK_IDX {
+                let l0 = l0_local.ok_or(StatamError::Corrupt {
+                    reason: "missing L0 local payload region",
+                })?;
+                let loc = l0.chunks.get(cid as usize).ok_or(StatamError::Corrupt {
+                    reason: "L0 chunk_id out of bounds",
+                })?;
+                Ok(loc.raw_len as usize)
+            } else {
+                let pack = match pack_cache.entry(pidx) {
+                    std::collections::hash_map::Entry::Occupied(o) => Arc::clone(o.get()),
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        let pack_id = *self.meta.schema_meta.pack_ids.get(pidx as usize).ok_or(
+                            StatamError::Corrupt {
+                                reason: "payload ref pack_idx out of bounds",
+                            },
+                        )?;
+                        let resolved = self.resolve_pack(pack_id)?;
+                        v.insert(Arc::clone(&resolved));
+                        resolved
+                    }
+                };
+                let loc = pack
+                    .toc()
+                    .chunks
+                    .get(cid as usize)
+                    .ok_or(StatamError::Corrupt {
+                        reason: "chunk_id out of bounds",
+                    })?;
+                Ok(loc.raw_len as usize)
+            }
+        };
+
+        let mut max_col_bytes = 0usize;
+        for (_, mask, decoded_p1) in active_mbs {
+            for &cidx in proj_payload_cols {
+                let mut col_bytes = 0usize;
+                match decoded_p1.get(&cidx) {
+                    Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
+                        for r in mask.iter_ones() {
+                            match refs.row_kind(r) {
+                                FLAT_REF_INLINE => {
+                                    col_bytes =
+                                        col_bytes.saturating_add(refs.inline_bytes(r).len());
+                                }
+                                FLAT_REF_CHUNKS => {
+                                    let (ps, cs) = refs.chunk_refs(r);
+                                    for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                                        col_bytes =
+                                            col_bytes.saturating_add(chunk_raw_len(pidx, cid)?);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
+                        for (r, row) in selected {
+                            if !mask.get(*r) {
+                                continue;
+                            }
+                            match row {
+                                PayloadRefRow::Null => {}
+                                PayloadRefRow::Inline(b) => {
+                                    col_bytes = col_bytes.saturating_add(b.len());
+                                }
+                                PayloadRefRow::Chunks(chunks) => {
+                                    for &(pidx, cid) in chunks {
+                                        col_bytes =
+                                            col_bytes.saturating_add(chunk_raw_len(pidx, cid)?);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if col_bytes > max_col_bytes {
+                    max_col_bytes = col_bytes;
+                }
+            }
+        }
+        Ok(max_col_bytes)
+    }
+
+    /// Resolves all external `.stpk` chunks in `ext_by_pack` in **ONE** coalesced read wave per
+    /// pack (preserving `read_threads` parallelism and enforcing `MAX_BATCH_DECODED_BYTES`).
+    pub(super) fn resolve_external_pack_chunks(
+        &self,
+        ext_by_pack: HashMap<u16, BTreeSet<u32>>,
+        read_threads: usize,
+    ) -> Result<HashMap<(u16, u32), Bytes>, StatamError> {
+        if ext_by_pack.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut work_items: Vec<(u16, Arc<ChunkPackReader>, Vec<u32>)> =
+            Vec::with_capacity(ext_by_pack.len());
+        let mut total_chunk_bytes = 0usize;
+        let mut total_frame_bytes = 0usize;
+        for (pidx, cids_set) in ext_by_pack {
+            let cids: Vec<u32> = cids_set.into_iter().collect();
+            let pack_id =
+                *self
+                    .meta
+                    .schema_meta
+                    .pack_ids
+                    .get(pidx as usize)
+                    .ok_or(StatamError::Corrupt {
+                        reason: "payload ref pack_idx out of bounds",
+                    })?;
+            let pack = self.resolve_pack(pack_id)?;
+            pack.check_chunks_budget(&cids, &mut total_chunk_bytes, &mut total_frame_bytes)?;
+            work_items.push((pidx, pack, cids));
+        }
+        let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
+        let mut resolved_chunks: HashMap<(u16, u32), Bytes> = HashMap::new();
+        for (pidx, pack, cids) in work_items {
+            if threads > 1 {
+                let pairs = pack.scan_chunks_in_frames_parallel(
+                    &cids,
+                    threads,
+                    || Ok(()),
+                    |(), cid, bytes| Some((cid, Bytes::copy_from_slice(bytes))),
+                )?;
+                for (cid, bytes) in pairs {
+                    resolved_chunks.insert((pidx, cid), bytes);
+                }
+            } else {
+                pack.scan_chunks_in_frames(&cids, |cid, bytes| {
+                    resolved_chunks.insert((pidx, cid), Bytes::copy_from_slice(bytes));
+                })?;
+            }
+        }
+        Ok(resolved_chunks)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn eval_payload_refs_substring(
         &self,
         refs: &FlatPayloadRefs,
@@ -564,6 +817,7 @@ impl StatamReader {
         case_insensitive: bool,
         l0_local: Option<&ParsedL0Payload<'_>>,
         read_threads: usize,
+        retain: Option<&RetainedPackChunks>,
     ) -> Result<Bitmap, StatamError> {
         let mut results = Bitmap::new_zeroed(refs.len());
         if active_mask.all_zeros() {
@@ -665,6 +919,7 @@ impl StatamReader {
                 needle,
                 case_insensitive,
                 read_threads,
+                retain.map(|r| (pack_id, r)),
             )?;
             for bit in bm.iter_ones() {
                 let _ = results.set(bit, true);
@@ -1163,7 +1418,27 @@ impl<'a> ParsedL0Payload<'a> {
         Ok(decoded)
     }
 
-    fn check_chunks_budget(
+    pub(super) fn measure_chunks_bytes(
+        &self,
+        cids: &BTreeSet<u32>,
+    ) -> Result<(usize, usize), StatamError> {
+        let mut total_chunk_bytes = 0usize;
+        let mut total_frame_bytes = 0usize;
+        let mut seen_frames = BTreeSet::new();
+        for &cid in cids {
+            let loc = self.chunks.get(cid as usize).ok_or(StatamError::Corrupt {
+                reason: "L0 chunk_id out of bounds",
+            })?;
+            total_chunk_bytes = total_chunk_bytes.saturating_add(loc.raw_len as usize);
+            if seen_frames.insert(loc.frame_id) {
+                let (_, _, raw_len) = self.frames[loc.frame_id as usize];
+                total_frame_bytes = total_frame_bytes.saturating_add(raw_len as usize);
+            }
+        }
+        Ok((total_chunk_bytes, total_frame_bytes))
+    }
+
+    pub(super) fn check_chunks_budget(
         &self,
         cids: &[u32],
         total_chunk_bytes: &mut usize,

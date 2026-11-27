@@ -20,7 +20,9 @@ use crate::format::{
     MAX_BLOCK_RAW_BYTES,
 };
 use crate::parallel::{MAX_PARALLEL_THREADS, parallel_map_in_order};
-use crate::payload::search::{pack_short_circuits_all, unicode_lowercase_context_free_into};
+use crate::payload::search::{
+    RetainedPackChunks, pack_short_circuits_all, unicode_lowercase_context_free_into,
+};
 use crate::payload::{
     FLAT_REF_NULL, FlatPayloadRefs, decode_payload_refs_flat, scan_payload_refs_inline_substring,
 };
@@ -41,6 +43,7 @@ impl StatamReader {
         rg_idx: usize,
         surviving_mbs: &[usize],
         plan: &RgIoPlan,
+        proj_indices: &[usize],
         time_col_idx: Option<usize>,
         time_range: TimeRange,
         lookups: &[(usize, &IdLookup)],
@@ -52,6 +55,7 @@ impl StatamReader {
         limit_remaining: Option<usize>,
         trim_tail: bool,
         read_threads: usize,
+        retained: &RetainedPackChunks,
     ) -> Result<Vec<ActiveMiniBlock>, StatamError> {
         if limit_remaining == Some(0) {
             return Ok(Vec::new());
@@ -88,6 +92,7 @@ impl StatamReader {
                     rg_idx,
                     mb_idx,
                     plan,
+                    proj_indices,
                     time_col_idx,
                     time_range,
                     lookups,
@@ -97,13 +102,17 @@ impl StatamReader {
                     l0_local,
                     read_block,
                     inner_threads,
+                    retained,
                 )?;
                 Ok((mb_idx, mask, decoded_p1))
             })?;
-            return Ok(per_mb
-                .into_iter()
-                .filter(|(_, mask, _)| mask.count_ones() > 0)
-                .collect());
+            let mut active = Vec::new();
+            for (mb_idx, mask, decoded_p1) in per_mb {
+                if mask.count_ones() > 0 {
+                    active.push((mb_idx, mask, decoded_p1));
+                }
+            }
+            return Ok(active);
         }
 
         let mut active_mbs = Vec::new();
@@ -113,6 +122,7 @@ impl StatamReader {
                 rg_idx,
                 mb_idx,
                 plan,
+                proj_indices,
                 time_col_idx,
                 time_range,
                 lookups,
@@ -122,6 +132,7 @@ impl StatamReader {
                 l0_local,
                 read_block,
                 read_threads,
+                retained,
             )?;
             let hits = mask.count_ones();
             if hits > 0 {
@@ -155,6 +166,7 @@ impl StatamReader {
         rg_idx: usize,
         mb_idx: usize,
         plan: &RgIoPlan,
+        proj_indices: &[usize],
         time_col_idx: Option<usize>,
         time_range: TimeRange,
         lookups: &[(usize, &IdLookup)],
@@ -164,6 +176,7 @@ impl StatamReader {
         l0_local: Option<&ParsedL0Payload<'_>>,
         read_block: &BlockReader<'a>,
         read_threads: usize,
+        retained: &RetainedPackChunks,
     ) -> Result<(Bitmap, HashMap<usize, DecodedPhase1>), StatamError> {
         let fields = self.meta.schema_meta.schema.fields();
         let mb_row_count = self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
@@ -480,6 +493,11 @@ impl StatamReader {
                         sq.case_insensitive,
                         l0_local,
                         read_threads,
+                        if proj_indices.contains(&cidx) {
+                            Some(retained)
+                        } else {
+                            None
+                        },
                     )?,
                     DecodedPhase1::SelectedPayloadRefs(_) | DecodedPhase1::ShreddedSub(_) => {
                         return Err(StatamError::Corrupt {
@@ -1786,6 +1804,11 @@ impl Utf8Matcher {
                     unicode_lowercase_context_free_into(s, uni_scratch);
                     finder.find(uni_scratch.as_bytes()).is_some()
                 } else {
+                    let lossy = String::from_utf8_lossy(haystack);
+                    unicode_lowercase_context_free_into(&lossy, uni_scratch);
+                    if finder.find(uni_scratch.as_bytes()).is_some() {
+                        return true;
+                    }
                     ascii_lowercase_into(haystack, scratch);
                     memmem::find(scratch, needle_raw_lower).is_some()
                 }

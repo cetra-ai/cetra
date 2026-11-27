@@ -6,9 +6,11 @@
 //! payload bits, `±inf`, `-0.0`, subnormals, high-precision floats) via a
 //! sparse `(pos: u16, raw_bits: u64)` exception list.
 
+use std::cmp::Ordering;
+
 use cetra_column::Bitmap;
 
-use crate::simd::bitpack::{min_bits_u64, pack_u64, unpack_u64};
+use crate::simd::bitpack::{min_bits_u64, pack_u64, unpack_u64, unpack_u64_at};
 use crate::{MAX_BLOCK_RAW_BYTES, StatamError};
 
 /// Maximum `exp` / `fac` index in ALP (`0..=18`).
@@ -271,14 +273,77 @@ pub fn encode_alp_body(
     Ok(Some(out))
 }
 
-/// Decodes an ALP-encoded `f64` block body into `count` values.
-///
-/// Null rows (where `nulls` bit is `0`) are set to canonical `0.0`.
-pub fn decode_alp_body(
-    src: &[u8],
-    count: usize,
-    nulls: Option<&Bitmap>,
-) -> Result<Vec<f64>, StatamError> {
+#[inline]
+fn read_u16_le(slice: &[u8], idx: usize) -> u16 {
+    let off = idx * 2;
+    u16::from_le_bytes([slice[off], slice[off + 1]])
+}
+
+#[inline]
+fn read_u64_le(slice: &[u8], idx: usize) -> u64 {
+    let off = idx * 8;
+    u64::from_le_bytes([
+        slice[off],
+        slice[off + 1],
+        slice[off + 2],
+        slice[off + 3],
+        slice[off + 4],
+        slice[off + 5],
+        slice[off + 6],
+        slice[off + 7],
+    ])
+}
+
+struct ParsedAlpHeader<'a> {
+    div_mode: bool,
+    exp: u8,
+    fac: u8,
+    exc_count: usize,
+    base: i64,
+    bit_width: u8,
+    packed: &'a [u8],
+    pos_section: &'a [u8],
+    bits_section: &'a [u8],
+    exc_strictly_sorted: bool,
+}
+
+impl ParsedAlpHeader<'_> {
+    #[inline]
+    fn lookup_exception(&self, row: usize) -> Option<f64> {
+        if self.exc_count == 0 {
+            return None;
+        }
+        let Ok(target) = u16::try_from(row) else {
+            return None;
+        };
+        if self.exc_strictly_sorted {
+            let mut lo = 0usize;
+            let mut hi = self.exc_count;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let p = read_u16_le(self.pos_section, mid);
+                match p.cmp(&target) {
+                    Ordering::Less => lo = mid + 1,
+                    Ordering::Greater => hi = mid,
+                    Ordering::Equal => {
+                        return Some(f64::from_bits(read_u64_le(self.bits_section, mid)));
+                    }
+                }
+            }
+            None
+        } else {
+            // Crafted/fuzzed unsorted or duplicate exc_pos: match `decode_alp_body` last-write-wins.
+            for i in (0..self.exc_count).rev() {
+                if read_u16_le(self.pos_section, i) == target {
+                    return Some(f64::from_bits(read_u64_le(self.bits_section, i)));
+                }
+            }
+            None
+        }
+    }
+}
+
+fn parse_alp_header(src: &[u8], count: usize) -> Result<Option<ParsedAlpHeader<'_>>, StatamError> {
     if count
         .checked_mul(size_of::<f64>())
         .is_none_or(|bytes| bytes > MAX_BLOCK_RAW_BYTES)
@@ -287,18 +352,13 @@ pub fn decode_alp_body(
             reason: "alp decode count exceeds MAX_BLOCK_RAW_BYTES",
         });
     }
-    if nulls.is_some_and(|bm| bm.len() != count) {
-        return Err(StatamError::Corrupt {
-            reason: "alp null bitmap length mismatch",
-        });
-    }
     if count == 0 {
         if !src.is_empty() {
             return Err(StatamError::Corrupt {
                 reason: "trailing bytes in empty alp block",
             });
         }
-        return Ok(Vec::new());
+        return Ok(None);
     }
     if src.len() < 13 {
         return Err(StatamError::Corrupt {
@@ -353,37 +413,65 @@ pub fn decode_alp_body(
             reason: "alp exception table length mismatch",
         });
     }
+
     let exc_slice = &packed_slice[packed_len..];
-
-    let mut deltas = Vec::with_capacity(count);
-    unpack_u64(&packed_slice[..packed_len], count, bit_width, &mut deltas)?;
-
-    let mut out = Vec::with_capacity(count);
-    for &d in &deltas {
-        let scaled = base.wrapping_add(d as i64);
-        out.push(unscale(scaled, exp, fac, div_mode));
-    }
-
     let pos_section = &exc_slice[..exc_count * 2];
     let bits_section = &exc_slice[exc_count * 2..];
+
+    let mut exc_strictly_sorted = true;
+    let mut prev_pos: Option<u16> = None;
     for i in 0..exc_count {
-        let pos = u16::from_le_bytes([pos_section[i * 2], pos_section[i * 2 + 1]]) as usize;
-        if pos >= count {
+        let pos = read_u16_le(pos_section, i);
+        if usize::from(pos) >= count {
             return Err(StatamError::Corrupt {
                 reason: "alp exception position out of bounds",
             });
         }
-        let b_off = i * 8;
-        let bits = u64::from_le_bytes([
-            bits_section[b_off],
-            bits_section[b_off + 1],
-            bits_section[b_off + 2],
-            bits_section[b_off + 3],
-            bits_section[b_off + 4],
-            bits_section[b_off + 5],
-            bits_section[b_off + 6],
-            bits_section[b_off + 7],
-        ]);
+        if let Some(prev) = prev_pos
+            && pos <= prev
+        {
+            exc_strictly_sorted = false;
+        }
+        prev_pos = Some(pos);
+    }
+
+    Ok(Some(ParsedAlpHeader {
+        div_mode,
+        exp,
+        fac,
+        exc_count,
+        base,
+        bit_width,
+        packed: &packed_slice[..packed_len],
+        pos_section,
+        bits_section,
+        exc_strictly_sorted,
+    }))
+}
+
+/// Validates an ALP block header, packed length, and exception table without allocating.
+pub(crate) fn validate_alp_body(src: &[u8], row_count: usize) -> Result<(), StatamError> {
+    let _ = parse_alp_header(src, row_count)?;
+    Ok(())
+}
+
+fn decode_alp_from_header(
+    hdr: &ParsedAlpHeader<'_>,
+    count: usize,
+    nulls: Option<&Bitmap>,
+) -> Result<Vec<f64>, StatamError> {
+    let mut deltas = Vec::with_capacity(count);
+    unpack_u64(hdr.packed, count, hdr.bit_width, &mut deltas)?;
+
+    let mut out = Vec::with_capacity(count);
+    for &d in &deltas {
+        let scaled = hdr.base.wrapping_add(d as i64);
+        out.push(unscale(scaled, hdr.exp, hdr.fac, hdr.div_mode));
+    }
+
+    for i in 0..hdr.exc_count {
+        let pos = usize::from(read_u16_le(hdr.pos_section, i));
+        let bits = read_u64_le(hdr.bits_section, i);
         out[pos] = f64::from_bits(bits);
     }
 
@@ -395,6 +483,173 @@ pub fn decode_alp_body(
         }
     }
 
+    Ok(out)
+}
+
+/// Decodes an ALP-encoded `f64` block body into `count` values.
+///
+/// Null rows (where `nulls` bit is `0`) are set to canonical `0.0`.
+pub fn decode_alp_body(
+    src: &[u8],
+    count: usize,
+    nulls: Option<&Bitmap>,
+) -> Result<Vec<f64>, StatamError> {
+    if count
+        .checked_mul(size_of::<f64>())
+        .is_none_or(|bytes| bytes > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "alp decode count exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    if nulls.is_some_and(|bm| bm.len() != count) {
+        return Err(StatamError::Corrupt {
+            reason: "alp null bitmap length mismatch",
+        });
+    }
+    let Some(hdr) = parse_alp_header(src, count)? else {
+        return Ok(Vec::new());
+    };
+    decode_alp_from_header(&hdr, count, nulls)
+}
+
+/// Sparsely decodes only `indices` of an ALP-encoded `f64` block body in O(k log(exc_count)) time.
+///
+/// Null rows (where `nulls` bit is `0`) are set to canonical `0.0`.
+pub fn decode_alp_take(
+    src: &[u8],
+    row_count: usize,
+    nulls: Option<&Bitmap>,
+    indices: &[usize],
+) -> Result<Vec<f64>, StatamError> {
+    if row_count
+        .checked_mul(size_of::<f64>())
+        .is_none_or(|bytes| bytes > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "alp decode count exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    if indices
+        .len()
+        .checked_mul(size_of::<f64>())
+        .is_none_or(|bytes| bytes > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "alp take indices exceed MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    if nulls.is_some_and(|bm| bm.len() != row_count) {
+        return Err(StatamError::Corrupt {
+            reason: "alp null bitmap length mismatch",
+        });
+    }
+    for &row in indices {
+        if row >= row_count {
+            return Err(StatamError::Corrupt {
+                reason: "alp take index out of bounds",
+            });
+        }
+    }
+    let Some(hdr) = parse_alp_header(src, row_count)? else {
+        return Ok(Vec::new());
+    };
+    if indices.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let dense_or_unsorted_heavy = indices.len().saturating_mul(16) >= row_count
+        || (!hdr.exc_strictly_sorted && indices.len().saturating_mul(hdr.exc_count) > row_count);
+    if dense_or_unsorted_heavy {
+        let all = decode_alp_from_header(&hdr, row_count, nulls)?;
+        let mut out = Vec::with_capacity(indices.len());
+        for &row in indices {
+            out.push(all[row]);
+        }
+        return Ok(out);
+    }
+
+    let mut out = Vec::with_capacity(indices.len());
+    for &row in indices {
+        if nulls.is_some_and(|bm| !bm.get(row)) {
+            out.push(0.0);
+        } else if let Some(exc_val) = hdr.lookup_exception(row) {
+            out.push(exc_val);
+        } else {
+            let d = unpack_u64_at(hdr.packed, row_count, hdr.bit_width, row)?;
+            let scaled = hdr.base.wrapping_add(d as i64);
+            out.push(unscale(scaled, hdr.exp, hdr.fac, hdr.div_mode));
+        }
+    }
+    Ok(out)
+}
+
+/// Sparsely decodes only `mask`-selected non-null rows of an ALP-encoded `f64` block body.
+///
+/// Unselected and null rows are set to canonical `0.0`.
+pub fn decode_alp_selected(
+    src: &[u8],
+    row_count: usize,
+    nulls: Option<&Bitmap>,
+    mask: &Bitmap,
+) -> Result<Vec<f64>, StatamError> {
+    if mask.len() != row_count {
+        return Err(StatamError::Corrupt {
+            reason: "selection mask length mismatch",
+        });
+    }
+    if row_count
+        .checked_mul(size_of::<f64>())
+        .is_none_or(|bytes| bytes > MAX_BLOCK_RAW_BYTES)
+    {
+        return Err(StatamError::BoundsExceeded {
+            reason: "alp decode count exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    if nulls.is_some_and(|bm| bm.len() != row_count) {
+        return Err(StatamError::Corrupt {
+            reason: "alp null bitmap length mismatch",
+        });
+    }
+    let Some(hdr) = parse_alp_header(src, row_count)? else {
+        return Ok(Vec::new());
+    };
+
+    let selected_count = mask.count_ones();
+    if selected_count == 0 {
+        return Ok(vec![0.0f64; row_count]);
+    }
+
+    let dense_or_unsorted_heavy = selected_count.saturating_mul(16) >= row_count
+        || (!hdr.exc_strictly_sorted && selected_count.saturating_mul(hdr.exc_count) > row_count);
+    if dense_or_unsorted_heavy {
+        let mut all = decode_alp_from_header(&hdr, row_count, nulls)?;
+        if !mask.all_ones() {
+            for (row, slot) in all.iter_mut().enumerate() {
+                if !mask.get(row) {
+                    *slot = 0.0;
+                }
+            }
+        }
+        return Ok(all);
+    }
+
+    let mut out = vec![0.0f64; row_count];
+    for row in mask.iter_ones() {
+        if row >= row_count {
+            break;
+        }
+        if nulls.is_some_and(|bm| !bm.get(row)) {
+            continue;
+        }
+        out[row] = if let Some(exc_val) = hdr.lookup_exception(row) {
+            exc_val
+        } else {
+            let d = unpack_u64_at(hdr.packed, row_count, hdr.bit_width, row)?;
+            let scaled = hdr.base.wrapping_add(d as i64);
+            unscale(scaled, hdr.exp, hdr.fac, hdr.div_mode)
+        };
+    }
     Ok(out)
 }
 
@@ -442,5 +697,317 @@ mod tests {
                 reason: "alp null bitmap length mismatch",
             })
         ));
+    }
+
+    fn assert_alp_sparse_parity(body: &[u8], row_count: usize, nulls: Option<&Bitmap>) {
+        let full = decode_alp_body(body, row_count, nulls).unwrap();
+        assert_eq!(full.len(), row_count);
+
+        let all_null_indices: Vec<usize> = (0..row_count)
+            .filter(|&r| nulls.is_some_and(|bm| !bm.get(r)))
+            .take(5)
+            .collect();
+        let unsorted_dup_indices: Vec<usize> = [
+            row_count - 1,
+            0,
+            3,
+            1024.min(row_count - 1),
+            3,
+            1,
+            2,
+            0,
+            1023.min(row_count - 1),
+            11.min(row_count - 1),
+        ]
+        .into_iter()
+        .collect();
+        let dense_indices: Vec<usize> = (0..row_count).step_by(3).collect();
+
+        for indices in [
+            &[][..],
+            &[0][..],
+            &all_null_indices[..],
+            &unsorted_dup_indices[..],
+            &dense_indices[..],
+        ] {
+            let taken = decode_alp_take(body, row_count, nulls, indices).unwrap();
+            assert_eq!(taken.len(), indices.len());
+            for (pos, &row) in indices.iter().enumerate() {
+                assert_eq!(
+                    taken[pos].to_bits(),
+                    full[row].to_bits(),
+                    "decode_alp_take mismatch at out_pos={pos}, row={row}"
+                );
+            }
+        }
+
+        let empty_mask = Bitmap::new_zeroed(row_count);
+        let mut sparse_mask = Bitmap::new_zeroed(row_count);
+        for &r in &unsorted_dup_indices {
+            let _ = sparse_mask.set(r, true);
+        }
+        let mut all_null_mask = Bitmap::new_zeroed(row_count);
+        for &r in &all_null_indices {
+            let _ = all_null_mask.set(r, true);
+        }
+        let mut dense_mask = Bitmap::new_zeroed(row_count);
+        for &r in &dense_indices {
+            let _ = dense_mask.set(r, true);
+        }
+        let all_ones_mask = Bitmap::new_ones(row_count);
+
+        for mask in [
+            &empty_mask,
+            &all_null_mask,
+            &sparse_mask,
+            &dense_mask,
+            &all_ones_mask,
+        ] {
+            let sel = decode_alp_selected(body, row_count, nulls, mask).unwrap();
+            assert_eq!(sel.len(), row_count);
+            for r in 0..row_count {
+                let expected_bits = if mask.get(r) {
+                    full[r].to_bits()
+                } else {
+                    0.0f64.to_bits()
+                };
+                assert_eq!(
+                    sel[r].to_bits(),
+                    expected_bits,
+                    "decode_alp_selected mismatch at row={r}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decode_alp_take_and_selected_bit_exact_parity() {
+        let n = 1300usize;
+        let nulls = Bitmap::from_bools(&(0..n).map(|i| i % 9 != 0).collect::<Vec<_>>());
+
+        // 1. Decimal scaling + all IEEE-754 edge exceptions across FastLanes tile & tail.
+        let mut vals: Vec<f64> = (0..n).map(|i| ((i % 97) as f64) * 0.000_025).collect();
+        vals[0] = -0.0;
+        vals[1] = 0.0;
+        vals[2] = f64::from_bits(0x7ff8_0000_0000_0001); // quiet NaN payload
+        vals[3] = f64::from_bits(0x7ff0_0000_0000_0042); // signaling NaN payload
+        vals[4] = f64::from_bits(0xfff8_1234_5678_9abc); // negative NaN payload
+        vals[5] = f64::INFINITY;
+        vals[6] = f64::NEG_INFINITY;
+        vals[7] = f64::MIN_POSITIVE;
+        vals[8] = 1e-310; // subnormal
+        vals[9] = f64::from_bits(1); // smallest positive subnormal
+        vals[10] = f64::from_bits(0x8000_0000_0000_0001); // smallest negative subnormal
+        vals[11] = std::f64::consts::PI;
+        vals[1023] = -0.0;
+        vals[1024] = f64::from_bits(0x7ff8_cafe_babe_0001);
+        vals[n - 1] = f64::NEG_INFINITY;
+
+        for opt_nulls in [None, Some(&nulls)] {
+            let body = encode_alp_body(&vals, opt_nulls).unwrap().unwrap();
+            assert_alp_sparse_parity(&body, n, opt_nulls);
+        }
+
+        // 2. ALP_DIV_MODE_FLAG (`div_mode = true`) with exact `/ 100.0` decimals + exceptions.
+        let mut div_vals: Vec<f64> = (0..n).map(|i| (((i % 97) + 1) as f64) / 100.0).collect();
+        div_vals[2] = -0.0;
+        div_vals[1025] = std::f64::consts::E;
+        let div_body = encode_alp_body(&div_vals, None).unwrap().unwrap();
+        assert_ne!(
+            div_body[0] & ALP_DIV_MODE_FLAG,
+            0,
+            "expected ALP div_mode to be selected"
+        );
+        assert_alp_sparse_parity(&div_body, n, None);
+        assert_alp_sparse_parity(&div_body, n, Some(&nulls));
+
+        // 3. Zero-exception block (every value has 2 decimal digits so all samples pick exp=2).
+        let clean_vals: Vec<f64> = (0..n).map(|i| ((i % 128) as f64) * 0.5 + 0.25).collect();
+        let clean_body = encode_alp_body(&clean_vals, None).unwrap().unwrap();
+        assert_eq!(u16::from_le_bytes([clean_body[2], clean_body[3]]), 0);
+        assert_alp_sparse_parity(&clean_body, n, None);
+        assert_alp_sparse_parity(&clean_body, n, Some(&nulls));
+
+        // 4. Crafted block with unsorted & duplicate exception positions (last-write-wins)
+        //    and an exception on a null row (must still yield +0.0 when masked by nulls).
+        let crafted_n = 64usize;
+        let mut crafted = Vec::new();
+        crafted.push(0); // exp = 0, div_mode = false
+        crafted.push(0); // fac = 0
+        crafted.extend_from_slice(&4u16.to_le_bytes()); // exc_count = 4
+        crafted.extend_from_slice(&7i64.to_le_bytes()); // base = 7
+        crafted.push(0); // bit_width = 0 -> packed_len = 0
+        // Unsorted + duplicate positions: [10, 5, 10, 0]
+        for pos in [10u16, 5, 10, 0] {
+            crafted.extend_from_slice(&pos.to_le_bytes());
+        }
+        for bits in [
+            1.5f64.to_bits(),
+            (-0.0f64).to_bits(),
+            0x7ff8_0000_0000_0099u64, // overwrites pos 10
+            f64::INFINITY.to_bits(),  // pos 0 (will be null when nulls[0] == false)
+        ] {
+            crafted.extend_from_slice(&bits.to_le_bytes());
+        }
+        let crafted_nulls =
+            Bitmap::from_bools(&(0..crafted_n).map(|i| i % 4 != 0).collect::<Vec<_>>());
+        assert_alp_sparse_parity(&crafted, crafted_n, None);
+        assert_alp_sparse_parity(&crafted, crafted_n, Some(&crafted_nulls));
+    }
+
+    #[test]
+    fn decode_alp_take_and_selected_reject_corrupt_inputs() {
+        let vals: Vec<f64> = (0..64).map(|i| (i as f64) * 0.5 + 0.25).collect();
+        let mut body = encode_alp_body(&vals, None).unwrap().unwrap();
+        let empty_mask = Bitmap::new_zeroed(vals.len());
+        let mut one_mask = Bitmap::new_zeroed(vals.len());
+        let _ = one_mask.set(0, true);
+
+        // Trailing bytes on empty block.
+        assert!(decode_alp_take(&[0], 0, None, &[]).is_err());
+        assert!(decode_alp_selected(&[0], 0, None, &Bitmap::new_zeroed(0)).is_err());
+
+        // Truncated header.
+        assert!(decode_alp_take(&body[..12], vals.len(), None, &[0]).is_err());
+        assert!(decode_alp_selected(&body[..12], vals.len(), None, &empty_mask).is_err());
+
+        // Invalid exp/fac/div_mode.
+        for (exp_byte, fac) in [(19u8, 0u8), (3, 4), (ALP_DIV_MODE_FLAG, 0)] {
+            let mut bad = body.clone();
+            bad[0] = exp_byte;
+            bad[1] = fac;
+            assert!(decode_alp_take(&bad, vals.len(), None, &[0]).is_err());
+            assert!(decode_alp_selected(&bad, vals.len(), None, &empty_mask).is_err());
+        }
+
+        // exc_count > row_count.
+        {
+            let mut bad = body.clone();
+            bad[2..4].copy_from_slice(&(65u16).to_le_bytes());
+            assert!(decode_alp_take(&bad, vals.len(), None, &[0]).is_err());
+            assert!(decode_alp_selected(&bad, vals.len(), None, &empty_mask).is_err());
+        }
+
+        // bit_width > 64.
+        {
+            let mut bad = body.clone();
+            bad[12] = 65;
+            assert!(decode_alp_take(&bad, vals.len(), None, &[0]).is_err());
+            assert!(decode_alp_selected(&bad, vals.len(), None, &empty_mask).is_err());
+        }
+
+        // Truncated payload & trailing bytes.
+        assert!(decode_alp_take(&body[..body.len() - 1], vals.len(), None, &[0]).is_err());
+        assert!(
+            decode_alp_selected(&body[..body.len() - 1], vals.len(), None, &empty_mask).is_err()
+        );
+        body.push(0);
+        assert!(decode_alp_take(&body, vals.len(), None, &[0]).is_err());
+        assert!(decode_alp_selected(&body, vals.len(), None, &empty_mask).is_err());
+        body.pop();
+
+        // Out-of-bounds exc_pos >= row_count.
+        let mut bad_exc = vec![0u8; 13];
+        bad_exc[2..4].copy_from_slice(&1u16.to_le_bytes());
+        bad_exc.extend_from_slice(&64u16.to_le_bytes()); // pos == count -> OOB
+        bad_exc.extend_from_slice(&0u64.to_le_bytes());
+        assert!(matches!(
+            decode_alp_take(&bad_exc, 64, None, &[0]),
+            Err(StatamError::Corrupt {
+                reason: "alp exception position out of bounds",
+            })
+        ));
+        assert!(matches!(
+            decode_alp_selected(&bad_exc, 64, None, &empty_mask),
+            Err(StatamError::Corrupt {
+                reason: "alp exception position out of bounds",
+            })
+        ));
+
+        // Out-of-bounds take index and mismatched nulls/mask lengths.
+        assert!(decode_alp_take(&body, vals.len(), None, &[vals.len()]).is_err());
+        let short_nulls = Bitmap::new_ones(32);
+        assert!(decode_alp_take(&body, vals.len(), Some(&short_nulls), &[0]).is_err());
+        assert!(decode_alp_selected(&body, vals.len(), Some(&short_nulls), &one_mask).is_err());
+        assert!(decode_alp_selected(&body, vals.len(), None, &short_nulls).is_err());
+    }
+
+    #[test]
+    fn decode_alp_take_and_selected_row_count_over_u16_max() {
+        // m4: verify `decode_alp_take` and `decode_alp_selected` handle `row_count > 65_536`
+        // (including exceptions at `< 65_536` and regular values at `>= 65_536`, plus nulls).
+        let row_count = 70_000usize;
+        let mut nulls = Bitmap::new_ones(row_count);
+        for i in [10usize, 65_536, 69_999] {
+            let _ = nulls.set(i, false);
+        }
+
+        // Hand-craft a valid ALP block with `row_count = 70_000 > 65_536`:
+        // exp = 2, fac = 0, div_mode = false -> value = (base + delta) / 100.0
+        // plus two exceptions at positions < u16::MAX (7 -> NaN, 42_000 -> -0.0).
+        let deltas: Vec<u64> = (0..row_count).map(|i| (i % 1000) as u64).collect();
+        let exc_pos: [u16; 2] = [7, 42_000];
+        let exc_bits: [u64; 2] = [f64::NAN.to_bits(), (-0.0f64).to_bits()];
+        let mut encoded = Vec::new();
+        encoded.push(2u8); // exp = 2, div_mode = false
+        encoded.push(0u8); // fac = 0
+        encoded.extend_from_slice(&(exc_pos.len() as u16).to_le_bytes());
+        encoded.extend_from_slice(&0i64.to_le_bytes()); // base = 0
+        encoded.push(10u8); // bit_width = 10 (fits 0..1000)
+        pack_u64(&deltas, 10, &mut encoded).unwrap();
+        for &pos in &exc_pos {
+            encoded.extend_from_slice(&pos.to_le_bytes());
+        }
+        for &bits in &exc_bits {
+            encoded.extend_from_slice(&bits.to_le_bytes());
+        }
+
+        let full = decode_alp_body(&encoded, row_count, Some(&nulls)).unwrap();
+        assert_eq!(full.len(), row_count);
+        assert!(full[7].is_nan());
+        assert_eq!(full[42_000].to_bits(), (-0.0f64).to_bits());
+        assert_eq!(full[10].to_bits(), 0.0f64.to_bits());
+        assert_eq!(full[65_536].to_bits(), 0.0f64.to_bits());
+        assert_eq!(full[65_537], ((65_537 % 1000) as f64) / 100.0);
+
+        // Sparse take crossing u16::MAX boundary.
+        let sparse_indices = [
+            0usize, 7, 10, 42_000, 65_535, 65_536, 65_537, 69_998, 69_999,
+        ];
+        let got_sparse =
+            decode_alp_take(&encoded, row_count, Some(&nulls), &sparse_indices).unwrap();
+        for (&idx, &got) in sparse_indices.iter().zip(got_sparse.iter()) {
+            assert_eq!(
+                got.to_bits(),
+                full[idx].to_bits(),
+                "sparse take mismatch at row {idx}"
+            );
+        }
+
+        // Dense take (> row_count / 16) crossing u16::MAX boundary.
+        let dense_indices: Vec<usize> = (0..row_count).step_by(8).collect();
+        let got_dense = decode_alp_take(&encoded, row_count, Some(&nulls), &dense_indices).unwrap();
+        for (&idx, &got) in dense_indices.iter().zip(got_dense.iter()) {
+            assert_eq!(
+                got.to_bits(),
+                full[idx].to_bits(),
+                "dense take mismatch at row {idx}"
+            );
+        }
+
+        // Sparse `decode_alp_selected` crossing u16::MAX boundary.
+        let mut sparse_mask = Bitmap::new_zeroed(row_count);
+        for &idx in &sparse_indices {
+            let _ = sparse_mask.set(idx, true);
+        }
+        let got_sel = decode_alp_selected(&encoded, row_count, Some(&nulls), &sparse_mask).unwrap();
+        for i in 0..row_count {
+            let expected = if sparse_mask.get(i) { full[i] } else { 0.0 };
+            assert_eq!(
+                got_sel[i].to_bits(),
+                expected.to_bits(),
+                "sparse selected mismatch at row {i}"
+            );
+        }
     }
 }

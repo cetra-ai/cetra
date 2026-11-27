@@ -544,4 +544,71 @@ To eliminate Tokio/Rayon thread-pool asymmetry across formats, all 7 formats wer
 - **Local & Apple M4 (`aarch64` NEON) Checks:** `cargo fmt -p cetra-statam -- --check`, `cargo clippy --offline --locked -p cetra-statam --all-targets -- -D warnings` (0 warnings), `cargo test --offline --locked -p cetra-statam` (**183 unit + 2 `fuzz_replay` tests passing** on both local `x86_64` and Apple M4 `macbook-m4-vm` `--release` in `0.69 s`), `just check-ee`, `just deny-policy` (bans/licenses/sources ok).
 - **ASan libFuzzer (`precision-5770-vm`, 90s × 4 workers, 22-seed corpus incl. `seed-21-fsst-subchunked-l1` & `seed-22-binary-blobs-stpk`):** `~285k` total runs (`71,144` runs/worker), **`20,764` cov edges**, **`61,304` features**, **`605 MiB` peak RSS**, **0 crashes, 0 OOMs, 0 ASan errors**.
 
+---
+
+## 17. Live Garage S3 Benchmarks (All 17 Workloads) & Pass 13 (RTT Collapse, Single-Flight Pack Caches, Sparse ALP & All-Null Take)
+
+### 17.1 Real S3 Benchmark Harness (`docs/research/statam/bench/src/real_s3.rs`)
+To validate simulated S3 numbers against real network latency, TLS, HTTP/1.1–HTTP/2 keep-alive, TCP BDP, and object-store server overhead, we built a real S3 harness targeting a self-hosted **Garage v2.3.0** cluster (`https://s3.chapu.is:8443`, `~48–58 ms` keep-alive RTT, `~8–10 MiB/s` single-TCP-stream download, `~25–40 MiB/s` parallel HTTP streams) from the local 32-core client across **all 17 workloads (87 queries)** in **two modes** (identical `BenchS3Reader` across all 5 formats: `pq_default`, `pq_tuned`, `vortex`, `lance`, `statam_l1`, plus `pq_cetra` on `W1`–`W4`):
+- **`STATAM_REAL_S3=readcache` (`1 MiB ReadCache`):** Shared 1 MiB block-aligned LRU cache with `tokio::sync::watch` single-flight deduplication per 1 MiB block (matching production `cetra-storage`'s `ReadCache`), 3 cold runs when `< 4 s` else 1.
+- **`STATAM_REAL_S3=direct` (`Direct Range GET`):** Zero block cache; raw byte-range HTTP GETs with 64 KiB coalescing and up to 16 concurrent HTTP range requests.
+- Artifacts are uploaded idempotently via SHA-256 content-addressed keys (`8 MiB` multipart > `16 MiB`) into bucket `statam-bench`. Parquet uses true async `AsyncFileReader` (`get_byte_ranges`), Vortex uses direct async `read_range_async`, Lance uses direct async `get_opts`/`get_ranges` with `CachedFileSize::new(file_len)` and `SchedulerConfig::max_bandwidth`.
+
+### 17.2 Pass 13 Optimizations (Zero Wire-Format Changes)
+Live Garage S3 profiling and `perf` sampling on `precision-5770-vm` surfaced two high-impact bottlenecks — sequential S3 round-trip chains across Row Groups / lazy indexes / `.stpk` packs, and full-block decoding on sparse `ALP` / 95%-NULL `take_rows` columns:
+1. **Pass 13A — Real-S3 RTT Collapse & Single-Flight Pack Caches (`format.rs`, `payload/{pack,search}.rs`, `reader/{meta,mod,eval,payload}.rs`):**
+   - `DEFAULT_TAIL_HINT = 192 KiB` (covers wide-schema Hot Tails like `wide_1000`'s `~170 KiB` in 1 GET while staying inside the final 1 MiB ReadCache block for typical files) and `PACK_DEFAULT_TAIL_HINT = 256 KiB`, with bounded `Bytes::copy_from_slice` inline slicing of in-tail `lazy_dir` entries (`inline_lazy`, capped to `<= tail.len()` and first-per-key) and pack `inline_trigram` / `inline_edge_table`.
+   - Unified lazy-index + Phase-1 block fetch wave (`ensure_lazy_indexes_loaded`, `fetch_blocks_and_lazy`).
+   - Cross-RG batched `take_rows` (`<= 64 MiB` `.statam` data waves + 1 coalesced `.stpk` wave per pack; wave-bounded fallback including unique L0 bytes and per-column CDC-dedup decoded bytes `max_mb_col_decoded_bytes`).
+   - Cross-RG batched `scan` (`scan_rgs_unfiltered_batched`, `scan_rgs_filtered_batched`, bounded by `64 MiB` stored and `128 MiB` decoded Phase-1 raw bytes).
+   - Phase-1 → Phase-2 `.stpk` chunk retention (`RetainedPackChunks`, strict `64 MiB` atomic cap shared across parallel frames, parallel mini-blocks, and wave-wide RGs; consolidated into `payload/search.rs` with O(total_chunk_refs) `SameFrameSiblings` and unified lossy Unicode `ILIKE`).
+   - Single-flight double-checked locking (`Mutex<()>` + `OnceLock`) on `StatamReader::resolve_pack` and `ChunkPackReader::{dict_cache, trigram_cache, edge_table_cache}`, eliminating N-thread S3 thundering herds on parallel mini-block substring scans.
+   - Pass 12 trim-backs: `frame_divisor = 12` restricted to `frame_target <= 64 KiB`; parallel `.stpk` frame scan threshold raised to `4 MiB` / `4` frames (recovering `BL_take_10 8T` from `3.22 → 2.02 ms`).
+2. **Pass 13B — O(k) Sparse `ALP` & All-Null `take_rows` Short-Circuit (`codec/{alp,numeric,dict,mod}.rs`):**
+   - `decode_alp_take` and `decode_alp_selected` decode only requested indices via sparse bitpacking + exception patching (bit-exact IEEE-754 parity including NaN payloads, `-0.0`, subnormals, `±inf`).
+   - Zero-allocation `split_optional_null_bytes` + `gather_nulls_from_bytes` + `Column::Const(Null)` short-circuit (with full structural validation of Plain varlen offsets and Dict RLE `run_ends`) in `decode_narrow_column_take` and `decode_dict_take`.
+
+### 17.3 Live Garage S3 Results Across All 17 Workloads (87 Queries, Both Modes)
+
+| S3 Mode (`https://s3.chapu.is:8443`, 87 queries) | Statam L1 Rank #1 | vs Lance V2.2 | vs Vortex | vs Best Parquet |
+|---|---:|---:|---:|---:|
+| **1 MiB ReadCache (Baseline → Pass 13)** | `27/87` → **`45/87`** (+18) | `63/87` → **`75/87` (86%)** | `46/87` → **`62/87` (71%)** | `40/87` → **`57/87` (66%)** |
+| **Direct Range GET (Baseline → Pass 13)** | `34/87` → **`44/87`** (+10) | `75/87` → **`79/87` (91%)** | `57/87` → **`67/87` (77%)** | `39/87` → **`50/87` (57%)** |
+
+Selected live Garage S3 highlights (`ms (GETs)`):
+
+| Workload / Query | Mode | Best Parquet | Vortex | Lance V2.2 | Statam L1 (Pre-P13) | **Statam L1 (Pass 13)** |
+|---|---|---:|---:|---:|---:|---:|
+| `W1_agents · substring_rare` | ReadCache | 1,553.9 (2g) | 1,590.5 (12g) | 9,171.5 (11g) | 1,032.3 (4g) | **338.3 (4g)** (`27.1×` < Lance) |
+| `W1_agents · substring_absent` | ReadCache | 2,069.6 (2g) | 2,787.8 (12g) | 5,625.0 (11g) | 535.2 (3g) | **206.5 (3g)** (`27.2×` < Lance) |
+| `W3_spans · point_lookup_full` | ReadCache | 427.5 (4g) | 462.8 (12g) | 1,158.6 (23g) | 1,122.3 (2g) | **194.0 (2g)** (`5.8×` vs pre-P13) |
+| `W3_spans · time_bucket_agg` | ReadCache | 733.5 (4g) | 465.2 (6g) | 619.2 (7g) | 1,085.9 (7g) | **248.2 (7g)** (`4.4×` vs pre-P13) |
+| `clickbench · CB_Q20` | ReadCache | 210.4 (3g) | 205.2 (3g) | 516.9 (4g) | 313.0 (3g) | **137.3 (3g)** |
+| `clickbench · CB_wide_point` | ReadCache | 276.6 (4g) | 333.6 (6g) | 1,147.7 (18g) | 363.2 (3g) | **188.6 (3g)** (`6.1×` < Lance) |
+| `random_access · RA_take_100` | ReadCache | 642.1 (2g) | 557.9 (9g) | 838.3 (19g) | 1,287.4 (3g) | **263.0 (2g)** (`4.9×` vs pre-P13) |
+| `jsonbench · JB_Q2_did_pt` | ReadCache | 372.9 (3g) | 288.7 (4g) | 448.2 (7g) | 567.3 (2g) | **162.2 (2g)** (`3.5×` vs pre-P13) |
+| `jsonbench · JB_Q3_map_type` | ReadCache | 1,032.0 (3g) | 362.9 (9g) | 516.5 (17g) | 1,056.7 (3g) | **279.2 (3g)** (`3.8×` vs pre-P13) |
+| `blobs_2k · BL_meta_scan` | ReadCache | 157.9 (2g) | 124.3 (2g) | 131.2 (2g) | 46.5 (1g) | **49.3 (1g)** (4/4 Blobs sweep) |
+| `blobs_2k · BL_take_50` | ReadCache | 1,883.0 (31g) | 4,708.3 (3g) | 1,426.0 (45g) | 1,330.8 (29g) | **1,085.5 (29g)** |
+| `wide_1000 · WD_cold_open` | Direct | 126.8 (2g) | 113.8 (2g) | 242.2 (4g) | 116.5 (2g) | **59.7 (1g)** (`60.6 ms` ReadCache) |
+| `wide_1000 · WD_point_all_1000` | Direct | 362.0 (4g) | 4,747.3 (1199g) | 2,713.2 (2004g) | 268.3 (4g) | **158.3 (2g)** (`17.1×` < Lance) |
+| `wide_1000 · WD_take_20_1000` | Direct | 325.4 (3g) | 4,493.4 (1198g) | 3,394.3 (2897g) | 521.8 (7g) | **245.7 (2g)** (`13.8×` < Lance) |
+| `fineweb_40k · FW_take_100` | ReadCache | 1,464.7 (15g) | 1,378.7 (8g) | 1,510.1 (63g) | 4,053.6 (15g) | **1,271.0 (15g)** (#1; `709.6 ms` Direct) |
+| `fineweb_40k · FW_substr_rare` | ReadCache | 2,399.2 (6g) | 4,747.2 (8g) | 4,144.9 (10g) | 4,936.3 (12g) | **2,199.7 (12g)** (#1; Direct `138→91.9 MiB`) |
+| `fineweb_40k · FW_substr_absent` | ReadCache | 2,222.3 (4g) | 1,366.0 (7g) | 2,304.0 (9g) | 508.4 (3g) | **852.1 (3g)** (#1; Direct `56.2→11.7 MiB`) |
+| `tpch · TP_Q6_filter` | ReadCache | 371.6 (5g) | 311.5 (5g) | 310.9 (6g) | 384.3 (5g) | **210.2 (5g)** |
+| `tpch · TP_take_100` | ReadCache | 345.8 (2g) | 289.1 (10g) | 687.5 (22g) | 1,459.8 (5g) | **480.3 (2g)** (`3.0×` vs pre-P13) |
+| `dataloader · DL_epoch_s3_cached` | ReadCache | 2,449.3 (2g) | 1,313.1 (4g) | 693.4 (7g) | 359.0 (2g) | **368.2 (2g)** (Direct `12.8s` vs Lance `71.7s` / `26,317g`) |
+
+### 17.4 Pass 13 Local CPU & Verification (`precision-5770-vm` & `macbook-m4-vm`)
+- **Local CPU (`precision-5770-vm`, zero size regressions across all 17 workloads, `clickbench_100k = 8,411.2 KiB` Gate 1 PASS):**
+  - `WD_point_all_1000`: `28.5 → 18.40 ms` (1T, `1.55×`) / **`2.83 ms` (8T)**
+  - `WD_take_20_1000`: `105 → 62.66 ms` (1T, `1.68×`) / **`8.99 ms` (8T)**
+  - `BL_take_10` (8T): `3.22 → 2.02 ms` (`1.60×`); `BL_take_50` (8T): `3.64 → 2.59 ms`
+  - `TP_take_100`: `8.15 → 5.40 ms` (1T, `1.51×`) / **`1.70 ms` (8T)**
+  - `DL_epoch_local`: `641 → 586.6 ms` (1T) / **`115.8 ms` (8T)**
+- **Cold Code Reviews (3 rounds):** Initial cold review caught 3 Blockers (`B1`–`B3`), 3 Majors (`M1`–`M3`), 4 Minors (`m1`–`m4`); follow-up review caught 1 Blocker (`N1` `inline_lazy` copy-bomb OOM) and 1 Minor (`N2` CDC-dedup `take_rows` wave split); final cold sign-off **APPROVED** (0 Blockers, 0 Majors, 0 Minors, strict lock DAG verified).
+- **Tests, Security & Cross-Arch:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (0 warnings), `just check-ee`, `just deny-policy` (bans/licenses/sources ok); **203 unit + 2 `fuzz_replay` tests passing** on local `x86_64`, `precision-5770-vm` (`1.66 s` release), and Apple M4 `macbook-m4-vm` (`aarch64` NEON, `1.73 s` release).
+- **ASan libFuzzer (`statam_file`, 90s × 4 workers):** `~208k` total runs (`52,028` runs/worker), **`20,736` cov edges**, **`59,613` features**, **`600 MiB` peak RSS**, **0 crashes, 0 OOMs, 0 ASan errors**.
+
 **Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Awaiting explicit user go-ahead for Stage 3 (`cetra-storage` integration).

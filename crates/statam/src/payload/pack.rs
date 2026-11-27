@@ -5,16 +5,16 @@ use std::fmt;
 use std::hash::BuildHasherDefault;
 use std::io::Write;
 use std::ops::Range;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::Bytes;
 
 use crate::StatamError;
 use crate::format::{
     BLOB_DEDICATED_FRAME_BYTES, BLOB_MAX_CHUNK_BYTES, BLOB_SMALL_FRAME_TARGET_BYTES, CHUNK_LOC_LEN,
-    ChunkLoc, Codec, DEFAULT_TAIL_HINT, FORMAT_VERSION, FRAME_ENTRY_LEN, FrameEntry,
-    FramedWriteInfo, MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, MAX_BLOOM_BYTES,
-    MAX_FRAME_RAW_BYTES, MAX_HOT_TAIL_BYTES, MAX_PACK_CHUNKS, MAX_PACK_DICT_BYTES, MAX_PACK_FRAMES,
+    ChunkLoc, Codec, FORMAT_VERSION, FRAME_ENTRY_LEN, FrameEntry, FramedWriteInfo,
+    MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, MAX_BLOOM_BYTES, MAX_FRAME_RAW_BYTES,
+    MAX_HOT_TAIL_BYTES, MAX_PACK_CHUNKS, MAX_PACK_DICT_BYTES, MAX_PACK_FRAMES,
     MAX_ROW_PAYLOAD_BYTES, PACK_FLAG_HAS_DICT, PACK_FLAG_HAS_TRIGRAM, PACK_FLAG_TOC_LZ4,
     PACK_FLAG_TOC_ZSTD, PACK_FRAME_FLAG_USES_DICT, PACK_FRAME_HEADER_LEN, PACK_FRAME_MAGIC,
     PACK_HEADER_LEN, PACK_POSTSCRIPT_LEN, PackDecoderDict, PackDictCompressor, PackHeader,
@@ -114,6 +114,8 @@ const DICT_MAX_SAMPLES: usize = 1_024;
 const DICT_MAX_SAMPLE_SLICE: usize = 2_048;
 /// Maximum total raw bytes queued in `pending_frames` before flushing a parallel batch (32 MiB).
 const MAX_PENDING_RAW_BYTES: usize = 32 * 1024 * 1024;
+/// Default tail prefetch size for `.stpk` chunk packs (256 KiB), capturing TOC + dict + edge table + trigram section in 1 GET.
+const PACK_DEFAULT_TAIL_HINT: u32 = 256 * 1024;
 
 /// Configuration options for [`ChunkPackBuilder`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1510,6 +1512,7 @@ impl ChunkPackBuilder {
         }
 
         let options = self.options;
+        let frame_target = self.effective_target_frame_raw_bytes;
         let trained_dict = self.trained_dict.as_deref();
         let encoded = parallel_map_in_order_with_init(
             batch,
@@ -1554,7 +1557,7 @@ impl ChunkPackBuilder {
                     && options.enable_trigram_skip
                     && (info.stored_len as usize) >= MIN_FRAME_FOR_TRIGRAM
                 {
-                    build_frame_trigram_bytes(&raw, &chunks, info.stored_len as usize)
+                    build_frame_trigram_bytes(&raw, &chunks, info.stored_len as usize, frame_target)
                 } else {
                     (None, false)
                 };
@@ -1642,7 +1645,12 @@ impl ChunkPackBuilder {
             && self.options.enable_trigram_skip
             && (info.stored_len as usize) >= MIN_FRAME_FOR_TRIGRAM
         {
-            build_frame_trigram_bloom(raw, &chunks, info.stored_len as usize)
+            build_frame_trigram_bloom(
+                raw,
+                &chunks,
+                info.stored_len as usize,
+                self.effective_target_frame_raw_bytes,
+            )
         } else {
             (None, false)
         };
@@ -1755,8 +1763,9 @@ fn build_frame_trigram_bytes(
     raw: &[u8],
     chunks: &[PendingChunk],
     stored_len: usize,
+    frame_target: usize,
 ) -> (Option<Vec<u8>>, bool) {
-    let (bloom, high_density) = build_frame_trigram_bloom(raw, chunks, stored_len);
+    let (bloom, high_density) = build_frame_trigram_bloom(raw, chunks, stored_len, frame_target);
     (bloom.map(|b| b.as_bytes().to_vec()), high_density)
 }
 
@@ -1764,8 +1773,15 @@ fn build_frame_trigram_bloom(
     raw: &[u8],
     chunks: &[PendingChunk],
     stored_len: usize,
+    frame_target: usize,
 ) -> (Option<TrigramBloom>, bool) {
-    let frame_cap = (raw.len() / 12).clamp(MIN_TRIGRAM_BLOOM_BYTES, MAX_TRIGRAM_BLOOM_BYTES);
+    let frame_divisor = if frame_target <= ADAPTIVE_PROSE_FRAME_RAW_BYTES {
+        12
+    } else {
+        16
+    };
+    let frame_cap =
+        (raw.len() / frame_divisor).clamp(MIN_TRIGRAM_BLOOM_BYTES, MAX_TRIGRAM_BLOOM_BYTES);
     let max_bytes = (stored_len / 6)
         .min(frame_cap)
         .clamp(MIN_TRIGRAM_BLOOM_BYTES, MAX_TRIGRAM_BLOOM_BYTES);
@@ -1876,9 +1892,14 @@ pub struct ChunkPackReader {
     toc: PackToc,
     data_end: u64,
     inline_dict_framed: Option<Bytes>,
+    inline_trigram: Option<Bytes>,
+    inline_edge_table: Option<Bytes>,
     dict_cache: OnceLock<Option<Arc<PackDecoderDict>>>,
+    dict_init: Mutex<()>,
     trigram_cache: OnceLock<TrigramSectionData>,
+    trigram_init: Mutex<()>,
     edge_table_cache: OnceLock<Arc<FlatEdgeTable>>,
+    edge_table_init: Mutex<()>,
 }
 
 impl fmt::Debug for ChunkPackReader {
@@ -1892,7 +1913,7 @@ impl fmt::Debug for ChunkPackReader {
 }
 
 impl ChunkPackReader {
-    /// Opens a `.stpk` pack by reading its tail (`DEFAULT_TAIL_HINT` = 192 KiB) in 1 GET.
+    /// Opens a `.stpk` pack by reading its tail (`PACK_DEFAULT_TAIL_HINT` = 256 KiB) in 1 GET.
     pub fn open(reader: Arc<dyn RangeReader>) -> Result<Self, StatamError> {
         Self::open_with_tail_hint(reader, None)
     }
@@ -1911,7 +1932,7 @@ impl ChunkPackReader {
         }
 
         let hint =
-            u64::from(tail_hint.unwrap_or(DEFAULT_TAIL_HINT)).max(PACK_POSTSCRIPT_LEN as u64);
+            u64::from(tail_hint.unwrap_or(PACK_DEFAULT_TAIL_HINT)).max(PACK_POSTSCRIPT_LEN as u64);
         let tail_start = file_len.saturating_sub(hint);
         let tail = reader.read_range(tail_start..file_len)?;
         if tail.len() as u64 != file_len - tail_start {
@@ -1950,22 +1971,30 @@ impl ChunkPackReader {
 
         let trailer_sections = validate_trailer_sections(&ps, data_end)?;
 
-        let inline_dict_framed = if (ps.flags & PACK_FLAG_HAS_DICT) != 0
-            && ps.dict_len > 0
-            && ps.dict_off >= tail_start
-            && ps.dict_off.saturating_add(u64::from(ps.dict_len)) <= file_len
-        {
-            usize::try_from(ps.dict_off - tail_start)
-                .ok()
-                .and_then(|start| {
-                    start
-                        .checked_add(ps.dict_len as usize)
-                        .filter(|&end| tail.get(start..end).is_some())
-                        .map(|end| tail.slice(start..end))
-                })
+        let slice_inline = |off: u64, len: u32| -> Option<Bytes> {
+            if len == 0
+                || off < tail_start
+                || off
+                    .checked_add(u64::from(len))
+                    .is_none_or(|end| end > data_end)
+            {
+                return None;
+            }
+            usize::try_from(off - tail_start).ok().and_then(|start| {
+                start
+                    .checked_add(len as usize)
+                    .and_then(|end| tail.get(start..end))
+                    .map(Bytes::copy_from_slice)
+            })
+        };
+
+        let inline_dict_framed = if (ps.flags & PACK_FLAG_HAS_DICT) != 0 {
+            slice_inline(ps.dict_off, ps.dict_len)
         } else {
             None
         };
+        let inline_trigram = slice_inline(ps.trigram_off, ps.trigram_len);
+        let inline_edge_table = slice_inline(ps.edge_table_off, ps.edge_table_len);
 
         let toc_body_stored_len = (ps.toc_stored_len as usize) - PACK_POSTSCRIPT_LEN;
         let owned_toc_body: Bytes;
@@ -2104,9 +2133,14 @@ impl ChunkPackReader {
             },
             data_end,
             inline_dict_framed,
+            inline_trigram,
+            inline_edge_table,
             dict_cache: OnceLock::new(),
+            dict_init: Mutex::new(()),
             trigram_cache: OnceLock::new(),
+            trigram_init: Mutex::new(()),
             edge_table_cache: OnceLock::new(),
+            edge_table_init: Mutex::new(()),
         })
     }
 
@@ -2115,6 +2149,10 @@ impl ChunkPackReader {
         if (ps.flags & PACK_FLAG_HAS_DICT) == 0 || ps.dict_len == 0 {
             return Ok(None);
         }
+        if let Some(cached) = self.dict_cache.get() {
+            return Ok(cached.clone());
+        }
+        let _guard = self.dict_init.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(cached) = self.dict_cache.get() {
             return Ok(cached.clone());
         }
@@ -2495,7 +2533,7 @@ impl ChunkPackReader {
         }
         if threads <= 1
             || frame_groups.len() <= 1
-            || (compressed_frames < 2 && total_raw_bytes < 2 * 1024 * 1024)
+            || (compressed_frames < 4 && total_raw_bytes < 4 * 1024 * 1024)
         {
             let mut state = init()?;
             let mut out = Vec::new();
@@ -2544,6 +2582,89 @@ impl ChunkPackReader {
         Ok(out)
     }
 
+    /// Frame-level variant of [`Self::scan_chunks_in_frames_parallel`] that passes the full
+    /// decompressed frame buffer and its requested `chunk_ids` to `f`, enabling callers (e.g.
+    /// Phase-1 substring search) to retain matched rows' chunks (including same-frame siblings)
+    /// without re-reading the frame in Phase 2.
+    pub(crate) fn scan_frames_parallel<S, T, Init, F>(
+        &self,
+        chunk_ids: &[u32],
+        read_threads: usize,
+        init: Init,
+        f: F,
+    ) -> Result<Vec<T>, StatamError>
+    where
+        T: Send,
+        Init: Fn() -> Result<S, StatamError> + Sync,
+        F: Fn(&mut S, u32, &[u8], &[u32]) -> Result<Option<T>, StatamError> + Sync,
+    {
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let (frame_groups, ranges, dict) = self.prepare_frame_chunk_groups(chunk_ids)?;
+        let frame_bytes_list = self.reader.read_ranges(&ranges)?;
+        if frame_bytes_list.len() != frame_groups.len() {
+            return Err(StatamError::Corrupt {
+                reason: "read_ranges returned wrong frame count",
+            });
+        }
+
+        let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
+        let mut compressed_frames = 0usize;
+        let mut total_raw_bytes = 0usize;
+        for &(fid, _) in &frame_groups {
+            let entry = &self.toc.frames[fid as usize];
+            if entry.codec != Codec::None {
+                compressed_frames += 1;
+            }
+            total_raw_bytes = total_raw_bytes.saturating_add(entry.raw_len as usize);
+        }
+
+        let run_frame =
+            |state: &mut S, fid: u32, raw: &[u8], cids: &[u32]| -> Result<Option<T>, StatamError> {
+                let entry = &self.toc.frames[fid as usize];
+                verify_raw_frame_matches_entry(raw, entry)?;
+                let (_, _, decoded) =
+                    read_framed_pack_frame_with_dict(raw, MAX_FRAME_RAW_BYTES, dict.as_deref())?;
+                if decoded.len() != entry.raw_len as usize {
+                    return Err(StatamError::Corrupt {
+                        reason: "decompressed frame length mismatch",
+                    });
+                }
+                f(state, fid, &decoded, cids)
+            };
+
+        if threads <= 1
+            || frame_groups.len() <= 1
+            || (compressed_frames < 4 && total_raw_bytes < 4 * 1024 * 1024)
+        {
+            let mut state = init()?;
+            let mut out = Vec::new();
+            for ((fid, cids), raw) in frame_groups.iter().zip(frame_bytes_list.iter()) {
+                if let Some(item) = run_frame(&mut state, *fid, raw, cids)? {
+                    out.push(item);
+                }
+            }
+            return Ok(out);
+        }
+
+        let frame_tasks: Vec<(u32, Bytes, Vec<u32>)> = frame_groups
+            .into_iter()
+            .zip(frame_bytes_list)
+            .map(|((fid, cids), raw)| (fid, raw, cids))
+            .collect();
+
+        let per_frame = parallel_map_in_order_with_init(
+            frame_tasks,
+            threads,
+            init,
+            |state, (fid, raw, cids)| run_frame(state, fid, &raw, &cids),
+        )?;
+
+        Ok(per_frame.into_iter().flatten().collect())
+    }
+
     /// Reads and validates the per-frame trigram bloom filters (`None` where omitted), cached per reader.
     pub fn read_trigram_section(&self) -> Result<Vec<Option<TrigramBloom>>, StatamError> {
         Ok(self.trigram_section_cached()?.frame_blooms.clone())
@@ -2558,6 +2679,10 @@ impl ChunkPackReader {
     }
 
     pub(crate) fn trigram_section_cached(&self) -> Result<&TrigramSectionData, StatamError> {
+        if let Some(cached) = self.trigram_cache.get() {
+            return Ok(cached);
+        }
+        let _guard = self.trigram_init.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(cached) = self.trigram_cache.get() {
             return Ok(cached);
         }
@@ -2595,7 +2720,11 @@ impl ChunkPackReader {
                 reason: "trigram section out of pack bounds",
             });
         }
-        let section = self.reader.read_range(start..end)?;
+        let section = if let Some(ref inline) = self.inline_trigram {
+            inline.clone()
+        } else {
+            self.reader.read_range(start..end)?
+        };
         if section.len() != ps.trigram_len as usize {
             return Err(StatamError::Corrupt {
                 reason: "short read on pack trigram section",
@@ -2674,6 +2803,13 @@ impl ChunkPackReader {
         if let Some(cached) = self.edge_table_cache.get() {
             return Ok(Arc::clone(cached));
         }
+        let _guard = self
+            .edge_table_init
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(cached) = self.edge_table_cache.get() {
+            return Ok(Arc::clone(cached));
+        }
         let table = Arc::new(self.read_edge_table_flat_uncached()?);
         let _ = self.edge_table_cache.set(Arc::clone(&table));
         Ok(self.edge_table_cache.get().map_or(table, Arc::clone))
@@ -2708,7 +2844,11 @@ impl ChunkPackReader {
                 reason: "edge table out of pack bounds",
             });
         }
-        let framed = self.reader.read_range(start..end)?;
+        let framed = if let Some(ref inline) = self.inline_edge_table {
+            inline.clone()
+        } else {
+            self.reader.read_range(start..end)?
+        };
         if framed.len() != ps.edge_table_len as usize {
             return Err(StatamError::Corrupt {
                 reason: "short read on pack edge table",
@@ -4864,5 +5004,95 @@ mod tests {
             reader.read_trigram_section().unwrap().len(),
             reader.toc().frames.len()
         );
+    }
+
+    #[test]
+    fn pass13a_inline_trigram_and_edge_table_slicing_zero_extra_reads() {
+        // Build a pack with both TrigramSkipSection and EdgeTable sitting right before the TOC
+        // inside the default 256 KiB tail prefetch window.
+        let opts = PackWriteOptions {
+            codec: test_codec(),
+            zstd_level: 1,
+            target_frame_raw_bytes: 64 * 1024,
+            enable_trigram_skip: true,
+            compress_toc_lz4: true,
+            write_threads: 1,
+            emit_hash_table: true,
+        };
+        let mut pb = ChunkPackBuilder::new([0xA5u8; 16], opts);
+        pb.enable_boundary_tracking();
+        let mut cids = Vec::new();
+        let words = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima", "mike", "november", "oscar", "papa", "quebec", "romeo",
+            "sierra", "tango", "uniform", "victor", "whiskey", "xray", "yankee", "zulu",
+        ];
+        let mut rng = 0x1234_5678_9abc_def0u64;
+        for i in 0..48u32 {
+            let mut chunk = format!("doc_{i:04}:");
+            for _ in 0..240 {
+                rng = rng
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                chunk.push(' ');
+                chunk.push_str(words[((rng >> 56) as usize) % words.len()]);
+            }
+            cids.push(pb.intern_chunk(chunk.as_bytes()).unwrap());
+        }
+        pb.mark_boundary_chunks(&cids[0..4]);
+
+        let mut pack_bytes = Vec::new();
+        let stats = pb.finish(&mut pack_bytes).unwrap();
+        assert!(stats.trigram_section_bytes > 0);
+        assert!(stats.edge_table_bytes > 0);
+        assert!(
+            (stats.trigram_section_bytes + stats.edge_table_bytes + stats.toc_stored_bytes)
+                < PACK_DEFAULT_TAIL_HINT,
+            "pack trailers must fit inside 256 KiB default tail hint"
+        );
+
+        // Disable S3 block cache so any extra read_range would immediately show up in waves & gets.
+        let s3 = Arc::new(SimulatedS3Reader::from_bytes(
+            pack_bytes.clone(),
+            SimulatedS3Config {
+                cache_capacity_blocks: 0,
+                ..SimulatedS3Config::default()
+            },
+        ));
+        let reader = ChunkPackReader::open(s3.clone()).unwrap();
+        assert_eq!(s3.counters().waves, 1);
+        assert_eq!(s3.counters().gets, 1);
+        assert!(reader.inline_trigram.is_some());
+        assert!(reader.inline_edge_table.is_some());
+
+        // Reading trigram blooms AND edge table must issue 0 extra range reads!
+        let blooms = reader.read_trigram_section().unwrap();
+        assert_eq!(blooms.len(), reader.toc().frames.len());
+        let edge_blooms = reader.read_edge_trigram_blooms().unwrap();
+        assert!(edge_blooms.is_some());
+        let edges = reader.read_edge_table_flat().unwrap();
+        assert_eq!(edges.len(), cids.len());
+        assert_eq!(
+            s3.counters().waves,
+            1,
+            "inline trigram + edge table must incur 0 extra waves"
+        );
+        assert_eq!(
+            s3.counters().gets,
+            1,
+            "inline trigram + edge table must incur 0 extra GETs"
+        );
+
+        // Custom small tail hint must still work identically by fetching on demand.
+        let s3_small = Arc::new(SimulatedS3Reader::from_bytes(
+            pack_bytes,
+            SimulatedS3Config {
+                cache_capacity_blocks: 0,
+                ..SimulatedS3Config::default()
+            },
+        ));
+        let cold = ChunkPackReader::open_with_tail_hint(s3_small, Some(256)).unwrap();
+        assert_eq!(cold.read_trigram_section().unwrap().len(), blooms.len());
+        assert_eq!(cold.read_edge_table_flat().unwrap().len(), edges.len());
     }
 }

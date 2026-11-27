@@ -20,7 +20,8 @@ use crate::codec::nested::{decode_nested_column, encode_nested_column};
 use crate::codec::numeric::{
     decode_const_block, decode_inner_flat, decode_narrow_column, decode_narrow_column_selected,
     decode_narrow_column_take, decode_plain_varlen_selected, encode_narrow_column_with_locality,
-    parse_rle_header, read_optional_nulls, try_encode_const_or_null, write_optional_nulls,
+    parse_rle_header, read_optional_nulls, split_optional_null_bytes, try_encode_const_or_null,
+    write_optional_nulls,
 };
 use crate::codec::zonemap::{compute_zone_map, count_col_nulls};
 use crate::format::{
@@ -29,7 +30,9 @@ use crate::format::{
     write_framed_block_with_min_savings,
 };
 
-pub use alp::{ALP_MAX_EXP, decode_alp_body, encode_alp_body};
+pub use alp::{
+    ALP_MAX_EXP, decode_alp_body, decode_alp_selected, decode_alp_take, encode_alp_body,
+};
 pub use dict::{
     DICT_HEADER_LEN, DICT_PASSTHROUGH_MAX_BYTES, DictBuildMode, DictBuilder, DictValueKind,
     FileDict as CodecFileDict, L0_DICT_MAX_ENTRIES, decode_dict_codes_body, decode_dict_selected,
@@ -534,6 +537,7 @@ pub fn decode_mini_block_selected(
                     | Encoding::BitpackBool
                     | Encoding::ForBitpack
                     | Encoding::DeltaBitpack
+                    | Encoding::Alp
             ) && mask.count_ones().saturating_mul(16) < row_count)
         {
             dt.validate(MAX_NESTING_DEPTH)?;
@@ -602,8 +606,9 @@ pub(crate) fn decode_mini_block_take(
                 reason: "FileDict DataType mismatch",
             });
         }
-        let (nulls, after_nulls) = read_optional_nulls(raw_body, row_count, entry.block_flags)?;
-        return decode_dict_take(after_nulls, row_count, nulls.as_ref(), dict, indices);
+        let (null_bytes, after_nulls) =
+            split_optional_null_bytes(raw_body, row_count, entry.block_flags)?;
+        return decode_dict_take(after_nulls, row_count, null_bytes, dict, indices);
     }
 
     if !matches!(
@@ -3411,6 +3416,26 @@ mod tests {
                 &dense,
             );
 
+            // ALP (L1Compact): decimal costs + adversarial IEEE-754 exceptions across tile & tail
+            let mut alp_vals: Vec<f64> = (0..n).map(|i| ((i % 97) as f64) * 0.000_025).collect();
+            alp_vals[1] = -0.0;
+            alp_vals[5] = f64::NEG_INFINITY;
+            alp_vals[1023] = f64::INFINITY;
+            alp_vals[1024] = 1e-310;
+            alp_vals[n - 1] = std::f64::consts::PI;
+            let alp_col = Column::Flat(
+                FlatColumn::try_new(FlatData::F64(alp_vals), opt_nulls.clone()).unwrap(),
+            );
+            assert_selected_and_take_parity(
+                &alp_col,
+                &DataType::F64,
+                WriteProfile::L1Compact,
+                None,
+                Some(Encoding::Alp),
+                &sparse,
+                &dense,
+            );
+
             let plain_date_vals: Vec<i32> = (0..n)
                 .map(|i| {
                     if i % 2 == 0 {
@@ -4247,5 +4272,427 @@ mod tests {
                 reason: "unknown shredded subcol flags",
             })
         ));
+    }
+
+    #[test]
+    fn all_null_take_short_circuit_parity_and_corrupt_rejection() {
+        let n = 1_200usize;
+        // Alternating null bitmap: rows 1, 3, 5, ..., 1199 are NULL, while >16 transitions in the
+        // first 64 rows keep `try_encode_rle` from intercepting the target encodings.
+        let half_nulls = Bitmap::from_bools(&(0..n).map(|i| i % 2 == 0).collect::<Vec<_>>());
+        let null_indices_1 = [1usize];
+        let null_indices_many = [1usize, 3, 19, 513, 1, 1199];
+        let mixed_indices = [0usize, 1, 20, 513, 40, 1199];
+
+        let assert_all_null_short_circuit =
+            |col: &Column,
+             dt: &DataType,
+             profile: WriteProfile,
+             dict: Option<&FileDict>,
+             expected_enc: Encoding,
+             expect_subchunked: Option<bool>,
+             row_n: usize,
+             null_1: &[usize],
+             null_many: &[usize],
+             mixed_idx: &[usize]| {
+                let enc = encode_mini_block(col, dt, profile, dict).unwrap();
+                assert_eq!(enc.encoding, expected_enc, "encoding mismatch for {dt:?}");
+                if let Some(sub) = expect_subchunked {
+                    assert_eq!(
+                        (enc.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0,
+                        sub,
+                        "subchunked flag mismatch for {dt:?}"
+                    );
+                }
+                let (entry, raw) = frame_raw_body(&enc, row_n);
+                let full_flat = decode_mini_block(&raw, &entry, dt, dict)
+                    .unwrap()
+                    .materialize(None)
+                    .unwrap();
+
+                for indices in [null_1, null_many] {
+                    let taken = decode_mini_block_take(&raw, &entry, dt, dict, indices).unwrap();
+                    assert!(
+                        matches!(
+                            &taken,
+                            Column::Const { value, len }
+                                if value.is_null() && value.data_type() == *dt && *len == indices.len()
+                        ),
+                        "expected Column::Const(Null) short-circuit for {expected_enc:?}/{dt:?}"
+                    );
+                    let taken_flat = taken.materialize(None).unwrap();
+                    for (out_pos, &row) in indices.iter().enumerate() {
+                        assert!(taken_flat.is_null(out_pos));
+                        assert!(full_flat.is_null(row));
+                    }
+                }
+
+                // Mixed null + non-null indices must match full decode.
+                let mixed = decode_mini_block_take(&raw, &entry, dt, dict, mixed_idx).unwrap();
+                let mixed_flat = mixed.materialize(None).unwrap();
+                for (out_pos, &row) in mixed_idx.iter().enumerate() {
+                    assert_eq!(mixed_flat.is_null(out_pos), full_flat.is_null(row));
+                    if !full_flat.is_null(row) {
+                        assert_eq!(
+                            mixed_flat.get_scalar(out_pos).unwrap(),
+                            full_flat.get_scalar(row).unwrap()
+                        );
+                    }
+                }
+
+                // Corrupt body rejection STILL triggers even when every requested row is NULL.
+                assert!(
+                    decode_mini_block_take(&raw[..raw.len() - 1], &entry, dt, dict, null_1)
+                        .is_err(),
+                    "truncated body must be rejected for {expected_enc:?}/{dt:?}"
+                );
+                let mut trailing = raw.clone();
+                trailing.push(0xAA);
+                assert!(
+                    decode_mini_block_take(&trailing, &entry, dt, dict, null_1).is_err(),
+                    "trailing byte must be rejected for {expected_enc:?}/{dt:?}"
+                );
+                // Truncated null bitmap itself.
+                let null_bytes_len = row_n.div_ceil(8);
+                assert!(
+                    decode_mini_block_take(&raw[..null_bytes_len - 1], &entry, dt, dict, null_1)
+                        .is_err(),
+                    "truncated null bitmap must be rejected for {expected_enc:?}/{dt:?}"
+                );
+
+                (entry, raw)
+            };
+
+        // 1. BitpackBool
+        let bool_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Bool(Bitmap::from_bools(
+                    &(0..n).map(|i| (i / 2) % 2 == 0).collect::<Vec<_>>(),
+                )),
+                Some(half_nulls.clone()),
+            )
+            .unwrap(),
+        );
+        assert_all_null_short_circuit(
+            &bool_col,
+            &DataType::Bool,
+            WriteProfile::L0Fast,
+            None,
+            Encoding::BitpackBool,
+            None,
+            n,
+            &null_indices_1,
+            &null_indices_many,
+            &mixed_indices,
+        );
+
+        // 2. Plain fixed-width (F64, FixedBytes16) & Plain varlen (Utf8)
+        let plain_f64_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::F64((0..n).map(|i| (i as f64) * 0.123456789).collect()),
+                Some(half_nulls.clone()),
+            )
+            .unwrap(),
+        );
+        assert_all_null_short_circuit(
+            &plain_f64_col,
+            &DataType::F64,
+            WriteProfile::L0Fast,
+            None,
+            Encoding::Plain,
+            None,
+            n,
+            &null_indices_1,
+            &null_indices_many,
+            &mixed_indices,
+        );
+
+        let plain_f16_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::FixedBytes16((0..n).map(|i| (i as u128).to_le_bytes()).collect()),
+                Some(half_nulls.clone()),
+            )
+            .unwrap(),
+        );
+        assert_all_null_short_circuit(
+            &plain_f16_col,
+            &DataType::FixedBytes16,
+            WriteProfile::L0Fast,
+            None,
+            Encoding::Plain,
+            None,
+            n,
+            &null_indices_1,
+            &null_indices_many,
+            &mixed_indices,
+        );
+
+        let short_strs: Vec<String> = (0..n).map(|i| format!("row-{i:04}-payload")).collect();
+        let plain_utf8_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(short_strs.iter().map(String::as_str)).unwrap(),
+                ),
+                Some(half_nulls.clone()),
+            )
+            .unwrap(),
+        );
+        assert_all_null_short_circuit(
+            &plain_utf8_col,
+            &DataType::Utf8,
+            WriteProfile::L0Fast,
+            None,
+            Encoding::Plain,
+            None,
+            n,
+            &null_indices_1,
+            &null_indices_many,
+            &mixed_indices,
+        );
+
+        // 3. ForBitpack (I64) + invalid bit_width rejection on all-null take
+        let for_i64_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64((0..n).map(|i| ((i * 7919) % 5000) as i64).collect()),
+                Some(half_nulls.clone()),
+            )
+            .unwrap(),
+        );
+        let (for_entry, mut for_raw) = assert_all_null_short_circuit(
+            &for_i64_col,
+            &DataType::I64,
+            WriteProfile::L1Compact,
+            None,
+            Encoding::ForBitpack,
+            None,
+            n,
+            &null_indices_1,
+            &null_indices_many,
+            &mixed_indices,
+        );
+        let null_bytes_len = n.div_ceil(8);
+        for_raw[null_bytes_len + 8] = 65; // invalid bw > 64
+        assert!(
+            decode_mini_block_take(&for_raw, &for_entry, &DataType::I64, None, &null_indices_1)
+                .is_err()
+        );
+
+        // 4. DeltaBitpack (TimestampNs) + invalid bw rejection on all-null take
+        let ts_dt = DataType::TimestampNs { utc: true };
+        let delta_ts_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: (0..n)
+                        .map(|i| 1_700_000_000_000 + (i as i64) * 1_000_003)
+                        .collect(),
+                    utc: true,
+                },
+                Some(half_nulls.clone()),
+            )
+            .unwrap(),
+        );
+        let (delta_entry, mut delta_raw) = assert_all_null_short_circuit(
+            &delta_ts_col,
+            &ts_dt,
+            WriteProfile::L1Compact,
+            None,
+            Encoding::DeltaBitpack,
+            None,
+            n,
+            &null_indices_1,
+            &null_indices_many,
+            &mixed_indices,
+        );
+        delta_raw[null_bytes_len + 1] = 65; // invalid bw > 64
+        assert!(
+            decode_mini_block_take(&delta_raw, &delta_entry, &ts_dt, None, &null_indices_1)
+                .is_err()
+        );
+
+        // 5. Alp (F64) + invalid exp rejection on all-null take
+        let alp_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::F64((0..n).map(|i| ((i % 97) as f64) * 0.000_025).collect()),
+                Some(half_nulls.clone()),
+            )
+            .unwrap(),
+        );
+        let (alp_entry, mut alp_raw) = assert_all_null_short_circuit(
+            &alp_col,
+            &DataType::F64,
+            WriteProfile::L1Compact,
+            None,
+            Encoding::Alp,
+            None,
+            n,
+            &null_indices_1,
+            &null_indices_many,
+            &mixed_indices,
+        );
+        alp_raw[null_bytes_len] = 25; // invalid exp > 18
+        assert!(
+            decode_mini_block_take(&alp_raw, &alp_entry, &DataType::F64, None, &null_indices_1)
+                .is_err()
+        );
+
+        // 6. Dict (both ForBitpack and Rle sub-encodings) + bad sub_enc/bw rejection on all-null take
+        let dict_vals: Vec<String> = (0..12).map(|k| format!("svc-{k:02}")).collect();
+        let file_dict = FileDict::from_flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(dict_vals.iter().map(String::as_str)).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+            true,
+        )
+        .unwrap();
+        let dict_fb_strs: Vec<&str> = (0..n).map(|i| dict_vals[(i / 2) % 12].as_str()).collect();
+        let dict_fb_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(dict_fb_strs).unwrap()),
+                Some(half_nulls),
+            )
+            .unwrap(),
+        );
+        let (dict_fb_entry, mut dict_fb_raw) = assert_all_null_short_circuit(
+            &dict_fb_col,
+            &DataType::Utf8,
+            WriteProfile::L1Compact,
+            Some(&file_dict),
+            Encoding::Dict,
+            None,
+            n,
+            &null_indices_1,
+            &null_indices_many,
+            &mixed_indices,
+        );
+        assert_eq!(dict_fb_raw[null_bytes_len], 0);
+        dict_fb_raw[null_bytes_len] = 99; // unknown sub_enc
+        assert!(
+            decode_mini_block_take(
+                &dict_fb_raw,
+                &dict_fb_entry,
+                &DataType::Utf8,
+                Some(&file_dict),
+                &null_indices_1
+            )
+            .is_err()
+        );
+
+        // Dict Rle sub-encoding: leading 200 NULL rows followed by 4 clean runs of 250 rows each.
+        let rle_nulls = Bitmap::from_bools(&(0..n).map(|i| i >= 200).collect::<Vec<_>>());
+        let dict_rle_strs: Vec<&str> = (0..n).map(|i| dict_vals[(i / 250) % 12].as_str()).collect();
+        let dict_rle_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(dict_rle_strs).unwrap()),
+                Some(rle_nulls),
+            )
+            .unwrap(),
+        );
+        let (dict_rle_entry, mut dict_rle_raw) = assert_all_null_short_circuit(
+            &dict_rle_col,
+            &DataType::Utf8,
+            WriteProfile::L1Compact,
+            Some(&file_dict),
+            Encoding::Dict,
+            None,
+            n,
+            &[0],
+            &[0, 1, 199, 0],
+            &[0, 200, 100, 500, 199, 900],
+        );
+        assert_eq!(dict_rle_raw[null_bytes_len], 1);
+        dict_rle_raw[null_bytes_len + 5] = 33; // invalid re_bw > 32
+        assert!(
+            decode_mini_block_take(
+                &dict_rle_raw,
+                &dict_rle_entry,
+                &DataType::Utf8,
+                Some(&file_dict),
+                &[0]
+            )
+            .is_err()
+        );
+
+        // 7. Fsst single-chunk (row_count <= 512 -> never sub-chunked) + bad symbol len rejection
+        let single_n = 400usize;
+        let single_nulls =
+            Bitmap::from_bools(&(0..single_n).map(|i| i % 2 == 0).collect::<Vec<_>>());
+        let fsst_single_strs: Vec<String> = (0..single_n)
+            .map(|i| {
+                format!(
+                    "{{\"service\":\"checkout-api\",\"environment\":\"production\",\"trace\":\"{:08x}\",\"idx\":{i}}}",
+                    i * 131
+                )
+            })
+            .collect();
+        let fsst_single_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(fsst_single_strs.iter().map(String::as_str)).unwrap(),
+                ),
+                Some(single_nulls),
+            )
+            .unwrap(),
+        );
+        let (fsst_s_entry, mut fsst_s_raw) = assert_all_null_short_circuit(
+            &fsst_single_col,
+            &DataType::Utf8,
+            WriteProfile::L1Compact,
+            None,
+            Encoding::Fsst,
+            Some(false),
+            single_n,
+            &[1],
+            &[1, 3, 199, 399],
+            &[0, 1, 20, 199, 398, 399],
+        );
+        // Corrupt first symbol length to 0 (valid is 1..=8).
+        fsst_s_raw[single_n.div_ceil(8) + 1] = 0;
+        assert!(
+            decode_mini_block_take(&fsst_s_raw, &fsst_s_entry, &DataType::Utf8, None, &[1])
+                .is_err()
+        );
+
+        // 8. Fsst sub-chunked (`BLOCK_FLAG_FSST_SUBCHUNKED` set) + bad header rejection on all-null take
+        let fsst_sub_strs: Vec<String> = (0..n)
+            .map(|i| {
+                format!(
+                    "https://observability.cetra.sh/api/v1/spans/trace_{i:06}/events/node_{:03}/req_{:08x}/meta_{:06x}/extra_payload_chunk_{:08x}_{:08x}_{:08x}",
+                    i % 89,
+                    (i as u32).wrapping_mul(2654435761),
+                    (i as u32).wrapping_mul(2246822519) & 0x00FF_FFFF,
+                    (i as u32).wrapping_mul(3266489917),
+                    (i as u32).wrapping_mul(668265263),
+                    (i as u32).wrapping_mul(374761393),
+                )
+            })
+            .collect();
+        let fsst_sub_nulls = Bitmap::from_bools(&(0..n).map(|i| i % 5 != 0).collect::<Vec<_>>());
+        let fsst_sub_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(fsst_sub_strs.iter().map(String::as_str)).unwrap(),
+                ),
+                Some(fsst_sub_nulls),
+            )
+            .unwrap(),
+        );
+        let (sub_entry, mut sub_raw) = assert_all_null_short_circuit(
+            &fsst_sub_col,
+            &DataType::Utf8,
+            WriteProfile::L1Compact,
+            None,
+            Encoding::Fsst,
+            Some(true),
+            n,
+            &[0],
+            &[0, 5, 515, 1195],
+            &[0, 1, 5, 512, 515, 1199],
+        );
+        sub_raw[null_bytes_len + 1] = 9; // invalid symbol len > 8
+        assert!(decode_mini_block_take(&sub_raw, &sub_entry, &DataType::Utf8, None, &[0]).is_err());
     }
 }

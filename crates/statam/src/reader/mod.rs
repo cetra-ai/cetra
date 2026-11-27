@@ -32,6 +32,7 @@ use crate::format::{
 };
 use crate::io::RangeReader;
 use crate::payload::pack::ChunkPackReader;
+use crate::payload::search::RetainedPackChunks;
 use crate::simd::bloom::{BloomIndex, statam_bloom_hash};
 use crate::simd::trigram::TrigramBloom;
 use crate::writer::{concat_column_refs, estimate_column_bytes};
@@ -41,14 +42,18 @@ use eval::{Utf8Matcher, is_always_false_pred, is_supported_id_lookup_type};
 use eval::{eval_utf8_block_substring_raw, eval_utf8_substring};
 use materialize::mask_from_indices;
 pub use meta::StatamFileMeta;
-use payload::ParsedL0Payload;
 pub(crate) use payload::StreamingL0Payload;
-use plan::{DecodedPhase1, RgIoPlan, TouchedMbRows, fetch_coalesced_blocks, find_time_column};
+use payload::{PHASE2_PAYLOAD_WAVE_TARGET_BYTES, ParsedL0Payload};
+use plan::{ActiveMiniBlock, DecodedPhase1, RgIoPlan, TouchedMbRows, find_time_column};
 
 /// Maximum gap (64 KiB) between blocks coalesced into a single `Scan` range read.
 const SCAN_COALESCE_MAX_GAP: u64 = 64 * 1024;
 /// Maximum total span (4 MiB) of a single coalesced `Scan` range read.
 const SCAN_COALESCE_MAX_SPAN: u64 = 4 * 1024 * 1024;
+/// Maximum cumulative `.statam` byte range volume fetched in a single cross-RG I/O wave (`64 MiB`).
+const IO_WAVE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// Maximum cumulative uncompressed Phase-1 block bytes decoded in a single filtered wave (`128 MiB`).
+const P1_WAVE_MAX_RAW_BYTES: u64 = 128 * 1024 * 1024;
 /// Minimum total uncompressed block bytes required before spawning reader worker threads
 /// (48 KiB), avoiding OS thread-spawn overhead on sub-millisecond narrow queries.
 /// Tasks touching `LocalityGroup::ExternalPayload` are exempt from this threshold.
@@ -304,6 +309,7 @@ pub struct StatamReader {
     meta: StatamFileMeta,
     packs: Option<Arc<dyn PackResolver>>,
     caches: Mutex<ReaderCaches>,
+    pack_init_lock: Mutex<()>,
 }
 
 impl fmt::Debug for StatamReader {
@@ -345,6 +351,7 @@ impl StatamReader {
             meta,
             packs,
             caches: Mutex::new(caches),
+            pack_init_lock: Mutex::new(()),
         })
     }
 
@@ -553,7 +560,7 @@ impl StatamReader {
             return Ok(Vec::new());
         }
 
-        // Step 1: Precompute lookup hashes once and check file-level SBBF blooms.
+        // Step 1: Precompute lookup hashes, RG order, and coalescing mode.
         let lookup_hashes: Vec<(usize, Vec<u64>)> = resolved_lookups
             .iter()
             .map(|&(cidx, lk)| {
@@ -565,9 +572,6 @@ impl StatamReader {
                 (cidx, hashes)
             })
             .collect();
-        if !lookup_hashes.is_empty() && !self.check_blooms(&lookup_hashes)? {
-            return Ok(Vec::new());
-        }
 
         // Step 2: Determine RG iteration order & prune via sort key + zone maps.
         let num_rgs = self.meta.rg_dir.len();
@@ -599,7 +603,7 @@ impl StatamReader {
             other => other,
         };
 
-        // Pre-load narrow trigram indexes for any substring query columns that have one.
+        let bloom_cols: Vec<usize> = lookup_hashes.iter().map(|&(cidx, _)| cidx).collect();
         let sub_cols_with_trigram: Vec<usize> = resolved_subs
             .iter()
             .filter_map(|&(cidx, _)| {
@@ -607,11 +611,7 @@ impl StatamReader {
                     .then_some(cidx)
             })
             .collect();
-        if !sub_cols_with_trigram.is_empty() {
-            self.ensure_narrow_trigrams(&sub_cols_with_trigram)?;
-        }
 
-        // Pre-load lazy dictionaries needed for pruning & Phase 1 filter/substring evaluation ONCE.
         let mut preload_dict_cols = Vec::new();
         if let Some(tc) = time_col_idx {
             preload_dict_cols.push(tc);
@@ -630,42 +630,83 @@ impl StatamReader {
         for &(cidx, _) in &resolved_subs {
             preload_dict_cols.push(cidx);
         }
-        if !preload_dict_cols.is_empty() {
-            self.ensure_dicts_loaded(&preload_dict_cols)?;
+
+        // Combine pre-scan blooms + narrow trigrams + Phase-1 dicts into ONE wave when
+        // bloom/narrow-trigram predicates exist; otherwise consume `inline_lazy` (0 I/O)
+        // and piggyback any remaining lazy Phase-1 dicts onto Wave 1 alongside Phase-1 blocks.
+        if !bloom_cols.is_empty() || !sub_cols_with_trigram.is_empty() {
+            self.ensure_lazy_indexes_loaded(
+                &bloom_cols,
+                &sub_cols_with_trigram,
+                &preload_dict_cols,
+            )?;
+            if !lookup_hashes.is_empty() && !self.blooms_may_match(&lookup_hashes) {
+                return Ok(Vec::new());
+            }
+        } else if !preload_dict_cols.is_empty() {
+            self.load_inline_lazy_indexes(&[], &[], &preload_dict_cols)?;
         }
 
-        // Precompute matching-code Bitmap once per dict-encoded substring query.
-        let dict_sub_bitmaps: Vec<Option<Bitmap>> = if resolved_subs.is_empty() {
-            Vec::new()
-        } else {
-            let caches = self.caches.lock().unwrap_or_else(|p| p.into_inner());
-            resolved_subs
-                .iter()
-                .map(|&(cidx, sq)| {
-                    if sq.needle.is_empty() {
-                        return None;
-                    }
-                    let dict = caches.dicts.get(&cidx)?;
-                    let mut matcher = Utf8Matcher::new(&sq.needle, sq.case_insensitive);
-                    let mut bm = Bitmap::new_zeroed(dict.len());
-                    if let FlatData::Utf8(u) = dict.values().data() {
-                        for i in 0..u.len() {
-                            if let Some(s) = u.get(i)
-                                && matcher.matches(s.as_bytes())
-                            {
-                                let _ = bm.set(i, true);
-                            }
-                        }
-                    }
-                    Some(bm)
-                })
-                .collect()
-        };
+        // Precompute matching-code Bitmap for any already-cached dict-encoded substring query.
+        let mut dict_sub_bitmaps = self.build_dict_sub_bitmaps(&resolved_subs);
 
         let has_filters = time_col_idx.is_some()
             || !resolved_lookups.is_empty()
             || !resolved_preds.is_empty()
             || !resolved_subs.is_empty();
+
+        // Cross-RG batched I/O path for unbounded Scan/Auto queries (collapses multi-RG RTTs).
+        if effective_limit.is_none() && matches!(mode, CoalesceMode::Scan | CoalesceMode::Auto) {
+            let mut surviving_rgs: Vec<(usize, Vec<usize>)> = Vec::new();
+            for rg_idx in rg_order {
+                if !lookup_hashes.is_empty() && !self.rg_blooms_may_match(rg_idx, &lookup_hashes) {
+                    continue;
+                }
+                let mb_count = self.meta.rg_blocks(0, rg_idx).len();
+                if mb_count == 0 {
+                    continue;
+                }
+                let surviving_mbs = self.prune_rg_mini_blocks(
+                    rg_idx,
+                    mb_count,
+                    time_col_idx,
+                    req.time_range,
+                    &resolved_lookups,
+                    &resolved_preds,
+                    &resolved_subs,
+                    &dict_sub_bitmaps,
+                )?;
+                if !surviving_mbs.is_empty() {
+                    surviving_rgs.push((rg_idx, surviving_mbs));
+                }
+            }
+            if surviving_rgs.is_empty() {
+                return Ok(Vec::new());
+            }
+            return if !has_filters {
+                self.scan_rgs_unfiltered_batched(
+                    surviving_rgs,
+                    &proj_indices,
+                    &proj_schema,
+                    &map_keys_by_col,
+                    req.read_threads,
+                )
+            } else {
+                self.scan_rgs_filtered_batched(
+                    surviving_rgs,
+                    &proj_indices,
+                    &proj_schema,
+                    &map_keys_by_col,
+                    time_col_idx,
+                    req.time_range,
+                    &resolved_lookups,
+                    &resolved_preds,
+                    &resolved_subs,
+                    &mut dict_sub_bitmaps,
+                    req.read_threads,
+                )
+            };
+        }
 
         let mut out_batches = Vec::new();
         let mut emitted_rows = 0usize;
@@ -677,20 +718,8 @@ impl StatamReader {
                 break;
             }
 
-            if !lookup_hashes.is_empty() {
-                let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
-                let mut rg_may_match = true;
-                for (cidx, hashes) in &lookup_hashes {
-                    if let Some(bloom) = guard.blooms.get(cidx)
-                        && !bloom.rg_may_contain_any_hash(rg_idx, hashes)
-                    {
-                        rg_may_match = false;
-                        break;
-                    }
-                }
-                if !rg_may_match {
-                    continue;
-                }
+            if !lookup_hashes.is_empty() && !self.rg_blooms_may_match(rg_idx, &lookup_hashes) {
+                continue;
             }
 
             let rg = &self.meta.rg_dir[rg_idx];
@@ -748,7 +777,7 @@ impl StatamReader {
                     &resolved_lookups,
                     &resolved_preds,
                     &resolved_subs,
-                    &dict_sub_bitmaps,
+                    &mut dict_sub_bitmaps,
                     rg_limit_remaining,
                     desc_limit,
                     req.read_threads,
@@ -765,7 +794,7 @@ impl StatamReader {
                     &resolved_lookups,
                     &resolved_preds,
                     &resolved_subs,
-                    &dict_sub_bitmaps,
+                    &mut dict_sub_bitmaps,
                     rg_limit_remaining,
                     desc_limit,
                     req.read_threads,
@@ -916,12 +945,15 @@ impl StatamReader {
         struct TouchedRgPlan {
             rg_idx: usize,
             mb_rows: Vec<(usize, Vec<usize>)>,
-            surviving_mbs: Vec<usize>,
             plan: RgIoPlan,
+            ranges: Vec<(u64, u64)>,
+            rg_bytes: u64,
+            need_l0_payload: bool,
+            l0_end: u64,
+            dict_cols: Vec<usize>,
         }
 
         let empty_map_keys: HashMap<usize, Vec<String>> = HashMap::new();
-        let mut dict_cols_set: BTreeSet<usize> = BTreeSet::new();
         let mut touched_with_plans: Vec<TouchedRgPlan> = Vec::with_capacity(touched_rgs.len());
         for (rg_idx, mb_rows) in touched_rgs {
             let surviving_mbs: Vec<usize> = mb_rows.iter().map(|(mb, _)| *mb).collect();
@@ -936,6 +968,7 @@ impl StatamReader {
                 &[],
                 &[],
             );
+            let mut dict_cols = Vec::new();
             for &pidx in plan.all_phys_cols() {
                 if (self.meta.col_dir[pidx].col_flags & COL_FLAG_HAS_FILE_DICT) != 0 {
                     let blks = self.meta.rg_blocks(pidx, rg_idx);
@@ -943,37 +976,14 @@ impl StatamReader {
                         .iter()
                         .any(|&mb| blks[mb].encoding == Encoding::Dict)
                     {
-                        dict_cols_set.insert(pidx);
+                        dict_cols.push(pidx);
                     }
                 }
             }
-            touched_with_plans.push(TouchedRgPlan {
-                rg_idx,
-                mb_rows,
-                surviving_mbs,
-                plan,
-            });
-        }
-        if !dict_cols_set.is_empty() {
-            let dict_cols: Vec<usize> = dict_cols_set.into_iter().collect();
-            self.ensure_dicts_loaded(&dict_cols)?;
-        }
 
-        let has_payload_proj = proj_indices
-            .iter()
-            .any(|&cidx| self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload);
-
-        let mut out_batches = Vec::new();
-        for TouchedRgPlan {
-            rg_idx,
-            mb_rows,
-            surviving_mbs,
-            plan,
-        } in touched_with_plans
-        {
             let rg = &self.meta.rg_dir[rg_idx];
-
             let mut ranges = Vec::new();
+            let mut rg_bytes = 0u64;
             let mut need_l0_payload = false;
             for &mb_idx in &surviving_mbs {
                 for &pidx in plan.all_phys_cols() {
@@ -991,6 +1001,7 @@ impl StatamReader {
                                     reason: "take_rows block end overflow",
                                 })?;
                         ranges.push((blk.offset, end));
+                        rg_bytes = rg_bytes.saturating_add(total);
                     }
                     if self.meta.col_dir[pidx].locality_group == LocalityGroup::ExternalPayload
                         && rg.l0_payload_len > 0
@@ -999,7 +1010,6 @@ impl StatamReader {
                     }
                 }
             }
-
             let l0_end = rg
                 .l0_payload_offset
                 .checked_add(u64::from(rg.l0_payload_len))
@@ -1008,17 +1018,64 @@ impl StatamReader {
                 })?;
             if need_l0_payload {
                 ranges.push((rg.l0_payload_offset, l0_end));
+                rg_bytes = rg_bytes.saturating_add(u64::from(rg.l0_payload_len));
             }
 
-            let block_cache = fetch_coalesced_blocks(self.reader.as_ref(), &ranges)?;
-            let l0_parsed = if need_l0_payload {
-                block_cache
-                    .get(&(rg.l0_payload_offset, l0_end))
-                    .map(|b| ParsedL0Payload::parse(b))
-                    .transpose()?
-            } else {
-                None
-            };
+            touched_with_plans.push(TouchedRgPlan {
+                rg_idx,
+                mb_rows,
+                plan,
+                ranges,
+                rg_bytes,
+                need_l0_payload,
+                l0_end,
+                dict_cols,
+            });
+        }
+
+        let mut proj_payload_cols: Vec<usize> = proj_indices
+            .iter()
+            .copied()
+            .filter(|&cidx| {
+                self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload
+            })
+            .collect();
+        proj_payload_cols.sort_unstable();
+        proj_payload_cols.dedup();
+        let has_payload_proj = !proj_payload_cols.is_empty();
+
+        // Partition touched RGs into <= 64 MiB `.statam` I/O waves.
+        let mut io_waves: Vec<Vec<TouchedRgPlan>> = Vec::new();
+        let mut cur_wave: Vec<TouchedRgPlan> = Vec::new();
+        let mut cur_wave_bytes = 0u64;
+        for item in touched_with_plans {
+            if !cur_wave.is_empty()
+                && cur_wave_bytes.saturating_add(item.rg_bytes) > IO_WAVE_MAX_BYTES
+            {
+                io_waves.push(std::mem::take(&mut cur_wave));
+                cur_wave_bytes = 0;
+            }
+            cur_wave_bytes = cur_wave_bytes.saturating_add(item.rg_bytes);
+            cur_wave.push(item);
+        }
+        if !cur_wave.is_empty() {
+            io_waves.push(cur_wave);
+        }
+
+        let mut out_batches = Vec::new();
+        for wave in io_waves {
+            let total_ranges: usize = wave.iter().map(|w| w.ranges.len()).sum();
+            let mut wave_ranges = Vec::with_capacity(total_ranges);
+            let mut wave_dict_cols = Vec::new();
+            for item in &wave {
+                wave_ranges.extend_from_slice(&item.ranges);
+                wave_dict_cols.extend_from_slice(&item.dict_cols);
+            }
+
+            // Fetch ALL missing lazy dicts + ALL touched mini-blocks + L0 payloads across
+            // all RGs in this wave in ONE `reader.read_ranges(...)` call!
+            let block_cache =
+                self.fetch_blocks_and_lazy(&wave_ranges, &[], &[], &wave_dict_cols)?;
 
             let read_block = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
                 if blk.stored_len == 0 {
@@ -1037,52 +1094,362 @@ impl StatamReader {
                 read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
             };
 
-            let (rg_resolved_chunks, take_mbs) = if has_payload_proj {
-                let mut active_mbs: Vec<(usize, Bitmap, HashMap<usize, DecodedPhase1>)> = mb_rows
+            if !has_payload_proj {
+                let empty_chunks = HashMap::new();
+                for item in wave {
+                    let take_mbs = item
+                        .mb_rows
+                        .into_iter()
+                        .map(|(mb_idx, local_indices)| {
+                            (mb_idx, local_indices, None, HashMap::new())
+                        })
+                        .collect();
+                    let mut rg_batches = self.materialize_take_mbs(
+                        item.rg_idx,
+                        take_mbs,
+                        &item.plan,
+                        &proj_indices,
+                        &proj_schema,
+                        &empty_map_keys,
+                        &empty_chunks,
+                        &read_block,
+                        read_threads,
+                    )?;
+                    out_batches.append(&mut rg_batches);
+                }
+                continue;
+            }
+
+            // Decode PayloadRefs for every touched RG in this wave (0 I/O: all blocks are in `block_cache`).
+            struct PreparedTakeRg<'a> {
+                rg_idx: usize,
+                mb_rows: Vec<(usize, Vec<usize>)>,
+                plan: RgIoPlan,
+                l0_parsed: Option<ParsedL0Payload<'a>>,
+                active_mbs: Vec<(usize, Bitmap, HashMap<usize, DecodedPhase1>)>,
+                ext_by_pack: HashMap<u16, BTreeSet<u32>>,
+                l0_cids: BTreeSet<u32>,
+                l0_chunk_bytes: usize,
+                l0_frame_bytes: usize,
+                max_mb_col_decoded_bytes: usize,
+            }
+
+            let mut prepared: Vec<PreparedTakeRg<'_>> = Vec::with_capacity(wave.len());
+            let mut merged_ext_by_pack: HashMap<u16, BTreeSet<u32>> = HashMap::new();
+            let mut total_l0_chunk_bytes = 0usize;
+            let mut total_l0_frame_bytes = 0usize;
+            let mut max_wave_col_decoded_bytes = 0usize;
+            for item in wave {
+                let rg = &self.meta.rg_dir[item.rg_idx];
+                let l0_parsed = if item.need_l0_payload {
+                    block_cache
+                        .get(&(rg.l0_payload_offset, item.l0_end))
+                        .map(|b| ParsedL0Payload::parse(b))
+                        .transpose()?
+                } else {
+                    None
+                };
+                let mut active_mbs: Vec<(usize, Bitmap, HashMap<usize, DecodedPhase1>)> = item
+                    .mb_rows
                     .iter()
                     .map(|(mb_idx, local_indices)| {
                         let mb_row_count =
-                            self.meta.rg_blocks(0, rg_idx)[*mb_idx].row_count as usize;
+                            self.meta.rg_blocks(0, item.rg_idx)[*mb_idx].row_count as usize;
                         let mask = mask_from_indices(mb_row_count, local_indices);
                         (*mb_idx, mask, HashMap::new())
                     })
                     .collect();
-                let chunks = self.resolve_rg_payload_chunks(
-                    rg_idx,
+                self.ensure_rg_payload_refs_decoded(
+                    item.rg_idx,
                     &mut active_mbs,
-                    &proj_indices,
-                    l0_parsed.as_ref(),
+                    &proj_payload_cols,
                     &read_block,
-                    read_threads,
                 )?;
-                let mbs = mb_rows
+                let (ext_by_pack, l0_cids) =
+                    Self::collect_chunk_refs_for_mbs(&active_mbs, &proj_payload_cols);
+                for (&pidx, cids) in &ext_by_pack {
+                    merged_ext_by_pack.entry(pidx).or_default().extend(cids);
+                }
+                let (l0_chunk_bytes, l0_frame_bytes) = if l0_cids.is_empty() {
+                    (0, 0)
+                } else {
+                    let l0 = l0_parsed.as_ref().ok_or(StatamError::Corrupt {
+                        reason: "missing L0 local payload region",
+                    })?;
+                    l0.measure_chunks_bytes(&l0_cids)?
+                };
+                let max_mb_col_decoded_bytes = self.max_mb_col_decoded_bytes(
+                    &active_mbs,
+                    &proj_payload_cols,
+                    l0_parsed.as_ref(),
+                )?;
+                total_l0_chunk_bytes = total_l0_chunk_bytes.saturating_add(l0_chunk_bytes);
+                total_l0_frame_bytes = total_l0_frame_bytes.saturating_add(l0_frame_bytes);
+                max_wave_col_decoded_bytes =
+                    max_wave_col_decoded_bytes.max(max_mb_col_decoded_bytes);
+                prepared.push(PreparedTakeRg {
+                    rg_idx: item.rg_idx,
+                    mb_rows: item.mb_rows,
+                    plan: item.plan,
+                    l0_parsed,
+                    active_mbs,
+                    ext_by_pack,
+                    l0_cids,
+                    l0_chunk_bytes,
+                    l0_frame_bytes,
+                    max_mb_col_decoded_bytes,
+                });
+            }
+
+            let materialize_prepared_rg = |prep: PreparedTakeRg<'_>,
+                                           ext_map: &HashMap<(u16, u32), Bytes>,
+                                           ext_chunk_bytes: usize,
+                                           ext_frame_bytes: usize|
+             -> Result<Vec<Batch>, StatamError> {
+                let take_mbs = prep
+                    .mb_rows
                     .into_iter()
-                    .zip(active_mbs)
+                    .zip(prep.active_mbs)
                     .map(|((mb_idx, local_indices), (_, mask, p1))| {
                         (mb_idx, local_indices, Some(mask), p1)
                     })
                     .collect();
-                (chunks, mbs)
-            } else {
-                let mbs = mb_rows
-                    .into_iter()
-                    .map(|(mb_idx, local_indices)| (mb_idx, local_indices, None, HashMap::new()))
-                    .collect();
-                (HashMap::new(), mbs)
+                if prep.l0_cids.is_empty() {
+                    self.materialize_take_mbs(
+                        prep.rg_idx,
+                        take_mbs,
+                        &prep.plan,
+                        &proj_indices,
+                        &proj_schema,
+                        &empty_map_keys,
+                        ext_map,
+                        &read_block,
+                        read_threads,
+                    )
+                } else {
+                    let l0 = prep.l0_parsed.as_ref().ok_or(StatamError::Corrupt {
+                        reason: "missing L0 local payload region",
+                    })?;
+                    let l0_vec: Vec<u32> = prep.l0_cids.into_iter().collect();
+                    let mut combined_chunk_bytes = ext_chunk_bytes;
+                    let mut combined_frame_bytes = ext_frame_bytes;
+                    l0.check_chunks_budget(
+                        &l0_vec,
+                        &mut combined_chunk_bytes,
+                        &mut combined_frame_bytes,
+                    )?;
+                    let l0_map = l0.read_chunks(&l0_vec)?;
+                    let mut combined = HashMap::with_capacity(
+                        l0_map.len() + prep.ext_by_pack.values().map(BTreeSet::len).sum::<usize>(),
+                    );
+                    for (cid, bytes) in l0_map {
+                        combined.insert((crate::writer::L0_LOCAL_PACK_IDX, cid), bytes);
+                    }
+                    for (pidx, cids) in prep.ext_by_pack {
+                        for cid in cids {
+                            if let Some(b) = ext_map.get(&(pidx, cid)) {
+                                combined.insert((pidx, cid), b.clone());
+                            }
+                        }
+                    }
+                    self.materialize_take_mbs(
+                        prep.rg_idx,
+                        take_mbs,
+                        &prep.plan,
+                        &proj_indices,
+                        &proj_schema,
+                        &empty_map_keys,
+                        &combined,
+                        &read_block,
+                        read_threads,
+                    )
+                }
             };
 
-            let mut rg_batches = self.materialize_take_mbs(
-                rg_idx,
-                take_mbs,
-                &plan,
-                &proj_indices,
-                &proj_schema,
-                &empty_map_keys,
-                &rg_resolved_chunks,
-                &read_block,
-                read_threads,
-            )?;
-            out_batches.append(&mut rg_batches);
+            // Fast path: all external `.stpk` + L0 local chunks across every RG in this wave fit
+            // in <= 128 MiB -> resolve ALL external packs in ONE coalesced wave per pack!
+            let (total_ext_chunk_bytes, total_ext_frame_bytes) =
+                self.measure_external_pack_bytes(&merged_ext_by_pack)?;
+            let total_chunk_bytes = total_ext_chunk_bytes.saturating_add(total_l0_chunk_bytes);
+            let total_frame_bytes = total_ext_frame_bytes.saturating_add(total_l0_frame_bytes);
+            if total_chunk_bytes <= PHASE2_PAYLOAD_WAVE_TARGET_BYTES
+                && total_frame_bytes <= PHASE2_PAYLOAD_WAVE_TARGET_BYTES
+                && max_wave_col_decoded_bytes <= PHASE2_PAYLOAD_WAVE_TARGET_BYTES
+            {
+                let wave_ext_chunks =
+                    self.resolve_external_pack_chunks(merged_ext_by_pack, read_threads)?;
+                for prep in prepared {
+                    let mut rg_batches = materialize_prepared_rg(
+                        prep,
+                        &wave_ext_chunks,
+                        total_ext_chunk_bytes,
+                        total_ext_frame_bytes,
+                    )?;
+                    out_batches.append(&mut rg_batches);
+                }
+            } else {
+                // Wave-bounded fallback (> 128 MiB of external and/or L0 blobs): partition RGs
+                // into <= 128 MiB payload sub-waves, splitting any > 128 MiB single RG via
+                // `partition_payload_waves`.
+                let empty_pre = HashMap::new();
+                let mut sub_rgs: Vec<PreparedTakeRg<'_>> = Vec::new();
+                let mut sub_ext: HashMap<u16, BTreeSet<u32>> = HashMap::new();
+                let mut sub_l0_c = 0usize;
+                let mut sub_l0_f = 0usize;
+
+                let flush_sub_rgs = |rgs: &mut Vec<PreparedTakeRg<'_>>,
+                                     ext: &mut HashMap<u16, BTreeSet<u32>>,
+                                     l0_c: &mut usize,
+                                     l0_f: &mut usize,
+                                     out: &mut Vec<Batch>|
+                 -> Result<(), StatamError> {
+                    if rgs.is_empty() {
+                        return Ok(());
+                    }
+                    let taken_ext = std::mem::take(ext);
+                    let (ext_c, ext_f) = self.measure_external_pack_bytes(&taken_ext)?;
+                    let ext_map = self.resolve_external_pack_chunks(taken_ext, read_threads)?;
+                    *l0_c = 0;
+                    *l0_f = 0;
+                    for prep in rgs.drain(..) {
+                        let mut rg_batches = materialize_prepared_rg(prep, &ext_map, ext_c, ext_f)?;
+                        out.append(&mut rg_batches);
+                    }
+                    Ok(())
+                };
+
+                for prep in prepared {
+                    let (rg_ext_c, rg_ext_f) =
+                        self.measure_external_pack_bytes(&prep.ext_by_pack)?;
+                    let rg_total_c = rg_ext_c.saturating_add(prep.l0_chunk_bytes);
+                    let rg_total_f = rg_ext_f.saturating_add(prep.l0_frame_bytes);
+                    if rg_total_c > PHASE2_PAYLOAD_WAVE_TARGET_BYTES
+                        || rg_total_f > PHASE2_PAYLOAD_WAVE_TARGET_BYTES
+                        || prep.max_mb_col_decoded_bytes > PHASE2_PAYLOAD_WAVE_TARGET_BYTES
+                    {
+                        flush_sub_rgs(
+                            &mut sub_rgs,
+                            &mut sub_ext,
+                            &mut sub_l0_c,
+                            &mut sub_l0_f,
+                            &mut out_batches,
+                        )?;
+                        let pwaves = self.partition_payload_waves(
+                            &prep.active_mbs,
+                            &proj_payload_cols,
+                            prep.l0_parsed.as_ref(),
+                        )?;
+                        let mut slots: Vec<Option<ActiveMiniBlock>> =
+                            prep.active_mbs.into_iter().map(Some).collect();
+                        let mut last_wave = vec![0usize; slots.len()];
+                        for (wi, pw) in pwaves.iter().enumerate() {
+                            for &(pos, _) in pw {
+                                last_wave[pos] = wi;
+                            }
+                        }
+                        for (wi, pw) in pwaves.into_iter().enumerate() {
+                            let mut wave_mbs = Vec::with_capacity(pw.len());
+                            for (pos, sub_mask) in pw {
+                                if last_wave[pos] == wi {
+                                    if let Some((mb_idx, _, p1)) = slots[pos].take() {
+                                        wave_mbs.push((mb_idx, sub_mask, p1));
+                                    }
+                                } else if let Some((mb_idx, _, p1)) = slots[pos].as_ref() {
+                                    let mut cloned_p1 = HashMap::with_capacity(p1.len());
+                                    for (&k, v) in p1 {
+                                        match v {
+                                            DecodedPhase1::FlatPayloadRefs(r) => {
+                                                cloned_p1.insert(
+                                                    k,
+                                                    DecodedPhase1::FlatPayloadRefs(r.clone()),
+                                                );
+                                            }
+                                            DecodedPhase1::SelectedPayloadRefs(s) => {
+                                                cloned_p1.insert(
+                                                    k,
+                                                    DecodedPhase1::SelectedPayloadRefs(s.clone()),
+                                                );
+                                            }
+                                            DecodedPhase1::Col(c) => {
+                                                cloned_p1.insert(k, DecodedPhase1::Col(c.clone()));
+                                            }
+                                            DecodedPhase1::ShreddedSub(_) => {}
+                                        }
+                                    }
+                                    wave_mbs.push((*mb_idx, sub_mask, cloned_p1));
+                                }
+                            }
+                            let chunks = self.resolve_rg_payload_chunks(
+                                prep.rg_idx,
+                                &mut wave_mbs,
+                                &proj_indices,
+                                prep.l0_parsed.as_ref(),
+                                &empty_pre,
+                                &read_block,
+                                read_threads,
+                            )?;
+                            let take_mbs = wave_mbs
+                                .into_iter()
+                                .map(|(mb_idx, sub_mask, p1)| {
+                                    let idxs: Vec<usize> = sub_mask.iter_ones().collect();
+                                    (mb_idx, idxs, Some(sub_mask), p1)
+                                })
+                                .collect();
+                            let mut rg_batches = self.materialize_take_mbs(
+                                prep.rg_idx,
+                                take_mbs,
+                                &prep.plan,
+                                &proj_indices,
+                                &proj_schema,
+                                &empty_map_keys,
+                                &chunks,
+                                &read_block,
+                                read_threads,
+                            )?;
+                            out_batches.append(&mut rg_batches);
+                        }
+                        continue;
+                    }
+
+                    if !sub_rgs.is_empty() {
+                        let mut trial = sub_ext.clone();
+                        for (&pidx, cids) in &prep.ext_by_pack {
+                            trial.entry(pidx).or_default().extend(cids);
+                        }
+                        let (tc, tf) = self.measure_external_pack_bytes(&trial)?;
+                        let trial_c = tc
+                            .saturating_add(sub_l0_c)
+                            .saturating_add(prep.l0_chunk_bytes);
+                        let trial_f = tf
+                            .saturating_add(sub_l0_f)
+                            .saturating_add(prep.l0_frame_bytes);
+                        if trial_c > PHASE2_PAYLOAD_WAVE_TARGET_BYTES
+                            || trial_f > PHASE2_PAYLOAD_WAVE_TARGET_BYTES
+                        {
+                            flush_sub_rgs(
+                                &mut sub_rgs,
+                                &mut sub_ext,
+                                &mut sub_l0_c,
+                                &mut sub_l0_f,
+                                &mut out_batches,
+                            )?;
+                        }
+                    }
+                    for (&pidx, cids) in &prep.ext_by_pack {
+                        sub_ext.entry(pidx).or_default().extend(cids);
+                    }
+                    sub_l0_c = sub_l0_c.saturating_add(prep.l0_chunk_bytes);
+                    sub_l0_f = sub_l0_f.saturating_add(prep.l0_frame_bytes);
+                    sub_rgs.push(prep);
+                }
+                flush_sub_rgs(
+                    &mut sub_rgs,
+                    &mut sub_ext,
+                    &mut sub_l0_c,
+                    &mut sub_l0_f,
+                    &mut out_batches,
+                )?;
+            }
         }
 
         if out_batches.len() > 1 {
@@ -1096,6 +1463,624 @@ impl StatamReader {
                 )?]);
             }
             out_batches = coalesce_take_batches(&proj_schema, out_batches)?;
+        }
+
+        Ok(out_batches)
+    }
+
+    fn build_dict_sub_bitmaps(
+        &self,
+        resolved_subs: &[(usize, &SubstringQuery)],
+    ) -> Vec<Option<Bitmap>> {
+        if resolved_subs.is_empty() {
+            return Vec::new();
+        }
+        let caches = self.caches.lock().unwrap_or_else(|p| p.into_inner());
+        resolved_subs
+            .iter()
+            .map(|&(cidx, sq)| {
+                if sq.needle.is_empty() {
+                    return None;
+                }
+                let dict = caches.dicts.get(&cidx)?;
+                let mut matcher = Utf8Matcher::new(&sq.needle, sq.case_insensitive);
+                let mut bm = Bitmap::new_zeroed(dict.len());
+                if let FlatData::Utf8(u) = dict.values().data() {
+                    for i in 0..u.len() {
+                        if let Some(s) = u.get(i)
+                            && matcher.matches(s.as_bytes())
+                        {
+                            let _ = bm.set(i, true);
+                        }
+                    }
+                }
+                Some(bm)
+            })
+            .collect()
+    }
+
+    fn refresh_dict_sub_bitmaps(
+        &self,
+        resolved_subs: &[(usize, &SubstringQuery)],
+        dict_sub_bitmaps: &mut Vec<Option<Bitmap>>,
+    ) {
+        if resolved_subs.is_empty() {
+            return;
+        }
+        let needs_refresh = resolved_subs.iter().enumerate().any(|(i, &(cidx, sq))| {
+            !sq.needle.is_empty()
+                && (self.meta.col_dir[cidx].col_flags & COL_FLAG_HAS_FILE_DICT) != 0
+                && dict_sub_bitmaps.get(i).is_none_or(Option::is_none)
+        });
+        if needs_refresh {
+            *dict_sub_bitmaps = self.build_dict_sub_bitmaps(resolved_subs);
+        }
+    }
+
+    fn rg_blooms_may_match(&self, rg_idx: usize, lookup_hashes: &[(usize, Vec<u64>)]) -> bool {
+        let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
+        for (cidx, hashes) in lookup_hashes {
+            if let Some(bloom) = guard.blooms.get(cidx)
+                && !bloom.rg_may_contain_any_hash(rg_idx, hashes)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn scan_rgs_unfiltered_batched(
+        &self,
+        surviving_rgs: Vec<(usize, Vec<usize>)>,
+        proj_indices: &[usize],
+        proj_schema: &Arc<Schema>,
+        map_keys_by_col: &HashMap<usize, Vec<String>>,
+        read_threads: usize,
+    ) -> Result<Vec<Batch>, StatamError> {
+        struct UnfilteredRgPlan {
+            rg_idx: usize,
+            surviving_mbs: Vec<usize>,
+            plan: RgIoPlan,
+            ranges: Vec<(u64, u64)>,
+            rg_bytes: u64,
+            l0_needed: bool,
+            l0_end: u64,
+            dict_cols: Vec<usize>,
+        }
+
+        let has_payload_proj = proj_indices
+            .iter()
+            .any(|&cidx| self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload);
+
+        let mut planned = Vec::with_capacity(surviving_rgs.len());
+        for (rg_idx, surviving_mbs) in surviving_rgs {
+            let rg = &self.meta.rg_dir[rg_idx];
+            let plan = self.build_rg_io_plan(
+                rg_idx,
+                &surviving_mbs,
+                proj_indices,
+                map_keys_by_col,
+                None,
+                TimeRange::ALL,
+                &[],
+                &[],
+                &[],
+            );
+            let mut ranges = Vec::new();
+            let mut rg_bytes = 0u64;
+            for &mb_idx in &surviving_mbs {
+                for &pidx in plan.all_phys_cols() {
+                    if self
+                        .meta
+                        .schema_meta
+                        .schema
+                        .fields()
+                        .get(pidx)
+                        .is_some_and(|f| f.data_type == DataType::MapUtf8)
+                        && plan.phase2_map_fast_path.contains(&(mb_idx, pidx))
+                    {
+                        continue;
+                    }
+                    let blk = &self.meta.rg_blocks(pidx, rg_idx)[mb_idx];
+                    if blk.stored_len > 0 {
+                        let total = (BLOCK_FRAME_HEADER_LEN as u64)
+                            .checked_add(u64::from(blk.stored_len))
+                            .ok_or(StatamError::BoundsExceeded {
+                                reason: "Scan block length overflow",
+                            })?;
+                        let end =
+                            blk.offset
+                                .checked_add(total)
+                                .ok_or(StatamError::BoundsExceeded {
+                                    reason: "Scan block end overflow",
+                                })?;
+                        ranges.push((blk.offset, end));
+                        rg_bytes = rg_bytes.saturating_add(total);
+                    }
+                }
+            }
+            let l0_needed = has_payload_proj && rg.l0_payload_len > 0;
+            let l0_end = rg
+                .l0_payload_offset
+                .checked_add(u64::from(rg.l0_payload_len))
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "Scan L0 payload end overflow",
+                })?;
+            if l0_needed {
+                ranges.push((rg.l0_payload_offset, l0_end));
+                rg_bytes = rg_bytes.saturating_add(u64::from(rg.l0_payload_len));
+            }
+            let dict_cols: Vec<usize> = plan
+                .all_phys_cols()
+                .copied()
+                .filter(|&pidx| {
+                    (self.meta.col_dir[pidx].col_flags & COL_FLAG_HAS_FILE_DICT) != 0
+                        && surviving_mbs.iter().any(|&mb| {
+                            self.meta.rg_blocks(pidx, rg_idx)[mb].encoding == Encoding::Dict
+                        })
+                })
+                .collect();
+            planned.push(UnfilteredRgPlan {
+                rg_idx,
+                surviving_mbs,
+                plan,
+                ranges,
+                rg_bytes,
+                l0_needed,
+                l0_end,
+                dict_cols,
+            });
+        }
+
+        let mut waves: Vec<Vec<UnfilteredRgPlan>> = Vec::new();
+        let mut cur_wave: Vec<UnfilteredRgPlan> = Vec::new();
+        let mut cur_bytes = 0u64;
+        for item in planned {
+            if !cur_wave.is_empty() && cur_bytes.saturating_add(item.rg_bytes) > IO_WAVE_MAX_BYTES {
+                waves.push(std::mem::take(&mut cur_wave));
+                cur_bytes = 0;
+            }
+            cur_bytes = cur_bytes.saturating_add(item.rg_bytes);
+            cur_wave.push(item);
+        }
+        if !cur_wave.is_empty() {
+            waves.push(cur_wave);
+        }
+
+        let empty_pre = HashMap::new();
+        let mut out_batches = Vec::new();
+        for wave in waves {
+            let total_ranges: usize = wave.iter().map(|w| w.ranges.len()).sum();
+            let mut wave_ranges = Vec::with_capacity(total_ranges);
+            let mut wave_dicts = Vec::new();
+            for item in &wave {
+                wave_ranges.extend_from_slice(&item.ranges);
+                wave_dicts.extend_from_slice(&item.dict_cols);
+            }
+
+            let cache = self.fetch_blocks_and_lazy(&wave_ranges, &[], &[], &wave_dicts)?;
+            let read_block = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
+                if blk.stored_len == 0 {
+                    return Ok(Cow::Borrowed(&[]));
+                }
+                let end = blk
+                    .offset
+                    .checked_add(BLOCK_FRAME_HEADER_LEN as u64 + u64::from(blk.stored_len))
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "Scan block key overflow",
+                    })?;
+                let frame = cache.get(&(blk.offset, end)).ok_or(StatamError::Corrupt {
+                    reason: "missing unfiltered Scan fetched block",
+                })?;
+                read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
+            };
+
+            for item in wave {
+                let rg = &self.meta.rg_dir[item.rg_idx];
+                let l0_parsed = if item.l0_needed {
+                    cache
+                        .get(&(rg.l0_payload_offset, item.l0_end))
+                        .map(|b| ParsedL0Payload::parse(b))
+                        .transpose()?
+                } else {
+                    None
+                };
+                let blks0 = self.meta.rg_blocks(0, item.rg_idx);
+                let active_mbs = item
+                    .surviving_mbs
+                    .into_iter()
+                    .map(|mb_idx| {
+                        (
+                            mb_idx,
+                            Bitmap::new_ones(blks0[mb_idx].row_count as usize),
+                            HashMap::new(),
+                        )
+                    })
+                    .collect();
+                let rg_batches = self.resolve_and_materialize_phase2_mbs(
+                    item.rg_idx,
+                    active_mbs,
+                    &item.plan,
+                    proj_indices,
+                    proj_schema,
+                    map_keys_by_col,
+                    l0_parsed.as_ref(),
+                    &empty_pre,
+                    &read_block,
+                    read_threads,
+                )?;
+                for batch in rg_batches {
+                    if !batch.is_empty() {
+                        out_batches.push(batch);
+                    }
+                }
+            }
+        }
+        Ok(out_batches)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn scan_rgs_filtered_batched(
+        &self,
+        surviving_rgs: Vec<(usize, Vec<usize>)>,
+        proj_indices: &[usize],
+        proj_schema: &Arc<Schema>,
+        map_keys_by_col: &HashMap<usize, Vec<String>>,
+        time_col_idx: Option<usize>,
+        time_range: TimeRange,
+        lookups: &[(usize, &IdLookup)],
+        preds: &[(usize, &Predicate)],
+        subs: &[(usize, &SubstringQuery)],
+        dict_sub_bitmaps: &mut Vec<Option<Bitmap>>,
+        read_threads: usize,
+    ) -> Result<Vec<Batch>, StatamError> {
+        struct FilteredRgP1 {
+            rg_idx: usize,
+            surviving_mbs: Vec<usize>,
+            plan: RgIoPlan,
+            p1_ranges: Vec<(u64, u64)>,
+            p1_bytes: u64,
+            p1_raw_bytes: u64,
+            p1_l0_needed: bool,
+            l0_end: u64,
+            p1_dict_cols: Vec<usize>,
+        }
+
+        let has_payload_sub = subs.iter().any(|&(cidx, _)| {
+            self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload
+        });
+        let has_payload_proj = proj_indices
+            .iter()
+            .any(|&cidx| self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload);
+
+        let mut planned = Vec::with_capacity(surviving_rgs.len());
+        for (rg_idx, surviving_mbs) in surviving_rgs {
+            let rg = &self.meta.rg_dir[rg_idx];
+            let plan = self.build_rg_io_plan(
+                rg_idx,
+                &surviving_mbs,
+                proj_indices,
+                map_keys_by_col,
+                time_col_idx,
+                time_range,
+                lookups,
+                preds,
+                subs,
+            );
+            let mut p1_ranges = Vec::new();
+            let mut p1_bytes = 0u64;
+            let mut p1_raw_bytes = 0u64;
+            for &mb_idx in &surviving_mbs {
+                for &pidx in &plan.phase1_phys_cols {
+                    let blk = &self.meta.rg_blocks(pidx, rg_idx)[mb_idx];
+                    p1_raw_bytes = p1_raw_bytes.saturating_add(u64::from(blk.raw_len));
+                    if blk.stored_len > 0 {
+                        let total = (BLOCK_FRAME_HEADER_LEN as u64)
+                            .checked_add(u64::from(blk.stored_len))
+                            .ok_or(StatamError::BoundsExceeded {
+                                reason: "Phase 1 block length overflow",
+                            })?;
+                        let end =
+                            blk.offset
+                                .checked_add(total)
+                                .ok_or(StatamError::BoundsExceeded {
+                                    reason: "Phase 1 block end overflow",
+                                })?;
+                        p1_ranges.push((blk.offset, end));
+                        p1_bytes = p1_bytes.saturating_add(total);
+                    }
+                }
+            }
+            let p1_l0_needed = rg.l0_payload_len > 0 && has_payload_sub;
+            let l0_end = rg
+                .l0_payload_offset
+                .checked_add(u64::from(rg.l0_payload_len))
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "Phase 1 L0 payload end overflow",
+                })?;
+            if p1_l0_needed {
+                p1_ranges.push((rg.l0_payload_offset, l0_end));
+                p1_bytes = p1_bytes.saturating_add(u64::from(rg.l0_payload_len));
+            }
+            let p1_dict_cols: Vec<usize> = plan
+                .phase1_phys_cols
+                .iter()
+                .copied()
+                .filter(|&pidx| {
+                    (self.meta.col_dir[pidx].col_flags & COL_FLAG_HAS_FILE_DICT) != 0
+                        && surviving_mbs.iter().any(|&mb| {
+                            self.meta.rg_blocks(pidx, rg_idx)[mb].encoding == Encoding::Dict
+                        })
+                })
+                .collect();
+            planned.push(FilteredRgP1 {
+                rg_idx,
+                surviving_mbs,
+                plan,
+                p1_ranges,
+                p1_bytes,
+                p1_raw_bytes,
+                p1_l0_needed,
+                l0_end,
+                p1_dict_cols,
+            });
+        }
+
+        // Partition RGs into <= 64 MiB stored / <= 128 MiB decoded-raw Wave-1 batches.
+        let mut p1_waves: Vec<Vec<FilteredRgP1>> = Vec::new();
+        let mut cur_wave: Vec<FilteredRgP1> = Vec::new();
+        let mut cur_bytes = 0u64;
+        let mut cur_raw_bytes = 0u64;
+        for item in planned {
+            if !cur_wave.is_empty()
+                && (cur_bytes.saturating_add(item.p1_bytes) > IO_WAVE_MAX_BYTES
+                    || cur_raw_bytes.saturating_add(item.p1_raw_bytes) > P1_WAVE_MAX_RAW_BYTES)
+            {
+                p1_waves.push(std::mem::take(&mut cur_wave));
+                cur_bytes = 0;
+                cur_raw_bytes = 0;
+            }
+            cur_bytes = cur_bytes.saturating_add(item.p1_bytes);
+            cur_raw_bytes = cur_raw_bytes.saturating_add(item.p1_raw_bytes);
+            cur_wave.push(item);
+        }
+        if !cur_wave.is_empty() {
+            p1_waves.push(cur_wave);
+        }
+
+        let mut out_batches = Vec::new();
+        for p1_wave in p1_waves {
+            let total_p1_ranges: usize = p1_wave.iter().map(|w| w.p1_ranges.len()).sum();
+            let mut wave_p1_ranges = Vec::with_capacity(total_p1_ranges);
+            let mut wave_p1_dicts = Vec::new();
+            for item in &p1_wave {
+                wave_p1_ranges.extend_from_slice(&item.p1_ranges);
+                wave_p1_dicts.extend_from_slice(&item.p1_dict_cols);
+            }
+
+            // Wave 1: Fetch ALL missing Phase-1 dicts + ALL Phase-1 blocks in ONE wave!
+            let p1_cache = self.fetch_blocks_and_lazy(&wave_p1_ranges, &[], &[], &wave_p1_dicts)?;
+            self.refresh_dict_sub_bitmaps(subs, dict_sub_bitmaps);
+
+            let p1_lookup = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
+                if blk.stored_len == 0 {
+                    return Ok(Cow::Borrowed(&[]));
+                }
+                let end = blk
+                    .offset
+                    .checked_add(BLOCK_FRAME_HEADER_LEN as u64 + u64::from(blk.stored_len))
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "Phase 1 block key overflow",
+                    })?;
+                let frame = p1_cache
+                    .get(&(blk.offset, end))
+                    .ok_or(StatamError::Corrupt {
+                        reason: "missing Phase 1 fetched block",
+                    })?;
+                read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
+            };
+
+            struct ActiveRgP2 {
+                rg_idx: usize,
+                plan: RgIoPlan,
+                active_mbs: Vec<(usize, Bitmap, HashMap<usize, DecodedPhase1>)>,
+                p1_l0_needed: bool,
+                p2_l0_needed: bool,
+                l0_end: u64,
+                p2_ranges: Vec<(u64, u64)>,
+                p2_bytes: u64,
+                p2_dict_cols: Vec<usize>,
+            }
+
+            // One shared 64 MiB chunk-retention cache across all RGs in this `p1_wave`.
+            let wave_retained = RetainedPackChunks::default();
+            let mut active_rgs = Vec::new();
+            for item in p1_wave {
+                let rg = &self.meta.rg_dir[item.rg_idx];
+                let l0_from_p1 = if item.p1_l0_needed {
+                    p1_cache
+                        .get(&(rg.l0_payload_offset, item.l0_end))
+                        .map(|b| ParsedL0Payload::parse(b))
+                        .transpose()?
+                } else {
+                    None
+                };
+                let active_mbs = self.eval_phase1_mbs(
+                    item.rg_idx,
+                    &item.surviving_mbs,
+                    &item.plan,
+                    proj_indices,
+                    time_col_idx,
+                    time_range,
+                    lookups,
+                    preds,
+                    subs,
+                    dict_sub_bitmaps,
+                    l0_from_p1.as_ref(),
+                    &p1_lookup,
+                    None,
+                    false,
+                    read_threads,
+                    &wave_retained,
+                )?;
+                if active_mbs.is_empty() {
+                    continue;
+                }
+
+                let p2_dict_cols: Vec<usize> = item
+                    .plan
+                    .phase2_only_phys_cols
+                    .iter()
+                    .copied()
+                    .filter(|&pidx| {
+                        (self.meta.col_dir[pidx].col_flags & COL_FLAG_HAS_FILE_DICT) != 0
+                            && active_mbs.iter().any(|(mb, _, _)| {
+                                self.meta.rg_blocks(pidx, item.rg_idx)[*mb].encoding
+                                    == Encoding::Dict
+                            })
+                    })
+                    .collect();
+
+                let mut p2_ranges = Vec::new();
+                let mut p2_bytes = 0u64;
+                let p2_l0_needed = rg.l0_payload_len > 0 && !item.p1_l0_needed && has_payload_proj;
+                for (mb_idx, _, _) in &active_mbs {
+                    for &pidx in &item.plan.phase2_only_phys_cols {
+                        if self
+                            .meta
+                            .schema_meta
+                            .schema
+                            .fields()
+                            .get(pidx)
+                            .is_some_and(|f| f.data_type == DataType::MapUtf8)
+                            && item.plan.phase2_map_fast_path.contains(&(*mb_idx, pidx))
+                        {
+                            continue;
+                        }
+                        let blk = &self.meta.rg_blocks(pidx, item.rg_idx)[*mb_idx];
+                        if blk.stored_len > 0 {
+                            let total = (BLOCK_FRAME_HEADER_LEN as u64)
+                                .checked_add(u64::from(blk.stored_len))
+                                .ok_or(StatamError::BoundsExceeded {
+                                    reason: "Phase 2 block length overflow",
+                                })?;
+                            let end = blk.offset.checked_add(total).ok_or(
+                                StatamError::BoundsExceeded {
+                                    reason: "Phase 2 block end overflow",
+                                },
+                            )?;
+                            p2_ranges.push((blk.offset, end));
+                            p2_bytes = p2_bytes.saturating_add(total);
+                        }
+                    }
+                }
+                if p2_l0_needed {
+                    p2_ranges.push((rg.l0_payload_offset, item.l0_end));
+                    p2_bytes = p2_bytes.saturating_add(u64::from(rg.l0_payload_len));
+                }
+
+                active_rgs.push(ActiveRgP2 {
+                    rg_idx: item.rg_idx,
+                    plan: item.plan,
+                    active_mbs,
+                    p1_l0_needed: item.p1_l0_needed,
+                    p2_l0_needed,
+                    l0_end: item.l0_end,
+                    p2_ranges,
+                    p2_bytes,
+                    p2_dict_cols,
+                });
+            }
+
+            if active_rgs.is_empty() {
+                continue;
+            }
+            let wave_retained_map = wave_retained.into_map();
+
+            // Partition active RGs into <= 64 MiB Wave-2 batches.
+            let mut p2_waves: Vec<Vec<ActiveRgP2>> = Vec::new();
+            let mut cur_p2: Vec<ActiveRgP2> = Vec::new();
+            let mut cur_p2_bytes = 0u64;
+            for item in active_rgs {
+                if !cur_p2.is_empty()
+                    && cur_p2_bytes.saturating_add(item.p2_bytes) > IO_WAVE_MAX_BYTES
+                {
+                    p2_waves.push(std::mem::take(&mut cur_p2));
+                    cur_p2_bytes = 0;
+                }
+                cur_p2_bytes = cur_p2_bytes.saturating_add(item.p2_bytes);
+                cur_p2.push(item);
+            }
+            if !cur_p2.is_empty() {
+                p2_waves.push(cur_p2);
+            }
+
+            for p2_wave in p2_waves {
+                let total_p2_ranges: usize = p2_wave.iter().map(|w| w.p2_ranges.len()).sum();
+                let mut wave_p2_ranges = Vec::with_capacity(total_p2_ranges);
+                let mut wave_p2_dicts = Vec::new();
+                for item in &p2_wave {
+                    wave_p2_ranges.extend_from_slice(&item.p2_ranges);
+                    wave_p2_dicts.extend_from_slice(&item.p2_dict_cols);
+                }
+
+                // Wave 2: Fetch ALL missing Phase-2 dicts + ALL active RGs' Phase-2 blocks in ONE wave!
+                let p2_cache =
+                    self.fetch_blocks_and_lazy(&wave_p2_ranges, &[], &[], &wave_p2_dicts)?;
+
+                let p2_lookup = |blk: &BlockEntry| -> Result<Cow<'_, [u8]>, StatamError> {
+                    if blk.stored_len == 0 {
+                        return Ok(Cow::Borrowed(&[]));
+                    }
+                    let end = blk
+                        .offset
+                        .checked_add(BLOCK_FRAME_HEADER_LEN as u64 + u64::from(blk.stored_len))
+                        .ok_or(StatamError::BoundsExceeded {
+                            reason: "Phase 2 block key overflow",
+                        })?;
+                    let key = (blk.offset, end);
+                    let frame = p2_cache.get(&key).or_else(|| p1_cache.get(&key)).ok_or(
+                        StatamError::Corrupt {
+                            reason: "missing Phase 2 fetched block",
+                        },
+                    )?;
+                    read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
+                };
+
+                for item in p2_wave {
+                    let rg = &self.meta.rg_dir[item.rg_idx];
+                    let l0_parsed = if item.p1_l0_needed {
+                        p1_cache
+                            .get(&(rg.l0_payload_offset, item.l0_end))
+                            .map(|b| ParsedL0Payload::parse(b))
+                            .transpose()?
+                    } else if item.p2_l0_needed {
+                        p2_cache
+                            .get(&(rg.l0_payload_offset, item.l0_end))
+                            .map(|b| ParsedL0Payload::parse(b))
+                            .transpose()?
+                    } else {
+                        None
+                    };
+                    let rg_batches = self.resolve_and_materialize_phase2_mbs(
+                        item.rg_idx,
+                        item.active_mbs,
+                        &item.plan,
+                        proj_indices,
+                        proj_schema,
+                        map_keys_by_col,
+                        l0_parsed.as_ref(),
+                        &wave_retained_map,
+                        &p2_lookup,
+                        read_threads,
+                    )?;
+                    for batch in rg_batches {
+                        if !batch.is_empty() {
+                            out_batches.push(batch);
+                        }
+                    }
+                }
+            }
         }
 
         Ok(out_batches)
@@ -1115,7 +2100,7 @@ impl StatamReader {
         lookups: &[(usize, &IdLookup)],
         preds: &[(usize, &Predicate)],
         subs: &[(usize, &SubstringQuery)],
-        dict_sub_bitmaps: &[Option<Bitmap>],
+        dict_sub_bitmaps: &mut Vec<Option<Bitmap>>,
         limit_remaining: Option<usize>,
         trim_tail: bool,
         read_threads: usize,
@@ -1188,9 +2173,6 @@ impl StatamReader {
                         .any(|&mb| self.meta.rg_blocks(pidx, rg_idx)[mb].encoding == Encoding::Dict)
             })
             .collect();
-        if !dict_cols.is_empty() {
-            self.ensure_dicts_loaded(&dict_cols)?;
-        }
 
         if need_l0_payload {
             let l0_end = rg
@@ -1215,17 +2197,28 @@ impl StatamReader {
                     reason: "invalid Point RG byte range",
                 })?;
 
-        let rg_slice = if range_end > range_start {
-            let bytes = self.reader.read_range(range_start..range_end)?;
-            if bytes.len() as u64 != expected_range_len {
-                return Err(StatamError::Corrupt {
-                    reason: "short read on Point RG range",
-                });
-            }
-            bytes
-        } else {
-            Bytes::new()
-        };
+        let rg_slice =
+            if range_end > range_start {
+                let fetched =
+                    self.fetch_blocks_and_lazy(&[(range_start, range_end)], &[], &[], &dict_cols)?;
+                let bytes = fetched.get(&(range_start, range_end)).cloned().ok_or(
+                    StatamError::Corrupt {
+                        reason: "missing Point RG range",
+                    },
+                )?;
+                if bytes.len() as u64 != expected_range_len {
+                    return Err(StatamError::Corrupt {
+                        reason: "short read on Point RG range",
+                    });
+                }
+                bytes
+            } else {
+                if !dict_cols.is_empty() {
+                    self.ensure_dicts_loaded(&dict_cols)?;
+                }
+                Bytes::new()
+            };
+        self.refresh_dict_sub_bitmaps(subs, dict_sub_bitmaps);
 
         let l0_parsed = if need_l0_payload && rg.l0_payload_len > 0 {
             let rel_start = rg
@@ -1275,10 +2268,12 @@ impl StatamReader {
             read_framed_block_checked_cow(frame, blk, MAX_BLOCK_RAW_BYTES)
         };
 
+        let retained = RetainedPackChunks::default();
         let active_mbs = self.eval_phase1_mbs(
             rg_idx,
             surviving_mbs,
             &plan,
+            proj_indices,
             time_col_idx,
             time_range,
             lookups,
@@ -1290,10 +2285,12 @@ impl StatamReader {
             limit_remaining,
             trim_tail,
             read_threads,
+            &retained,
         )?;
         if active_mbs.is_empty() {
             return Ok(Vec::new());
         }
+        let retained_chunks = retained.into_map();
 
         self.resolve_and_materialize_phase2_mbs(
             rg_idx,
@@ -1303,6 +2300,7 @@ impl StatamReader {
             proj_schema,
             map_keys_by_col,
             l0_parsed.as_ref(),
+            &retained_chunks,
             &block_lookup,
             read_threads,
         )
@@ -1322,7 +2320,7 @@ impl StatamReader {
         lookups: &[(usize, &IdLookup)],
         preds: &[(usize, &Predicate)],
         subs: &[(usize, &SubstringQuery)],
-        dict_sub_bitmaps: &[Option<Bitmap>],
+        dict_sub_bitmaps: &mut Vec<Option<Bitmap>>,
         limit_remaining: Option<usize>,
         trim_tail: bool,
         read_threads: usize,
@@ -1339,7 +2337,7 @@ impl StatamReader {
             subs,
         );
 
-        // Phase 1: Coalesce and fetch ONLY filter/substring columns.
+        // Phase 1: Coalesce and fetch ONLY filter/substring columns (+ any missing Phase-1 lazy dicts).
         let mut p1_ranges = Vec::new();
         for &mb_idx in surviving_mbs {
             for &pidx in &plan.phase1_phys_cols {
@@ -1380,7 +2378,21 @@ impl StatamReader {
             p1_ranges.push((rg.l0_payload_offset, p1_l0_end));
         }
 
-        let p1_cache = fetch_coalesced_blocks(self.reader.as_ref(), &p1_ranges)?;
+        let p1_dict_cols: Vec<usize> = plan
+            .phase1_phys_cols
+            .iter()
+            .copied()
+            .filter(|&pidx| {
+                (self.meta.col_dir[pidx].col_flags & COL_FLAG_HAS_FILE_DICT) != 0
+                    && surviving_mbs
+                        .iter()
+                        .any(|&mb| self.meta.rg_blocks(pidx, rg_idx)[mb].encoding == Encoding::Dict)
+            })
+            .collect();
+
+        let p1_cache = self.fetch_blocks_and_lazy(&p1_ranges, &[], &[], &p1_dict_cols)?;
+        self.refresh_dict_sub_bitmaps(subs, dict_sub_bitmaps);
+
         let l0_from_p1 = if p1_l0_needed {
             p1_cache
                 .get(&(rg.l0_payload_offset, p1_l0_end))
@@ -1408,10 +2420,12 @@ impl StatamReader {
         };
 
         // Evaluate Phase 1 on each surviving mini-block (in parallel across MBs when read_threads > 1).
+        let retained = RetainedPackChunks::default();
         let active_mbs = self.eval_phase1_mbs(
             rg_idx,
             surviving_mbs,
             &plan,
+            proj_indices,
             time_col_idx,
             time_range,
             lookups,
@@ -1423,13 +2437,16 @@ impl StatamReader {
             limit_remaining,
             trim_tail,
             read_threads,
+            &retained,
         )?;
 
         if active_mbs.is_empty() {
             return Ok(Vec::new());
         }
+        let retained_chunks = retained.into_map();
 
-        // Load lazy dicts for Phase 2 columns ONLY if an active mini-block actually uses Encoding::Dict.
+        // Load lazy dicts for Phase 2 columns ONLY if an active mini-block actually uses Encoding::Dict,
+        // combined with `p2_ranges` in ONE `reader.read_ranges(...)` wave!
         let p2_dict_cols: Vec<usize> = plan
             .phase2_only_phys_cols
             .iter()
@@ -1441,9 +2458,6 @@ impl StatamReader {
                     })
             })
             .collect();
-        if !p2_dict_cols.is_empty() {
-            self.ensure_dicts_loaded(&p2_dict_cols)?;
-        }
 
         // Phase 2: Coalesce and fetch ONLY remaining projected columns for active mini-blocks!
         let mut p2_ranges = Vec::new();
@@ -1487,7 +2501,7 @@ impl StatamReader {
             p2_ranges.push((rg.l0_payload_offset, p1_l0_end));
         }
 
-        let p2_cache = fetch_coalesced_blocks(self.reader.as_ref(), &p2_ranges)?;
+        let p2_cache = self.fetch_blocks_and_lazy(&p2_ranges, &[], &[], &p2_dict_cols)?;
         let l0_from_p2 = if p2_l0_needed {
             p2_cache
                 .get(&(rg.l0_payload_offset, p1_l0_end))
@@ -1528,6 +2542,7 @@ impl StatamReader {
             proj_schema,
             map_keys_by_col,
             l0_ref,
+            &retained_chunks,
             &p2_lookup,
             read_threads,
         )

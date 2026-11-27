@@ -766,13 +766,15 @@ pub fn encode_dict_codes_body(
     Ok(out)
 }
 
-struct ParsedDictRle {
-    run_ends: Vec<u32>,
+struct DictRleHeader {
+    num_runs: usize,
+    re_bw: u8,
+    pos_after_re: usize,
     rv_base: u32,
-    rv_deltas: Vec<u32>,
+    rv_bw: u8,
 }
 
-fn parse_dict_rle_body(src: &[u8], row_count: usize) -> Result<ParsedDictRle, StatamError> {
+fn validate_dict_rle_header(src: &[u8], row_count: usize) -> Result<DictRleHeader, StatamError> {
     if src.len() < 6 {
         return Err(StatamError::Corrupt {
             reason: "truncated dict Rle header",
@@ -791,8 +793,17 @@ fn parse_dict_rle_body(src: &[u8], row_count: usize) -> Result<ParsedDictRle, St
         });
     }
     let re_bytes = packed_bytes_len(num_runs, re_bw)?;
-    let pos_after_re = 6 + re_bytes;
-    if src.len() < pos_after_re + 5 {
+    let pos_after_re = 6usize
+        .checked_add(re_bytes)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "dict Rle run_ends size overflow",
+        })?;
+    let values_start = pos_after_re
+        .checked_add(5)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "dict Rle values header overflow",
+        })?;
+    if src.len() < values_start {
         return Err(StatamError::Corrupt {
             reason: "truncated dict Rle values header",
         });
@@ -810,14 +821,86 @@ fn parse_dict_rle_body(src: &[u8], row_count: usize) -> Result<ParsedDictRle, St
         });
     }
     let rv_bytes = packed_bytes_len(num_runs, rv_bw)?;
-    if src.len() != pos_after_re + 5 + rv_bytes {
+    let expected_total = values_start
+        .checked_add(rv_bytes)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "dict Rle total length overflow",
+        })?;
+    if src.len() != expected_total {
         return Err(StatamError::Corrupt {
             reason: "dict Rle length mismatch",
         });
     }
+    Ok(DictRleHeader {
+        num_runs,
+        re_bw,
+        pos_after_re,
+        rv_base,
+        rv_bw,
+    })
+}
 
-    let mut run_ends = Vec::with_capacity(num_runs);
-    unpack_u32(&src[6..pos_after_re], num_runs, re_bw, &mut run_ends)?;
+fn validate_dict_codes_header(src: &[u8], row_count: usize) -> Result<(), StatamError> {
+    let Some(&sub_enc) = src.first() else {
+        return Err(StatamError::Corrupt {
+            reason: "truncated dict sub_enc byte",
+        });
+    };
+    match sub_enc {
+        0 => {
+            if src.len() < 6 {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated dict ForBitpack header",
+                });
+            }
+            let bw = src[5];
+            if bw > 32 {
+                return Err(StatamError::Corrupt {
+                    reason: "invalid u32 bit_width",
+                });
+            }
+            let needed = packed_bytes_len(row_count, bw)?;
+            let expected_total = 6usize
+                .checked_add(needed)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "dict ForBitpack length overflow",
+                })?;
+            if src.len() != expected_total {
+                return Err(StatamError::Corrupt {
+                    reason: "dict ForBitpack length mismatch",
+                });
+            }
+            Ok(())
+        }
+        1 => {
+            let _ = parse_dict_rle_run_ends(src, row_count)?;
+            Ok(())
+        }
+        _ => Err(StatamError::Corrupt {
+            reason: "unknown dict sub_enc",
+        }),
+    }
+}
+
+struct ParsedDictRle {
+    run_ends: Vec<u32>,
+    rv_base: u32,
+    rv_deltas: Vec<u32>,
+}
+
+fn parse_dict_rle_run_ends(
+    src: &[u8],
+    row_count: usize,
+) -> Result<(DictRleHeader, Vec<u32>), StatamError> {
+    let hdr = validate_dict_rle_header(src, row_count)?;
+
+    let mut run_ends = Vec::with_capacity(hdr.num_runs);
+    unpack_u32(
+        &src[6..hdr.pos_after_re],
+        hdr.num_runs,
+        hdr.re_bw,
+        &mut run_ends,
+    )?;
     let mut prev = 0u32;
     for &end in &run_ends {
         if end <= prev || (end as usize) > row_count {
@@ -833,12 +916,23 @@ fn parse_dict_rle_body(src: &[u8], row_count: usize) -> Result<ParsedDictRle, St
         });
     }
 
-    let mut rv_deltas = Vec::with_capacity(num_runs);
-    unpack_u32(&src[pos_after_re + 5..], num_runs, rv_bw, &mut rv_deltas)?;
+    Ok((hdr, run_ends))
+}
+
+fn parse_dict_rle_body(src: &[u8], row_count: usize) -> Result<ParsedDictRle, StatamError> {
+    let (hdr, run_ends) = parse_dict_rle_run_ends(src, row_count)?;
+
+    let mut rv_deltas = Vec::with_capacity(hdr.num_runs);
+    unpack_u32(
+        &src[hdr.pos_after_re + 5..],
+        hdr.num_runs,
+        hdr.rv_bw,
+        &mut rv_deltas,
+    )?;
 
     Ok(ParsedDictRle {
         run_ends,
-        rv_base,
+        rv_base: hdr.rv_base,
         rv_deltas,
     })
 }
@@ -1259,16 +1353,21 @@ pub fn decode_dict_selected(
     Ok(Column::Flat(flat))
 }
 
+#[inline]
+fn null_bytes_is_valid(null_bytes: Option<&[u8]>, row: usize) -> bool {
+    null_bytes.is_none_or(|nb| ((nb[row / 8] >> (row % 8)) & 1) != 0)
+}
+
 /// Decodes only `indices` of a `Dict` mini-block body into a compact `indices.len()`-row
-/// [`Column::Flat`] without allocating `row_count`-sized outputs or cloning the dictionary.
+/// [`Column`] without allocating `row_count`-sized outputs or cloning the dictionary.
 pub(crate) fn decode_dict_take(
     after_nulls: &[u8],
     row_count: usize,
-    nulls: Option<&Bitmap>,
+    null_bytes: Option<&[u8]>,
     dict: &FileDict,
     indices: &[usize],
 ) -> Result<Column, StatamError> {
-    if nulls.is_some_and(|bm| bm.len() != row_count) {
+    if null_bytes.is_some_and(|nb| nb.len() != row_count.div_ceil(8)) {
         return Err(StatamError::Corrupt {
             reason: "null bitmap length mismatch",
         });
@@ -1306,6 +1405,37 @@ pub(crate) fn decode_dict_take(
         return Ok(Column::Flat(FlatColumn::empty(&dict.values().data_type())));
     }
 
+    if indices.is_empty() {
+        validate_dict_codes_header(after_nulls, row_count)?;
+        return Ok(Column::Flat(FlatColumn::empty(&dict.values().data_type())));
+    }
+
+    let (all_null, any_null) = if let Some(nb) = null_bytes {
+        let mut saw_valid = false;
+        let mut saw_null = false;
+        for &row in indices {
+            if ((nb[row / 8] >> (row % 8)) & 1) != 0 {
+                saw_valid = true;
+            } else {
+                saw_null = true;
+            }
+            if saw_valid && saw_null {
+                break;
+            }
+        }
+        (!saw_valid, saw_null)
+    } else {
+        (false, false)
+    };
+
+    if all_null {
+        validate_dict_codes_header(after_nulls, row_count)?;
+        return Ok(Column::Const {
+            value: ScalarValue::Null(dict.values().data_type()),
+            len: indices.len(),
+        });
+    }
+
     let Some(&sub_enc) = after_nulls.first() else {
         return Err(StatamError::Corrupt {
             reason: "truncated dict sub_enc byte",
@@ -1314,12 +1444,7 @@ pub(crate) fn decode_dict_take(
 
     let dict_len = dict.len();
     let mut codes = Vec::with_capacity(indices.len());
-    let mut out_nulls = if nulls.is_some() {
-        Some(Bitmap::new_ones(indices.len()))
-    } else {
-        None
-    };
-    let mut any_null = false;
+    let mut out_nulls = any_null.then(|| Bitmap::new_ones(indices.len()));
 
     match sub_enc {
         0 => {
@@ -1348,16 +1473,9 @@ pub(crate) fn decode_dict_take(
             }
             let packed = &after_nulls[6..];
             if indices.len().saturating_mul(16) < row_count {
-                let mut deltas = Vec::with_capacity(indices.len());
-                crate::simd::bitpack::unpack_u32_indices(
-                    packed,
-                    row_count,
-                    bw,
-                    indices,
-                    &mut deltas,
-                )?;
-                for (out_pos, (&row, d)) in indices.iter().zip(deltas).enumerate() {
-                    if nulls.is_none_or(|bm| bm.get(row)) {
+                for (out_pos, &row) in indices.iter().enumerate() {
+                    if !any_null || null_bytes_is_valid(null_bytes, row) {
+                        let d = unpack_u32_at(packed, row_count, bw, row)?;
                         let code = base.checked_add(d).ok_or(StatamError::Corrupt {
                             reason: "dict code overflow",
                         })?;
@@ -1368,7 +1486,6 @@ pub(crate) fn decode_dict_take(
                         }
                         codes.push(code);
                     } else {
-                        any_null = true;
                         if let Some(bm) = out_nulls.as_mut() {
                             let _ = bm.set(out_pos, false);
                         }
@@ -1379,7 +1496,7 @@ pub(crate) fn decode_dict_take(
                 let mut deltas = Vec::with_capacity(row_count);
                 unpack_u32(packed, row_count, bw, &mut deltas)?;
                 for (out_pos, &row) in indices.iter().enumerate() {
-                    if nulls.is_none_or(|bm| bm.get(row)) {
+                    if !any_null || null_bytes_is_valid(null_bytes, row) {
                         let code = base.checked_add(deltas[row]).ok_or(StatamError::Corrupt {
                             reason: "dict code overflow",
                         })?;
@@ -1390,7 +1507,6 @@ pub(crate) fn decode_dict_take(
                         }
                         codes.push(code);
                     } else {
-                        any_null = true;
                         if let Some(bm) = out_nulls.as_mut() {
                             let _ = bm.set(out_pos, false);
                         }
@@ -1404,6 +1520,13 @@ pub(crate) fn decode_dict_take(
             let mut run_idx = 0usize;
             let mut run_start = 0usize;
             for (out_pos, &row) in indices.iter().enumerate() {
+                if any_null && !null_bytes_is_valid(null_bytes, row) {
+                    if let Some(bm) = out_nulls.as_mut() {
+                        let _ = bm.set(out_pos, false);
+                    }
+                    codes.push(0);
+                    continue;
+                }
                 if row < run_start {
                     run_idx = parsed.run_ends.partition_point(|&e| (e as usize) <= row);
                 } else {
@@ -1416,26 +1539,18 @@ pub(crate) fn decode_dict_take(
                 } else {
                     parsed.run_ends[run_idx - 1] as usize
                 };
-                if nulls.is_none_or(|bm| bm.get(row)) {
-                    let code = parsed
-                        .rv_base
-                        .checked_add(parsed.rv_deltas[run_idx])
-                        .ok_or(StatamError::Corrupt {
-                            reason: "dict Rle code overflow",
-                        })?;
-                    if (code as usize) >= dict_len {
-                        return Err(StatamError::Corrupt {
-                            reason: "dict code out of bounds",
-                        });
-                    }
-                    codes.push(code);
-                } else {
-                    any_null = true;
-                    if let Some(bm) = out_nulls.as_mut() {
-                        let _ = bm.set(out_pos, false);
-                    }
-                    codes.push(0);
+                let code = parsed
+                    .rv_base
+                    .checked_add(parsed.rv_deltas[run_idx])
+                    .ok_or(StatamError::Corrupt {
+                        reason: "dict Rle code overflow",
+                    })?;
+                if (code as usize) >= dict_len {
+                    return Err(StatamError::Corrupt {
+                        reason: "dict code out of bounds",
+                    });
                 }
+                codes.push(code);
             }
         }
         _ => {
@@ -1445,12 +1560,7 @@ pub(crate) fn decode_dict_take(
         }
     }
 
-    if indices.is_empty() {
-        return Ok(Column::Flat(FlatColumn::empty(&dict.values().data_type())));
-    }
-
-    let final_nulls = if any_null { out_nulls } else { None };
-    let flat = materialize_from_dict(dict.values(), &codes, final_nulls)?;
+    let flat = materialize_from_dict(dict.values(), &codes, out_nulls)?;
     Ok(Column::Flat(flat))
 }
 
@@ -1939,6 +2049,52 @@ mod tests {
                 reason: "invalid u32 bit_width",
             })
         ));
+
+        // 5. M2 regression: corrupt Dict RLE run_ends must be rejected by decode_dict_take
+        // even when `indices` is empty or all selected rows are null.
+        let dict_flat = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(["alpha", "beta"]).unwrap()),
+            None,
+        )
+        .unwrap();
+        let dict = FileDict::from_flat(dict_flat, true).unwrap();
+
+        let build_dict_rle_block = |run_ends: &[u32]| -> Vec<u8> {
+            let mut body = Vec::new();
+            // Null bitmap for 4 all-null rows (1 byte = 0x00).
+            body.push(0x00);
+            // sub_enc = 1 (Rle)
+            body.push(1);
+            body.extend_from_slice(&(run_ends.len() as u32).to_le_bytes());
+            // re_bw = 32 (raw little-endian u32s)
+            body.push(32);
+            for &end in run_ends {
+                body.extend_from_slice(&end.to_le_bytes());
+            }
+            // rv_base = 0, rv_bw = 0 (all deltas 0 -> code 0)
+            body.extend_from_slice(&0u32.to_le_bytes());
+            body.push(0);
+            body
+        };
+
+        let non_mono = build_dict_rle_block(&[2, 2]);
+        let short_cov = build_dict_rle_block(&[1, 2]);
+        let oob_end = build_dict_rle_block(&[5]);
+
+        for (raw, expected_reason) in [
+            (&non_mono, "invalid dict Rle run_ends"),
+            (&short_cov, "dict Rle run_ends do not cover row_count"),
+            (&oob_end, "invalid dict Rle run_ends"),
+        ] {
+            for indices in [&[][..], &[0usize, 3][..]] {
+                let err =
+                    decode_dict_take(&raw[1..], 4, Some(&raw[..1]), &dict, indices).unwrap_err();
+                assert!(
+                    matches!(err, StatamError::Corrupt { reason } if reason == expected_reason),
+                    "expected {expected_reason:?} for indices={indices:?}, got {err:?}"
+                );
+            }
+        }
         let bad_rle_bw = [1u8, 1, 0, 0, 0, 33];
         assert!(matches!(
             decode_dict_codes_body(&bad_rle_bw, 4, 2, None),

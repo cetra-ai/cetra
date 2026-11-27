@@ -1,7 +1,7 @@
 //! File metadata (`StatamFileMeta`), tail parsing, bounds validation, and lazy index caches.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -23,7 +23,8 @@ use crate::simd::bloom::BloomIndex;
 use crate::simd::trigram::TrigramBloom;
 use crate::writer::NARROW_TRIGRAM_MAGIC;
 
-use super::StatamReader;
+use super::plan::fetch_coalesced_blocks;
+use super::{ReaderCaches, StatamReader};
 
 /// Parsed Hot Tail metadata for a `.statam` file (opened in 1 GET).
 #[derive(Clone)]
@@ -48,6 +49,9 @@ pub struct StatamFileMeta {
     pub lazy_dir: Vec<LazyIndexEntry>,
     /// Absolute byte offset where the stored Hot Tail begins.
     pub hot_tail_start: u64,
+    /// Lazy index sections already captured inside the initial tail prefetch, keyed by
+    /// index into `lazy_dir`.
+    pub(crate) inline_lazy: HashMap<usize, Bytes>,
 }
 
 impl fmt::Debug for StatamFileMeta {
@@ -381,6 +385,9 @@ impl StatamFileMeta {
 
         let lazy_count = (ps.lazy_dir_len as usize) / LAZY_INDEX_ENTRY_LEN;
         let mut lazy_dir = Vec::with_capacity(lazy_count);
+        let mut inline_lazy: HashMap<usize, Bytes> = HashMap::new();
+        let mut seen_lazy_keys: HashSet<(u8, u32)> = HashSet::new();
+        let mut inline_lazy_bytes = 0usize;
         for idx in 0..lazy_count {
             let off = ps.lazy_dir_off as usize + idx * LAZY_INDEX_ENTRY_LEN;
             let entry = LazyIndexEntry::decode(&raw_body[off..off + LAZY_INDEX_ENTRY_LEN])?;
@@ -398,6 +405,19 @@ impl StatamFileMeta {
                 return Err(StatamError::Corrupt {
                     reason: "lazy index section lies outside file data region",
                 });
+            }
+            let is_first_for_key = seen_lazy_keys.insert((entry.kind as u8, entry.phys_col_id));
+            if is_first_for_key
+                && entry.offset >= tail_start
+                && end <= hot_tail_start
+                && let Ok(rel_s) = usize::try_from(entry.offset - tail_start)
+                && let Some(rel_e) = rel_s.checked_add(entry.len as usize)
+                && let Some(slice) = tail.get(rel_s..rel_e)
+                && let Some(next_total) = inline_lazy_bytes.checked_add(slice.len())
+                && next_total <= tail.len()
+            {
+                inline_lazy_bytes = next_total;
+                inline_lazy.insert(idx, Bytes::copy_from_slice(slice));
             }
             lazy_dir.push(entry);
         }
@@ -440,6 +460,7 @@ impl StatamFileMeta {
             hot_dict_bytes,
             lazy_dir,
             hot_tail_start,
+            inline_lazy,
         })
     }
 
@@ -631,52 +652,26 @@ fn validate_block_in_rg(
 }
 
 impl StatamReader {
-    pub(super) fn check_blooms(
+    fn decode_and_cache_lazy_entry(
         &self,
-        lookups_with_hashes: &[(usize, Vec<u64>)],
-    ) -> Result<bool, StatamError> {
-        let mut missing_lazy: Vec<(usize, LazyIndexEntry)> = Vec::new();
-        {
-            let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
-            for (cidx, _) in lookups_with_hashes {
-                let cd = &self.meta.col_dir[*cidx];
-                if cd.bloom_len > 0
-                    && !guard.blooms.contains_key(cidx)
-                    && !missing_lazy.iter().any(|&(m, _)| m == *cidx)
-                    && let Some(entry) =
-                        self.meta.lazy_dir.iter().find(|e| {
-                            e.kind == LazyIndexKind::Bloom && e.phys_col_id as usize == *cidx
-                        })
-                {
-                    missing_lazy.push((*cidx, *entry));
-                }
-            }
-        }
-
-        if !missing_lazy.is_empty() {
-            let ranges: Vec<Range<u64>> = missing_lazy
-                .iter()
-                .map(|(_, e)| e.offset..e.offset + u64::from(e.len))
-                .collect();
-            let parts = self.reader.read_ranges(&ranges)?;
-            if parts.len() != missing_lazy.len() {
-                return Err(StatamError::Corrupt {
-                    reason: "read_ranges returned unexpected bloom count",
-                });
-            }
-            let mut guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
-            for ((cidx, entry), bytes) in missing_lazy.into_iter().zip(parts) {
+        guard: &mut ReaderCaches,
+        entry: LazyIndexEntry,
+        bytes: &[u8],
+    ) -> Result<(), StatamError> {
+        let pidx = entry.phys_col_id as usize;
+        match entry.kind {
+            LazyIndexKind::Bloom => {
                 if bytes.len() != entry.len as usize {
                     return Err(StatamError::Corrupt {
                         reason: "short read on lazy bloom filter",
                     });
                 }
-                if crc32c::crc32c(&bytes) != entry.crc32c {
+                if crc32c::crc32c(bytes) != entry.crc32c {
                     return Err(StatamError::ChecksumMismatch {
                         context: "lazy bloom filter",
                     });
                 }
-                let bloom = BloomIndex::from_bytes(&bytes)?;
+                let bloom = BloomIndex::from_bytes(bytes)?;
                 if let BloomIndex::PerRowGroup(rgs) = &bloom
                     && rgs.len() != self.meta.rg_dir.len()
                 {
@@ -684,122 +679,203 @@ impl StatamReader {
                         reason: "per-RG bloom count does not match num_row_groups",
                     });
                 }
-                guard.blooms.insert(cidx, bloom);
+                guard.blooms.insert(pidx, bloom);
+            }
+            LazyIndexKind::NarrowTrigram => {
+                if bytes.len() != entry.len as usize {
+                    return Err(StatamError::Corrupt {
+                        reason: "short read on narrow trigram index",
+                    });
+                }
+                if crc32c::crc32c(bytes) != entry.crc32c {
+                    return Err(StatamError::ChecksumMismatch {
+                        context: "narrow trigram index",
+                    });
+                }
+                let blooms = decode_narrow_trigram_section(
+                    bytes,
+                    self.meta.col_dir[pidx].num_blocks as usize,
+                )?;
+                guard.narrow_trigrams.insert(pidx, blooms);
+            }
+            LazyIndexKind::Dict => {
+                if bytes.len() != entry.len as usize {
+                    return Err(StatamError::Corrupt {
+                        reason: "short read on lazy dictionary",
+                    });
+                }
+                if crc32c::crc32c(bytes) != entry.crc32c {
+                    return Err(StatamError::ChecksumMismatch {
+                        context: "lazy dictionary",
+                    });
+                }
+                let sorted = (self.meta.col_dir[pidx].col_flags & COL_FLAG_DICT_SORTED) != 0;
+                let dict = Arc::new(FileDict::decode(bytes, sorted)?);
+                let expected_dt = self.meta.expected_dict_data_type(pidx)?;
+                if dict.values().data_type() != expected_dt {
+                    return Err(StatamError::Corrupt {
+                        reason: "dictionary data type does not match column schema",
+                    });
+                }
+                guard.dicts.insert(pidx, dict);
+            }
+        }
+        Ok(())
+    }
+
+    /// Populates `self.caches` from any matching `inline_lazy` slices with 0 I/O, and returns
+    /// the remaining uncached [`LazyIndexEntry`] items that still require remote reads.
+    fn collect_missing_lazy_entries(
+        &self,
+        bloom_cols: &[usize],
+        trigram_cols: &[usize],
+        dict_cols: &[usize],
+    ) -> Result<Vec<LazyIndexEntry>, StatamError> {
+        let mut missing: Vec<LazyIndexEntry> = Vec::new();
+        let mut guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
+
+        for &cidx in bloom_cols {
+            let cd = &self.meta.col_dir[cidx];
+            if cd.bloom_len > 0
+                && !guard.blooms.contains_key(&cidx)
+                && !missing
+                    .iter()
+                    .any(|e| e.kind == LazyIndexKind::Bloom && e.phys_col_id as usize == cidx)
+                && let Some((idx, entry)) =
+                    self.meta.lazy_dir.iter().enumerate().find(|(_, e)| {
+                        e.kind == LazyIndexKind::Bloom && e.phys_col_id as usize == cidx
+                    })
+            {
+                if let Some(inline) = self.meta.inline_lazy.get(&idx) {
+                    self.decode_and_cache_lazy_entry(&mut guard, *entry, inline)?;
+                } else {
+                    missing.push(*entry);
+                }
             }
         }
 
+        for &cidx in trigram_cols {
+            if !guard.narrow_trigrams.contains_key(&cidx)
+                && !missing.iter().any(|e| {
+                    e.kind == LazyIndexKind::NarrowTrigram && e.phys_col_id as usize == cidx
+                })
+                && let Some((idx, entry)) = self.meta.lazy_dir.iter().enumerate().find(|(_, e)| {
+                    e.kind == LazyIndexKind::NarrowTrigram && e.phys_col_id as usize == cidx
+                })
+            {
+                if let Some(inline) = self.meta.inline_lazy.get(&idx) {
+                    self.decode_and_cache_lazy_entry(&mut guard, *entry, inline)?;
+                } else {
+                    missing.push(*entry);
+                }
+            }
+        }
+
+        for &pidx in dict_cols {
+            let cd = &self.meta.col_dir[pidx];
+            if (cd.col_flags & COL_FLAG_HAS_FILE_DICT) != 0
+                && !guard.dicts.contains_key(&pidx)
+                && !missing
+                    .iter()
+                    .any(|e| e.kind == LazyIndexKind::Dict && e.phys_col_id as usize == pidx)
+                && let Some((idx, entry)) =
+                    self.meta.lazy_dir.iter().enumerate().find(|(_, e)| {
+                        e.kind == LazyIndexKind::Dict && e.phys_col_id as usize == pidx
+                    })
+            {
+                if let Some(inline) = self.meta.inline_lazy.get(&idx) {
+                    self.decode_and_cache_lazy_entry(&mut guard, *entry, inline)?;
+                } else {
+                    missing.push(*entry);
+                }
+            }
+        }
+
+        Ok(missing)
+    }
+
+    /// Decodes any requested lazy indexes that were already prefetched in `inline_lazy` (0 I/O).
+    pub(super) fn load_inline_lazy_indexes(
+        &self,
+        bloom_cols: &[usize],
+        trigram_cols: &[usize],
+        dict_cols: &[usize],
+    ) -> Result<(), StatamError> {
+        let _ = self.collect_missing_lazy_entries(bloom_cols, trigram_cols, dict_cols)?;
+        Ok(())
+    }
+
+    /// Fetches `block_ranges` AND any remaining uncached lazy indexes (`bloom_cols`,
+    /// `trigram_cols`, `dict_cols`) together in **ONE** coalesced `reader.read_ranges(...)` wave,
+    /// consuming any `inline_lazy` slices first with 0 I/O.
+    pub(super) fn fetch_blocks_and_lazy(
+        &self,
+        block_ranges: &[(u64, u64)],
+        bloom_cols: &[usize],
+        trigram_cols: &[usize],
+        dict_cols: &[usize],
+    ) -> Result<HashMap<(u64, u64), Bytes>, StatamError> {
+        let missing_lazy =
+            self.collect_missing_lazy_entries(bloom_cols, trigram_cols, dict_cols)?;
+        if block_ranges.is_empty() && missing_lazy.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut all_ranges: Vec<(u64, u64)> =
+            Vec::with_capacity(block_ranges.len() + missing_lazy.len());
+        all_ranges.extend_from_slice(block_ranges);
+        for entry in &missing_lazy {
+            let end = entry.offset.checked_add(u64::from(entry.len)).ok_or(
+                StatamError::BoundsExceeded {
+                    reason: "lazy index end offset overflow",
+                },
+            )?;
+            all_ranges.push((entry.offset, end));
+        }
+
+        let fetched = fetch_coalesced_blocks(self.reader.as_ref(), &all_ranges)?;
+
+        if !missing_lazy.is_empty() {
+            let mut guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
+            for entry in missing_lazy {
+                let key = (entry.offset, entry.offset + u64::from(entry.len));
+                let bytes = fetched.get(&key).ok_or(StatamError::Corrupt {
+                    reason: "missing fetched lazy index section",
+                })?;
+                self.decode_and_cache_lazy_entry(&mut guard, entry, bytes)?;
+            }
+        }
+
+        Ok(fetched)
+    }
+
+    /// Ensures all requested blooms, narrow trigrams, and lazy dictionaries are cached,
+    /// using `inline_lazy` first and fetching any remaining entries in **ONE** `read_ranges` wave.
+    pub(super) fn ensure_lazy_indexes_loaded(
+        &self,
+        bloom_cols: &[usize],
+        trigram_cols: &[usize],
+        dict_cols: &[usize],
+    ) -> Result<(), StatamError> {
+        let _ = self.fetch_blocks_and_lazy(&[], bloom_cols, trigram_cols, dict_cols)?;
+        Ok(())
+    }
+
+    /// Checks already-loaded file-level SBBF blooms against `lookups_with_hashes` (0 I/O).
+    pub(super) fn blooms_may_match(&self, lookups_with_hashes: &[(usize, Vec<u64>)]) -> bool {
         let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
         for (cidx, hashes) in lookups_with_hashes {
             if let Some(bloom) = guard.blooms.get(cidx)
                 && !bloom.contains_any_hash(hashes)
             {
-                return Ok(false);
+                return false;
             }
         }
-        Ok(true)
-    }
-
-    pub(super) fn ensure_narrow_trigrams(&self, cols: &[usize]) -> Result<(), StatamError> {
-        let mut missing: Vec<(usize, LazyIndexEntry)> = Vec::new();
-        {
-            let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
-            for &cidx in cols {
-                if !guard.narrow_trigrams.contains_key(&cidx)
-                    && !missing.iter().any(|&(m_idx, _)| m_idx == cidx)
-                    && let Some(entry) = self.meta.lazy_dir.iter().find(|e| {
-                        e.kind == LazyIndexKind::NarrowTrigram && e.phys_col_id as usize == cidx
-                    })
-                {
-                    missing.push((cidx, *entry));
-                }
-            }
-        }
-        if missing.is_empty() {
-            return Ok(());
-        }
-        let ranges: Vec<Range<u64>> = missing
-            .iter()
-            .map(|(_, e)| e.offset..e.offset + u64::from(e.len))
-            .collect();
-        let parts = self.reader.read_ranges(&ranges)?;
-        if parts.len() != missing.len() {
-            return Err(StatamError::Corrupt {
-                reason: "read_ranges returned unexpected narrow trigram count",
-            });
-        }
-        let mut guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
-        for ((cidx, entry), bytes) in missing.into_iter().zip(parts) {
-            if bytes.len() != entry.len as usize {
-                return Err(StatamError::Corrupt {
-                    reason: "short read on narrow trigram index",
-                });
-            }
-            if crc32c::crc32c(&bytes) != entry.crc32c {
-                return Err(StatamError::ChecksumMismatch {
-                    context: "narrow trigram index",
-                });
-            }
-            let blooms =
-                decode_narrow_trigram_section(&bytes, self.meta.col_dir[cidx].num_blocks as usize)?;
-            guard.narrow_trigrams.insert(cidx, blooms);
-        }
-        Ok(())
+        true
     }
 
     pub(super) fn ensure_dicts_loaded(&self, phys_cols: &[usize]) -> Result<(), StatamError> {
-        let mut missing: Vec<(usize, LazyIndexEntry, bool)> = Vec::new();
-        {
-            let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
-            for &pidx in phys_cols {
-                let cd = &self.meta.col_dir[pidx];
-                if (cd.col_flags & COL_FLAG_HAS_FILE_DICT) != 0
-                    && !guard.dicts.contains_key(&pidx)
-                    && !missing.iter().any(|&(m_idx, _, _)| m_idx == pidx)
-                    && let Some(entry) =
-                        self.meta.lazy_dir.iter().find(|e| {
-                            e.kind == LazyIndexKind::Dict && e.phys_col_id as usize == pidx
-                        })
-                {
-                    let sorted = (cd.col_flags & COL_FLAG_DICT_SORTED) != 0;
-                    missing.push((pidx, *entry, sorted));
-                }
-            }
-        }
-        if missing.is_empty() {
-            return Ok(());
-        }
-        let ranges: Vec<Range<u64>> = missing
-            .iter()
-            .map(|(_, e, _)| e.offset..e.offset + u64::from(e.len))
-            .collect();
-        let parts = self.reader.read_ranges(&ranges)?;
-        if parts.len() != missing.len() {
-            return Err(StatamError::Corrupt {
-                reason: "read_ranges returned unexpected lazy dict count",
-            });
-        }
-        let mut guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
-        for ((pidx, entry, sorted), bytes) in missing.into_iter().zip(parts) {
-            if bytes.len() != entry.len as usize {
-                return Err(StatamError::Corrupt {
-                    reason: "short read on lazy dictionary",
-                });
-            }
-            if crc32c::crc32c(&bytes) != entry.crc32c {
-                return Err(StatamError::ChecksumMismatch {
-                    context: "lazy dictionary",
-                });
-            }
-            let dict = Arc::new(FileDict::decode(&bytes, sorted)?);
-            let expected_dt = self.meta.expected_dict_data_type(pidx)?;
-            if dict.values().data_type() != expected_dt {
-                return Err(StatamError::Corrupt {
-                    reason: "dictionary data type does not match column schema",
-                });
-            }
-            guard.dicts.insert(pidx, dict);
-        }
-        Ok(())
+        self.ensure_lazy_indexes_loaded(&[], &[], phys_cols)
     }
 
     pub(super) fn get_cached_dict(&self, pidx: usize) -> Option<Arc<FileDict>> {
@@ -815,6 +891,16 @@ impl StatamReader {
         &self,
         pack_id: [u8; 16],
     ) -> Result<Arc<ChunkPackReader>, StatamError> {
+        {
+            let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(p) = guard.packs.get(&pack_id) {
+                return Ok(Arc::clone(p));
+            }
+        }
+        let _init_guard = self
+            .pack_init_lock
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         {
             let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(p) = guard.packs.get(&pack_id) {
