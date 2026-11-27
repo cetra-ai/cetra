@@ -666,4 +666,38 @@ Driven by `perf` profiling on `precision-5770-vm` (`WildChat`, `Nested`, `Random
 - **Tests, Security & Cross-Arch:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (0 warnings), `just check-ee`, `just deny-policy` (bans/licenses/sources ok); **212 unit + 2 `fuzz_replay` tests passing** on local `x86_64` and Apple Silicon M4 `macbook-m4-vm` (`aarch64` NEON, `1.16 s` release).
 - **ASan libFuzzer (`statam_file`, 90s × 4 workers):** **`327,593` total runs**, **`21,239` cov edges**, **`61,215` features**, **`641 MiB` peak RSS**, **0 crashes, 0 OOMs, 0 ASan errors**.
 
+---
+
+## 20. Pass 16: Sparse RLE Take & Selected Decode, Flat FSST Training/Encoding, & Dense Dict Fast Path
+
+Driven by post-Pass-15 `perf` profiles on `wide-1000` (`11.38% unpack_u64`, `4.04% unpack_u32`, `2.39% decode_alp_from_header`, `8.25%` RLE run detection) and `tpch-bi` (`12.94% FsstTable::train`, `10.66% FsstTable::encode_row`, `2.17% small_sort_general`, `3.31% decode_dict_selected`), Pass 16 ships three zero-wire-format-change optimizations:
+
+1. **Pass 16A — Sparse RLE `take` / `selected`, Narrow `selected` Short-Circuit, & Hoisted RLE Run Detection (`codec/numeric.rs`, `codec/mod.rs`):**
+   - Replaced the `Encoding::Rle` fallback in `decode_narrow_column_take` (`Ok(None)` → 8192-bit `Bitmap` + full `decode_inner_flat` + `RleColumn::take`) with direct `decode_rle_block_take` + shared `decode_inner_body_take`: maps `indices → run_indices` monotonically (`partition_point` on backward jumps), validates & short-circuits empty/all-null runs to `Column::Const(Null)` in O(1), and sparsely decodes `ForBitpack`, `DeltaBitpack`, `Alp`, `BitpackBool`, `Plain`, and `Fsst` inner run bodies.
+   - Upgraded `decode_rle_block_selected` and `decode_narrow_column_selected` to validate & short-circuit all-null masks to `Column::Const(Null)`, single-run / single-row selections to zero-allocation `Column::Const(scalar)` (preserving `Selection::Mask` and exact `-0.0`/`NaN`/type metadata), and multi-run sparse RLE selections (`selected_runs * 16 < num_runs`) through `decode_inner_flat_selected`.
+   - Hoisted `flat.nulls()` and `flat.data()` dispatch outside the per-row loops in `compute_flat_runs` / `has_runs_sample_64`, tracking `run_is_null` across consecutive NULL rows.
+2. **Pass 16B — Bit-Identical Flat-Bucket FSST Training & Encoding (`codec/fsst.rs`):**
+   - Replaced `buckets: Vec<Vec<u8>>` + indirect `sym_words`/`sym_masks` lookups with contiguous L1-resident `BucketEntry { word, mask, code, len }` slices (`bucket_offsets: [u16; 257]`), skipped `in_word` loads on empty buckets, and split `encode_row` into a branch-lean `pos + 8 <= len` hot loop plus tail loop.
+   - Reused pre-allocated `count2` and `(u8, u64)` `candidates` maps across all 3 training rounds, added a Round-0 direct byte/pair counting fast path (`sym_count == 0`), precomputed `tok_word`/`tok_len` for 1-shift-1-OR pair combination, and replaced full sorting of `ranked` with `select_nth_unstable_by(FSST_MAX_SYMBOLS)` + `sort_unstable_by` (preserving exact lexicographical tie-breaking via `swap_bytes()`).
+3. **Pass 16C — Dense Small-Dict `decode_dict_selected` In-Place Fast Path (`codec/dict.rs`) & Invalid-UTF-8 Matcher Tests (`reader/eval.rs`, `payload/search.rs`):**
+   - For dense small-dict `ForBitpack` (`selected_count * 16 >= row_count`, `dict.memory_bytes() <= 256 KiB`), unpacks directly into `codes` and validates/masks in place in a single sequential pass, eliminating the intermediate `Vec<(usize, u32)>` allocation and scatter loop.
+
+### 20.1 Pass 16 Results & Verification
+- **File Sizes:** **Bit-identical (`+0.00%`) across all 17 workloads** (`clickbench_100k = 8,411.2 KiB`, `wide_1000_25k = 8,584.5 KiB`, `tpch_lineitem_500k = 11,245.9 KiB`, Gate 1 PASS).
+- **Local CPU Read Speedups (`precision-5770-vm`, `statam_l1`, zero regressions):**
+  - **`BL_take_10`:** `4.28 → 1.36 ms` 1C (**`3.15×`**) / `3.20 → 0.908 ms` 8T (**`3.52×`**)
+  - **`BL_take_50` (1C):** `17.13 → 5.97 ms` (**`2.87×`**)
+  - **`WD_take_20_1000`:** `62.33 → 26.96 ms` 1C (**`2.31×`** — **#1 on 1 core**, `2.25×` faster than Parquet `60.8 ms`, `2.44×` faster than Vortex `65.9 ms`, `2.51×` faster than Lance `67.7 ms`!) / `9.11 → 6.42 ms` 8T (**`1.42×`**)
+  - **`WD_point_all_1000`:** `18.15 → 8.26 ms` 1C (**`2.20×`** — `2.4×` faster than Parquet, `4.1×` faster than Lance, `5.2×` faster than Vortex!) / `3.14 → 1.86 ms` 8T (**`1.69×`**)
+  - **`CB_Q10` (1C):** `0.657 → 0.431 ms` (**`1.52×`**); **`CB_Q24` (1C):** `19.86 → 13.41 ms` (**`1.48×`**); **`CB_wide_point` (1C):** `1.736 → 1.531 ms` (**`1.13×`**); **`RF_pt_0_001pct` (1C):** `0.084 → 0.072 ms` (**`1.17×`**)
+  - **`TP_Q1_scan`:** `14.60 → 13.08 ms` 1C (**`1.12×`** — **#1 on 1 core**, beating Vortex `15.9 ms`, Parquet `20.9 ms`, Lance `29.9 ms`!) / `3.39 → 2.91 ms` 8T (**`1.17×`**); **`TP_take_100`:** `5.37 → 5.08 ms` 1C (**#1 on 1 core**, beating Lance `7.33 ms`!) / `1.72 → 1.58 ms` 8T (**`1.09×`**)
+  - **`NS_scan_full` (8T):** `5.32 → 4.42 ms` (**`1.20×`**); **`NS_take_100` (8T):** `1.64 → 1.44 ms` (**`1.14×`**); **`DL_epoch_local` (8T):** `119.9 → 108.7 ms` (**`1.10×`**)
+- **Write Speedups (`precision-5770-vm`, `statam_l1`):**
+  - **`clickbench_100k` (1C):** `843.5 → 602.9 ms` (**`1.40×`**, `114.8 → 160.6 MiB/s`)
+  - **`wide_1000_25k`:** `712.9 → 522.0 ms` 1C (**`1.37×`**) / `271.2 → 213.7 ms` 8W (**`1.27×`**, `831.2 MiB/s`)
+  - **`tpch_lineitem_500k` (8W):** `349.8 → 308.9 ms` (**`1.13×`**); **`jsonbench_100k` (1C):** `833.7 → 788.6 ms` (**`1.06×`**)
+- **Cold Code Review:** **APPROVED** on first pass (0 Blockers, 0 Majors).
+- **Tests, Security & Cross-Arch:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (0 warnings), `just check-ee`, `just deny-policy` (bans/licenses/sources ok); **219 unit + 2 `fuzz_replay` tests passing** on local `x86_64` and Apple Silicon M4 `macbook-m4-vm` (`aarch64` NEON, `1.11 s` release).
+- **ASan libFuzzer (`statam_file`, 90s × 4 workers):** **`367,751` total runs**, **0 crashes, 0 OOMs, 0 ASan errors**.
+
 **Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Awaiting explicit user go-ahead for Stage 3 (`cetra-storage` integration).

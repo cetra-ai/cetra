@@ -18,10 +18,11 @@ use crate::StatamError;
 use crate::codec::dict::{FileDict, decode_dict_column, decode_dict_take, encode_dict_codes_body};
 use crate::codec::nested::{decode_nested_column, encode_nested_column};
 use crate::codec::numeric::{
-    decode_const_block, decode_inner_flat, decode_narrow_column, decode_narrow_column_selected,
-    decode_narrow_column_take, decode_plain_varlen_selected, encode_narrow_column_with_locality,
-    parse_rle_header, read_optional_nulls, split_optional_null_bytes, try_encode_const_or_null,
-    write_optional_nulls,
+    decode_const_block, decode_inner_flat, decode_inner_flat_selected, decode_inner_take,
+    decode_narrow_column, decode_narrow_column_selected, decode_narrow_column_take,
+    decode_plain_varlen_selected, encode_narrow_column_with_locality, parse_rle_header,
+    read_optional_nulls, split_optional_null_bytes, try_encode_const_or_null,
+    validate_inner_take_body, write_optional_nulls,
 };
 use crate::codec::zonemap::{compute_zone_map, count_col_nulls};
 use crate::format::{
@@ -717,6 +718,9 @@ fn decode_rle_block_selected(
 
     let mut run_mask = Bitmap::new_zeroed(num_runs);
     let mut run_idx = 0usize;
+    let mut selected_runs = 0usize;
+    let mut first_selected_run = 0usize;
+    let mut any_valid_run = false;
     for row in mask.iter_ones() {
         if row >= row_count {
             break;
@@ -724,10 +728,42 @@ fn decode_rle_block_selected(
         while (run_ends[run_idx] as usize) <= row {
             run_idx += 1;
         }
-        let _ = run_mask.set(run_idx, true);
+        if !run_mask.get(run_idx) {
+            let _ = run_mask.set(run_idx, true);
+            if selected_runs == 0 {
+                first_selected_run = run_idx;
+            }
+            selected_runs += 1;
+            if run_nulls.as_ref().is_none_or(|bm| bm.get(run_idx)) {
+                any_valid_run = true;
+            }
+        }
     }
 
-    let selected_runs = run_mask.count_ones();
+    if selected_runs == 0 || !any_valid_run {
+        validate_inner_take_body(inner_body, inner_enc, false, dt, num_runs)?;
+        return Ok(Column::Const {
+            value: ScalarValue::Null(dt.clone()),
+            len: row_count,
+        });
+    }
+
+    if selected_runs == 1 {
+        let single = decode_inner_take(
+            inner_body,
+            inner_enc,
+            num_runs,
+            run_nulls.as_ref(),
+            dt,
+            &[first_selected_run],
+        )?;
+        let scalar = single.get_scalar(0)?;
+        return Ok(Column::Const {
+            value: scalar,
+            len: row_count,
+        });
+    }
+
     let run_values = match (inner_enc, dt) {
         (Encoding::Fsst, DataType::Utf8) => {
             let (u, n) =
@@ -755,15 +791,11 @@ fn decode_rle_block_selected(
                 run_nulls,
             )?
         }
+        _ if selected_runs.saturating_mul(16) < num_runs => {
+            decode_inner_flat_selected(inner_body, inner_enc, num_runs, dt, run_nulls, &run_mask)?
+        }
         _ => decode_inner_flat(inner_body, inner_enc, num_runs, dt, run_nulls)?,
     };
-
-    if selected_runs == 0 {
-        return Ok(Column::Const {
-            value: ScalarValue::Null(dt.clone()),
-            len: row_count,
-        });
-    }
 
     let rle = RleColumn::try_new(run_values, run_ends)?;
     Ok(Column::Rle(rle))
@@ -4742,5 +4774,536 @@ mod tests {
         );
         sub_raw[null_bytes_len + 1] = 9; // invalid symbol len > 8
         assert!(decode_mini_block_take(&sub_raw, &sub_entry, &DataType::Utf8, None, &[0]).is_err());
+    }
+
+    #[test]
+    fn pass16a_decode_rle_block_take_and_selected_parity_all_inner_encodings() {
+        // 80 runs * 16 rows = 1280 rows so both sparse (`selected_runs * 16 < num_runs`, e.g. 1..4 runs)
+        // and dense (`>= 5` runs) inner-take / inner-selected paths are exercised!
+        let num_runs = 80usize;
+        let run_len = 16usize;
+        let n = num_runs * run_len;
+        let run_ends: Vec<u32> = (1..=num_runs).map(|k| (k * run_len) as u32).collect();
+        // ~50% null runs (even runs are null, odd runs valid; plus run 0 null, run 1 valid).
+        let run_nulls = Bitmap::from_bools(&(0..num_runs).map(|r| r % 2 == 1).collect::<Vec<_>>());
+
+        let assert_rle_case = |label: &str,
+                               dt: &DataType,
+                               run_values: FlatColumn,
+                               profile: WriteProfile,
+                               expected_inner_enc: Encoding| {
+            let rle_col = Column::Rle(RleColumn::try_new(run_values, run_ends.clone()).unwrap());
+            let enc = encode_mini_block(&rle_col, dt, profile, None).unwrap();
+            assert_eq!(enc.encoding, Encoding::Rle, "{label}: must encode as Rle");
+            let (entry, raw) = frame_raw_body(&enc, n);
+            let hdr = parse_rle_header(&raw, n, entry.block_flags).unwrap();
+            assert_eq!(
+                hdr.inner_enc, expected_inner_enc,
+                "{label}: unexpected RLE inner_enc"
+            );
+
+            let full = decode_mini_block(&raw, &entry, dt, None).unwrap();
+            let full_flat = full.materialize(None).unwrap();
+
+            // 1. decode_rle_block_take (via decode_mini_block_take & direct):
+            //    - empty indices
+            //    - all-null taken rows (hits only even runs) -> Column::Const(Null)
+            //    - single valid row
+            //    - sparse sorted mixed null/valid (3 runs: 3*16 < 80)
+            //    - unsorted with duplicates across boundaries
+            //    - dense taken rows (every run hit: 80*16 >= 80)
+            let empty_idx: Vec<usize> = vec![];
+            let all_null_idx = vec![0usize, 15, 32, 64, n - 17]; // runs 0, 0, 2, 4, 78 (all even -> null)
+            let single_valid_idx = vec![20usize]; // run 1 (valid)
+            let sparse_mixed_idx = vec![0usize, 20, 35, 50, 700]; // runs 0(N), 1(V), 2(N), 3(V), 43(V)
+            let unsorted_dup_idx = vec![n - 1, 0, 20, n - 1, 50, 16, 15, 0, 700, 20];
+            let dense_idx: Vec<usize> =
+                (0..num_runs).map(|r| r * run_len + (r % run_len)).collect();
+
+            for (case_name, indices) in [
+                ("empty", &empty_idx),
+                ("all_null", &all_null_idx),
+                ("single_valid", &single_valid_idx),
+                ("sparse_mixed", &sparse_mixed_idx),
+                ("unsorted_dup", &unsorted_dup_idx),
+                ("dense", &dense_idx),
+            ] {
+                let taken = decode_mini_block_take(&raw, &entry, dt, None, indices).unwrap();
+                let direct = numeric::decode_rle_block_take(&raw, &entry, dt, indices).unwrap();
+                assert_eq!(taken.len(), indices.len(), "{label}/{case_name}");
+                assert_eq!(direct.len(), indices.len(), "{label}/{case_name}");
+                if case_name == "all_null" {
+                    assert!(
+                        matches!(taken, Column::Const { ref value, len } if value.is_null() && len == indices.len()),
+                        "{label}: all-null take must short-circuit to Column::Const(Null)"
+                    );
+                }
+                let taken_flat = taken.materialize(None).unwrap();
+                let direct_flat = direct.materialize(None).unwrap();
+                assert!(taken_flat.semantic_eq(&direct_flat), "{label}/{case_name}");
+                for (pos, &row) in indices.iter().enumerate() {
+                    assert_eq!(
+                        taken_flat.is_null(pos),
+                        full_flat.is_null(row),
+                        "{label}/{case_name} row {row}"
+                    );
+                    if !full_flat.is_null(row) {
+                        assert_eq!(
+                            taken_flat.get_scalar(pos).unwrap(),
+                            full_flat.get_scalar(row).unwrap(),
+                            "{label}/{case_name} row {row}"
+                        );
+                    }
+                }
+            }
+
+            // 2. decode_rle_block_selected:
+            //    - empty mask -> Column::Const(Null)
+            //    - all-null active rows (multiple even runs) -> Column::Const(Null)
+            //    - single non-null run (multiple rows inside run 1) -> Column::Const(scalar)
+            //    - multi-selected-run sparse (3 runs: 3*16 < 80) -> Column::Rle
+            let empty_mask = Bitmap::new_zeroed(n);
+            let sel_empty =
+                decode_mini_block_selected(&raw, &entry, dt, None, &empty_mask).unwrap();
+            assert!(
+                matches!(sel_empty, Column::Const { ref value, len } if value.is_null() && len == n),
+                "{label}: empty mask must return Const(Null)"
+            );
+
+            let mut null_runs_mask = Bitmap::new_zeroed(n);
+            for &r in &all_null_idx {
+                let _ = null_runs_mask.set(r, true);
+            }
+            let sel_all_null =
+                decode_mini_block_selected(&raw, &entry, dt, None, &null_runs_mask).unwrap();
+            assert!(
+                matches!(sel_all_null, Column::Const { ref value, len } if value.is_null() && len == n),
+                "{label}: all-null selected runs must return Const(Null)"
+            );
+
+            let mut one_run_mask = Bitmap::new_zeroed(n);
+            for r in [16usize, 20, 31] {
+                let _ = one_run_mask.set(r, true); // all in run 1
+            }
+            let sel_one_run =
+                decode_mini_block_selected(&raw, &entry, dt, None, &one_run_mask).unwrap();
+            assert!(
+                matches!(sel_one_run, Column::Const { ref value, len } if !value.is_null() && len == n),
+                "{label}: single selected valid run must short-circuit to Column::Const(scalar)"
+            );
+            assert_sparse_scalar_parity(&rle_col, &full, &sel_one_run, &one_run_mask);
+
+            let mut multi_sparse_mask = Bitmap::new_zeroed(n);
+            for &r in &[0usize, 20, 50, 700] {
+                let _ = multi_sparse_mask.set(r, true);
+            }
+            let sel_multi =
+                decode_mini_block_selected(&raw, &entry, dt, None, &multi_sparse_mask).unwrap();
+            assert_sparse_scalar_parity(&rle_col, &full, &sel_multi, &multi_sparse_mask);
+
+            // 3. Corrupt-input rejection even when all taken rows are null or empty:
+            //    truncate inner_body by 1 byte -> must return Err!
+            let trunc = &raw[..raw.len() - 1];
+            assert!(
+                decode_mini_block_take(trunc, &entry, dt, None, &all_null_idx).is_err(),
+                "{label}: truncated inner body must fail even on all-null take"
+            );
+            assert!(
+                decode_mini_block_take(trunc, &entry, dt, None, &empty_idx).is_err(),
+                "{label}: truncated inner body must fail on empty take"
+            );
+            assert!(
+                decode_mini_block_selected(trunc, &entry, dt, None, &null_runs_mask).is_err(),
+                "{label}: truncated inner body must fail on all-null selected"
+            );
+            assert!(
+                decode_mini_block_selected(trunc, &entry, dt, None, &one_run_mask).is_err(),
+                "{label}: truncated inner body must fail on single-run selected"
+            );
+        };
+
+        // Bool -> BitpackBool
+        let bool_vals = FlatColumn::try_new(
+            FlatData::Bool(Bitmap::from_bools(
+                &(0..num_runs).map(|r| (r / 2) % 2 == 0).collect::<Vec<_>>(),
+            )),
+            Some(run_nulls.clone()),
+        )
+        .unwrap();
+        assert_rle_case(
+            "Bool",
+            &DataType::Bool,
+            bool_vals,
+            WriteProfile::L0Fast,
+            Encoding::BitpackBool,
+        );
+
+        // I64 -> ForBitpack
+        let i64_vals = FlatColumn::try_new(
+            FlatData::I64((0..num_runs).map(|r| 1000 + (r as i64) * 7).collect()),
+            Some(run_nulls.clone()),
+        )
+        .unwrap();
+        assert_rle_case(
+            "I64",
+            &DataType::I64,
+            i64_vals,
+            WriteProfile::L0Fast,
+            Encoding::ForBitpack,
+        );
+
+        // TimestampNs -> ForBitpack
+        let ts_dt = DataType::TimestampNs { utc: true };
+        let ts_vals = FlatColumn::try_new(
+            FlatData::TimestampNs {
+                values: (0..num_runs)
+                    .map(|r| 1_700_000_000_000_000_000i64 + (r as i64) * 1_000)
+                    .collect(),
+                utc: true,
+            },
+            Some(run_nulls.clone()),
+        )
+        .unwrap();
+        assert_rle_case(
+            "TimestampNs",
+            &ts_dt,
+            ts_vals,
+            WriteProfile::L0Fast,
+            Encoding::ForBitpack,
+        );
+
+        // Date -> ForBitpack
+        let date_vals = FlatColumn::try_new(
+            FlatData::Date((0..num_runs).map(|r| 19_000 + r as i32).collect()),
+            Some(run_nulls.clone()),
+        )
+        .unwrap();
+        assert_rle_case(
+            "Date",
+            &DataType::Date,
+            date_vals,
+            WriteProfile::L0Fast,
+            Encoding::ForBitpack,
+        );
+
+        // Decimal128 (narrow range -> ForBitpack, wide range -> Plain)
+        let dec_dt = DataType::Decimal128 {
+            precision: 38,
+            scale: 6,
+        };
+        let dec_for = FlatColumn::try_new(
+            FlatData::Decimal128 {
+                values: (0..num_runs)
+                    .map(|r| 500_000i128 + r as i128 * 13)
+                    .collect(),
+                precision: 38,
+                scale: 6,
+            },
+            Some(run_nulls.clone()),
+        )
+        .unwrap();
+        assert_rle_case(
+            "Decimal128_For",
+            &dec_dt,
+            dec_for,
+            WriteProfile::L0Fast,
+            Encoding::ForBitpack,
+        );
+
+        let dec_plain = FlatColumn::try_new(
+            FlatData::Decimal128 {
+                values: (0..num_runs)
+                    .map(|r| {
+                        if r % 4 == 1 {
+                            i128::MIN / 4
+                        } else {
+                            i128::MAX / 4
+                        }
+                    })
+                    .collect(),
+                precision: 38,
+                scale: 6,
+            },
+            Some(run_nulls.clone()),
+        )
+        .unwrap();
+        assert_rle_case(
+            "Decimal128_Plain",
+            &dec_dt,
+            dec_plain,
+            WriteProfile::L0Fast,
+            Encoding::Plain,
+        );
+
+        // F64 -> Plain (L0Fast) & Alp (L1Compact)
+        let f64_alp_vals: Vec<f64> = (0..num_runs)
+            .map(|r| {
+                if r == 43 {
+                    std::f64::consts::PI
+                } else {
+                    (r as f64) * 0.25
+                }
+            })
+            .collect();
+        let f64_flat =
+            FlatColumn::try_new(FlatData::F64(f64_alp_vals), Some(run_nulls.clone())).unwrap();
+        assert_rle_case(
+            "F64_Plain",
+            &DataType::F64,
+            f64_flat.clone(),
+            WriteProfile::L0Fast,
+            Encoding::Plain,
+        );
+        assert_rle_case(
+            "F64_Alp",
+            &DataType::F64,
+            f64_flat,
+            WriteProfile::L1Compact,
+            Encoding::Alp,
+        );
+
+        // Interval, FixedBytes8, FixedBytes16 -> Plain
+        let iv_vals = FlatColumn::try_new(
+            FlatData::Interval(
+                (0..num_runs)
+                    .map(|r| Interval {
+                        months: r as i32,
+                        days: (r * 2) as i32,
+                        nanos: (r as i64) * 1000,
+                    })
+                    .collect(),
+            ),
+            Some(run_nulls.clone()),
+        )
+        .unwrap();
+        assert_rle_case(
+            "Interval",
+            &DataType::Interval,
+            iv_vals,
+            WriteProfile::L0Fast,
+            Encoding::Plain,
+        );
+
+        let fb8_vals = FlatColumn::try_new(
+            FlatData::FixedBytes8((0..num_runs).map(|r| (r as u64).to_le_bytes()).collect()),
+            Some(run_nulls.clone()),
+        )
+        .unwrap();
+        assert_rle_case(
+            "FixedBytes8",
+            &DataType::FixedBytes8,
+            fb8_vals,
+            WriteProfile::L0Fast,
+            Encoding::Plain,
+        );
+
+        let fb16_vals = FlatColumn::try_new(
+            FlatData::FixedBytes16((0..num_runs).map(|r| (r as u128).to_le_bytes()).collect()),
+            Some(run_nulls.clone()),
+        )
+        .unwrap();
+        assert_rle_case(
+            "FixedBytes16",
+            &DataType::FixedBytes16,
+            fb16_vals,
+            WriteProfile::L0Fast,
+            Encoding::Plain,
+        );
+
+        // Utf8 & Binary -> Plain (L0Fast) & Fsst (L1Compact)
+        let strs: Vec<String> = (0..num_runs)
+            .map(|r| {
+                format!("https://observability.cetra.sh/api/v1/spans/service_{r:03}/endpoint_ok")
+            })
+            .collect();
+        let utf8_flat = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(strs.iter().map(String::as_str)).unwrap()),
+            Some(run_nulls.clone()),
+        )
+        .unwrap();
+        assert_rle_case(
+            "Utf8_Plain",
+            &DataType::Utf8,
+            utf8_flat.clone(),
+            WriteProfile::L0Fast,
+            Encoding::Plain,
+        );
+        assert_rle_case(
+            "Utf8_Fsst",
+            &DataType::Utf8,
+            utf8_flat,
+            WriteProfile::L1Compact,
+            Encoding::Fsst,
+        );
+
+        let bins: Vec<Vec<u8>> = strs.iter().map(|s| s.as_bytes().to_vec()).collect();
+        let bin_flat = FlatColumn::try_new(
+            FlatData::Binary(BinaryData::try_from_slices(bins.iter().map(Vec::as_slice)).unwrap()),
+            Some(run_nulls),
+        )
+        .unwrap();
+        assert_rle_case(
+            "Binary_Plain",
+            &DataType::Binary,
+            bin_flat.clone(),
+            WriteProfile::L0Fast,
+            Encoding::Plain,
+        );
+        assert_rle_case(
+            "Binary_Fsst",
+            &DataType::Binary,
+            bin_flat,
+            WriteProfile::L1Compact,
+            Encoding::Fsst,
+        );
+    }
+
+    #[test]
+    fn pass16a_decode_narrow_column_selected_all_null_and_single_row_const_short_circuit() {
+        let n = 256usize;
+        let nulls = Bitmap::from_bools(&(0..n).map(|i| i % 4 != 0).collect::<Vec<_>>());
+        // Row 0, 4, 8 are NULL; Row 1 is valid.
+        let mut all_null_mask = Bitmap::new_zeroed(n);
+        for r in [0usize, 4, 8] {
+            let _ = all_null_mask.set(r, true);
+        }
+        let mut single_valid_mask = Bitmap::new_zeroed(n);
+        let _ = single_valid_mask.set(1, true);
+        let empty_mask = Bitmap::new_zeroed(n);
+
+        let check_case = |label: &str,
+                          col: &Column,
+                          dt: &DataType,
+                          profile: WriteProfile,
+                          want_enc: Encoding| {
+            let enc = encode_mini_block(col, dt, profile, None).unwrap();
+            assert_eq!(enc.encoding, want_enc, "{label}");
+            let (entry, raw) = frame_raw_body(&enc, n);
+            let full = decode_mini_block(&raw, &entry, dt, None).unwrap();
+
+            for (mname, mask) in [("empty", &empty_mask), ("all_null", &all_null_mask)] {
+                let sel = decode_narrow_column_selected(&raw, &entry, dt, mask).unwrap();
+                assert!(
+                    matches!(sel, Column::Const { ref value, len } if value.is_null() && len == n),
+                    "{label}/{mname}: must short-circuit to Column::Const(Null)"
+                );
+                assert_sparse_scalar_parity(col, &full, &sel, mask);
+            }
+
+            let sel_one =
+                decode_narrow_column_selected(&raw, &entry, dt, &single_valid_mask).unwrap();
+            assert!(
+                matches!(sel_one, Column::Const { ref value, len } if !value.is_null() && len == n),
+                "{label}/single_valid: must short-circuit to Column::Const(scalar)"
+            );
+            assert_sparse_scalar_parity(col, &full, &sel_one, &single_valid_mask);
+
+            // Corrupt truncated body must still be rejected on empty, all-null, and single-row masks!
+            let trunc = &raw[..raw.len() - 1];
+            for (mname, mask) in [
+                ("empty", &empty_mask),
+                ("all_null", &all_null_mask),
+                ("single_valid", &single_valid_mask),
+            ] {
+                assert!(
+                    decode_narrow_column_selected(trunc, &entry, dt, mask).is_err(),
+                    "{label}/{mname}: truncated body must fail"
+                );
+            }
+        };
+
+        // 1. BitpackBool
+        let bool_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Bool(Bitmap::from_bools(
+                    &(0..n).map(|i| i % 3 == 1).collect::<Vec<_>>(),
+                )),
+                Some(nulls.clone()),
+            )
+            .unwrap(),
+        );
+        check_case(
+            "BitpackBool",
+            &bool_col,
+            &DataType::Bool,
+            WriteProfile::L0Fast,
+            Encoding::BitpackBool,
+        );
+
+        // 2. ForBitpack (non-monotonic I64)
+        let for_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64((0..n).map(|i| 500 + ((i * 37) % 100) as i64).collect()),
+                Some(nulls.clone()),
+            )
+            .unwrap(),
+        );
+        check_case(
+            "ForBitpack",
+            &for_col,
+            &DataType::I64,
+            WriteProfile::L0Fast,
+            Encoding::ForBitpack,
+        );
+
+        // 3. DeltaBitpack (monotonic I64)
+        let delta_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64((0..n).map(|i| 10_000 + (i as i64) * 5).collect()),
+                Some(nulls.clone()),
+            )
+            .unwrap(),
+        );
+        check_case(
+            "DeltaBitpack",
+            &delta_col,
+            &DataType::I64,
+            WriteProfile::L0Fast,
+            Encoding::DeltaBitpack,
+        );
+
+        // 4. Plain (F64 in L0Fast) & Alp (F64 in L1Compact)
+        let f64_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::F64((0..n).map(|i| ((i % 53) as f64) * 0.125).collect()),
+                Some(nulls.clone()),
+            )
+            .unwrap(),
+        );
+        check_case(
+            "Plain_F64",
+            &f64_col,
+            &DataType::F64,
+            WriteProfile::L0Fast,
+            Encoding::Plain,
+        );
+        check_case(
+            "Alp_F64",
+            &f64_col,
+            &DataType::F64,
+            WriteProfile::L1Compact,
+            Encoding::Alp,
+        );
+
+        // 5. Fsst (Utf8 in L1Compact)
+        let fsst_strs: Vec<String> = (0..n)
+            .map(|i| format!("https://observability.cetra.sh/api/v1/spans/item_{i:04}/status=ok"))
+            .collect();
+        let fsst_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(fsst_strs.iter().map(String::as_str)).unwrap(),
+                ),
+                Some(nulls),
+            )
+            .unwrap(),
+        );
+        check_case(
+            "Fsst_Utf8",
+            &fsst_col,
+            &DataType::Utf8,
+            WriteProfile::L1Compact,
+            Encoding::Fsst,
+        );
     }
 }

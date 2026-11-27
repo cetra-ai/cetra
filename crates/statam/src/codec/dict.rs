@@ -1187,6 +1187,74 @@ pub fn decode_dict_selected(
 
     let selected_count = mask.count_ones();
     let dict_len = dict.len();
+
+    // Dense small-dict ForBitpack fast path: unpack directly into `codes` and validate/mask
+    // in a single cache-sequential pass, avoiding `selected_pairs` allocation and scatter.
+    if sub_enc == 0
+        && selected_count > 0
+        && selected_count.saturating_mul(16) >= row_count
+        && dict.memory_bytes() <= DICT_PASSTHROUGH_MAX_BYTES
+    {
+        if src.len() < 6 {
+            return Err(StatamError::Corrupt {
+                reason: "truncated dict ForBitpack header",
+            });
+        }
+        let base = u32::from_le_bytes([src[1], src[2], src[3], src[4]]);
+        let bw = src[5];
+        if bw > 32 {
+            return Err(StatamError::Corrupt {
+                reason: "invalid u32 bit_width",
+            });
+        }
+        let needed = packed_bytes_len(row_count, bw)?;
+        if src.len() != 6 + needed {
+            return Err(StatamError::Corrupt {
+                reason: "dict ForBitpack length mismatch",
+            });
+        }
+        let mut codes = Vec::with_capacity(row_count);
+        unpack_u32(&src[6..], row_count, bw, &mut codes)?;
+        let mut out_nulls = Bitmap::new_zeroed(row_count);
+        let mut any_valid = false;
+        for (row, slot) in codes.iter_mut().enumerate() {
+            if mask.get(row) && nulls.as_ref().is_none_or(|bm| bm.get(row)) {
+                let code = base.checked_add(*slot).ok_or(StatamError::Corrupt {
+                    reason: "dict code overflow",
+                })?;
+                if (code as usize) >= dict_len {
+                    return Err(StatamError::Corrupt {
+                        reason: "dict code out of bounds",
+                    });
+                }
+                *slot = code;
+                let _ = out_nulls.set(row, true);
+                any_valid = true;
+            } else {
+                *slot = 0;
+            }
+        }
+        if !any_valid {
+            return Ok(Column::Const {
+                value: ScalarValue::Null(dict.values().data_type()),
+                len: row_count,
+            });
+        }
+        let nulls_opt = if out_nulls.all_ones() {
+            None
+        } else {
+            Some(out_nulls)
+        };
+        let _ = dict_logical_materialized_bytes(
+            dict.values(),
+            &codes,
+            nulls_opt.as_ref(),
+            MAX_BLOCK_RAW_BYTES,
+        )?;
+        let dc = DictColumn::try_new(dict.values().clone(), codes, nulls_opt)?;
+        return Ok(Column::Dict(dc));
+    }
+
     let mut selected_pairs: Vec<(usize, u32)> = Vec::with_capacity(selected_count);
 
     match sub_enc {
@@ -2100,6 +2168,75 @@ mod tests {
             decode_dict_codes_body(&bad_rle_bw, 4, 2, None),
             Err(StatamError::Corrupt {
                 reason: "invalid u32 bit_width",
+            })
+        ));
+    }
+
+    #[test]
+    fn pass16c_decode_dict_selected_dense_small_dict_fast_path_parity_and_corrupt_oob() {
+        let row_count = 256usize;
+        let dict_vals: Vec<String> = (0..12).map(|k| format!("dense-dict-{k:02}")).collect();
+        let dict = FileDict::from_flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(dict_vals.iter().map(String::as_str)).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+            true,
+        )
+        .unwrap();
+        assert!(dict.memory_bytes() <= DICT_PASSTHROUGH_MAX_BYTES);
+
+        let codes: Vec<u32> = (0..row_count).map(|i| (i % 12) as u32).collect();
+        let valid_bits: Vec<bool> = (0..row_count).map(|i| i % 5 != 0).collect();
+        let nulls = Bitmap::from_bools(&valid_bits);
+        let all_nulls = Bitmap::new_zeroed(row_count);
+        let body = encode_dict_codes_body(&codes, Some(&nulls)).unwrap();
+        assert_eq!(body[0], 0); // ForBitpack
+
+        // Dense non-all-ones mask: 50% selected (`128 * 16 >= 256`, `!mask.all_ones()`).
+        let dense_mask =
+            Bitmap::from_bools(&(0..row_count).map(|i| i % 2 == 0).collect::<Vec<_>>());
+        assert!(!dense_mask.all_ones());
+        assert!(dense_mask.count_ones() * 16 >= row_count);
+
+        for row_nulls in [None, Some(&nulls), Some(&all_nulls)] {
+            let full = decode_dict_column(&body, row_count, row_nulls.cloned(), &dict)
+                .unwrap()
+                .materialize(None)
+                .unwrap();
+            let sel_col =
+                decode_dict_selected(&body, row_count, row_nulls.cloned(), &dict, &dense_mask)
+                    .unwrap();
+            if row_nulls == Some(&all_nulls) {
+                assert!(matches!(sel_col, Column::Const { .. }));
+            } else {
+                assert!(matches!(sel_col, Column::Dict(_)));
+            }
+            let sel = sel_col.materialize(None).unwrap();
+            for r in 0..row_count {
+                if dense_mask.get(r) {
+                    assert_eq!(sel.is_null(r), full.is_null(r), "row {r}");
+                    if !full.is_null(r) {
+                        assert_eq!(sel.get_scalar(r).unwrap(), full.get_scalar(r).unwrap());
+                    }
+                } else {
+                    assert!(sel.is_null(r), "unselected row {r} must be null");
+                }
+            }
+        }
+
+        // Corrupt out-of-bounds code on a selected row must be rejected by the dense fast path.
+        let mut oob_codes = codes;
+        oob_codes[42] = 99; // row 42 is selected (even) and valid (42 % 5 != 0)
+        let oob_body = encode_dict_codes_body(&oob_codes, Some(&nulls)).unwrap();
+        assert_eq!(oob_body[0], 0);
+        assert!(matches!(
+            decode_dict_selected(&oob_body, row_count, Some(nulls), &dict, &dense_mask),
+            Err(StatamError::Corrupt {
+                reason: "dict code out of bounds",
             })
         ));
     }

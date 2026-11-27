@@ -3068,6 +3068,39 @@ mod tests {
         assert!(trailing_i.matches("xxabci\u{0307}yy".as_bytes()));
     }
 
+    #[test]
+    fn pass16c_needle_matcher_invalid_utf8_scratch_reuse_does_not_poison() {
+        // UnicodeIlike WITH ascii_anchor: valid match -> invalid non-match hitting anchor ->
+        // valid non-match -> valid match.
+        let mut alien = NeedleMatcher::new("Alienación".as_bytes(), true);
+        assert!(alien.matches("prefix ALIENACIÓN suffix".as_bytes()));
+        let invalid_non_match = b"\xFF\xFEalienac\x80\xC3no-accent";
+        assert!(!alien.matches(invalid_non_match));
+        assert!(!alien.matches("alienacion without accent".as_bytes()));
+        assert!(alien.matches("un ALIENACIÓN nuevo".as_bytes()));
+
+        // UnicodeIlike WITHOUT ascii_anchor: valid match -> invalid non-match ->
+        // invalid match -> valid non-match -> valid match.
+        let mut sigma = NeedleMatcher::new("ς".as_bytes(), true);
+        assert!(sigma.matches("ΟΔΥΣΣΕΥΣ".as_bytes()));
+        let invalid_no_sigma = b"\xFF\xFEhello\x80world\xC3";
+        assert!(!sigma.matches(invalid_no_sigma));
+        let mut invalid_with_sigma = vec![0xFF, 0xFE];
+        invalid_with_sigma.extend_from_slice("ΟΔΥΣΣΕΥΣ".as_bytes());
+        invalid_with_sigma.push(0x80);
+        assert!(sigma.matches(&invalid_with_sigma));
+        assert!(!sigma.matches("αβγδε".as_bytes()));
+        assert!(sigma.matches("οδυσσευς".as_bytes()));
+
+        // AsciiIlike: valid match -> invalid UTF-8 non-match -> invalid UTF-8 match -> valid non-match.
+        let mut ascii = NeedleMatcher::new(b"Needle", true);
+        assert!(ascii.matches(b"haystack NEEDLE here"));
+        assert!(!ascii.matches(b"\xFF\xFEnot_here\x80"));
+        assert!(ascii.matches(b"\xFF\xFEhas_NeEdLe\x80"));
+        assert!(!ascii.matches(b"clean ascii without match"));
+        assert!(ascii.matches(b"needle"));
+    }
+
     proptest::proptest! {
         #[test]
         fn pass14a_proptest_unicode_lowercase_bytes_parity(
