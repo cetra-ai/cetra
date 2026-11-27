@@ -1633,3 +1633,625 @@ fn m18_m23_rejects_empty_schema_duplicate_sort_cols_and_unifies_l1_payload_codec
         "secondary bloom must spill when raw Hot Tail + POSTSCRIPT_LEN would exceed MAX_HOT_TAIL_BYTES"
     );
 }
+
+#[test]
+fn pass21_non_payload_compressed_rg_sizing() {
+    use cetra_column::{Bitmap, DictColumn, EventsData, LinksData, MapData, RleColumn};
+
+    let make_random_ascii = |seed: u64, len: usize| -> String {
+        let mut s = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut out = String::with_capacity(len);
+        for _ in 0..len {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            out.push((b'!' + (s % 94) as u8) as char);
+        }
+        out
+    };
+
+    let write_and_verify =
+        |schema: &Arc<Schema>, batches: &[Batch], opts: WriteOptions| -> (WriteStats, Vec<Batch>) {
+            let mut out = Vec::new();
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut out),
+                Arc::clone(schema),
+                opts,
+                None,
+            )
+            .unwrap();
+            for b in batches {
+                w.write_batch(b).unwrap();
+            }
+            let stats = w.finish().unwrap();
+            let reader = StatamReader::open(Arc::new(SliceReader::new(out)), None).unwrap();
+            reader.verify_full().unwrap();
+            let scanned = reader.scan(&ScanRequest::default()).unwrap();
+            (stats, scanned)
+        };
+
+    let collect_all_scalars = |batches: &[Batch], col_idx: usize| -> Vec<ScalarValue> {
+        let mut out = Vec::new();
+        for b in batches {
+            let c = b.compact(None).unwrap();
+            let col = c.column(col_idx).unwrap();
+            for r in 0..c.num_rows() {
+                out.push(col.get_scalar(r).unwrap());
+            }
+        }
+        out
+    };
+
+    // 1. Compressible non-payload single batch (1.6 MiB raw repetitive Utf8 + 95%-NULL I64)
+    //    under max_row_group_bytes = 256 KiB stays 1 RG (L0Fast & L1Compact) and round-trips bit-exact.
+    let comp_schema = Schema::try_new_arc(vec![
+        Field::new("text", DataType::Utf8, false),
+        Field::new("sparse_num", DataType::I64, true),
+    ])
+    .unwrap();
+    let n_comp = 200usize;
+    let comp_texts: Vec<String> = (0..n_comp)
+        .map(|i| {
+            format!(
+                "row-{i:04}-{}",
+                "COMPRESSIBLE_NON_PAYLOAD_PATTERN_".repeat(245)
+            )
+        })
+        .collect();
+    let mut sparse_vals = vec![0i64; n_comp];
+    let mut sparse_bm = Bitmap::new_zeroed(n_comp);
+    for i in (0..n_comp).step_by(20) {
+        sparse_vals[i] = (i as i64) * 17 + 3;
+        let _ = sparse_bm.set(i, true);
+    }
+    let comp_batch = Batch::try_new_all(
+        Arc::clone(&comp_schema),
+        vec![
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(comp_texts.iter().map(String::as_str)).unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+            Column::Flat(FlatColumn::try_new(FlatData::I64(sparse_vals), Some(sparse_bm)).unwrap()),
+        ],
+        n_comp,
+    )
+    .unwrap();
+    assert!(
+        estimate_column_bytes(comp_batch.column(0).unwrap()) > 1_500_000,
+        "expected > 1.5 MiB raw repetitive Utf8"
+    );
+
+    let expected_comp_texts = collect_all_scalars(std::slice::from_ref(&comp_batch), 0);
+    let expected_comp_nums = collect_all_scalars(std::slice::from_ref(&comp_batch), 1);
+
+    for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
+        let mut opts = WriteOptions::for_table(TableKind::Generic, profile);
+        opts.max_row_group_bytes = 256 * 1024;
+        let (stats, scanned) =
+            write_and_verify(&comp_schema, std::slice::from_ref(&comp_batch), opts);
+        assert_eq!(
+            stats.num_row_groups, 1,
+            "compressible 1.6 MiB non-payload single batch must stay 1 RG ({profile:?})"
+        );
+        assert_eq!(collect_all_scalars(&scanned, 0), expected_comp_texts);
+        assert_eq!(collect_all_scalars(&scanned, 1), expected_comp_nums);
+    }
+
+    // 2. Compressible non-payload streamed small batches (20 x 80 KiB) stays 1 RG.
+    let small_batches: Vec<Batch> = (0..20)
+        .map(|chunk| comp_batch.slice(chunk * 10, 10).unwrap())
+        .collect();
+    for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
+        let mut opts = WriteOptions::for_table(TableKind::Generic, profile);
+        opts.max_row_group_bytes = 256 * 1024;
+        let (stats, scanned) = write_and_verify(&comp_schema, &small_batches, opts);
+        assert_eq!(
+            stats.num_row_groups, 1,
+            "compressible 1.6 MiB streamed as 20 x 80 KiB must stay 1 RG ({profile:?})"
+        );
+        assert_eq!(collect_all_scalars(&scanned, 0), expected_comp_texts);
+        assert_eq!(collect_all_scalars(&scanned, 1), expected_comp_nums);
+    }
+
+    // 3. Sparse 95%-NULL wide micro-batches (B3 + M2): 50 nullable I64 columns at 95% NULL
+    //    streamed in 250 x 100-row micro-batches (< 1024 B/col/batch, ~10 MiB raw) stays 1 RG!
+    let wide_cols = 50usize;
+    let wide_schema = Schema::try_new_arc(
+        (0..wide_cols)
+            .map(|c| Field::new(format!("c_{c:02}"), DataType::I64, true))
+            .collect(),
+    )
+    .unwrap();
+    let num_micro_batches = 250usize;
+    let rows_per_micro = 100usize;
+    let mut micro_batches = Vec::with_capacity(num_micro_batches);
+    for b_idx in 0..num_micro_batches {
+        let mut cols = Vec::with_capacity(wide_cols);
+        for c_idx in 0..wide_cols {
+            let mut vals = vec![0i64; rows_per_micro];
+            let mut bm = Bitmap::new_zeroed(rows_per_micro);
+            for (r, slot) in vals.iter_mut().enumerate() {
+                let global_r = b_idx * rows_per_micro + r;
+                if (global_r + c_idx).is_multiple_of(20) {
+                    *slot = (global_r as i64) * 100 + (c_idx as i64);
+                    let _ = bm.set(r, true);
+                }
+            }
+            cols.push(Column::Flat(
+                FlatColumn::try_new(FlatData::I64(vals), Some(bm)).unwrap(),
+            ));
+        }
+        micro_batches
+            .push(Batch::try_new_all(Arc::clone(&wide_schema), cols, rows_per_micro).unwrap());
+    }
+    assert!(
+        estimate_column_bytes(micro_batches[0].column(0).unwrap()) < 1024,
+        "each micro-batch column must be < 1024 B to exercise M2 bypass lowering"
+    );
+    let mut wide_opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L0Fast);
+    wide_opts.max_row_group_bytes = 2 * 1024 * 1024;
+    let (wide_stats, wide_scanned) = write_and_verify(&wide_schema, &micro_batches, wide_opts);
+    assert_eq!(
+        wide_stats.num_row_groups, 1,
+        "250 x 100-row 95%-NULL wide micro-batches (~10 MiB raw) must stay 1 RG"
+    );
+    assert_eq!(
+        wide_scanned.iter().map(Batch::num_rows).sum::<usize>(),
+        num_micro_batches * rows_per_micro
+    );
+    assert_eq!(
+        collect_all_scalars(&wide_scanned, 0),
+        collect_all_scalars(&micro_batches, 0)
+    );
+    assert_eq!(
+        collect_all_scalars(&wide_scanned, wide_cols - 1),
+        collect_all_scalars(&micro_batches, wide_cols - 1)
+    );
+
+    // 4. Incompressible non-payload uniform (1 MiB pseudo-random Utf8 + I64 under 256 KiB cap)
+    //    splits into >= 3 RGs and round-trips bit-exact.
+    let incomp_schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("blob", DataType::Utf8, false),
+    ])
+    .unwrap();
+    let n_incomp = 32usize;
+    let incomp_strings: Vec<String> = (0..n_incomp)
+        .map(|i| make_random_ascii(1000 + i as u64, 32 * 1024))
+        .collect();
+    let incomp_ids: Vec<i64> = (0..n_incomp)
+        .map(|i| ((i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)) as i64)
+        .collect();
+    let incomp_batch = Batch::try_new_all(
+        Arc::clone(&incomp_schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(incomp_ids), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(incomp_strings.iter().map(String::as_str))
+                            .unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        n_incomp,
+    )
+    .unwrap();
+    let exp_incomp_blobs = collect_all_scalars(std::slice::from_ref(&incomp_batch), 1);
+    for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
+        let mut opts = WriteOptions::for_table(TableKind::Generic, profile);
+        opts.max_row_group_bytes = 256 * 1024;
+        let (stats, scanned) =
+            write_and_verify(&incomp_schema, std::slice::from_ref(&incomp_batch), opts);
+        assert!(
+            stats.num_row_groups >= 3,
+            "1 MiB incompressible non-payload must split into >= 3 RGs ({profile:?}), got {}",
+            stats.num_row_groups
+        );
+        assert_eq!(collect_all_scalars(&scanned, 1), exp_incomp_blobs);
+    }
+
+    // 5. Skewed incompressible non-payload: 400 tiny 16 B strings + 4 x 200 KiB giant random strings
+    //    under 256 KiB cap splits into >= 3 RGs and round-trips bit-exact.
+    let mut skewed_strs = Vec::with_capacity(404);
+    for i in 0..404usize {
+        if i == 80 || i == 180 || i == 280 || i == 380 {
+            skewed_strs.push(make_random_ascii(5000 + i as u64, 200 * 1024));
+        } else {
+            skewed_strs.push(format!("tiny_{i:011}"));
+        }
+    }
+    let skewed_batch = Batch::try_new_all(
+        Arc::clone(&incomp_schema),
+        vec![
+            Column::Flat(
+                FlatColumn::try_new(FlatData::I64((0..skewed_strs.len() as i64).collect()), None)
+                    .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(skewed_strs.iter().map(String::as_str)).unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        skewed_strs.len(),
+    )
+    .unwrap();
+    let exp_skewed_blobs = collect_all_scalars(std::slice::from_ref(&skewed_batch), 1);
+    let mut skew_opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L0Fast);
+    skew_opts.max_row_group_bytes = 256 * 1024;
+    let (skew_stats, skew_scanned) = write_and_verify(
+        &incomp_schema,
+        std::slice::from_ref(&skewed_batch),
+        skew_opts,
+    );
+    assert!(
+        skew_stats.num_row_groups >= 3,
+        "skewed 4 x 200 KiB incompressible non-payload must split into >= 3 RGs, got {}",
+        skew_stats.num_row_groups
+    );
+    assert_eq!(collect_all_scalars(&skew_scanned, 1), exp_skewed_blobs);
+
+    // 6. M1: Incompressible Links (random trace_ids/span_ids, empty attributes) & Events (random times)
+    //    split into >= 3 RGs under 256 KiB cap; compressible List<I64> + MapUtf8 stays 1 RG.
+    let links_schema =
+        Schema::try_new_arc(vec![Field::new("links", DataType::Links, false)]).unwrap();
+    let link_rows = 4_200usize;
+    let links_per_row = 10usize;
+    let total_links = link_rows * links_per_row;
+    let mut l_offs = Vec::with_capacity(link_rows + 1);
+    l_offs.push(0u32);
+    for r in 1..=link_rows {
+        l_offs.push((r * links_per_row) as u32);
+    }
+    let mut rng = 0x1357_9bdf_2468_ace0u64;
+    let mut l_tids = Vec::with_capacity(total_links);
+    let mut l_sids = Vec::with_capacity(total_links);
+    for _ in 0..total_links {
+        let mut tid = [0u8; 16];
+        for w in tid.as_chunks_mut::<8>().0 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            *w = rng.to_le_bytes();
+        }
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        l_tids.push(tid);
+        l_sids.push(rng.to_le_bytes());
+    }
+    let l_attrs = Utf8Data::try_from_slices(std::iter::repeat_n("", total_links)).unwrap();
+    let links_batch = Batch::try_new_all(
+        Arc::clone(&links_schema),
+        vec![Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Links(Box::new(
+                    LinksData::try_new(l_offs, l_tids, l_sids, l_attrs, None).unwrap(),
+                )),
+                None,
+            )
+            .unwrap(),
+        )],
+        link_rows,
+    )
+    .unwrap();
+    let mut links_opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L0Fast);
+    links_opts.max_row_group_bytes = 256 * 1024;
+    let (links_stats, links_scanned) = write_and_verify(
+        &links_schema,
+        std::slice::from_ref(&links_batch),
+        links_opts,
+    );
+    assert!(
+        links_stats.num_row_groups >= 3,
+        "incompressible ~1 MiB Links (random trace/span IDs, empty attrs) must split into >= 3 RGs, got {}",
+        links_stats.num_row_groups
+    );
+    assert_eq!(
+        links_scanned.iter().map(Batch::num_rows).sum::<usize>(),
+        link_rows
+    );
+    assert_eq!(
+        collect_all_scalars(&links_scanned, 0),
+        collect_all_scalars(std::slice::from_ref(&links_batch), 0)
+    );
+
+    let events_schema =
+        Schema::try_new_arc(vec![Field::new("events", DataType::Events, false)]).unwrap();
+    let ev_rows = 4_000usize;
+    let ev_per_row = 32usize;
+    let total_events = ev_rows * ev_per_row; // 128,000 * 8 B = 1 MiB random times
+    let mut e_offs = Vec::with_capacity(ev_rows + 1);
+    e_offs.push(0u32);
+    for r in 1..=ev_rows {
+        e_offs.push((r * ev_per_row) as u32);
+    }
+    let mut e_times = Vec::with_capacity(total_events);
+    for _ in 0..total_events {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        e_times.push(rng as i64);
+    }
+    let e_names = Utf8Data::try_from_slices(std::iter::repeat_n("ev", total_events)).unwrap();
+    let e_attrs = Utf8Data::try_from_slices(std::iter::repeat_n("", total_events)).unwrap();
+    let events_batch = Batch::try_new_all(
+        Arc::clone(&events_schema),
+        vec![Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Events(Box::new(
+                    EventsData::try_new(e_offs, e_times, e_names, e_attrs, None).unwrap(),
+                )),
+                None,
+            )
+            .unwrap(),
+        )],
+        ev_rows,
+    )
+    .unwrap();
+    let mut events_opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L0Fast);
+    events_opts.max_row_group_bytes = 256 * 1024;
+    let (events_stats, events_scanned) = write_and_verify(
+        &events_schema,
+        std::slice::from_ref(&events_batch),
+        events_opts,
+    );
+    assert!(
+        events_stats.num_row_groups >= 3,
+        "incompressible ~1 MiB Events (random times, repetitive names/attrs) must split into >= 3 RGs, got {}",
+        events_stats.num_row_groups
+    );
+    assert_eq!(
+        events_scanned.iter().map(Batch::num_rows).sum::<usize>(),
+        ev_rows
+    );
+
+    let nested_comp_schema = Schema::try_new_arc(vec![
+        Field::new("nums", DataType::List(Box::new(DataType::I64)), false),
+        Field::new("attrs", DataType::MapUtf8, false),
+    ])
+    .unwrap();
+    let nc_rows = 2_000usize;
+    let list_per_row = 64usize;
+    let mut list_offs = Vec::with_capacity(nc_rows + 1);
+    list_offs.push(0u32);
+    for r in 1..=nc_rows {
+        list_offs.push((r * list_per_row) as u32);
+    }
+    let list_vals = vec![42i64; nc_rows * list_per_row]; // ~1 MiB repetitive I64
+    let mut map_offs = Vec::with_capacity(nc_rows + 1);
+    map_offs.push(0u32);
+    let mut m_keys = Vec::with_capacity(nc_rows * 2);
+    let mut m_vals = Vec::with_capacity(nc_rows * 2);
+    let rep_val = "REPEATED_MAP_VALUE_".repeat(16);
+    for r in 0..nc_rows {
+        m_keys.push("env");
+        m_vals.push(rep_val.as_str());
+        m_keys.push("region");
+        m_vals.push(if r % 2 == 0 { "us-east-1" } else { "eu-west-1" });
+        map_offs.push(m_keys.len() as u32);
+    }
+    let nested_batch = Batch::try_new_all(
+        Arc::clone(&nested_comp_schema),
+        vec![
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::List {
+                        item_type: DataType::I64,
+                        offsets: list_offs,
+                        values: Box::new(Column::Flat(
+                            FlatColumn::try_new(FlatData::I64(list_vals), None).unwrap(),
+                        )),
+                    },
+                    None,
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::MapUtf8(Box::new(
+                        MapData::try_new(
+                            map_offs,
+                            Utf8Data::try_from_slices(m_keys).unwrap(),
+                            Utf8Data::try_from_slices(m_vals).unwrap(),
+                            None,
+                        )
+                        .unwrap(),
+                    )),
+                    None,
+                )
+                .unwrap(),
+            ),
+        ],
+        nc_rows,
+    )
+    .unwrap();
+    let mut nested_opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L0Fast);
+    nested_opts.max_row_group_bytes = 256 * 1024;
+    let (nested_stats, nested_scanned) = write_and_verify(
+        &nested_comp_schema,
+        std::slice::from_ref(&nested_batch),
+        nested_opts,
+    );
+    assert_eq!(
+        nested_stats.num_row_groups, 1,
+        "compressible ~1.6 MiB List<I64> + MapUtf8 must stay 1 RG"
+    );
+    assert_eq!(
+        collect_all_scalars(&nested_scanned, 0),
+        collect_all_scalars(std::slice::from_ref(&nested_batch), 0)
+    );
+    assert_eq!(
+        collect_all_scalars(&nested_scanned, 1),
+        collect_all_scalars(std::slice::from_ref(&nested_batch), 1)
+    );
+
+    // 7. B1: Per-mini-block MAX_COL_MB_RAW_BYTES guard: single batch of 8,192 x 10 KiB
+    //    repetitive Utf8 (80 MiB raw > 64 MiB MAX_BLOCK_RAW_BYTES, < 4 MiB stored) written
+    //    with BOTH L0Fast and L1Compact (max_row_group_bytes = 64 MiB) must auto-split into
+    //    >= 2 RGs and succeed through verify_full() + scan().
+    let mb_guard_schema =
+        Schema::try_new_arc(vec![Field::new("big_text", DataType::Utf8, false)]).unwrap();
+    let mb_rows = 8_192usize;
+    let pattern_10k = "B1_REPETITIVE_10KIB_BLOCK_GUARD_".repeat(320); // 10,240 B
+    assert_eq!(pattern_10k.len(), 10 * 1024);
+    let mb_batch = Batch::try_new_all(
+        Arc::clone(&mb_guard_schema),
+        vec![Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(std::iter::repeat_n(pattern_10k.as_str(), mb_rows))
+                        .unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+        )],
+        mb_rows,
+    )
+    .unwrap();
+    for profile in [WriteProfile::L0Fast, WriteProfile::L1Compact] {
+        let mut opts = WriteOptions::for_table(TableKind::Generic, profile);
+        opts.row_group_size = 131_072;
+        opts.mini_block_size = 8_192;
+        opts.max_row_group_bytes = 64 * 1024 * 1024;
+        let (stats, scanned) =
+            write_and_verify(&mb_guard_schema, std::slice::from_ref(&mb_batch), opts);
+        assert!(
+            stats.num_row_groups >= 2,
+            "8,192 x 10 KiB (80 MiB raw) single MB must auto-split into >= 2 RGs ({profile:?}), got {}",
+            stats.num_row_groups
+        );
+        assert_eq!(scanned.iter().map(Batch::num_rows).sum::<usize>(), mb_rows);
+        assert_eq!(
+            scanned[0].column(0).unwrap().get_scalar(0).unwrap(),
+            ScalarValue::Utf8(pattern_10k.clone())
+        );
+        let last_b = scanned.last().unwrap();
+        assert_eq!(
+            last_b
+                .column(0)
+                .unwrap()
+                .get_scalar(last_b.num_rows() - 1)
+                .unwrap(),
+            ScalarValue::Utf8(pattern_10k.clone())
+        );
+    }
+
+    // 8. B4: MAX_RG_RAW_BUFFER_BYTES (252 MiB) & Dict/Const/Rle (and List<Dict>/<Const>/<Rle>)
+    //    materialized cap prevents OOM / MAX_BATCH_DECODED_BYTES overflow.
+    let dict_vals = FlatColumn::try_new(
+        FlatData::Utf8(Utf8Data::try_from_slices([pattern_10k.as_str()]).unwrap()),
+        None,
+    )
+    .unwrap();
+    let dict_col_8k =
+        Column::Dict(DictColumn::try_new(dict_vals.clone(), vec![0u32; mb_rows], None).unwrap());
+    assert_eq!(
+        estimate_column_slice_materialized_bytes(&dict_col_8k, 0, mb_rows),
+        estimate_column_bytes(&dict_col_8k),
+        "Dict full-slice materialized estimate must match estimate_column_bytes"
+    );
+    assert!(
+        estimate_column_slice_materialized_bytes(&dict_col_8k, 0, mb_rows) > MAX_COL_MB_RAW_BYTES
+    );
+
+    let const_col_8k =
+        Column::try_new_const(ScalarValue::Utf8(pattern_10k.clone()), mb_rows).unwrap();
+    assert_eq!(
+        estimate_column_slice_materialized_bytes(&const_col_8k, 0, mb_rows),
+        estimate_column_bytes(&const_col_8k)
+    );
+
+    let rle_col_4k = Column::Rle(RleColumn::try_new(dict_vals.clone(), vec![4_096u32]).unwrap());
+    assert_eq!(
+        estimate_column_slice_materialized_bytes(&rle_col_4k, 0, 4_096),
+        estimate_column_bytes(&rle_col_4k)
+    );
+    assert!(
+        estimate_column_slice_materialized_bytes(&rle_col_4k, 1_000, 1_000) >= 1_000 * 10 * 1024
+    );
+
+    // Cold-review List<Dict> / List<Const> / List<Rle> materialized recursion check:
+    let list_offsets: Vec<u32> = (0..=4_096u32).collect();
+    let list_of_dict = Column::Flat(
+        FlatColumn::try_new(
+            FlatData::List {
+                item_type: DataType::Utf8,
+                offsets: list_offsets,
+                values: Box::new(Column::Dict(
+                    DictColumn::try_new(dict_vals, vec![0u32; 4_096], None).unwrap(),
+                )),
+            },
+            None,
+        )
+        .unwrap(),
+    );
+    assert!(
+        estimate_column_slice_materialized_bytes(&list_of_dict, 0, 4_096) >= 4_096 * 10 * 1024,
+        "List<Dict> materialized slice estimate must recurse into Dict materialized size"
+    );
+
+    // 8a. Single Dict column exceeding MAX_COL_MB_RAW_BYTES (80 MiB materialized) splits cleanly!
+    let dict_batch =
+        Batch::try_new_all(Arc::clone(&mb_guard_schema), vec![dict_col_8k], mb_rows).unwrap();
+    let mut dict_opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L0Fast);
+    dict_opts.max_row_group_bytes = 64 * 1024 * 1024;
+    let (dict_stats, dict_scanned) = write_and_verify(
+        &mb_guard_schema,
+        std::slice::from_ref(&dict_batch),
+        dict_opts,
+    );
+    assert!(
+        dict_stats.num_row_groups >= 2,
+        "Dict column with 80 MiB materialized raw must split via MAX_COL_MB_RAW_BYTES, got {}",
+        dict_stats.num_row_groups
+    );
+    assert_eq!(
+        dict_scanned.iter().map(Batch::num_rows).sum::<usize>(),
+        mb_rows
+    );
+
+    // 8b. 7 Rle columns x 40 MiB each (<= 48 MiB per-MB cap, 280 MiB total > 252 MiB MAX_RG_RAW_BUFFER_BYTES)
+    //     splits cleanly without hitting MAX_BATCH_DECODED_BYTES!
+    let b4_cols = 7usize;
+    let b4_rows = 4_096usize;
+    let b4_schema = Schema::try_new_arc(
+        (0..b4_cols)
+            .map(|c| Field::new(format!("rle_{c}"), DataType::Utf8, false))
+            .collect(),
+    )
+    .unwrap();
+    let b4_batch =
+        Batch::try_new_all(Arc::clone(&b4_schema), vec![rle_col_4k; b4_cols], b4_rows).unwrap();
+    let mut b4_opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L0Fast);
+    b4_opts.max_row_group_bytes = 64 * 1024 * 1024;
+    let (b4_stats, b4_scanned) =
+        write_and_verify(&b4_schema, std::slice::from_ref(&b4_batch), b4_opts);
+    assert!(
+        b4_stats.num_row_groups >= 2,
+        "7 x 40 MiB Rle cols (280 MiB > 252 MiB MAX_RG_RAW_BUFFER_BYTES) must split into >= 2 RGs, got {}",
+        b4_stats.num_row_groups
+    );
+    assert_eq!(
+        b4_scanned.iter().map(Batch::num_rows).sum::<usize>(),
+        b4_rows
+    );
+    assert_eq!(
+        b4_scanned[0].column(0).unwrap().get_scalar(0).unwrap(),
+        ScalarValue::Utf8(pattern_10k)
+    );
+}

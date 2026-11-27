@@ -87,6 +87,18 @@ fn estimate_flat_column_bytes(f: &FlatColumn) -> usize {
 }
 
 fn estimate_flat_slice_bytes(f: &FlatColumn, offset: usize, len: usize) -> usize {
+    estimate_flat_slice_bytes_inner(f, offset, len, false)
+}
+
+fn estimate_flat_slice_bytes_inner(
+    f: &FlatColumn,
+    offset: usize,
+    len: usize,
+    materialized: bool,
+) -> usize {
+    let col_len = f.len();
+    let offset = offset.min(col_len);
+    let len = len.min(col_len - offset);
     if len == 0 {
         return 0;
     }
@@ -121,8 +133,12 @@ fn estimate_flat_slice_bytes(f: &FlatColumn, offset: usize, len: usize) -> usize
             let s = offsets.get(offset).copied().unwrap_or(0) as usize;
             let e = offsets.get(end).copied().unwrap_or(0) as usize;
             let child_len = e.saturating_sub(s);
-            len.saturating_mul(4)
-                .saturating_add(estimate_column_slice_bytes(values, s, child_len))
+            let child_bytes = if materialized {
+                estimate_column_slice_materialized_bytes(values, s, child_len)
+            } else {
+                estimate_column_slice_bytes(values, s, child_len)
+            };
+            len.saturating_mul(4).saturating_add(child_bytes)
         }
         FlatData::MapUtf8(m) => {
             let offs = m.offsets();
@@ -277,6 +293,9 @@ pub(crate) fn estimate_column_bytes(col: &Column) -> usize {
 }
 
 pub(super) fn estimate_column_slice_bytes(col: &Column, offset: usize, len: usize) -> usize {
+    let col_len = col.len();
+    let offset = offset.min(col_len);
+    let len = len.min(col_len - offset);
     if len == 0 {
         return 0;
     }
@@ -284,7 +303,7 @@ pub(super) fn estimate_column_slice_bytes(col: &Column, offset: usize, len: usiz
         Column::Const { .. } => 64,
         Column::Dict(_) => len.saturating_mul(4),
         Column::Rle(r) => {
-            let total = col.len().max(1);
+            let total = col_len.max(1);
             r.run_ends()
                 .len()
                 .saturating_mul(12)
@@ -292,6 +311,700 @@ pub(super) fn estimate_column_slice_bytes(col: &Column, offset: usize, len: usiz
                 .div_ceil(total)
         }
         Column::Flat(f) => estimate_flat_slice_bytes(f, offset, len),
+    }
+}
+
+fn count_intersecting_runs(run_ends: &[u32], offset: usize, slice_end: usize) -> usize {
+    if offset >= slice_end || run_ends.is_empty() {
+        return 0;
+    }
+    let first = run_ends.partition_point(|&e| (e as usize) <= offset);
+    if first >= run_ends.len() {
+        return 0;
+    }
+    let last = run_ends
+        .partition_point(|&e| (e as usize) < slice_end)
+        .min(run_ends.len() - 1);
+    last.saturating_sub(first).saturating_add(1)
+}
+
+/// Conservative materialized byte estimate for a slice `offset..offset + len` of `col`,
+/// mirroring [`estimate_column_bytes`] for `Const`/`Dict`/`Rle`/`Flat` (including `List<Dict>`).
+pub(super) fn estimate_column_slice_materialized_bytes(
+    col: &Column,
+    offset: usize,
+    len: usize,
+) -> usize {
+    let col_len = col.len();
+    let offset = offset.min(col_len);
+    let len = len.min(col_len - offset);
+    if len == 0 {
+        return 0;
+    }
+    match col {
+        Column::Flat(f) => estimate_flat_slice_bytes_inner(f, offset, len, true),
+        Column::Const { value, .. } => scalar_byte_len(value).saturating_mul(len),
+        Column::Dict(d) => {
+            let codes = d.codes();
+            let slice_end = offset.saturating_add(len).min(codes.len());
+            let slice_start = offset.min(slice_end);
+            let sub_codes = &codes[slice_start..slice_end];
+            let sub_len = sub_codes.len();
+            let vals = d.values();
+            let mat_bytes = match vals.data() {
+                FlatData::Null(_) => 0,
+                FlatData::Bool(_) => sub_len.div_ceil(8),
+                FlatData::I64(_)
+                | FlatData::TimestampNs { .. }
+                | FlatData::F64(_)
+                | FlatData::FixedBytes8(_) => sub_len.saturating_mul(8),
+                FlatData::Date(_) => sub_len.saturating_mul(4),
+                FlatData::Decimal128 { .. } | FlatData::Interval(_) | FlatData::FixedBytes16(_) => {
+                    sub_len.saturating_mul(16)
+                }
+                FlatData::Utf8(u) => {
+                    let offs = u.offsets();
+                    let bytes: usize = sub_codes
+                        .iter()
+                        .map(|&c| {
+                            let i = c as usize;
+                            offs.get(i + 1)
+                                .copied()
+                                .unwrap_or(0)
+                                .saturating_sub(offs.get(i).copied().unwrap_or(0))
+                                as usize
+                        })
+                        .fold(0usize, usize::saturating_add);
+                    bytes.saturating_add(sub_len.saturating_mul(4))
+                }
+                FlatData::Binary(b) => {
+                    let offs = b.offsets();
+                    let bytes: usize = sub_codes
+                        .iter()
+                        .map(|&c| {
+                            let i = c as usize;
+                            offs.get(i + 1)
+                                .copied()
+                                .unwrap_or(0)
+                                .saturating_sub(offs.get(i).copied().unwrap_or(0))
+                                as usize
+                        })
+                        .fold(0usize, usize::saturating_add);
+                    bytes.saturating_add(sub_len.saturating_mul(4))
+                }
+                _ => sub_codes
+                    .iter()
+                    .map(|&c| estimate_flat_slice_bytes_inner(vals, c as usize, 1, true))
+                    .fold(0usize, usize::saturating_add),
+            };
+            let null_bytes = if d.nulls().is_some() || vals.has_nulls() {
+                sub_len.div_ceil(8)
+            } else {
+                0
+            };
+            sub_len
+                .saturating_mul(4)
+                .saturating_add(mat_bytes)
+                .saturating_add(null_bytes)
+        }
+        Column::Rle(r) => {
+            let vals = r.values();
+            let run_ends = r.run_ends();
+            let slice_end = offset.saturating_add(len);
+            let (intersecting_runs, mat_bytes) = match vals.data() {
+                FlatData::Null(_) => (count_intersecting_runs(run_ends, offset, slice_end), 0),
+                FlatData::Bool(_) => (
+                    count_intersecting_runs(run_ends, offset, slice_end),
+                    len.div_ceil(8),
+                ),
+                FlatData::I64(_)
+                | FlatData::TimestampNs { .. }
+                | FlatData::F64(_)
+                | FlatData::FixedBytes8(_) => (
+                    count_intersecting_runs(run_ends, offset, slice_end),
+                    len.saturating_mul(8),
+                ),
+                FlatData::Date(_) => (
+                    count_intersecting_runs(run_ends, offset, slice_end),
+                    len.saturating_mul(4),
+                ),
+                FlatData::Decimal128 { .. } | FlatData::Interval(_) | FlatData::FixedBytes16(_) => {
+                    (
+                        count_intersecting_runs(run_ends, offset, slice_end),
+                        len.saturating_mul(16),
+                    )
+                }
+                _ => {
+                    let first_idx = run_ends.partition_point(|&e| (e as usize) <= offset);
+                    let mut prev = if first_idx == 0 {
+                        0usize
+                    } else {
+                        run_ends[first_idx - 1] as usize
+                    };
+                    let mut runs = 0usize;
+                    let mut sum = 0usize;
+                    for (rel_idx, &end) in run_ends[first_idx..].iter().enumerate() {
+                        let run_idx = first_idx + rel_idx;
+                        let end_usize = end as usize;
+                        let lo = prev.max(offset);
+                        let hi = end_usize.min(slice_end);
+                        if hi > lo {
+                            runs = runs.saturating_add(1);
+                            sum = sum.saturating_add(
+                                estimate_flat_slice_bytes_inner(vals, run_idx, 1, true)
+                                    .saturating_mul(hi - lo),
+                            );
+                        }
+                        prev = end_usize;
+                        if prev >= slice_end {
+                            break;
+                        }
+                    }
+                    (runs, sum)
+                }
+            };
+            let null_bytes = if vals.has_nulls() { len.div_ceil(8) } else { 0 };
+            intersecting_runs
+                .saturating_mul(12)
+                .saturating_add(mat_bytes)
+                .saturating_add(null_bytes)
+        }
+    }
+}
+
+const SAMPLE_FIXED_ROWS: usize = 192;
+const SAMPLE_OFFSET_COUNT: usize = 1024;
+const STORED_PROBE_MAX_DEPTH: usize = 16;
+
+/// Reusable scratch buffers for zero-allocation LZ4 stored-size probing.
+#[derive(Debug, Default)]
+pub(super) struct StoredProbeScratch {
+    sample: Vec<u8>,
+    lz4_out: Vec<u8>,
+}
+
+fn compress_sample_len(scratch: &mut StoredProbeScratch) -> usize {
+    if scratch.sample.is_empty() {
+        return 0;
+    }
+    let max_len = lz4_flex::block::get_maximum_output_size(scratch.sample.len());
+    if scratch.lz4_out.len() < max_len {
+        scratch.lz4_out.resize(max_len, 0);
+    }
+    lz4_flex::block::compress_into(&scratch.sample, &mut scratch.lz4_out)
+        .unwrap_or(scratch.sample.len())
+}
+
+fn three_windows(start: usize, len: usize, budget: usize) -> [(usize, usize); 3] {
+    if len == 0 || budget == 0 {
+        return [(0, 0); 3];
+    }
+    if len <= budget {
+        return [(start, len), (0, 0), (0, 0)];
+    }
+    let w0 = budget.saturating_add(2) / 3;
+    let w1 = budget.saturating_add(1) / 3;
+    let w2 = budget / 3;
+    let s0 = start;
+    let s2 = if w2 > 0 {
+        start.saturating_add(len - w2)
+    } else {
+        0
+    };
+    let mid_space = len.saturating_sub(w0).saturating_sub(w2);
+    let s1 = if w1 > 0 {
+        start
+            .saturating_add(w0)
+            .saturating_add(mid_space.saturating_sub(w1) / 2)
+    } else {
+        0
+    };
+    [(s0, w0), (s1, w1), (s2, w2)]
+}
+
+fn sample_delta_offsets(
+    offsets: &[u32],
+    start_idx: usize,
+    count: usize,
+    scratch: &mut StoredProbeScratch,
+) -> usize {
+    let max_pairs = offsets.len().saturating_sub(1);
+    let start = start_idx.min(max_pairs);
+    let count = count.min(max_pairs - start);
+    if count == 0 {
+        return 0;
+    }
+    let raw = count.saturating_mul(4);
+    let windows = three_windows(start, count, SAMPLE_OFFSET_COUNT);
+    scratch.sample.clear();
+    let mut sampled = 0usize;
+    for (ws, wl) in windows {
+        for i in ws..ws.saturating_add(wl) {
+            let delta = offsets[i + 1].saturating_sub(offsets[i]);
+            scratch.sample.extend_from_slice(&delta.to_le_bytes());
+            sampled = sampled.saturating_add(1);
+        }
+    }
+    if sampled == 0 {
+        return 0;
+    }
+    let nominal = sampled.saturating_mul(4);
+    let compressed = compress_sample_len(scratch);
+    let est = ((raw as u128).saturating_mul(compressed.min(nominal) as u128)
+        / (nominal.max(1) as u128)) as usize;
+    est.clamp(1.min(raw), raw)
+}
+
+fn sample_fixed_slice<T>(
+    vals: &[T],
+    nulls: Option<&cetra_column::Bitmap>,
+    offset: usize,
+    len: usize,
+    elem_width: usize,
+    write_elem: impl Fn(&T, &mut Vec<u8>),
+    scratch: &mut StoredProbeScratch,
+) -> usize {
+    let start = offset.min(vals.len());
+    let len = len.min(vals.len() - start);
+    if len == 0 {
+        return 0;
+    }
+    let windows = three_windows(start, len, SAMPLE_FIXED_ROWS);
+    let sampled_rows: usize = windows.iter().map(|&(_, wl)| wl).sum();
+    if sampled_rows == 0 {
+        return 0;
+    }
+    scratch.sample.clear();
+    let validity_bytes = if nulls.is_some() {
+        sampled_rows.div_ceil(8)
+    } else {
+        0
+    };
+    if let Some(bm) = nulls {
+        scratch.sample.resize(validity_bytes, 0);
+        let mut bit_idx = 0usize;
+        let mut non_null_rows = 0usize;
+        for (ws, wl) in windows {
+            for r in ws..ws.saturating_add(wl) {
+                if bm.get(r) {
+                    scratch.sample[bit_idx / 8] |= 1u8 << (bit_idx % 8);
+                    non_null_rows = non_null_rows.saturating_add(1);
+                }
+                bit_idx = bit_idx.saturating_add(1);
+            }
+        }
+        if len <= SAMPLE_FIXED_ROWS && non_null_rows == 0 {
+            return 0;
+        }
+        for (ws, wl) in windows {
+            let we = ws.saturating_add(wl);
+            for (rel, val) in vals[ws..we].iter().enumerate() {
+                if bm.get(ws + rel) {
+                    write_elem(val, &mut scratch.sample);
+                }
+            }
+        }
+    } else {
+        for (ws, wl) in windows {
+            let we = ws.saturating_add(wl);
+            for val in &vals[ws..we] {
+                write_elem(val, &mut scratch.sample);
+            }
+        }
+    }
+    let raw = len
+        .saturating_mul(elem_width)
+        .saturating_add(if nulls.is_some() { len.div_ceil(8) } else { 0 });
+    let nominal = sampled_rows
+        .saturating_mul(elem_width)
+        .saturating_add(validity_bytes);
+    let compressed = compress_sample_len(scratch);
+    let est = ((raw as u128).saturating_mul(compressed.min(nominal) as u128)
+        / (nominal.max(1) as u128)) as usize;
+    est.clamp(1.min(raw), raw)
+}
+
+fn sample_bool_slice(
+    b: &cetra_column::Bitmap,
+    nulls: Option<&cetra_column::Bitmap>,
+    offset: usize,
+    len: usize,
+    scratch: &mut StoredProbeScratch,
+) -> usize {
+    let start = offset.min(b.len());
+    let len = len.min(b.len() - start);
+    if len == 0 {
+        return 0;
+    }
+    let windows = three_windows(start, len, SAMPLE_FIXED_ROWS);
+    let sampled_rows: usize = windows.iter().map(|&(_, wl)| wl).sum();
+    if sampled_rows == 0 {
+        return 0;
+    }
+    let raw = len
+        .div_ceil(8)
+        .saturating_add(if nulls.is_some() { len.div_ceil(8) } else { 0 });
+    let validity_bytes = if nulls.is_some() {
+        sampled_rows.div_ceil(8)
+    } else {
+        0
+    };
+    let nominal = sampled_rows.div_ceil(8).saturating_add(validity_bytes);
+    scratch.sample.clear();
+    if let Some(bm) = nulls {
+        scratch.sample.resize(validity_bytes, 0);
+        let mut bit_idx = 0usize;
+        let mut non_null_rows = 0usize;
+        for (ws, wl) in windows {
+            for r in ws..ws.saturating_add(wl) {
+                if bm.get(r) {
+                    scratch.sample[bit_idx / 8] |= 1u8 << (bit_idx % 8);
+                    non_null_rows = non_null_rows.saturating_add(1);
+                }
+                bit_idx = bit_idx.saturating_add(1);
+            }
+        }
+        if len <= SAMPLE_FIXED_ROWS && non_null_rows == 0 {
+            return 0;
+        }
+        let val_bytes = non_null_rows.div_ceil(8);
+        scratch
+            .sample
+            .resize(validity_bytes.saturating_add(val_bytes), 0);
+        let mut v_idx = 0usize;
+        for (ws, wl) in windows {
+            for r in ws..ws.saturating_add(wl) {
+                if bm.get(r) {
+                    if b.get(r) {
+                        scratch.sample[validity_bytes + v_idx / 8] |= 1u8 << (v_idx % 8);
+                    }
+                    v_idx = v_idx.saturating_add(1);
+                }
+            }
+        }
+    } else {
+        let val_bytes = sampled_rows.div_ceil(8);
+        scratch.sample.resize(val_bytes, 0);
+        let mut v_idx = 0usize;
+        for (ws, wl) in windows {
+            for r in ws..ws.saturating_add(wl) {
+                if b.get(r) {
+                    scratch.sample[v_idx / 8] |= 1u8 << (v_idx % 8);
+                }
+                v_idx = v_idx.saturating_add(1);
+            }
+        }
+    }
+    let compressed = compress_sample_len(scratch);
+    let est = ((raw as u128).saturating_mul(compressed.min(nominal) as u128)
+        / (nominal.max(1) as u128)) as usize;
+    est.clamp(1.min(raw), raw)
+}
+
+fn sample_byte_buffer(
+    bytes: &[u8],
+    byte_lo: usize,
+    byte_hi: usize,
+    budget: usize,
+    scratch: &mut StoredProbeScratch,
+) -> usize {
+    let lo = byte_lo.min(bytes.len());
+    let hi = byte_hi.min(bytes.len()).max(lo);
+    let span = hi - lo;
+    if span == 0 {
+        return 0;
+    }
+    let windows = three_windows(lo, span, budget);
+    scratch.sample.clear();
+    for (ws, wl) in windows {
+        if wl > 0 {
+            scratch.sample.extend_from_slice(&bytes[ws..ws + wl]);
+        }
+    }
+    let actual_in = scratch.sample.len().max(1);
+    let compressed = compress_sample_len(scratch);
+    let est = ((span as u128).saturating_mul(compressed.min(actual_in) as u128)
+        / (actual_in as u128)) as usize;
+    est.clamp(1.min(span), span)
+}
+
+fn is_fully_inspected_all_null(
+    nulls: Option<&cetra_column::Bitmap>,
+    offset: usize,
+    len: usize,
+) -> bool {
+    if let Some(bm) = nulls
+        && len <= SAMPLE_FIXED_ROWS
+    {
+        return (offset..offset.saturating_add(len)).all(|r| !bm.get(r));
+    }
+    false
+}
+
+/// Fast, skew-proof, zero-allocation stored-size estimator for a column slice.
+pub(super) fn estimate_column_slice_stored_bytes(
+    col: &Column,
+    offset: usize,
+    len: usize,
+    scratch: &mut StoredProbeScratch,
+) -> usize {
+    estimate_column_slice_stored_bytes_inner(col, offset, len, scratch, 0)
+}
+
+fn estimate_column_slice_stored_bytes_inner(
+    col: &Column,
+    offset: usize,
+    len: usize,
+    scratch: &mut StoredProbeScratch,
+    depth: usize,
+) -> usize {
+    let col_len = col.len();
+    let offset = offset.min(col_len);
+    let len = len.min(col_len - offset);
+    let raw = estimate_column_slice_bytes(col, offset, len);
+    if len == 0 || raw < 64 {
+        return raw;
+    }
+    match col {
+        Column::Const { .. } | Column::Rle(_) => raw,
+        Column::Dict(d) => sample_fixed_slice(
+            d.codes(),
+            d.nulls(),
+            offset,
+            len,
+            4,
+            |&c, out| out.extend_from_slice(&c.to_le_bytes()),
+            scratch,
+        )
+        .min(raw),
+        Column::Flat(f) => {
+            let end = offset.saturating_add(len);
+            let null_bytes = if f.has_nulls() { len.div_ceil(8) } else { 0 };
+            match f.data() {
+                FlatData::Null(_) => 0,
+                FlatData::Bool(b) => sample_bool_slice(b, f.nulls(), offset, len, scratch).min(raw),
+                FlatData::Date(v) => sample_fixed_slice(
+                    v,
+                    f.nulls(),
+                    offset,
+                    len,
+                    4,
+                    |&x, out| out.extend_from_slice(&x.to_le_bytes()),
+                    scratch,
+                )
+                .min(raw),
+                FlatData::I64(v) | FlatData::TimestampNs { values: v, .. } => sample_fixed_slice(
+                    v,
+                    f.nulls(),
+                    offset,
+                    len,
+                    8,
+                    |&x, out| out.extend_from_slice(&x.to_le_bytes()),
+                    scratch,
+                )
+                .min(raw),
+                FlatData::F64(v) => sample_fixed_slice(
+                    v,
+                    f.nulls(),
+                    offset,
+                    len,
+                    8,
+                    |&x, out| out.extend_from_slice(&x.to_bits().to_le_bytes()),
+                    scratch,
+                )
+                .min(raw),
+                FlatData::FixedBytes8(v) => sample_fixed_slice(
+                    v,
+                    f.nulls(),
+                    offset,
+                    len,
+                    8,
+                    |x, out| out.extend_from_slice(x),
+                    scratch,
+                )
+                .min(raw),
+                FlatData::Decimal128 { values: v, .. } => sample_fixed_slice(
+                    v,
+                    f.nulls(),
+                    offset,
+                    len,
+                    16,
+                    |&x, out| out.extend_from_slice(&x.to_le_bytes()),
+                    scratch,
+                )
+                .min(raw),
+                FlatData::Interval(v) => sample_fixed_slice(
+                    v,
+                    f.nulls(),
+                    offset,
+                    len,
+                    16,
+                    |iv, out| {
+                        out.extend_from_slice(&iv.months.to_le_bytes());
+                        out.extend_from_slice(&iv.days.to_le_bytes());
+                        out.extend_from_slice(&iv.nanos.to_le_bytes());
+                    },
+                    scratch,
+                )
+                .min(raw),
+                FlatData::FixedBytes16(v) => sample_fixed_slice(
+                    v,
+                    f.nulls(),
+                    offset,
+                    len,
+                    16,
+                    |x, out| out.extend_from_slice(x),
+                    scratch,
+                )
+                .min(raw),
+                FlatData::Utf8(u) => {
+                    let offs = u.offsets();
+                    let byte_lo = offs.get(offset).copied().unwrap_or(0) as usize;
+                    let byte_hi = offs.get(end).copied().unwrap_or(0) as usize;
+                    let span = byte_hi.saturating_sub(byte_lo);
+                    if span == 0 && is_fully_inspected_all_null(f.nulls(), offset, len) {
+                        return 0;
+                    }
+                    let data_est = sample_byte_buffer(u.bytes(), byte_lo, byte_hi, 4096, scratch);
+                    let off_est =
+                        sample_delta_offsets(offs, offset, len, scratch).saturating_add(null_bytes);
+                    data_est.saturating_add(off_est).clamp(1.min(raw), raw)
+                }
+                FlatData::Binary(b) => {
+                    let offs = b.offsets();
+                    let byte_lo = offs.get(offset).copied().unwrap_or(0) as usize;
+                    let byte_hi = offs.get(end).copied().unwrap_or(0) as usize;
+                    let span = byte_hi.saturating_sub(byte_lo);
+                    if span == 0 && is_fully_inspected_all_null(f.nulls(), offset, len) {
+                        return 0;
+                    }
+                    let data_est = sample_byte_buffer(b.bytes(), byte_lo, byte_hi, 4096, scratch);
+                    let off_est =
+                        sample_delta_offsets(offs, offset, len, scratch).saturating_add(null_bytes);
+                    data_est.saturating_add(off_est).clamp(1.min(raw), raw)
+                }
+                FlatData::MapUtf8(m) => {
+                    let offs = m.offsets();
+                    let es = offs.get(offset).copied().unwrap_or(0) as usize;
+                    let ee = offs.get(end).copied().unwrap_or(0) as usize;
+                    let entry_count = ee.saturating_sub(es);
+                    if entry_count == 0 && is_fully_inspected_all_null(f.nulls(), offset, len) {
+                        return 0;
+                    }
+                    let k_offs = m.keys().offsets();
+                    let v_offs = m.values().offsets();
+                    let ks = k_offs.get(es).copied().unwrap_or(0) as usize;
+                    let ke = k_offs.get(ee).copied().unwrap_or(0) as usize;
+                    let vs = v_offs.get(es).copied().unwrap_or(0) as usize;
+                    let ve = v_offs.get(ee).copied().unwrap_or(0) as usize;
+                    let k_est = sample_byte_buffer(m.keys().bytes(), ks, ke, 2048, scratch);
+                    let v_est = sample_byte_buffer(m.values().bytes(), vs, ve, 2048, scratch);
+                    let off_est = sample_delta_offsets(offs, offset, len, scratch)
+                        .saturating_add(sample_delta_offsets(k_offs, es, entry_count, scratch))
+                        .saturating_add(sample_delta_offsets(v_offs, es, entry_count, scratch))
+                        .saturating_add(null_bytes);
+                    k_est
+                        .saturating_add(v_est)
+                        .saturating_add(off_est)
+                        .clamp(1.min(raw), raw)
+                }
+                FlatData::Events(e) => {
+                    let offs = e.offsets();
+                    let es = offs.get(offset).copied().unwrap_or(0) as usize;
+                    let ee = offs.get(end).copied().unwrap_or(0) as usize;
+                    let event_count = ee.saturating_sub(es);
+                    if event_count == 0 && is_fully_inspected_all_null(f.nulls(), offset, len) {
+                        return 0;
+                    }
+                    let t_est = sample_fixed_slice(
+                        e.times(),
+                        None,
+                        es,
+                        event_count,
+                        8,
+                        |&t, out| out.extend_from_slice(&t.to_le_bytes()),
+                        scratch,
+                    );
+                    let n_offs = e.names().offsets();
+                    let ns = n_offs.get(es).copied().unwrap_or(0) as usize;
+                    let ne = n_offs.get(ee).copied().unwrap_or(0) as usize;
+                    let n_est = sample_byte_buffer(e.names().bytes(), ns, ne, 2048, scratch);
+                    let a_offs = e.attributes().offsets();
+                    let as_ = a_offs.get(es).copied().unwrap_or(0) as usize;
+                    let ae = a_offs.get(ee).copied().unwrap_or(0) as usize;
+                    let a_est = sample_byte_buffer(e.attributes().bytes(), as_, ae, 2048, scratch);
+                    let off_est =
+                        sample_delta_offsets(offs, offset, len, scratch).saturating_add(null_bytes);
+                    t_est
+                        .saturating_add(n_est)
+                        .saturating_add(a_est)
+                        .saturating_add(off_est)
+                        .clamp(1.min(raw), raw)
+                }
+                FlatData::Links(l) => {
+                    let offs = l.offsets();
+                    let es = offs.get(offset).copied().unwrap_or(0) as usize;
+                    let ee = offs.get(end).copied().unwrap_or(0) as usize;
+                    let link_count = ee.saturating_sub(es);
+                    if link_count == 0 && is_fully_inspected_all_null(f.nulls(), offset, len) {
+                        return 0;
+                    }
+                    let tid_est = sample_fixed_slice(
+                        l.trace_ids(),
+                        None,
+                        es,
+                        link_count,
+                        16,
+                        |id, out| out.extend_from_slice(id),
+                        scratch,
+                    );
+                    let sid_est = sample_fixed_slice(
+                        l.span_ids(),
+                        None,
+                        es,
+                        link_count,
+                        8,
+                        |id, out| out.extend_from_slice(id),
+                        scratch,
+                    );
+                    let a_offs = l.attributes().offsets();
+                    let as_ = a_offs.get(es).copied().unwrap_or(0) as usize;
+                    let ae = a_offs.get(ee).copied().unwrap_or(0) as usize;
+                    let a_est = sample_byte_buffer(l.attributes().bytes(), as_, ae, 2048, scratch);
+                    let off_est =
+                        sample_delta_offsets(offs, offset, len, scratch).saturating_add(null_bytes);
+                    tid_est
+                        .saturating_add(sid_est)
+                        .saturating_add(a_est)
+                        .saturating_add(off_est)
+                        .clamp(1.min(raw), raw)
+                }
+                FlatData::List {
+                    offsets, values, ..
+                } => {
+                    if depth >= STORED_PROBE_MAX_DEPTH {
+                        return raw;
+                    }
+                    let s = offsets.get(offset).copied().unwrap_or(0) as usize;
+                    let e = offsets.get(end).copied().unwrap_or(0) as usize;
+                    let child_len = e.saturating_sub(s);
+                    if child_len == 0 && is_fully_inspected_all_null(f.nulls(), offset, len) {
+                        return 0;
+                    }
+                    // Complete child recursion before using `scratch` for list offsets.
+                    let val_est = estimate_column_slice_stored_bytes_inner(
+                        values,
+                        s,
+                        child_len,
+                        scratch,
+                        depth + 1,
+                    );
+                    let off_est = sample_delta_offsets(offsets, offset, len, scratch)
+                        .saturating_add(null_bytes);
+                    val_est.saturating_add(off_est).clamp(1.min(raw), raw)
+                }
+            }
+        }
     }
 }
 

@@ -36,8 +36,11 @@ use crate::payload::{
 };
 use crate::simd::bloom::Sbbf;
 
+use concat::{
+    StoredProbeScratch, concat_rg_column, estimate_column_slice_bytes,
+    estimate_column_slice_materialized_bytes, estimate_column_slice_stored_bytes,
+};
 pub(crate) use concat::{concat_column_refs, concat_flat_columns, estimate_column_bytes};
-use concat::{concat_rg_column, estimate_column_slice_bytes};
 pub use l0_payload::L0_LOCAL_PACK_IDX;
 pub(crate) use l0_payload::L0_PAYLOAD_DIR_MAGIC;
 use l0_payload::LocalL0PayloadBuilder;
@@ -50,6 +53,14 @@ use tail::{
 
 /// Default maximum encoded/stored bytes per PAX Row Group before auto-flushing (64 MiB).
 const DEFAULT_MAX_ROW_GROUP_BYTES: usize = 64 * 1024 * 1024;
+/// Hard cap on buffered materialized raw non-payload bytes per RG (252 MiB), leaving 4 MiB
+/// headroom below `MAX_BATCH_DECODED_BYTES` (256 MiB) for block framing headers even on
+/// `Codec::None` fallback.
+const MAX_RG_RAW_BUFFER_BYTES: usize = MAX_BATCH_DECODED_BYTES - 4 * 1024 * 1024;
+/// Conservative per-column per-mini-block materialized raw byte cap (48 MiB), leaving 16 MiB
+/// headroom below `MAX_BLOCK_RAW_BYTES` (64 MiB) for nested headers, validity bitmaps, and
+/// dict/FSST decode buffers.
+const MAX_COL_MB_RAW_BYTES: usize = 48 * 1024 * 1024;
 
 type PrechunkedRefs<'a> = (
     &'a HashMap<usize, Vec<PayloadRefRow>>,
@@ -300,6 +311,10 @@ pub struct StatamWriter<'a, W: Write + Seek> {
     rg_buf_cols: Vec<Vec<Column>>,
     rg_buf_rows: usize,
     rg_buf_est_non_payload_bytes: usize,
+    rg_buf_probed_stored_bytes: usize,
+    rg_buf_unprobed_raw_bytes: usize,
+    rg_buf_unprobed_pieces: Vec<usize>,
+    rg_buf_cur_mb_col_raw: Vec<usize>,
     // Zero-copy L0Fast / local ExternalPayload accumulators for the current partial RG.
     pending_l0_local: LocalL0PayloadBuilder,
     pending_l0_mbs: HashMap<usize, Vec<(u16, u16, Vec<u8>)>>,
@@ -524,6 +539,10 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
             rg_buf_cols: vec![Vec::new(); num_logical],
             rg_buf_rows: 0,
             rg_buf_est_non_payload_bytes: 0,
+            rg_buf_probed_stored_bytes: 0,
+            rg_buf_unprobed_raw_bytes: 0,
+            rg_buf_unprobed_pieces: Vec::new(),
+            rg_buf_cur_mb_col_raw: vec![0; num_logical],
             pending_l0_local,
             pending_l0_mbs: HashMap::new(),
             pending_l0_partial: HashMap::new(),
@@ -583,15 +602,23 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
         let rg_size = self.options.row_group_size;
         let max_rg_bytes = self.options.max_row_group_bytes;
         let half_cap = (max_rg_bytes / 2).max(1);
+        let max_rg_raw_bytes = MAX_RG_RAW_BUFFER_BYTES;
+        let half_raw_cap = max_rg_raw_bytes / 2;
         let is_l0_fast = self.options.profile == WriteProfile::L0Fast;
         let is_local_payload = is_l0_fast || self.pack_builder.is_none();
+        let has_local_payload_cols = is_local_payload
+            && self
+                .logical_locality
+                .contains(&LocalityGroup::ExternalPayload);
         let is_l1_pack = !is_l0_fast && self.pack_builder.is_some();
+        let first_non_payload_col = self
+            .logical_locality
+            .iter()
+            .position(|&lg| lg != LocalityGroup::ExternalPayload);
         let mut offset = 0usize;
         while offset < total {
             if self.rg_buf_rows == 0 && total - offset >= rg_size {
-                let non_payload_est =
-                    self.estimate_slice_non_payload_bytes(active_batch.columns(), offset, rg_size);
-                let local_payload_est = if is_local_payload {
+                let local_payload_est = if has_local_payload_cols {
                     self.estimate_slice_local_payload_raw_bytes(
                         active_batch.columns(),
                         offset,
@@ -600,15 +627,38 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                 } else {
                     0
                 };
-                if non_payload_est.saturating_add(local_payload_est) <= max_rg_bytes {
-                    self.flush_rg_columns(active_batch.columns(), offset, rg_size, None)?;
-                    offset += rg_size;
-                    continue;
+                if local_payload_est <= max_rg_bytes {
+                    let np_mat_raw = self.estimate_slice_non_payload_materialized_bytes(
+                        active_batch.columns(),
+                        offset,
+                        rg_size,
+                    );
+                    if np_mat_raw <= max_rg_raw_bytes
+                        && self.slice_fits_mb_raw_cap(
+                            active_batch.columns(),
+                            offset,
+                            rg_size,
+                            false,
+                        )
+                    {
+                        let np_budget = max_rg_bytes.saturating_sub(local_payload_est);
+                        let (_, np_stored, _) = self.estimate_slice_non_payload_stored(
+                            active_batch.columns(),
+                            offset,
+                            rg_size,
+                            np_budget,
+                        );
+                        if np_stored.saturating_add(local_payload_est) <= max_rg_bytes {
+                            self.flush_rg_columns(active_batch.columns(), offset, rg_size, None)?;
+                            offset += rg_size;
+                            continue;
+                        }
+                    }
                 }
             }
             let space = rg_size - self.rg_buf_rows;
             let mut take = (total - offset).min(space);
-            if is_local_payload {
+            if has_local_payload_cols {
                 while take > 1 {
                     let payload_raw = self.estimate_slice_local_payload_raw_bytes(
                         active_batch.columns(),
@@ -621,33 +671,98 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                     take /= 2;
                 }
             }
-            while take > 1 {
-                let non_payload_est =
-                    self.estimate_slice_non_payload_bytes(active_batch.columns(), offset, take);
-                if non_payload_est <= half_cap {
-                    break;
+            let raw_limit = if self.rg_buf_rows == 0 {
+                max_rg_raw_bytes
+            } else {
+                half_raw_cap
+            };
+            let stored_limit = if self.rg_buf_rows == 0 && !has_local_payload_cols {
+                max_rg_bytes
+            } else {
+                half_cap
+            };
+            let (slice_np_mat_raw, mut slice_np_enc_raw, mut slice_np_stored, mut slice_was_probed) = loop {
+                let np_mat_raw = self.estimate_slice_non_payload_materialized_bytes(
+                    active_batch.columns(),
+                    offset,
+                    take,
+                );
+                let mb_ok = self.slice_fits_mb_raw_cap(active_batch.columns(), offset, take, false);
+                let (np_enc_raw, np_stored, np_probed) =
+                    if (np_mat_raw <= raw_limit && mb_ok) || take <= 1 {
+                        self.estimate_slice_non_payload_stored(
+                            active_batch.columns(),
+                            offset,
+                            take,
+                            stored_limit,
+                        )
+                    } else {
+                        (0, usize::MAX, false)
+                    };
+                if take <= 1 || (np_mat_raw <= raw_limit && mb_ok && np_stored <= stored_limit) {
+                    break (np_mat_raw, np_enc_raw, np_stored, np_probed);
                 }
                 take /= 2;
-            }
+            };
 
             if self.rg_buf_rows > 0 {
-                let cur_est = self.measure_current_rg_stored_bytes(max_rg_bytes)?;
-                let slice_non_payload =
-                    self.estimate_slice_non_payload_bytes(active_batch.columns(), offset, take);
-                let next_single_row_payload = if is_local_payload && take == 1 {
+                if self
+                    .rg_buf_est_non_payload_bytes
+                    .saturating_add(slice_np_mat_raw)
+                    > max_rg_raw_bytes
+                    || !self.slice_fits_mb_raw_cap(active_batch.columns(), offset, take, true)
+                {
+                    self.flush_row_group()?;
+                    continue;
+                }
+                let mut cur_est = self.measure_current_rg_stored_bytes(max_rg_bytes)?;
+                let next_single_row_payload = if has_local_payload_cols && take == 1 {
                     self.estimate_slice_local_payload_raw_bytes(active_batch.columns(), offset, 1)
                 } else {
                     0
                 };
                 if cur_est
-                    .saturating_add(slice_non_payload)
+                    .saturating_add(slice_np_stored)
                     .saturating_add(next_single_row_payload)
                     > max_rg_bytes
                 {
-                    self.flush_row_group()?;
-                    continue;
+                    if !self.rg_buf_unprobed_pieces.is_empty() {
+                        self.reprobe_rg_buf_non_payload_stored_bytes();
+                        cur_est = self.measure_current_rg_stored_bytes(max_rg_bytes)?;
+                    }
+                    if !slice_was_probed
+                        && cur_est
+                            .saturating_add(slice_np_stored)
+                            .saturating_add(next_single_row_payload)
+                            > max_rg_bytes
+                    {
+                        let (enc_raw, stored, probed) = self.estimate_slice_non_payload_stored(
+                            active_batch.columns(),
+                            offset,
+                            take,
+                            0,
+                        );
+                        slice_np_enc_raw = enc_raw;
+                        slice_np_stored = stored;
+                        slice_was_probed = probed;
+                    }
+                    if cur_est
+                        .saturating_add(slice_np_stored)
+                        .saturating_add(next_single_row_payload)
+                        > max_rg_bytes
+                    {
+                        self.flush_row_group()?;
+                        continue;
+                    }
                 }
             }
+
+            let piece_idx = first_non_payload_col.map(|c| self.rg_buf_cols[c].len());
+            let old_rows = self.rg_buf_rows;
+            let new_rows = old_rows + take;
+            let mb_size = self.options.mini_block_size;
+            let same_mb = old_rows / mb_size == new_rows / mb_size;
+            let rem_in_mb = new_rows % mb_size;
 
             for (col_idx, col) in active_batch.columns().iter().enumerate() {
                 if is_local_payload
@@ -664,16 +779,43 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                     } else {
                         col.slice(offset, take)?
                     };
+                    let piece_mat_bytes = estimate_column_bytes(&piece);
                     self.rg_buf_est_non_payload_bytes = self
                         .rg_buf_est_non_payload_bytes
-                        .saturating_add(estimate_column_bytes(&piece));
+                        .saturating_add(piece_mat_bytes);
+                    if same_mb {
+                        self.rg_buf_cur_mb_col_raw[col_idx] =
+                            self.rg_buf_cur_mb_col_raw[col_idx].saturating_add(piece_mat_bytes);
+                    } else if rem_in_mb == 0 {
+                        self.rg_buf_cur_mb_col_raw[col_idx] = 0;
+                    } else {
+                        self.rg_buf_cur_mb_col_raw[col_idx] =
+                            estimate_column_slice_materialized_bytes(
+                                col,
+                                offset + take - rem_in_mb,
+                                rem_in_mb,
+                            );
+                    }
                     self.rg_buf_cols[col_idx].push(piece);
                 }
             }
-            self.rg_buf_rows += take;
+            if let Some(pidx) = piece_idx {
+                if slice_was_probed {
+                    self.rg_buf_probed_stored_bytes = self
+                        .rg_buf_probed_stored_bytes
+                        .saturating_add(slice_np_stored);
+                } else if slice_np_enc_raw > 0 {
+                    self.rg_buf_unprobed_raw_bytes = self
+                        .rg_buf_unprobed_raw_bytes
+                        .saturating_add(slice_np_enc_raw);
+                    self.rg_buf_unprobed_pieces.push(pidx);
+                }
+            }
+            self.rg_buf_rows = new_rows;
             offset += take;
 
             if self.rg_buf_rows == rg_size
+                || self.rg_buf_est_non_payload_bytes >= max_rg_raw_bytes
                 || self.measure_current_rg_stored_bytes(max_rg_bytes)? >= max_rg_bytes
             {
                 self.flush_row_group()?;
@@ -703,14 +845,54 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
         mbs_bytes.saturating_add(partial_bytes)
     }
 
+    fn current_rg_non_payload_stored_est(&self) -> usize {
+        self.rg_buf_probed_stored_bytes
+            .saturating_add(self.rg_buf_unprobed_raw_bytes)
+    }
+
+    fn reprobe_rg_buf_non_payload_stored_bytes(&mut self) {
+        if self.rg_buf_unprobed_pieces.is_empty() {
+            self.rg_buf_unprobed_raw_bytes = 0;
+            return;
+        }
+        let mut scratch = StoredProbeScratch::default();
+        let unprobed = std::mem::take(&mut self.rg_buf_unprobed_pieces);
+        let mut added_stored = 0usize;
+        for piece_idx in unprobed {
+            for (cidx, col_pieces) in self.rg_buf_cols.iter().enumerate() {
+                if self.logical_locality[cidx] == LocalityGroup::ExternalPayload {
+                    continue;
+                }
+                if let Some(piece) = col_pieces.get(piece_idx) {
+                    added_stored = added_stored.saturating_add(estimate_column_slice_stored_bytes(
+                        piece,
+                        0,
+                        piece.len(),
+                        &mut scratch,
+                    ));
+                }
+            }
+        }
+        self.rg_buf_probed_stored_bytes =
+            self.rg_buf_probed_stored_bytes.saturating_add(added_stored);
+        self.rg_buf_unprobed_raw_bytes = 0;
+    }
+
     fn measure_current_rg_stored_bytes(
         &mut self,
         max_rg_bytes: usize,
     ) -> Result<usize, StatamError> {
-        let base = self
-            .rg_buf_est_non_payload_bytes
+        let mut base = self
+            .current_rg_non_payload_stored_est()
             .saturating_add(self.pending_l0_encoded_bytes());
         let mut est = base.saturating_add(self.pending_l0_local.estimated_stored_bytes());
+        if est >= max_rg_bytes && !self.rg_buf_unprobed_pieces.is_empty() {
+            self.reprobe_rg_buf_non_payload_stored_bytes();
+            base = self
+                .current_rg_non_payload_stored_est()
+                .saturating_add(self.pending_l0_encoded_bytes());
+            est = base.saturating_add(self.pending_l0_local.estimated_stored_bytes());
+        }
         if est >= max_rg_bytes && !self.pending_l0_local.pending_frames.is_empty() {
             self.pending_l0_local.flush_pending()?;
             est = base.saturating_add(self.pending_l0_local.estimated_stored_bytes());
@@ -849,6 +1031,105 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
             sum = sum.saturating_add(estimate_column_slice_bytes(col, offset, len));
         }
         sum
+    }
+
+    fn estimate_slice_non_payload_materialized_bytes(
+        &self,
+        cols: &[Column],
+        offset: usize,
+        len: usize,
+    ) -> usize {
+        if len == 0 {
+            return 0;
+        }
+        let mut sum = 0usize;
+        for (cidx, col) in cols.iter().enumerate() {
+            if self.logical_locality[cidx] == LocalityGroup::ExternalPayload {
+                continue;
+            }
+            sum = sum.saturating_add(estimate_column_slice_materialized_bytes(col, offset, len));
+        }
+        sum
+    }
+
+    fn slice_fits_mb_raw_cap(
+        &self,
+        cols: &[Column],
+        offset: usize,
+        len: usize,
+        aligned_to_rg_buf: bool,
+    ) -> bool {
+        if len == 0 {
+            return true;
+        }
+        let mb_size = self.options.mini_block_size;
+        let open_mod = if aligned_to_rg_buf {
+            self.rg_buf_rows % mb_size
+        } else {
+            0
+        };
+        for (cidx, col) in cols.iter().enumerate() {
+            if self.logical_locality[cidx] == LocalityGroup::ExternalPayload {
+                continue;
+            }
+            let col_mat = estimate_column_slice_materialized_bytes(col, offset, len);
+            let open_raw = if open_mod != 0 {
+                self.rg_buf_cur_mb_col_raw[cidx]
+            } else {
+                0
+            };
+            if open_raw.saturating_add(col_mat) <= MAX_COL_MB_RAW_BYTES {
+                continue;
+            }
+            let mut pos = 0usize;
+            if open_mod != 0 {
+                let chunk = (mb_size - open_mod).min(len);
+                if open_raw
+                    .saturating_add(estimate_column_slice_materialized_bytes(col, offset, chunk))
+                    > MAX_COL_MB_RAW_BYTES
+                {
+                    return false;
+                }
+                pos += chunk;
+            }
+            while pos < len {
+                let chunk = (len - pos).min(mb_size);
+                if estimate_column_slice_materialized_bytes(col, offset + pos, chunk)
+                    > MAX_COL_MB_RAW_BYTES
+                {
+                    return false;
+                }
+                pos += chunk;
+            }
+        }
+        true
+    }
+
+    fn estimate_slice_non_payload_stored(
+        &self,
+        cols: &[Column],
+        offset: usize,
+        len: usize,
+        probe_threshold: usize,
+    ) -> (usize, usize, bool) {
+        let enc_raw = self.estimate_slice_non_payload_bytes(cols, offset, len);
+        if len == 0 || enc_raw <= probe_threshold {
+            return (enc_raw, enc_raw, false);
+        }
+        let mut scratch = StoredProbeScratch::default();
+        let mut stored = 0usize;
+        for (cidx, col) in cols.iter().enumerate() {
+            if self.logical_locality[cidx] == LocalityGroup::ExternalPayload {
+                continue;
+            }
+            stored = stored.saturating_add(estimate_column_slice_stored_bytes(
+                col,
+                offset,
+                len,
+                &mut scratch,
+            ));
+        }
+        (enc_raw, stored.min(enc_raw), true)
     }
 
     fn append_l0_payload_slice(
@@ -1607,6 +1888,10 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
         }
         self.rg_buf_rows = 0;
         self.rg_buf_est_non_payload_bytes = 0;
+        self.rg_buf_probed_stored_bytes = 0;
+        self.rg_buf_unprobed_raw_bytes = 0;
+        self.rg_buf_unprobed_pieces.clear();
+        self.rg_buf_cur_mb_col_raw.fill(0);
 
         self.flush_rg_columns(&rg_cols, 0, rg_rows, prechunked)
     }

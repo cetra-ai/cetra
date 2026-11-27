@@ -9022,7 +9022,7 @@ fn pass20_remote_bounded_block_coalescing_and_single_wave_1536kib() {
     let rem = RecordingRangeReader::new((6 * mib) as usize, true);
     let loc = RecordingRangeReader::new((6 * mib) as usize, false);
 
-    // 1. Remote bounded 128 KiB coalescing: 100 KiB gap with useful=110 KiB >= wasted=100 KiB merges!
+    // 1. Remote bounded 192 KiB coalescing: 100 KiB gap with useful=110 KiB >= wasted=100 KiB merges!
     let r_a = (0, 60 * k);
     let r_b = (160 * k, 210 * k);
     let got_rem = fetch_coalesced_blocks(&rem, &[r_a, r_b], None).unwrap();
@@ -9033,7 +9033,29 @@ fn pass20_remote_bounded_block_coalescing_and_single_wave_1536kib() {
     );
     assert_eq!(rem.take_calls(), vec![vec![0..(210 * k)]]);
 
-    // 2. Same 100 KiB gap on non-remote (!is_remote()) stays split at 64 KiB cap!
+    // 1b. W3_spans map_key_lookup shape (150 KiB gap) and exact 192 KiB gap merge on remote
+    //     when new_wasted <= new_useful!
+    let r_150a = (0, 100 * k);
+    let r_150b = (250 * k, 310 * k); // gap = 150 KiB, useful = 160 KiB >= 150 KiB
+    let got_150 = fetch_coalesced_blocks(&rem, &[r_150a, r_150b], None).unwrap();
+    assert_eq!(got_150[&r_150a].as_ref(), &rem.data[0..(100 * k) as usize]);
+    assert_eq!(
+        got_150[&r_150b].as_ref(),
+        &rem.data[(250 * k) as usize..(310 * k) as usize]
+    );
+    assert_eq!(rem.take_calls(), vec![vec![0..(310 * k)]]);
+
+    let r_192a = (0, 100 * k);
+    let r_192b = (292 * k, 384 * k); // gap = 192 KiB, useful = 192 KiB == wasted = 192 KiB
+    let got_192 = fetch_coalesced_blocks(&rem, &[r_192a, r_192b], None).unwrap();
+    assert_eq!(got_192[&r_192a].as_ref(), &rem.data[0..(100 * k) as usize]);
+    assert_eq!(
+        got_192[&r_192b].as_ref(),
+        &rem.data[(292 * k) as usize..(384 * k) as usize]
+    );
+    assert_eq!(rem.take_calls(), vec![vec![0..(384 * k)]]);
+
+    // 2. Same 100 KiB / 150 KiB gaps on non-remote (!is_remote()) stay split at 64 KiB cap!
     let got_loc = fetch_coalesced_blocks(&loc, &[r_a, r_b], None).unwrap();
     assert_eq!(got_loc[&r_a].as_ref(), &loc.data[0..(60 * k) as usize]);
     assert_eq!(
@@ -9044,17 +9066,29 @@ fn pass20_remote_bounded_block_coalescing_and_single_wave_1536kib() {
         loc.take_calls(),
         vec![vec![0..(60 * k), (160 * k)..(210 * k)]]
     );
+    let _ = fetch_coalesced_blocks(&loc, &[r_150a, r_150b], None).unwrap();
+    assert_eq!(
+        loc.take_calls(),
+        vec![vec![0..(100 * k), (250 * k)..(310 * k)]]
+    );
 
     // Non-remote still coalesces exact 64 KiB gap.
     let _ = fetch_coalesced_blocks(&loc, &[(0, 60 * k), (124 * k, 184 * k)], None).unwrap();
     assert_eq!(loc.take_calls(), vec![vec![0..(184 * k)]]);
 
-    // 3. Remote gap > 128 KiB never merges even with large useful bytes.
+    // 3. Remote gap > 192 KiB (192 KiB + 1) never merges even with large useful bytes.
     let _ =
-        fetch_coalesced_blocks(&rem, &[(0, 512 * k), (640 * k + 1, 1152 * k + 1)], None).unwrap();
+        fetch_coalesced_blocks(&rem, &[(0, 512 * k), (704 * k + 1, 1216 * k + 1)], None).unwrap();
     assert_eq!(
         rem.take_calls(),
-        vec![vec![0..(512 * k), (640 * k + 1)..(1152 * k + 1)]]
+        vec![vec![0..(512 * k), (704 * k + 1)..(1216 * k + 1)]]
+    );
+
+    // 3b. Remote 150 KiB gap with small useful bytes (new_wasted 150 KiB > new_useful 100 KiB) MUST NOT merge!
+    let _ = fetch_coalesced_blocks(&rem, &[(0, 50 * k), (200 * k, 250 * k)], None).unwrap();
+    assert_eq!(
+        rem.take_calls(),
+        vec![vec![0..(50 * k), (200 * k)..(250 * k)]]
     );
 
     // 4. WD_narrow_3col amplification guard: 10 KiB + 90 KiB gap + 10 KiB (wasted 90 > useful 20) MUST NOT merge!

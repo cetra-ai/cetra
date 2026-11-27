@@ -48,9 +48,9 @@ use plan::{ActiveMiniBlock, DecodedPhase1, RgIoPlan, TouchedMbRows, find_time_co
 
 /// Maximum gap (64 KiB) between blocks coalesced unconditionally into a single `Scan` range read.
 const SCAN_COALESCE_MAX_GAP: u64 = 64 * 1024;
-/// Maximum gap (128 KiB) between blocks coalesced on remote readers when wasted gap bytes do not
+/// Maximum gap (192 KiB) between blocks coalesced on remote readers when wasted gap bytes do not
 /// exceed useful payload bytes (`new_wasted <= new_useful`).
-const REMOTE_SCAN_COALESCE_MAX_GAP: u64 = 128 * 1024;
+const REMOTE_SCAN_COALESCE_MAX_GAP: u64 = 192 * 1024;
 /// Maximum total span (4 MiB) of a single coalesced `Scan` range read.
 const SCAN_COALESCE_MAX_SPAN: u64 = 4 * 1024 * 1024;
 /// Maximum cumulative `.statam` byte range volume fetched in a single cross-RG I/O wave (`64 MiB`).
