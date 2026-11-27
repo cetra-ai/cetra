@@ -1,17 +1,63 @@
 ---
+import { Code } from "astro:components";
 import Button from "../marketing/components/Button.astro";
-import Card from "../marketing/components/Card.astro";
 import Section from "../marketing/components/Section.astro";
 import SectionHeading from "../marketing/components/SectionHeading.astro";
-import { groups, loadIntegrations } from "../marketing/data/integrations.mjs";
+import Tabs from "../marketing/components/Tabs.astro";
+import {
+  groups,
+  LANGUAGE_CHIPS,
+  loadIntegrations,
+  MIGRATING_GROUP,
+  monogram,
+} from "../marketing/data/integrations.mjs";
 import MarketingLayout from "../marketing/layouts/MarketingLayout.astro";
+import { LANGUAGE_FILTERS } from "../marketing/lib/integrations-filter.mjs";
 
 const items = loadIntegrations();
-const sections = groups(items).map((group) => ({
+
+/** The hero's setup snippets, one entry per tab, each split into its install command and its code. */
+const SETUP = [
+  [
+    { lang: "shellscript", code: 'pip install "cetra-sdk[openai]" openai' },
+    { lang: "python", code: 'import cetra\ncetra.init(instrument=["openai"])' },
+  ],
+  [
+    {
+      lang: "shellscript",
+      code: "npm install @cetra-ai/sdk @arizeai/openinference-instrumentation-openai openai",
+    },
+    {
+      lang: "typescript",
+      code: [
+        'import { init } from "@cetra-ai/sdk";',
+        'import { openai } from "@cetra-ai/sdk/openai";',
+        'import OpenAI from "openai";',
+        "",
+        "init({ apiKey: process.env.CETRA_API_KEY, instrument: [openai(OpenAI)] });",
+      ].join("\n"),
+    },
+  ],
+  [
+    {
+      lang: "shellscript",
+      code: [
+        "export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080",
+        'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-cetra-…"',
+        "# then start any OpenTelemetry SDK or collector",
+      ].join("\n"),
+    },
+  ],
+] as const;
+const groupChips = groups(items).map((group) => ({
   group,
-  id: `group-${group.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
-  items: items.filter((item) => item.group === group),
+  count: items.filter((item) => item.group === group).length,
 }));
+const anyLanguageItems = items
+  .map((item, index) => ({ item, index }))
+  .filter(({ item }) => item.languages.length === 0);
+const guides = items.filter((item) => item.group === MIGRATING_GROUP).length;
+const integrationCount = items.length - guides;
 
 /** One test badge, e.g. "Recorded traces · Python". The docs page has the detail. */
 function testLabel(test: {
@@ -26,6 +72,21 @@ function testLabel(test: {
         : "SDK test";
   return test.lang ? `${kind} · ${test.lang}` : kind;
 }
+
+/** The tile's tooltip: its description and what it is tested against. */
+function tooltip(item: (typeof items)[number]): string {
+  return `${item.description} Tested against: ${item.tests.map(testLabel).join(", ")}.`;
+}
+
+// The directory's data for the page script. "<" is escaped so no docs text can close the tag.
+const filterData = JSON.stringify(
+  items.map(({ group, title, description, languages }) => ({
+    group,
+    title,
+    description,
+    languages,
+  })),
+).replaceAll("<", "\\u003c");
 ---
 
 <MarketingLayout
@@ -34,40 +95,113 @@ function testLabel(test: {
   route="/integrations/"
 >
   <Section tone="ink" pad="md" labelledby="integrations-title">
-    <SectionHeading
-      level={1}
-      eyebrow="Integrations"
-      title="Works with your stack."
-      id="integrations-title"
-      lede="cetra reads OpenTelemetry. Each of these is tested against recorded or hand-written traces, or SDK tests; anything else that speaks OpenTelemetry works too."
-    />
-  </Section>
-
-  {
-    sections.map((section, index) => (
-      <Section
-        tone={index % 2 === 0 ? "raised" : "ink"}
-        divider
-        labelledby={section.id}
-      >
-        <SectionHeading title={section.group} id={section.id} />
-        <div class="tiles">
-          {section.items.map((item) => (
-            <Card title={item.title} href={item.href}>
-              <p>{item.description}</p>
-              <div class="badges">
-                {item.python && <span class="badge">Python</span>}
-                {item.typescript && <span class="badge">TypeScript</span>}
-                {item.tests.map((test) => (
-                  <span class="badge">{testLabel(test)}</span>
+    <div class="hero">
+      <SectionHeading
+        level={1}
+        eyebrow="Integrations"
+        title="Works with your stack."
+        id="integrations-title"
+        lede={`${integrationCount} integrations and ${guides} migration guides, each with a setup page and tested against real traces or SDK tests. Anything else that speaks OpenTelemetry works too.`}
+      />
+      <div class="setup">
+        <Tabs id="setup" label="Set up cetra" labels={["Python", "TypeScript", "Any OTLP exporter"]}>
+          {SETUP.map((panel) => (
+            <div data-tab-panel>
+              <div class="code">
+                {panel.map((block) => (
+                  <Code code={block.code} lang={block.lang} theme="css-variables" />
                 ))}
               </div>
-            </Card>
+            </div>
           ))}
-        </div>
-      </Section>
-    ))
-  }
+        </Tabs>
+        <p class="setup-note">OpenAI shown, abridged. Each integration's page has its own lines.</p>
+      </div>
+    </div>
+  </Section>
+
+  <Section tone="raised" pad="md" divider labelledby="directory-title">
+    <h2 id="directory-title" class="visually-hidden">All integrations</h2>
+    <div class="controls" data-directory-controls hidden>
+      <label class="visually-hidden" for="integration-search">Search integrations</label>
+      <input
+        id="integration-search"
+        type="search"
+        class="search"
+        placeholder="Search: OpenAI, LangGraph, Claude Code…"
+        autocomplete="off"
+      />
+      <div class="chips" role="group" aria-label="Group">
+        <button type="button" class="chip" data-group-chip="" aria-pressed="true">
+          All {items.length}
+        </button>
+        {groupChips.map(({ group, count }) => (
+          <button type="button" class="chip" data-group-chip={group} aria-pressed="false">
+            {group} {count}
+          </button>
+        ))}
+      </div>
+      <div class="chips" role="group" aria-label="Language">
+        {LANGUAGE_FILTERS.map((filter) => (
+          <button
+            type="button"
+            class="chip"
+            data-language-chip={filter.id}
+            aria-pressed={filter.id === "any" ? "true" : "false"}
+          >
+            {filter.label}
+          </button>
+        ))}
+      </div>
+      <p class="count" aria-live="polite" data-directory-count></p>
+    </div>
+    <ul class="tiles" role="list" data-directory-grid>
+      {items.map((item, index) => (
+        <li class="tile" data-index={index}>
+          <a href={item.href} title={tooltip(item)}>
+            <span class="mono" aria-hidden="true">{monogram(item.title)}</span>
+            <span class="text">
+              <span class="name">{item.title}</span>
+              {item.languages.length > 0 && (
+                <span class="langs">
+                  {item.languages.map((language) => (
+                    <span class="lang">{LANGUAGE_CHIPS[language]}</span>
+                  ))}
+                </span>
+              )}
+            </span>
+          </a>
+        </li>
+      ))}
+    </ul>
+    <div class="any-language" data-any-language hidden>
+      <h3 id="any-language-title">Works with any language</h3>
+      <p>Tools you configure rather than import.</p>
+      <ul class="tiles" role="list" aria-labelledby="any-language-title">
+        {anyLanguageItems.map(({ item, index }) => (
+          <li class="tile" data-index={index}>
+            <a href={item.href} title={tooltip(item)}>
+              <span class="mono" aria-hidden="true">{monogram(item.title)}</span>
+              <span class="text">
+                <span class="name">{item.title}</span>
+                {item.languages.length > 0 && (
+                  <span class="langs">
+                    {item.languages.map((language) => (
+                      <span class="lang">{LANGUAGE_CHIPS[language]}</span>
+                    ))}
+                  </span>
+                )}
+              </span>
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+    <p class="empty" data-directory-empty hidden>
+      No integration matches. <a href="#send-title">Anything that speaks OpenTelemetry works</a>.
+    </p>
+    <script type="application/json" id="integrations-data" is:inline set:html={filterData}></script>
+  </Section>
 
   <Section tone="teal" divider labelledby="send-title">
     <SectionHeading
@@ -82,27 +216,230 @@ function testLabel(test: {
 </MarketingLayout>
 
 <style>
-  .tiles {
+  .hero {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-    gap: var(--space-4);
-    margin-top: var(--space-7);
+    gap: var(--space-7);
   }
-  .badges {
+  @media (min-width: 960px) {
+    .hero {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      align-items: center;
+    }
+  }
+  .setup {
+    min-width: 0;
+  }
+  .code {
+    margin: var(--space-3) 0 0;
+    padding: var(--space-4);
+    background: var(--c-ink-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    font-size: var(--text-sm);
+    line-height: 1.7;
+    /* Shiki's css-variables theme reads these: the site palette, not a stock theme */
+    --astro-code-foreground: var(--c-paper);
+    --astro-code-background: transparent;
+    --astro-code-token-keyword: var(--c-teal-light);
+    --astro-code-token-string: var(--c-code-string);
+    --astro-code-token-string-expression: var(--c-code-string);
+    --astro-code-token-constant: var(--c-code-constant);
+    --astro-code-token-function: var(--c-code-function);
+    --astro-code-token-parameter: var(--c-stone-300);
+    --astro-code-token-punctuation: var(--c-stone-400);
+    --astro-code-token-comment: var(--c-stone-400);
+    --astro-code-token-link: var(--c-teal-light);
+  }
+  .code :global(pre) {
+    margin: 0;
+    font-family: var(--font-mono);
+    white-space: pre;
+  }
+  .code :global(pre + pre) {
+    margin-top: var(--space-4);
+  }
+  .code :global([style*="--astro-code-token-comment"]) {
+    font-style: italic;
+  }
+  .setup-note {
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    margin-top: var(--space-2);
+  }
+  .search {
+    width: 100%;
+    padding: var(--space-3) var(--space-4);
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: inherit;
+  }
+  .chips {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2);
     margin-top: var(--space-4);
   }
-  .badge {
-    font-family: var(--font-mono);
+  .chip {
     font-size: var(--text-xs);
+    padding: 4px 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--fg-muted);
+    cursor: pointer;
+  }
+  .chip[aria-pressed="true"] {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .chip:focus-visible,
+  .search:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: -2px;
+  }
+  .count {
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    margin-top: var(--space-4);
+  }
+  .tiles {
+    list-style: none;
+    margin: var(--space-4) 0 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: var(--space-2);
+  }
+  .tile a {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    color: var(--fg);
+    text-decoration: none;
+    height: 100%;
+    box-sizing: border-box;
+    min-width: 0;
+  }
+  .tile a:hover,
+  .tile a:focus-visible {
+    border-color: var(--accent);
+  }
+  .tile a:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: -2px;
+  }
+  .mono {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    color: var(--accent);
+    font-weight: 600;
+    font-size: var(--text-sm);
+  }
+  .text {
+    min-width: 0;
+    display: grid;
+    gap: 2px;
+  }
+  .name {
+    font-size: var(--text-sm);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .langs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .lang {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--fg-muted);
     border: 1px solid var(--line);
     border-radius: 999px;
-    padding: 2px 8px;
+    padding: 0 6px;
+  }
+  .any-language {
+    margin-top: var(--space-7);
+  }
+  .any-language h3 {
+    font-size: var(--text-lg);
+  }
+  .any-language p {
+    color: var(--fg-muted);
+    font-size: var(--text-sm);
+  }
+  .empty {
+    margin-top: var(--space-6);
     color: var(--fg-muted);
   }
   .actions {
     margin-top: var(--space-6);
   }
 </style>
+
+<script>
+  import { type FilterItem, filterIntegrations } from "../marketing/lib/integrations-filter.mjs";
+
+  const controls = document.querySelector<HTMLElement>("[data-directory-controls]");
+  const search = document.querySelector<HTMLInputElement>("#integration-search");
+  const data = document.querySelector<HTMLScriptElement>("#integrations-data");
+  const strip = document.querySelector<HTMLElement>("[data-any-language]");
+  const empty = document.querySelector<HTMLElement>("[data-directory-empty]");
+  const count = document.querySelector<HTMLElement>("[data-directory-count]");
+
+  if (controls && search && data && strip && empty && count) {
+    const items: FilterItem[] = JSON.parse(data.textContent ?? "[]");
+    const mainTiles = Array.from(document.querySelectorAll<HTMLElement>("[data-directory-grid] > li"));
+    const stripTiles = Array.from(strip.querySelectorAll<HTMLElement>("li[data-index]"));
+    let group: string | null = null;
+    let language = "any";
+
+    const render = () => {
+      const { matched, anyLanguage } = filterIntegrations(items, { group, language, query: search.value });
+      const shown = new Set(matched);
+      const shownAny = new Set(anyLanguage);
+      for (const tile of mainTiles) tile.hidden = !shown.has(Number(tile.dataset.index));
+      for (const tile of stripTiles) tile.hidden = !shownAny.has(Number(tile.dataset.index));
+      strip.hidden = anyLanguage.length === 0;
+      const total = matched.length + anyLanguage.length;
+      empty.hidden = total > 0;
+      count.textContent = `${total} of ${items.length} shown`;
+    };
+
+    // Each chip group is a radio-like set: the clicked chip is pressed, its siblings are not.
+    const wire = (attribute: string, select: (value: string) => void) => {
+      for (const chip of controls.querySelectorAll<HTMLButtonElement>(`[${attribute}]`)) {
+        chip.addEventListener("click", () => {
+          select(chip.getAttribute(attribute) ?? "");
+          for (const sibling of chip.parentElement?.querySelectorAll<HTMLButtonElement>(`[${attribute}]`) ?? []) {
+            sibling.setAttribute("aria-pressed", sibling === chip ? "true" : "false");
+          }
+          render();
+        });
+      }
+    };
+    wire("data-group-chip", (value) => {
+      group = value === "" ? null : value;
+    });
+    wire("data-language-chip", (value) => {
+      language = value;
+    });
+    search.addEventListener("input", render);
+
+    controls.hidden = false;
+    render();
+  }
+</script>

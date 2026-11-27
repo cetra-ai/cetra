@@ -1,6 +1,6 @@
 # Marketing site (cetra.sh)
 
-The design is `docs/website/00-design.md`. It has nineteen milestones, M1–M19, each with its own plan written just before it starts. M6 (benchmarks) waits for the benchmark and is not planned yet.
+The design is `docs/website/00-design.md`. It has twenty milestones, M1–M20, each with its own plan written just before it starts. M6 (benchmarks) waits for the benchmark and is not planned yet.
 
 | Milestone | Plan | Status |
 |---|---|---|
@@ -23,6 +23,7 @@ The design is `docs/website/00-design.md`. It has nineteen milestones, M1–M19,
 | M17 Story data | planned | [17-m17-story-data.md](17-m17-story-data.md) |
 | M18 Pictures that need no UI change | done | [18-m18-story-pictures.md](18-m18-story-pictures.md) |
 | M19 Pictures that wait for the UI | done | [19-m19-ui-pictures.md](19-m19-ui-pictures.md) |
+| M20 Integrations directory | [`20-m20-integrations-directory.md`](20-m20-integrations-directory.md) | done (D1–D3) |
 
 ## Branches
 

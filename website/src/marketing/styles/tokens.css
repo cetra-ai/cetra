@@ -15,6 +15,10 @@
   --c-teal-light: #2dd4bf;
   --c-teal-deep: #0a2e2b;
   --c-teal-ink: #042f2e;
+  /* Code highlighting, on --c-ink-2 (the integrations page's setup snippets) */
+  --c-code-string: #e6c88f;
+  --c-code-constant: #f2a58e;
+  --c-code-function: #a7d8d1;
 
   /* Semantic tokens (re-mapped by .tone-* bands) */
   --bg: var(--c-ink);
