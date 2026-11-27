@@ -12,17 +12,19 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use bytes::Bytes;
-use cetra_column::{Batch, Column, DataType, FlatData, ScalarValue, Selection};
+use cetra_column::{Batch, CancelToken, Column, DataType, FlatData, ScalarValue, Selection};
 use cetra_core::ids::ProjectId;
+use cetra_statam::TaskExecutor;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 
+use crate::QeRuntime;
 use crate::anchor::{AnchorPlan, Anchors};
 use crate::catalog::{Catalog, CatalogEdit, Committer, FileId, FileMeta, FileTable};
 use crate::dedup;
 use crate::deletion::{Tombstones, applicable, drop_covered_batch, to_tombstone_specs};
+use crate::engine::WorkerPoolExecutor;
 use crate::error::FlushError;
-use crate::file_format::{WrittenFile, write_file_batch};
 use crate::hooks::{HookPoint, Hooks};
 #[cfg(test)]
 use crate::memtable::MemBatch;
@@ -31,6 +33,9 @@ use crate::objects::Objects;
 use crate::partials::partials_from_spans_batch;
 use crate::projects::ProjectStates;
 use crate::read_state::{Published, ReadState};
+use crate::statam_io::{
+    WriteParallelism, WrittenFile, write_file_batch, write_file_batch_with_parallel,
+};
 use crate::wal::writer::{RotateError, WriterShared};
 use crate::wal::{Table, truncate_segments};
 
@@ -41,6 +46,9 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// The writer notifies only at `flush.max_bytes`. A smaller memtable still has
 /// to start its age deadline.
 const IDLE_POLL: Duration = Duration::from_millis(50);
+/// Minimum batch bytes and rows for enabling parallel `write_threads` on a single-partition flush.
+const LARGE_FLUSH_MIN_BYTES: usize = 16 * 1024 * 1024;
+const LARGE_FLUSH_MIN_ROWS: usize = 16_384;
 
 struct PreparedFile {
     meta: FileMeta,
@@ -71,6 +79,8 @@ struct FlushParams {
     upload_concurrency: usize,
     /// Present only on the spans flush task.
     anchors: Option<Arc<Mutex<Anchors>>>,
+    /// Shared query runtime providing `bg_workers` for large single-partition flushes.
+    qe_runtime: Arc<QeRuntime>,
     stop: watch::Receiver<bool>,
     notify: Arc<Notify>,
 }
@@ -100,6 +110,8 @@ pub(crate) struct FlushStart {
     pub upload_concurrency: usize,
     /// The spans task's anchor state. `None` for scores.
     pub anchors: Option<Arc<Mutex<Anchors>>>,
+    /// Shared query runtime providing `bg_workers` for large single-partition flushes.
+    pub qe_runtime: Arc<QeRuntime>,
 }
 
 /// A running flush task. Shutdown asks it to finish; drop cancels it.
@@ -154,6 +166,7 @@ pub(crate) fn spawn(start: FlushStart) -> FlushHandle {
         max_age: start.max_age,
         upload_concurrency: start.upload_concurrency,
         anchors: start.anchors,
+        qe_runtime: start.qe_runtime,
         stop,
         notify: Arc::clone(&notify),
     };
@@ -332,8 +345,16 @@ async fn flush_once(params: &FlushParams) -> Result<Option<u64>, FlushError> {
     }
     let table = params.table;
     let anchors = params.anchors.clone();
+    let qe_runtime = Arc::clone(&params.qe_runtime);
     let prepared = match tokio::task::spawn_blocking(move || {
-        prepare(table, &view, anchors.as_deref(), &tombstones, &projects)
+        prepare(
+            table,
+            &view,
+            anchors.as_deref(),
+            &tombstones,
+            &projects,
+            &qe_runtime,
+        )
     })
     .await
     {
@@ -372,11 +393,9 @@ async fn flush_once(params: &FlushParams) -> Result<Option<u64>, FlushError> {
     }
     let edit = CatalogEdit {
         add: files.into_iter().map(|file| file.meta).collect(),
-        remove: Vec::new(),
         flushed_seq: Some((params.table, max_seq)),
         sources,
-        raise: Vec::new(),
-        quarantine: Vec::new(),
+        ..CatalogEdit::default()
     };
     let published = Arc::clone(&params.published);
     let shared = Arc::clone(&params.shared);
@@ -453,12 +472,43 @@ fn publish_flush(
     shared.set_memtable_bytes(bytes);
 }
 
+fn flush_write_parallelism(
+    qe_runtime: &QeRuntime,
+    partition_count: usize,
+    batch_bytes: usize,
+    batch_rows: usize,
+) -> WriteParallelism {
+    if partition_count != 1
+        || batch_bytes < LARGE_FLUSH_MIN_BYTES
+        || batch_rows < LARGE_FLUSH_MIN_ROWS
+    {
+        return WriteParallelism::default();
+    }
+    let Ok(bg_workers) = qe_runtime.bg_workers() else {
+        return WriteParallelism::default();
+    };
+    if bg_workers.num_workers() <= 1 {
+        return WriteParallelism::default();
+    }
+    let write_threads = bg_workers.num_workers().clamp(2, 4);
+    let executor: Arc<dyn TaskExecutor> = Arc::new(WorkerPoolExecutor::new(
+        bg_workers,
+        CancelToken::new(),
+        write_threads,
+    ));
+    WriteParallelism {
+        write_threads,
+        executor: Some(executor),
+    }
+}
+
 fn prepare(
     table: Table,
     view: &FrozenView,
     anchors: Option<&Mutex<Anchors>>,
     tombstones: &Tombstones,
     projects: &ProjectStates,
+    qe_runtime: &QeRuntime,
 ) -> Result<Prepared, FlushError> {
     let file_table = FileTable::from(table);
     let known_seq = tombstones.known_seq();
@@ -473,6 +523,7 @@ fn prepare(
                 .unwrap_or_else(PoisonError::into_inner)
                 .partition(view)?;
             anchor_plan = Some(plan);
+            let partition_count = partitions.len();
             for partition in partitions {
                 // A partition of a day the project's retention watermark has
                 // dropped never reaches a file (spec 03 §8).
@@ -495,10 +546,24 @@ fn prepare(
                 }
                 let batch = dedup::latest_spans_batch(&batch)
                     .map_err(|error| FlushError::dedup(error.reason()))?;
-                push_spans_files(&mut files, &mut sources, &partition.key, batch, known_seq)?;
+                let parallel = flush_write_parallelism(
+                    qe_runtime,
+                    partition_count,
+                    batch.memory_bytes(),
+                    batch.num_rows(),
+                );
+                push_spans_files(
+                    &mut files,
+                    &mut sources,
+                    &partition.key,
+                    batch,
+                    known_seq,
+                    parallel,
+                )?;
             }
         }
         Table::Scores => {
+            let partition_count = view.partitions.len();
             for (key, batches) in view.partitions.iter() {
                 if projects.drops(key.project, key.day) {
                     continue;
@@ -509,7 +574,7 @@ fn prepare(
                 let refs: Vec<&Batch> = batches.iter().map(|batch| batch.batch.as_ref()).collect();
                 let combined = Batch::concat(FileTable::Scores.column_schema(), &refs, None)
                     .map_err(|source| {
-                        FlushError::prepare(crate::error::ParquetWriteError::from_column(source))
+                        FlushError::prepare(crate::error::FileWriteError::from_column(source))
                     })?;
                 let min_ingest = min_ingest_time(&combined, table)?;
                 let combined =
@@ -517,8 +582,15 @@ fn prepare(
                 if combined.num_rows() == 0 {
                     continue;
                 }
-                let written = write_file_batch(file_table, 0, &[Arc::new(combined)])
-                    .map_err(FlushError::prepare)?;
+                let parallel = flush_write_parallelism(
+                    qe_runtime,
+                    partition_count,
+                    combined.memory_bytes(),
+                    combined.num_rows(),
+                );
+                let written =
+                    write_file_batch_with_parallel(file_table, 0, &[Arc::new(combined)], parallel)
+                        .map_err(FlushError::prepare)?;
                 let (path, id) = Objects::table_file_path(file_table, key.project, key.day, 0);
                 files.push(prepared_file(id, file_table, key, path, written, known_seq));
             }
@@ -650,10 +722,12 @@ fn push_spans_files(
     key: &PartitionKey,
     batch: Batch,
     known_seq: u64,
+    parallel: WriteParallelism,
 ) -> Result<(), FlushError> {
     let batch = Arc::new(batch);
-    let spans_written = write_file_batch(FileTable::Spans, 0, &[Arc::clone(&batch)])
-        .map_err(FlushError::prepare)?;
+    let spans_written =
+        write_file_batch_with_parallel(FileTable::Spans, 0, &[Arc::clone(&batch)], parallel)
+            .map_err(FlushError::prepare)?;
     let partials = partials_from_spans_batch(&batch).map_err(FlushError::partials)?;
     let traces_written = write_file_batch(FileTable::Traces, 0, &[Arc::new(partials)])
         .map_err(FlushError::prepare)?;
@@ -707,6 +781,7 @@ fn prepared_file(
             max_ingest_time: written.max_ingest_time,
             fully_merged: false,
             deletions_applied_seq: known_seq,
+            pack: None,
         },
         bytes: written.bytes,
     }
@@ -719,9 +794,8 @@ fn prepared_file(
 fn dedup_spans(batches: &[MemBatch]) -> Result<Batch, FlushError> {
     let schema = Arc::clone(batches[0].batch.schema());
     let refs: Vec<&Batch> = batches.iter().map(|batch| batch.batch.as_ref()).collect();
-    let combined = Batch::concat(schema, &refs, None).map_err(|source| {
-        FlushError::prepare(crate::error::ParquetWriteError::from_column(source))
-    })?;
+    let combined = Batch::concat(schema, &refs, None)
+        .map_err(|source| FlushError::prepare(crate::error::FileWriteError::from_column(source)))?;
     dedup::latest_spans_batch(&combined).map_err(|error| FlushError::dedup(error.reason()))
 }
 

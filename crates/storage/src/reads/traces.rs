@@ -22,11 +22,13 @@ use cetra_query::exec::{
 };
 use cetra_query::{BinaryOp, CompiledFilter, Expr, FilterView, QueryError};
 
+use crate::engine::statam_source::{ROW_COORD_FILE_COL, ROW_COORD_ROW_COL};
 use crate::engine::traces_source::TraceListMode;
+use crate::engine::{BufferedBatchStream, apply_visible_from};
 use crate::query_error::RunError;
 use crate::reads::columns::{
-    active_rows, decimal_to_f64_at, i64_at, internal, raw_string_at, raw_time_at, require_col,
-    string_at,
+    active_rows, decimal_to_f64_at, i64_at, internal, raw_i64_at, raw_string_at, raw_time_at,
+    require_col, string_at,
 };
 use crate::reads::context::{
     DURATION_MS, DURATION_NS, EngineContext, OperatorStream, duration_ns_from_bounds_expr,
@@ -961,7 +963,8 @@ async fn run_span_list_attempt(
     let compiled_c = compiled.cloned();
     let cursor_c = cursor.cloned();
     let search_c = present(request.search).map(str::to_owned);
-    let sort_col = span_sort_column(request.sort);
+    let sort = request.sort;
+    let sort_col = span_sort_column(sort);
     let scope = request.scope;
     let strict = request.strict_exclusions;
     let order = request.order;
@@ -1034,6 +1037,235 @@ async fn run_span_list_attempt(
                 populate_id_lookups(&mut spec);
 
                 let raw_proj = span_list_raw_indices(&spans_raw, true).map_err(run_err_to_query)?;
+
+                // M3.5.5: Two-phase late-materialization Top-K via `StatamSource::take_rows`
+                // for non-time sorts (`duration_ns`, `cost_total`, `total_tokens`).
+                if !ctx_c.force_range_mode
+                    && sort != SpanSort::StartTime
+                    && let Some(spans_statam) = &ctx_c.spans_statam
+                {
+                    if let Some(vf) = ctx_c.visible_from {
+                        spec = apply_visible_from(&spec, &spans_raw, spans::START_TIME, vf)?;
+                    }
+
+                    // Phase 1 (disk): narrow Top-K over `(sort_col, span_id, trace_id, ingest_time)`
+                    // plus row coordinates `(file_ordinal, row_idx)`.
+                    let mut narrow_set = BTreeSet::new();
+                    for col_name in [
+                        sort_col,
+                        spans::SPAN_ID,
+                        spans::TRACE_ID,
+                        spans::INGEST_TIME,
+                    ] {
+                        let idx = spans_raw.index_of(col_name).ok_or_else(|| {
+                            QueryError::internal(format!("spans schema missing {col_name}"))
+                        })?;
+                        narrow_set.insert(idx);
+                    }
+                    let mut p1_spec = spec.clone();
+                    p1_spec.projection = Some(narrow_set.into_iter().collect());
+                    let (mut disk_streams, p1_coord_schema) =
+                        spans_statam.open_with_row_coords(&p1_spec, exec_ctx)?;
+                    let mut disk_coords: Vec<(u32, u64)> = Vec::new();
+                    if !disk_streams.is_empty() {
+                        if strict {
+                            disk_streams = strict_exclusions_spans(
+                                &ctx_c,
+                                exec_ctx,
+                                disk_streams,
+                                Arc::clone(&p1_coord_schema),
+                                None,
+                            )?;
+                        }
+                        let mut p1_sort_keys =
+                            cursor::order_by(&p1_coord_schema, sort_col, SPAN_TIES, order)
+                                .map_err(run_err_to_query)?;
+                        p1_sort_keys.push(SortKey {
+                            expr: col_expr_q(&p1_coord_schema, spans::INGEST_TIME)?,
+                            descending: true,
+                            nulls_first: false,
+                        });
+                        let sink_schema = Arc::clone(&p1_coord_schema);
+                        let sink_keys = p1_sort_keys.clone();
+                        let sink_ctx = exec_ctx.clone();
+                        let p1_sinks = exec_run_pipeline(
+                            exec_ctx,
+                            disk_streams,
+                            |_| Ok(Vec::new()),
+                            move |_| {
+                                Ok(TopKSink::new(
+                                    Arc::clone(&sink_schema),
+                                    sink_keys.clone(),
+                                    fetch,
+                                    0,
+                                    sink_ctx.clone(),
+                                ))
+                            },
+                        )?;
+                        let p1_merged = TopKSink::merge(
+                            p1_sinks,
+                            p1_coord_schema,
+                            &p1_sort_keys,
+                            0,
+                            fetch,
+                            exec_ctx,
+                        )?;
+                        for batch in p1_merged {
+                            if batch.is_empty() {
+                                continue;
+                            }
+                            let file_col =
+                                batch.column_by_name(ROW_COORD_FILE_COL).ok_or_else(|| {
+                                    QueryError::internal("missing row coord file_ordinal")
+                                })?;
+                            let row_col = batch
+                                .column_by_name(ROW_COORD_ROW_COL)
+                                .ok_or_else(|| QueryError::internal("missing row coord row_idx"))?;
+                            for phys_row in active_rows(&batch) {
+                                let f_i64 =
+                                    raw_i64_at(file_col, phys_row).map_err(run_err_to_query)?;
+                                let r_i64 =
+                                    raw_i64_at(row_col, phys_row).map_err(run_err_to_query)?;
+                                let file_ord = u32::try_from(f_i64).map_err(|_| {
+                                    QueryError::internal("invalid row coord file_ordinal")
+                                })?;
+                                let row_idx = u64::try_from(r_i64).map_err(|_| {
+                                    QueryError::internal("invalid row coord row_idx")
+                                })?;
+                                disk_coords.push((file_ord, row_idx));
+                            }
+                        }
+                    }
+
+                    // Phase 1 (memtable): regular Top-K(`fetch`) over live memtable rows.
+                    let mut mem_winners: Vec<Batch> = Vec::new();
+                    if let Some(spans_mem) = &ctx_c.spans_mem {
+                        let mut mem_spec = spec;
+                        mem_spec.projection = Some(raw_proj.clone());
+                        let mem_scan_schema = spans_mem.projected_schema(&mem_spec)?;
+                        let mut mem_streams = spans_mem.open_partitions(&mem_spec, exec_ctx)?;
+                        if !mem_streams.is_empty() {
+                            if strict {
+                                mem_streams = strict_exclusions_spans(
+                                    &ctx_c,
+                                    exec_ctx,
+                                    mem_streams,
+                                    Arc::clone(&mem_scan_schema),
+                                    None,
+                                )?;
+                            }
+                            let mem_view_streams: Vec<Box<dyn PartitionStream>> = mem_streams
+                                .into_iter()
+                                .map(|s| {
+                                    let proj = project_view_columns(
+                                        &mem_scan_schema,
+                                        Arc::clone(&list_with_ingest_schema),
+                                        &list_with_ingest_names,
+                                        false,
+                                        exec_ctx.clone(),
+                                    )?;
+                                    Ok(Box::new(OperatorStream::new(
+                                        s,
+                                        vec![Box::new(proj)],
+                                        exec_ctx,
+                                    ))
+                                        as Box<dyn PartitionStream>)
+                                })
+                                .collect::<Result<Vec<_>, QueryError>>()?;
+                            let mut mem_sort_keys = cursor::order_by(
+                                &list_with_ingest_schema,
+                                sort_col,
+                                SPAN_TIES,
+                                order,
+                            )
+                            .map_err(run_err_to_query)?;
+                            mem_sort_keys.push(SortKey {
+                                expr: col_expr_q(&list_with_ingest_schema, spans::INGEST_TIME)?,
+                                descending: true,
+                                nulls_first: false,
+                            });
+                            let sink_schema = Arc::clone(&list_with_ingest_schema);
+                            let sink_keys = mem_sort_keys.clone();
+                            let sink_ctx = exec_ctx.clone();
+                            let mem_sinks = exec_run_pipeline(
+                                exec_ctx,
+                                mem_view_streams,
+                                |_| Ok(Vec::new()),
+                                move |_| {
+                                    Ok(TopKSink::new(
+                                        Arc::clone(&sink_schema),
+                                        sink_keys.clone(),
+                                        fetch,
+                                        0,
+                                        sink_ctx.clone(),
+                                    ))
+                                },
+                            )?;
+                            mem_winners = TopKSink::merge(
+                                mem_sinks,
+                                Arc::clone(&list_with_ingest_schema),
+                                &mem_sort_keys,
+                                0,
+                                fetch,
+                                exec_ctx,
+                            )?;
+                        }
+                    }
+
+                    // Phase 2: random-access fetch winning disk rows via `take_rows`, combine
+                    // with memtable winners, and re-sort into exact `(sort_col, span_id,
+                    // trace_id, ingest_time DESC)` order before stripping `ingest_time`.
+                    let mut combined_streams: Vec<Box<dyn PartitionStream>> = Vec::new();
+                    if !disk_coords.is_empty() {
+                        let mut take_res = exec_ctx.pool.register("span_list_p2_take", false);
+                        let raw_batches = spans_statam.take_rows(
+                            &disk_coords,
+                            &raw_proj,
+                            exec_ctx,
+                            &mut take_res,
+                        )?;
+                        if !raw_batches.is_empty() {
+                            let p2_raw_schema = Arc::new(spans_raw.project(&raw_proj)?);
+                            let stream = Box::new(BufferedBatchStream::new(raw_batches, take_res))
+                                as Box<dyn PartitionStream>;
+                            let proj = project_view_columns(
+                                &p2_raw_schema,
+                                Arc::clone(&list_with_ingest_schema),
+                                &list_with_ingest_names,
+                                false,
+                                exec_ctx.clone(),
+                            )?;
+                            combined_streams.push(Box::new(OperatorStream::new(
+                                stream,
+                                vec![Box::new(proj)],
+                                exec_ctx,
+                            )));
+                        }
+                    }
+                    if !mem_winners.is_empty() {
+                        let mut mem_res = exec_ctx.pool.register("span_list_p2_mem", false);
+                        let total_mem = mem_winners
+                            .iter()
+                            .map(Batch::memory_bytes)
+                            .fold(0usize, usize::saturating_add);
+                        mem_res.try_grow(total_mem)?;
+                        combined_streams
+                            .push(Box::new(BufferedBatchStream::new(mem_winners, mem_res)));
+                    }
+                    if combined_streams.is_empty() {
+                        return Ok(Vec::new());
+                    }
+                    return run_span_topk_and_strip_ingest(
+                        combined_streams,
+                        list_with_ingest_schema,
+                        &list_out_schema,
+                        sort_col,
+                        order,
+                        fetch,
+                        exec_ctx,
+                    );
+                }
+
                 spec.projection = Some(raw_proj);
                 let scan_schema = ctx_c.spans.projected_schema(&spec)?;
                 let mut streams = ctx_c.spans.open_partitions(&spec, exec_ctx)?;
@@ -4021,6 +4253,170 @@ mod tests {
                 cost_total: 1.0,
             }
         );
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn two_phase_span_list_matches_single_phase_across_sorts_ties_visible_from_strict_and_memtable()
+     {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(test_config(dir.path())).await.expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-00000000000b".parse().expect("pid");
+
+        let t_base = parse_rfc3339("2026-01-01T12:00:00Z").expect("ts");
+        // Batch 1 (flushed to Statam disk): ties, NULLs, eval/experiment exclusions, and a span
+        // that will later receive an updated copy in memtable with newer `ingest_time`.
+        let mut disk_spans = Vec::new();
+        for i in 1..=12_u16 {
+            let start = t_base + i64::from(i) * 1_000_000_000;
+            let mut s = span_row(i, 0, start, start + 1_000);
+            s.project_id = project;
+            s.name = format!("disk-span-{i}");
+            // Deliberate ties on duration_ns, cost_total, total_tokens + NULLs.
+            s.end_time = s.start_time + i64::from((i % 4) + 1) * 100_000;
+            s.cost_total = if i % 5 == 0 {
+                None
+            } else {
+                Some(f64::from(i % 3) * 0.25 + 0.1)
+            };
+            s.total_tokens = if i % 6 == 0 {
+                None
+            } else {
+                Some(i64::from(i % 4) * 50)
+            };
+            if i == 11 {
+                s.environment = Some(cetra_core::names::environment::EVAL.to_owned());
+            }
+            if i == 12 {
+                s.metadata
+                    .insert(metadata_key::EXPERIMENT_ID.to_owned(), "exp-1".to_owned());
+            }
+            if i % 2 == 0 {
+                s.input = Some("order-search-needle".to_owned());
+            }
+            disk_spans.push(s);
+        }
+        storage
+            .append_spans(project, span_rows(&disk_spans))
+            .await
+            .expect("append disk spans");
+        storage.flush_now(TIMEOUT).await.expect("flush to statam");
+        assert!(
+            !storage.catalog_files(crate::wal::Table::Spans).is_empty(),
+            "disk spans must be flushed"
+        );
+
+        // Batch 2 (stays in live MemtableSource): new spans + duplicate of span 3 with newer ingest_time.
+        let mut mem_spans = Vec::new();
+        let mut dup3 = disk_spans[2].clone();
+        dup3.ingest_time += 50_000_000;
+        dup3.name = "disk-span-3-updated".to_owned();
+        mem_spans.push(dup3);
+        for i in 13..=16_u16 {
+            let start = t_base + i64::from(i) * 1_000_000_000;
+            let mut s = span_row(i, 0, start, start + 50_000_000);
+            s.project_id = project;
+            s.name = format!("mem-span-{i}");
+            s.end_time = s.start_time + i64::from((i % 4) + 1) * 100_000;
+            s.cost_total = Some(f64::from(i % 3) * 0.25 + 0.1);
+            s.total_tokens = Some(i64::from(i % 4) * 50);
+            s.input = Some("order-search-needle".to_owned());
+            mem_spans.push(s);
+        }
+        storage
+            .append_spans(project, span_rows(&mem_spans))
+            .await
+            .expect("append mem spans");
+
+        let win = TimeWindow::new(t_base, t_base + 30 * 1_000_000_000).expect("win");
+        let vf = t_base + 3 * 1_000_000_000;
+
+        for (visible_from, strict, search) in [
+            (None, false, None),
+            (Some(vf), false, None),
+            (None, true, Some("order-search-needle")),
+            (Some(vf), true, Some("order-search-needle")),
+        ] {
+            let two_phase_eng = EngineContext::from_storage(
+                &storage,
+                project,
+                &QueryOptions::new(visible_from, None),
+            )
+            .expect("two_phase");
+            assert!(two_phase_eng.spans_statam.is_some());
+            assert!(two_phase_eng.spans_mem.is_some());
+            let mut single_phase_eng = two_phase_eng.clone();
+            single_phase_eng.set_force_range_mode(true);
+            let ctx_2p = QueryContext::from_engine(two_phase_eng);
+            let ctx_1p = QueryContext::from_engine(single_phase_eng);
+
+            let scope = ListScope {
+                window: Some(win),
+                include_eval: false,
+                include_experiments: false,
+            };
+
+            for sort in [
+                SpanSort::Duration,
+                SpanSort::CostTotal,
+                SpanSort::TotalTokens,
+            ] {
+                for order in [SortOrder::Desc, SortOrder::Asc] {
+                    // Page through with limit=2 using two-phase path.
+                    let mut cur: Option<String> = None;
+                    let mut rows_2p = Vec::new();
+                    loop {
+                        let page = span_list(
+                            &ctx_2p,
+                            SpanListRequest {
+                                filter: None,
+                                search,
+                                scope,
+                                strict_exclusions: strict,
+                                sort,
+                                order,
+                                limit: 2,
+                                cursor: cur.as_deref(),
+                                timeout: TIMEOUT,
+                            },
+                        )
+                        .await
+                        .expect("2p page");
+                        rows_2p.extend(qe_rows(&page.batches));
+                        match page.next_cursor {
+                            Some(next) => cur = Some(next),
+                            None => break,
+                        }
+                    }
+
+                    // Reference single-phase full list.
+                    let ref_page = span_list(
+                        &ctx_1p,
+                        SpanListRequest {
+                            filter: None,
+                            search,
+                            scope,
+                            strict_exclusions: strict,
+                            sort,
+                            order,
+                            limit: 100,
+                            cursor: None,
+                            timeout: TIMEOUT,
+                        },
+                    )
+                    .await
+                    .expect("1p ref");
+                    let rows_1p = qe_rows(&ref_page.batches);
+
+                    assert_eq!(
+                        rows_2p, rows_1p,
+                        "two-phase mismatch for sort={sort:?}, order={order:?}, vf={visible_from:?}, strict={strict}, search={search:?}"
+                    );
+                    assert!(!rows_2p.is_empty());
+                }
+            }
+        }
 
         let _ = storage.shutdown().await;
     }

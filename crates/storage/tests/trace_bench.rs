@@ -533,7 +533,7 @@ fn count_spans_files(dir: &Path) -> usize {
             let p = entry.path();
             if p.is_dir() {
                 walk(&p, count);
-            } else if p.extension().is_some_and(|e| e == "parquet")
+            } else if p.extension().is_some_and(|e| e == "statam")
                 && p.to_string_lossy().contains("tables/spans")
             {
                 *count += 1;
@@ -641,7 +641,7 @@ async fn dataset_files(backend: &Backend) -> (usize, u64) {
                 .iter()
                 .filter(|meta| {
                     let key = meta.location.to_string();
-                    key.contains("tables/spans") && key.ends_with(".parquet")
+                    key.contains("tables/spans") && key.ends_with(".statam")
                 })
                 .count();
             (count, metas.iter().map(|meta| meta.size).sum())

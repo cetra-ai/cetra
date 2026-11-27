@@ -1,6 +1,6 @@
 //! The streaming k-way merge of one time slice (spec 03 § During a merge).
 //!
-//! Inputs are sorted runs (one `ParquetSource` stream per input file, ordered
+//! Inputs are sorted runs (one `StatamSource` stream per input file, ordered
 //! by `file.id` ascending), merged via a k-way min-heap with one active batch
 //! per input in memory under `compaction.max_memory`. Duplicates are collapsed
 //! per group (a trace for spans, a `created_at` value for scores), so a group
@@ -8,7 +8,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::io::Write;
+use std::io::{Cursor, Seek, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -18,8 +18,8 @@ use cetra_column::{
 };
 use cetra_core::schema::{scores, spans};
 use cetra_query::exec::{
-    ExecContext, ExecMetrics, PartitionStream, ScanSpec, SortKey, SpillManager, TimeRangeHint,
-    WorkerPool, compare_rows_across,
+    ExecContext, ExecMetrics, PartitionStream, ScanSource, ScanSpec, SortKey, SpillManager,
+    TimeRangeHint, WorkerPool, compare_rows_across,
 };
 use cetra_query::tombstone::filter_uncovered;
 use cetra_query::{BinaryOp, EvalContext, Expr, QueryError};
@@ -27,9 +27,11 @@ use cetra_query::{BinaryOp, EvalContext, Expr, QueryError};
 use crate::catalog::{FileMeta, FileTable};
 use crate::compaction::slice::Slice;
 use crate::dedup;
+use crate::engine::statam_source::StatamSource;
 use crate::error::CompactionError;
-use crate::file_format::{BatchFileWriter, open_merge_file_stream, sort_columns, time_column};
+use crate::objects::StorageIo;
 use crate::partials::partials_from_spans_batch;
+use crate::statam_io::{BatchFileWriter, sort_columns, time_column};
 use crate::verify::Suspects;
 
 /// Process-wide settings of the merge, built once at open (M4.6) and by tests.
@@ -45,9 +47,9 @@ pub(crate) struct MergeContext {
     pub(crate) pool: Arc<GlobalPool>,
     /// Persistent native query runtime (`workers` + `metadata_cache`).
     pub(crate) qe_runtime: Arc<crate::QeRuntime>,
-    /// Object store handle for native Parquet scans.
-    pub(crate) store: Arc<dyn object_store::ObjectStore>,
-    /// Suspect file queue for native Parquet scans.
+    /// Read-side I/O handle for native Statam scans.
+    pub(crate) io: StorageIo,
+    /// Suspect file queue for native Statam scans.
     pub(crate) verify: Arc<crate::verify::VerifyQueue>,
     /// Tokio runtime handle for async object-store reads from worker threads.
     pub(crate) runtime_handle: tokio::runtime::Handle,
@@ -61,7 +63,7 @@ impl MergeContext {
         jobs: usize,
         pool: Arc<GlobalPool>,
         qe_runtime: Arc<crate::QeRuntime>,
-        store: Arc<dyn object_store::ObjectStore>,
+        io: StorageIo,
         verify: Arc<crate::verify::VerifyQueue>,
         runtime_handle: tokio::runtime::Handle,
     ) -> Self {
@@ -70,7 +72,7 @@ impl MergeContext {
             jobs,
             pool,
             qe_runtime,
-            store,
+            io,
             verify,
             runtime_handle,
         }
@@ -78,9 +80,12 @@ impl MergeContext {
 }
 
 /// What `merge_slice` produced.
-pub(crate) struct MergedSlice<W: Write + Send> {
+pub(crate) struct MergedSlice<
+    W: Write + Seek + Send,
+    PW: Write + Seek + Send + 'static = Cursor<Vec<u8>>,
+> {
     /// The writer the rows went into.
-    pub(crate) writer: BatchFileWriter<W>,
+    pub(crate) writer: BatchFileWriter<W, PW>,
     /// `spans` only: one partial batch per emitted chunk (`traces` schema).
     pub(crate) partials: Vec<Arc<Batch>>,
     /// Rows written to `writer`.
@@ -149,15 +154,18 @@ impl Ord for HeapEntry {
 /// job started (spec 03 §7): covered rows are dropped before the dedup. For
 /// `spans`, the returned partials are the trace partials of the emitted rows,
 /// one batch per chunk. `drop_deleted` is ignored for spans.
-pub(crate) async fn merge_slice<W: Write + Send + 'static>(
+pub(crate) async fn merge_slice<
+    W: Write + Seek + Send + 'static,
+    PW: Write + Seek + Send + 'static,
+>(
     ctx: &MergeContext,
     table: FileTable,
     inputs: &[Arc<FileMeta>],
     slice: Slice,
     drop_deleted: bool,
     covered: Option<&Expr>,
-    writer: BatchFileWriter<W>,
-) -> Result<MergedSlice<W>, CompactionError> {
+    writer: BatchFileWriter<W, PW>,
+) -> Result<MergedSlice<W, PW>, CompactionError> {
     if table == FileTable::Traces {
         return Err(CompactionError::Input {
             reason: "traces are not merged",
@@ -201,20 +209,21 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
         metrics: ExecMetrics::new(),
     };
 
-    // Open one independent `ParquetSource` stream per input file in `file.id` ascending order.
+    // Open one independent `StatamSource` stream per input file in `file.id` ascending order.
     let mut raw_streams: Vec<(usize, Box<dyn PartitionStream>)> = Vec::with_capacity(files.len());
     for (input_index, file) in files.iter().enumerate() {
-        let partitions = open_merge_file_stream(
-            Arc::clone(&ctx.store),
+        let partitions = StatamSource::new(
+            ctx.io.clone(),
             table,
             Arc::clone(&schema),
-            Arc::clone(file),
+            vec![Arc::clone(file)],
+            Arc::from([]),
             Arc::clone(&ctx.qe_runtime.metadata_cache),
             Suspects::new(Arc::clone(&ctx.verify)),
             ctx.runtime_handle.clone(),
-            &spec,
-            &exec_ctx,
         )
+        .with_chunk_to_batch_size()
+        .open_partitions(&spec, &exec_ctx)
         .map_err(CompactionError::from)?;
         for stream in partitions {
             raw_streams.push((input_index, stream));
@@ -748,7 +757,7 @@ fn combine_pending_and_pieces(
 /// Fewest rows per input batch. Below it the per-batch overhead dominates.
 const MIN_BATCH_ROWS: usize = 64;
 /// Decoded bytes per stored byte assumed for a row. Text compresses about 4×
-/// with zstd (track R M7); twice that leaves room for Arrow's offsets and buffers.
+/// with zstd (track R M7); twice that leaves room for decoded column offsets and buffers.
 const DECODED_PER_STORED: u64 = 8;
 /// Batches of each input the merge may hold at once (the current batch and the
 /// one being read), plus the output it builds.
@@ -769,7 +778,7 @@ fn batch_rows(ctx: &MergeContext, inputs: &[&Arc<FileMeta>]) -> usize {
     let stored_per_row = inputs
         .iter()
         .filter(|file| file.rows > 0)
-        .map(|file| file.size.div_ceil(file.rows))
+        .map(|file| file.total_bytes().div_ceil(file.rows))
         .max()
         .unwrap_or(1)
         .max(1);
@@ -1060,18 +1069,18 @@ fn read_ts(col: &Column, row: usize) -> Option<i64> {
 /// spans. Covered rows are dropped first (spec 03 §7): a chunk left with no
 /// row writes nothing and pushes no partial. The blocking write runs on
 /// `spawn_blocking`.
-#[allow(clippy::too_many_arguments)]
-async fn emit_chunk<W: Write + Send + 'static>(
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+async fn emit_chunk<W: Write + Seek + Send + 'static, PW: Write + Seek + Send + 'static>(
     table: FileTable,
     drop_deleted: bool,
     covered: Option<&Expr>,
-    writer: BatchFileWriter<W>,
+    writer: BatchFileWriter<W, PW>,
     chunk: Batch,
     mut partials: Vec<Arc<Batch>>,
     eval_ctx: &EvalContext,
     chunk_res: &mut Reservation,
     scratch_res: &mut Reservation,
-) -> Result<(BatchFileWriter<W>, Vec<Arc<Batch>>, u64), CompactionError> {
+) -> Result<(BatchFileWriter<W, PW>, Vec<Arc<Batch>>, u64), CompactionError> {
     let filtered = match covered {
         Some(predicate) => {
             let kept = filter_uncovered(&chunk, predicate, eval_ctx, Some(scratch_res)).map_err(
@@ -1145,10 +1154,10 @@ fn reconcile_chunk_to_scratch(
     }
 }
 
-async fn blocking_write<W: Write + Send + 'static>(
-    mut writer: BatchFileWriter<W>,
+async fn blocking_write<W: Write + Seek + Send + 'static, PW: Write + Seek + Send + 'static>(
+    mut writer: BatchFileWriter<W, PW>,
     rows: Batch,
-) -> Result<BatchFileWriter<W>, CompactionError> {
+) -> Result<BatchFileWriter<W, PW>, CompactionError> {
     tokio::task::spawn_blocking(move || writer.write(&rows).map(|()| writer))
         .await
         .map_err(join_error)?
@@ -1182,12 +1191,12 @@ mod tests {
         WalConfig,
     };
     use crate::error::CompactionError;
-    use crate::file_format::{BatchFileWriter, write_file_batch};
     use crate::hooks::Hooks;
-    use crate::objects::Objects;
+    use crate::objects::{Objects, StorageIo};
     use crate::partials::partials_from_spans_batch;
     use crate::reads::columns::{bool_at, i64_at, require_col, string_at, time_at};
-    use crate::test_support::{parquet_rows, span_row, span_rows};
+    use crate::statam_io::{BatchFileWriter, write_file_batch};
+    use crate::test_support::{span_row, span_rows, statam_rows};
     use crate::verify::may_be_corrupt;
 
     fn project() -> ProjectId {
@@ -1224,7 +1233,7 @@ mod tests {
             1,
             cetra_column::GlobalPool::new(64 << 20),
             crate::QeRuntime::for_test(),
-            objects.store(),
+            objects.io(),
             Arc::new(crate::verify::VerifyQueue::default()),
             tokio::runtime::Handle::current(),
         )
@@ -1255,6 +1264,7 @@ mod tests {
             max_ingest_time: written.max_ingest_time,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         })
     }
 
@@ -1272,14 +1282,14 @@ mod tests {
             .await
             .unwrap();
         assert!(merged.rows > 0);
-        let (file, summary) = merged.writer.finish().unwrap();
+        let (file, summary, _pack) = merged.writer.finish().unwrap();
         assert_eq!(summary.rows, merged.rows);
         let mut file = file;
         file.seek(SeekFrom::Start(0)).unwrap();
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer).unwrap();
         (
-            parquet_rows(bytes::Bytes::from(buffer)),
+            statam_rows(bytes::Bytes::from(buffer), None),
             merged
                 .partials
                 .into_iter()
@@ -1431,6 +1441,7 @@ mod tests {
             max_ingest_time: 0,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         })
     }
 
@@ -1447,7 +1458,7 @@ mod tests {
             3,
             cetra_column::GlobalPool::new(1 << 30),
             crate::QeRuntime::for_test(),
-            Arc::clone(&store),
+            StorageIo::from_store(Arc::clone(&store)),
             Arc::new(crate::verify::VerifyQueue::default()),
             rt.handle().clone(),
         );
@@ -1474,7 +1485,7 @@ mod tests {
             3,
             cetra_column::GlobalPool::new(usize::MAX),
             crate::QeRuntime::for_test(),
-            store,
+            StorageIo::from_store(store),
             Arc::new(crate::verify::VerifyQueue::default()),
             rt.handle().clone(),
         );
@@ -1495,7 +1506,7 @@ mod tests {
             1,
             Arc::clone(&pool),
             crate::QeRuntime::for_test(),
-            objects.store(),
+            objects.io(),
             Arc::new(crate::verify::VerifyQueue::default()),
             tokio::runtime::Handle::current(),
         );
@@ -1523,7 +1534,7 @@ mod tests {
             1,
             Arc::clone(&pool),
             crate::QeRuntime::for_test(),
-            objects.store(),
+            objects.io(),
             Arc::new(crate::verify::VerifyQueue::default()),
             tokio::runtime::Handle::current(),
         );
@@ -1665,7 +1676,7 @@ mod tests {
         let ctx = ctx(&objects, 8192);
         let inputs = three_span_inputs(&objects).await;
 
-        let times = time_values(objects.store(), &inputs, spans::START_TIME)
+        let times = time_values(objects.io(), &inputs, spans::START_TIME)
             .await
             .unwrap();
         let parts = slices(&times, 2);

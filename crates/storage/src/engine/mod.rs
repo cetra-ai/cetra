@@ -1,13 +1,13 @@
 //! Native query execution engine storage adapters (`AsyncAdmissionPool`,
-//! `MetadataCache`, zero-Arrow `ParquetSource`, `MemtableSource`, `TracesSource`,
+//! `MetadataCache`, `StatamSource`, `MemtableSource`, `TracesSource`,
 //! and `ScoresSource`).
 
 pub(crate) mod admission;
 pub(crate) mod mem_source;
 pub(crate) mod metadata_cache;
 pub(crate) mod parquet_export;
-pub(crate) mod parquet_source;
 pub(crate) mod scores_source;
+pub(crate) mod statam_source;
 pub(crate) mod traces_source;
 
 use std::sync::Arc;
@@ -19,16 +19,59 @@ use cetra_column::{
 use cetra_query::exec::sort_window::ExternalSort;
 use cetra_query::exec::{
     ControlFlow, ExecContext, MAX_MERGE_WAY, PartitionStream, PushSink, ScanSource, ScanSpec,
-    SortKey, SpillAppender, SpillFile,
+    SortKey, SpillAppender, SpillFile, WorkerPool,
 };
 use cetra_query::{
     BinaryOp, EvalContext, Expr, QueryError, TombstoneSpec, TombstoneTable, eval_filter,
     filter_uncovered,
 };
+use cetra_statam::{StatamError, TaskExecutor};
 use chrono::{Datelike, NaiveDate};
 
 use crate::catalog::FileTable;
 use crate::deletion::PendingDeletion;
+
+/// Concrete [`cetra_statam::TaskExecutor`] delegating Statam's internal parallel batches
+/// to [`WorkerPool::run_helping`] (deadlock-free even when called from inside pool workers).
+pub(crate) struct WorkerPoolExecutor {
+    pool: Arc<WorkerPool>,
+    cancel: CancelToken,
+    max_helpers: usize,
+}
+
+impl WorkerPoolExecutor {
+    /// Creates an executor capped at `max_threads` total concurrent threads (caller + up to
+    /// `max_threads - 1` optional helpers, clamped to `pool.num_workers()`).
+    pub(crate) fn new(pool: Arc<WorkerPool>, cancel: CancelToken, max_threads: usize) -> Self {
+        let max_helpers = max_threads
+            .saturating_sub(1)
+            .min(pool.num_workers().saturating_sub(1));
+        Self {
+            pool,
+            cancel,
+            max_helpers,
+        }
+    }
+}
+
+impl TaskExecutor for WorkerPoolExecutor {
+    fn max_threads(&self) -> usize {
+        self.max_helpers
+            .saturating_add(1)
+            .min(self.pool.num_workers().max(1))
+    }
+
+    fn run_batch(&self, tasks: Vec<Box<dyn FnOnce() + Send + 'static>>) -> Result<(), StatamError> {
+        self.pool
+            .run_helping(&self.cancel, self.max_helpers, tasks)
+            .map_err(|err| match err {
+                QueryError::Cancelled => StatamError::Cancelled,
+                _ => StatamError::Store {
+                    reason: "worker pool execution failed",
+                },
+            })
+    }
+}
 
 /// Nanoseconds in a UTC day.
 pub(super) const DAY_NS: i64 = 86_400_000_000_000;
@@ -554,13 +597,13 @@ pub(super) fn read_bool_at(col: &Column, row: usize) -> Option<bool> {
     }
 }
 
-pub(super) struct BufferedBatchStream {
+pub(crate) struct BufferedBatchStream {
     batches: std::collections::VecDeque<Batch>,
     res: Reservation,
 }
 
 impl BufferedBatchStream {
-    pub(super) fn new(batches: Vec<Batch>, res: Reservation) -> Self {
+    pub(crate) fn new(batches: Vec<Batch>, res: Reservation) -> Self {
         Self {
             batches: batches.into(),
             res,
@@ -1313,9 +1356,9 @@ mod tests {
         use crate::engine::metadata_cache::MetadataCache;
         use crate::engine::scores_source::ScoresSource;
         use crate::engine::traces_source::{TraceListMode, TracesSource};
-        use crate::file_format::write_file_batch;
         use crate::memtable::Memtable;
         use crate::partials::partials_from_spans_batch;
+        use crate::statam_io::write_file_batch;
         use crate::test_support::{score_row, score_rows, span_row, span_rows};
         use crate::verify::{Suspects, VerifyQueue};
         use crate::wal::Table;
@@ -1401,6 +1444,7 @@ mod tests {
                 max_ingest_time: written.max_ingest_time,
                 fully_merged: false,
                 deletions_applied_seq,
+                pack: None,
             })
         }
 
@@ -1553,7 +1597,7 @@ mod tests {
             let mut scores_vec: Vec<Score> = Vec::with_capacity(200);
             for i in 1..=200_u16 {
                 let mut s = span_row(i, 1, base + i64::from(i) * 100, base + 10);
-                s.name = format!("trace-name-{:02}-{}", i % 16, "x".repeat(700));
+                s.name = format!("trace-name-{i:04}-{}", "x".repeat(700));
                 spans_vec.push(s);
 
                 let mut sc = score_row(
@@ -1563,9 +1607,9 @@ mod tests {
                     base + 200,
                     base + 200,
                     false,
-                    &format!("score-{:02}-{}", i % 16, "y".repeat(700)),
+                    &format!("score-{i:04}-{}", "y".repeat(350)),
                 );
-                sc.reason = Some(format!("reason-{:02}-{}", i % 16, "z".repeat(700)));
+                sc.reason = Some(format!("reason-{i:04}-{}", "z".repeat(350)));
                 scores_vec.push(sc);
             }
 
@@ -1610,7 +1654,7 @@ mod tests {
             let (mut tight_trace_ctx, _tdir) = make_ctx(96 * 1024, 16 * 1024 * 1024, 1);
             tight_trace_ctx.batch_size = 16;
             let traces_src = TracesSource::new(
-                Arc::clone(&store),
+                crate::objects::StorageIo::from_store(Arc::clone(&store)),
                 project(),
                 vec![f_trace_a, f_trace_b],
                 crate::deletion::ProjectMemSnapshot::empty(),
@@ -1643,7 +1687,7 @@ mod tests {
             let (mut tight_score_ctx, _sdir) = make_ctx(96 * 1024, 16 * 1024 * 1024, 1);
             tight_score_ctx.batch_size = 16;
             let scores_src = ScoresSource::new(
-                Arc::clone(&store),
+                crate::objects::StorageIo::from_store(Arc::clone(&store)),
                 project(),
                 vec![f_score_a, f_score_b],
                 crate::deletion::ProjectMemSnapshot::empty(),
@@ -1730,7 +1774,7 @@ mod tests {
             };
 
             let traces_src = TracesSource::new(
-                store,
+                crate::objects::StorageIo::from_store(store),
                 project(),
                 vec![f_trace],
                 crate::deletion::ProjectMemSnapshot::empty(),
@@ -1815,7 +1859,7 @@ mod tests {
             )
             .unwrap();
             let traces_src = TracesSource::new(
-                Arc::clone(&store),
+                crate::objects::StorageIo::from_store(Arc::clone(&store)),
                 project(),
                 Vec::new(),
                 projected_spans,
@@ -1849,7 +1893,7 @@ mod tests {
             )
             .unwrap();
             let scores_src = ScoresSource::new(
-                store,
+                crate::objects::StorageIo::from_store(store),
                 project(),
                 Vec::new(),
                 projected_scores,
@@ -2011,7 +2055,7 @@ mod tests {
                 reads: Arc::clone(&path_reads),
             });
             let store: Arc<dyn ObjectStore> = counting;
-            let cache = Arc::new(crate::file_format::FileMetadataCache::new(1024 * 1024));
+            let cache = Arc::new(MetadataCache::new(1024 * 1024));
             let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
 
             let base = 20_000 * DAY_NS;
@@ -2049,7 +2093,7 @@ mod tests {
             );
 
             let scores_src = ScoresSource::new(
-                Arc::clone(&store),
+                crate::objects::StorageIo::from_store(Arc::clone(&store)),
                 project(),
                 vec![f_a, f_b],
                 crate::deletion::ProjectMemSnapshot::empty(),
@@ -2105,16 +2149,15 @@ mod tests {
             };
             let out_sid_hint = run_source(&scores_src, &sid_hint_spec, &ctx).unwrap();
             let total_sid_hint: usize = out_sid_hint.iter().map(Batch::num_rows).sum();
-            assert_eq!(total_sid_hint, 50);
+            assert_eq!(total_sid_hint, 1);
             let reads_after_sid_hint = path_reads.lock().unwrap().clone();
             let a_sid_hint_reads = reads_after_sid_hint
                 .get(path_a)
                 .cloned()
                 .unwrap_or_default();
-            assert_eq!(
-                a_sid_hint_reads.len(),
-                1,
-                "File A should fetch ONLY its score_id bloom filter (1 range): {a_sid_hint_reads:?}"
+            assert!(
+                a_sid_hint_reads.is_empty(),
+                "File A should be pruned in 0 GETs by cached inline score_id bloom filter: {a_sid_hint_reads:?}"
             );
 
             // 3. Query by `trace_id = trace(20)`: `trace_id` is NOT pushed pre-LWW (explicit
@@ -2154,7 +2197,7 @@ mod tests {
                 .build()
                 .unwrap();
             let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let cache = Arc::new(crate::file_format::FileMetadataCache::new(1024 * 1024));
+            let cache = Arc::new(MetadataCache::new(1024 * 1024));
             let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
 
             let base = 20_000 * DAY_NS;
@@ -2225,7 +2268,7 @@ mod tests {
             );
 
             let traces_src = TracesSource::new(
-                Arc::clone(&store),
+                crate::objects::StorageIo::from_store(Arc::clone(&store)),
                 project(),
                 vec![f_trace_a, f_trace_b],
                 crate::deletion::ProjectMemSnapshot::empty(),
@@ -2237,7 +2280,7 @@ mod tests {
             )
             .unwrap();
             let scores_src = ScoresSource::new(
-                store,
+                crate::objects::StorageIo::from_store(store),
                 project(),
                 vec![f_score_a, f_score_b],
                 crate::deletion::ProjectMemSnapshot::empty(),
@@ -2383,7 +2426,7 @@ mod tests {
                 .build()
                 .unwrap();
             let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let cache = Arc::new(crate::file_format::FileMetadataCache::new(1024 * 1024));
+            let cache = Arc::new(MetadataCache::new(1024 * 1024));
             let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
 
             let base = 20_000 * DAY_NS;
@@ -2455,7 +2498,7 @@ mod tests {
             );
 
             let traces_src = TracesSource::new(
-                Arc::clone(&store),
+                crate::objects::StorageIo::from_store(Arc::clone(&store)),
                 project(),
                 vec![f_trace],
                 crate::deletion::ProjectMemSnapshot::empty(),
@@ -2469,7 +2512,7 @@ mod tests {
             .with_visible_from(Some(cutoff));
 
             let scores_src = ScoresSource::new(
-                store,
+                crate::objects::StorageIo::from_store(store),
                 project(),
                 vec![f_score],
                 crate::deletion::ProjectMemSnapshot::empty(),

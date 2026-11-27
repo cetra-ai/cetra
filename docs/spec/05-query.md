@@ -1,12 +1,12 @@
 # 05 — Query: filter DSL, SQL console, search, dashboard queries
 
-Structured reads (`cetra-storage::reads`) compile directly to `cetra-query` push pipelines over `ScanSource` (`ParquetSource`, `MemtableSource`, `TracesSource`, `ScoresSource`), without SQL planning. The Filter DSL (`cetra-query::filter`) and Shape B SQL console/MCP (`cetra-query::sql`) parse with `sqlparser` (`GenericDialect`), rewrite hex-literal ID comparisons to binary ones, apply default exclusions, and execute on `WorkerPool` using `GlobalPool` / `ScopedPool` (`FairSpill`), `SpillManager`, and `CancelToken` (D-QE-1, D-QE-4, D-QE-5). `QueryContext::new` (in `cetra-storage`) wraps the `ProjectQuery` returned by `Storage::query` with an optional SQL `TimeWindow` and registers server-owned SQLite views as `BatchSource` tables (D91).
+Structured reads (`cetra-storage::reads`) compile directly to `cetra-query` push pipelines over `ScanSource` (`StatamSource`, `MemtableSource`, `TracesSource`, `ScoresSource`), without SQL planning. The Filter DSL (`cetra-query::filter`) and Shape B SQL console/MCP (`cetra-query::sql`) parse with `sqlparser` (`GenericDialect`), rewrite hex-literal ID comparisons to binary ones, apply default exclusions, and execute on `WorkerPool` using `GlobalPool` / `ScopedPool` (`FairSpill`), `SpillManager`, and `CancelToken` (D-QE-1, D-QE-4, D-QE-5, D-ST-1). `QueryContext::new` (in `cetra-storage`) wraps the `ProjectQuery` returned by `Storage::query` with an optional SQL `TimeWindow` and registers server-owned SQLite views as `BatchSource` tables (D91).
 
 ## Logical views exposed to users
 
 | View | Rows | Backed by |
 |---|---|---|
-| `spans` | one per span | `ParquetSource` + `MemtableSource` |
+| `spans` | one per span | `StatamSource` + `MemtableSource` |
 | `traces` | one per trace (merged; the merge bookkeeping columns `last_ingest_time` and `partial_count` are not exposed) | `TracesSource` |
 | `sessions` | one per session_id | `SELECT session_id, min(start_time) AS start_time, max(end_time) AS end_time, count(*) AS trace_count, sum(error_count) AS error_count, sum(total_tokens) AS total_tokens, sum(cost_total) AS cost_total, first non-null user_id by (start_time, trace_id) AS user_id, sorted distinct union of tags AS tags, duration_ns, duration_ms … FROM traces WHERE session_id IS NOT NULL GROUP BY session_id` (using dedicated internal `sessions` aggregates in `cetra-query`) |
 | `scores` | one per live score | `ScoresSource` |
@@ -19,9 +19,18 @@ Each view exposes the stored columns of its table in spec 01 order, without `pro
 
 `sessions` columns, in order: `session_id, start_time, end_time, duration_ns, duration_ms, trace_count, error_count, total_tokens, cost_total, user_id, tags`. `user_id` is the first non-null `user_id` of the session's traces ordered by `(start_time, trace_id)`. `tags` is the sorted distinct union of the traces' tags.
 
-An optimizer rule rewrites `id = '<hex>'`, `id <> '<hex>'`, `id IN ('<hex>', …)` and `id NOT IN (…)` on these ID columns into comparisons on the stored binary bytes (`FixedBytes16` / `FixedBytes8`), so `ScanSpec` and `ParquetSource` can prune with bloom filters and page indexes. The literal must be exactly twice the ID's byte width and contain only hex digits, in either case. Otherwise the comparison stays on the hex string, which never matches an invalid ID. A comparison between two ID columns of the same plan node compares bytes. Joins between two views on an ID compare the hex strings: correct, but not pruned.
+An optimizer rule rewrites `id = '<hex>'`, `id <> '<hex>'`, `id IN ('<hex>', …)` and `id NOT IN (…)` on these ID columns into comparisons on the stored binary bytes (`FixedBytes16` / `FixedBytes8`), so `ScanSpec` and `StatamSource` can prune with Hot/Lazy SBBF bloom filters (`id_lookups`) and mini-block zone maps. The literal must be exactly twice the ID's byte width and contain only hex digits, in either case. Otherwise the comparison stays on the hex string, which never matches an invalid ID. A comparison between two ID columns of the same plan node compares bytes. Joins between two views on an ID compare the hex strings: correct, but not pruned.
 
 Column reference for each view is generated from the `cetra-column` view schemas and served at `GET /api/v1/projects/{p}/schema` (used by the UI autocomplete, the docs and the MCP `get_schema` tool).
+
+### Scan pushdown (`StatamSource`)
+
+`StatamSource` compiles each `ScanSpec` into a sound `Statam` `ScanRequest` (D-ST-1; exact residuals and tombstones always evaluate in `cetra-query` unless proven covered):
+
+- **Shredded `MapUtf8` single-key pushdown (`map_projections` lattice):** `StatamSource` merges `spec.map_projections` with every map access in residual `spec.filters` and applicable tombstones (treating any projected `MapUtf8` column absent from `spec.map_projections` as `Full`). It emits `(col, key)` into `ScanRequest::map_keys` only when the final merged entry is `MapProjection::Keys(keys)` with non-empty `keys`, reading only the shredded sub-columns and skipping residual map blocks; `Full` and `KeysOnly` never push `map_keys`.
+- **Hot and Lazy SBBF bloom filters (`id_lookups`):** equality and `IN` hints on `trace_id`, `session_id`, `user_id` and `score_id` (`FixedBytes16`, `FixedBytes8`, `Utf8`) prune files and row groups via Statam's 8-lane SIMD Split-Block Bloom Filters (hot blooms cached in `StatamFileMeta`, lazy blooms fetched on demand).
+- **Single-disjunct `TS02` trigram substring pushdown (`substrings`):** `ScanSpec::substrings` is a CNF list of substring hints (outer `AND` of inner `OR` clauses). `StatamSource` pushes only single-disjunct clauses (`clause.len() == 1`) targeting `Utf8` columns into `ScanRequest::substrings`, skipping non-matching `.stpk` payload frames via `TS02` trigram blooms and `EdgeTable` while keeping the full `Expr` in `spec.filters`. Multi-disjunct `OR` clauses (such as the 4-column list search box) are never flattened into `ScanRequest::substrings`.
+- **Descending time `sort_desc_hint` + `limit` on `traces` and `scores`:** `StatamSource` sets `sort_desc_hint = true` only on `traces` or `scores` when `spec.sort_hints` has a single descending key on the table's time column (`start_time` / `created_at`), zero residual filters, zero applicable tombstones, and `spec.limit` is set. `ScanRequest::limit` is pushed only with zero residual filters and zero applicable tombstones when `spec.sort_hints` is empty or matches that single-key descending-time fast path.
 
 ## Default exclusions
 
@@ -86,7 +95,7 @@ The search text is at most 1,024 bytes; a longer one is a `400` (D-G-39).
 
 `\` becomes `\\`, `%` becomes `\%` and `_` becomes `\_`. The pattern is `%<escaped>%`, with `ILIKE … ESCAPE '\'`. An empty or all-whitespace search adds nothing.
 
-On the `traces` view, search runs on `spans` first (semi-join: `trace_id IN (SELECT trace_id FROM spans WHERE <search> AND <time window>)`). Search **requires a time window** (default: the page's time picker, max 30 days unless the user confirms "search all") because it is a scan. `cetra-query`'s `ILIKE` evaluates directly across `Flat`, `Dict`, `Const`, and `Rle` `Utf8` columns with `Selection`-vector late materialization, so only the needed heavy columns are read.
+On the `traces` view, search runs on `spans` first (semi-join: `trace_id IN (SELECT trace_id FROM spans WHERE <search> AND <time window>)`). Search **requires a time window** (default: the page's time picker, max 30 days unless the user confirms "search all") because it is a scan. Single-column `ILIKE '%…%'` predicates push down into Statam's `TS02` trigram skip index on `.stpk` payload packs (§ Scan pushdown); multi-column `OR` searches (such as the 4-column search box above) evaluate directly in `cetra-query` across `Flat`, `Dict`, `Const`, and `Rle` `Utf8` columns with `Selection`-vector late materialization, so only surviving rows fetch heavy payload columns.
 
 **On the live trace stream** (`GET /traces/stream`, 09), `search` is checked against each arriving span, on the same columns with the same escaping as the `spans`-view search. The stream sends a trace from its first matching span on, and every later update of that trace while the stream stays open. Spans that arrived before the stream opened are not checked; the client's refetch on `resync` covers them. The check runs as the `traces`-view search with its window set to the arriving spans' `start_time` range (narrowed to its last 24 h), so only spans in that range can match (D-C-5, D-G-33).
 

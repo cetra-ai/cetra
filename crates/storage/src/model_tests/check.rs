@@ -32,7 +32,7 @@ use crate::catalog::FileTable;
 use crate::deletion::DeletionStatus;
 use crate::reads::{AlertMeasure, AlertValue, ListScope, MAX_PAGE};
 use crate::test_support::{
-    Call, collect_orphans_dry_run, obsolete_rows, orphan_objects, parquet_rows, trace_ids_of,
+    Call, collect_orphans_dry_run, obsolete_rows, orphan_objects, statam_rows, trace_ids_of,
 };
 use crate::wal::Table;
 
@@ -1612,7 +1612,7 @@ fn check_settled_spans(
                 file.day
             );
         }
-        let batch = parquet_rows(h.object_bytes(&file));
+        let batch = statam_rows(h.object_bytes(&file), h.pack_bytes(&file));
         let trace_bytes = trace_ids_of(&batch);
         let span_col = crate::reads::columns::require_col(&batch, spans::SPAN_ID)
             .expect("a spans file has a span_id column");
@@ -1657,7 +1657,7 @@ fn check_settled_scores(
             "scores file {} is not fully merged after settle",
             file.path
         );
-        let batch = parquet_rows(h.object_bytes(&file));
+        let batch = statam_rows(h.object_bytes(&file), h.pack_bytes(&file));
         let ids = crate::reads::columns::require_col(&batch, scores::SCORE_ID)
             .expect("a scores file has a score_id column");
         let deleted = crate::reads::columns::require_col(&batch, scores::DELETED)

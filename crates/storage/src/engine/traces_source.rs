@@ -21,14 +21,16 @@ use cetra_query::exec::{
 };
 use cetra_query::{BinaryOp, EvalContext, Expr, QueryError, eval_filter};
 use chrono::NaiveDate;
-use object_store::ObjectStore;
 
 use crate::catalog::{FileMeta, FileTable};
 use crate::deletion::{PendingDeletion, ProjectMemSnapshot, applicable};
-use crate::file_format::{FileMetadataCache, open_table_source};
 use crate::memtable::{MemBatch, MemSnapshot};
+use crate::objects::StorageIo;
 use crate::partials::MergeColumns;
 use crate::verify::Suspects;
+
+use super::metadata_cache::MetadataCache;
+use super::statam_source::StatamSource;
 
 use super::{
     BufferedBatchStream, DAY_NS, HashPartitionedSortSink, TimeBounds, apply_tombstones_and_filters,
@@ -64,18 +66,18 @@ pub(crate) enum TraceListMode {
     },
 }
 
-/// Native [`ScanSource`] for the `traces` view over `traces` Parquet files and
+/// Native [`ScanSource`] for the `traces` view over `traces` Statam files and
 /// pre-filtered `spans` memtable partials.
 #[derive(Clone)]
 pub(crate) struct TracesSource {
-    store: Arc<dyn ObjectStore>,
+    io: StorageIo,
     project: ProjectId,
     schema: Arc<Schema>,
     files: Vec<Arc<FileMeta>>,
     spans_mem: ProjectMemSnapshot,
     lookback: i64,
     deletions: Arc<[Arc<PendingDeletion>]>,
-    metadata_cache: Arc<FileMetadataCache>,
+    metadata_cache: Arc<MetadataCache>,
     suspects: Suspects,
     runtime: tokio::runtime::Handle,
     list_mode: Option<TraceListMode>,
@@ -127,19 +129,19 @@ impl TracesSource {
     /// by `deletion::project_snapshot(Table::Spans, ...)` (`QE-M16`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        store: Arc<dyn ObjectStore>,
+        io: StorageIo,
         project: ProjectId,
         files: Vec<Arc<FileMeta>>,
         spans_mem: ProjectMemSnapshot,
         lookback: i64,
         deletions: Arc<[Arc<PendingDeletion>]>,
-        metadata_cache: Arc<FileMetadataCache>,
+        metadata_cache: Arc<MetadataCache>,
         suspects: Suspects,
         runtime: tokio::runtime::Handle,
     ) -> Result<Self, QueryError> {
         let schema = FileTable::Traces.column_schema();
         Ok(Self {
-            store,
+            io,
             project,
             schema,
             files,
@@ -319,8 +321,8 @@ impl TracesSource {
 
         let mut partial_streams: Vec<Box<dyn PartitionStream>> = Vec::new();
         if !clean_files.is_empty() {
-            let parquet_src = open_table_source(
-                Arc::clone(&self.store),
+            let statam_src = Arc::new(StatamSource::new(
+                self.io.clone(),
                 FileTable::Traces,
                 Arc::clone(&self.schema),
                 clean_files,
@@ -328,12 +330,12 @@ impl TracesSource {
                 Arc::clone(&self.metadata_cache),
                 self.suspects.clone(),
                 self.runtime.clone(),
-            );
-            partial_streams.extend(parquet_src.open_partitions(&file_spec, ctx)?);
+            ));
+            partial_streams.extend(statam_src.open_partitions(&file_spec, ctx)?);
         }
         for (pending, group_files) in gated.into_values() {
-            let parquet_src = open_table_source(
-                Arc::clone(&self.store),
+            let statam_src = Arc::new(StatamSource::new(
+                self.io.clone(),
                 FileTable::Traces,
                 Arc::clone(&self.schema),
                 group_files,
@@ -341,8 +343,8 @@ impl TracesSource {
                 Arc::clone(&self.metadata_cache),
                 self.suspects.clone(),
                 self.runtime.clone(),
-            );
-            partial_streams.extend(parquet_src.open_partitions(&file_spec, ctx)?);
+            ));
+            partial_streams.extend(statam_src.open_partitions(&file_spec, ctx)?);
         }
 
         // Lazily stream memtable spans into cached partials (projected to `input_indices`).

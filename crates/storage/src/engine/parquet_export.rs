@@ -1492,26 +1492,46 @@ fn format_decimal_neg_scale(value: i128, scale: i8) -> String {
     s
 }
 
+/// Decodes a SQL-exported `.parquet` byte buffer into `(column_names, stringified_rows)`
+/// using the low-level `parquet::file::reader::SerializedFileReader` (zero Arrow).
+#[doc(hidden)]
+pub fn read_parquet_rows_for_test(bytes: Bytes) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
+    use parquet::file::reader::{FileReader as _, SerializedFileReader};
+    let reader = SerializedFileReader::new(bytes).map_err(|e| e.to_string())?;
+    let file_meta = reader.metadata().file_metadata();
+    let names = file_meta
+        .schema_descr()
+        .root_schema()
+        .get_fields()
+        .iter()
+        .map(|field| field.name().to_owned())
+        .collect();
+    let mut rows = Vec::new();
+    let iter = reader.get_row_iter(None).map_err(|e| e.to_string())?;
+    for row_res in iter {
+        let row = row_res.map_err(|e| e.to_string())?;
+        let cells = row
+            .get_column_iter()
+            .map(|(_name, field)| field.to_string())
+            .collect();
+        rows.push(cells);
+    }
+    Ok((names, rows))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{
-        Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, FixedSizeBinaryArray,
-        Float64Array, Int64Array, ListArray, MapArray, StringArray, StructArray,
-        TimestampNanosecondArray,
-    };
-    use arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
     use bytes::Bytes;
     use cetra_column::{
         Batch, BinaryData, Bitmap, Column, DataType, DictColumn, EventsData, Field, FlatColumn,
         FlatData, GlobalPool, Interval, LinksData, MapData, RleColumn, ScalarValue, Schema,
         ScopedPool, Selection, Utf8Data,
     };
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use parquet::basic::Compression;
+    use parquet::basic::{Compression, LogicalType, TimeUnit};
     use parquet::file::reader::{FileReader, SerializedFileReader};
-    use parquet::record::RowAccessor;
+    use parquet::record::{Field as ParquetField, Row, RowAccessor};
 
     use super::*;
 
@@ -1550,19 +1570,79 @@ mod tests {
         Ok(out)
     }
 
-    fn read_arrow(bytes: &[u8]) -> Vec<arrow::record_batch::RecordBatch> {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(bytes))
-            .expect("valid parquet for arrow reader");
-        builder
-            .build()
-            .expect("build arrow reader")
-            .map(|r| r.expect("record batch"))
-            .collect()
-    }
-
     fn read_low_level(bytes: &[u8]) -> SerializedFileReader<Bytes> {
         SerializedFileReader::new(Bytes::copy_from_slice(bytes))
             .expect("valid parquet for low-level reader")
+    }
+
+    fn read_rows(bytes: &[u8]) -> Vec<Row> {
+        read_low_level(bytes)
+            .get_row_iter(None)
+            .expect("row iter")
+            .map(|r| r.expect("row"))
+            .collect()
+    }
+
+    fn field_at(row: &Row, idx: usize) -> &ParquetField {
+        row.get_column_iter().nth(idx).expect("column at idx").1
+    }
+
+    fn decimal_i128(field: &ParquetField) -> i128 {
+        let ParquetField::Decimal(dec) = field else {
+            panic!("expected Decimal, got {field:?}");
+        };
+        let raw = dec.data();
+        assert_eq!(raw.len(), 16, "expected 16-byte FixedLenByteArray decimal");
+        i128::from_be_bytes(raw.try_into().unwrap())
+    }
+
+    fn timestamp_ns(field: &ParquetField) -> i64 {
+        match field {
+            ParquetField::Long(v) => *v,
+            other => panic!("expected timestamp i64, got {other:?}"),
+        }
+    }
+
+    fn date_val(field: &ParquetField) -> i32 {
+        match field {
+            ParquetField::Date(v) => *v,
+            other => panic!("expected Date, got {other:?}"),
+        }
+    }
+
+    fn list_elements(field: &ParquetField) -> &[ParquetField] {
+        match field {
+            ParquetField::ListInternal(list) => list.elements(),
+            other => panic!("expected ListInternal, got {other:?}"),
+        }
+    }
+
+    fn map_entries(field: &ParquetField) -> &[(ParquetField, ParquetField)] {
+        match field {
+            ParquetField::MapInternal(map) => map.entries(),
+            other => panic!("expected MapInternal, got {other:?}"),
+        }
+    }
+
+    fn struct_row(field: &ParquetField) -> &Row {
+        match field {
+            ParquetField::Group(row) => row,
+            other => panic!("expected Group, got {other:?}"),
+        }
+    }
+
+    fn str_val(field: &ParquetField) -> &str {
+        match field {
+            ParquetField::Str(s) => s.as_str(),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    fn bytes_val(field: &ParquetField) -> &[u8] {
+        match field {
+            ParquetField::Bytes(b) => b.data(),
+            other => panic!("expected Bytes, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1595,17 +1675,14 @@ mod tests {
             ll.metadata().file_metadata().schema_descr().num_columns(),
             3
         );
-
-        let arrow_batches = read_arrow(&bytes);
-        let total_rows: usize = arrow_batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total_rows, 0);
+        assert!(read_rows(&bytes).is_empty());
 
         // Also verify 0 push_batch calls at all.
         let bytes_no_push = export_batches(schema, vec![], &pool).unwrap();
         assert_eq!(pool.reserved(), 0);
         let ll2 = read_low_level(&bytes_no_push);
         assert_eq!(ll2.metadata().num_row_groups(), 0);
-        assert!(read_arrow(&bytes_no_push).is_empty());
+        assert!(read_rows(&bytes_no_push).is_empty());
     }
 
     #[test]
@@ -1801,7 +1878,7 @@ mod tests {
         let bytes = export_batches(schema, vec![batch], &pool).unwrap();
         assert_eq!(pool.reserved(), 0);
 
-        // Low-level Parquet reader verification (compression, row count, types, values).
+        // Low-level Parquet reader verification (compression, schema metadata, row count, values).
         let ll = read_low_level(&bytes);
         assert_eq!(ll.metadata().num_row_groups(), 1);
         let rg_meta = ll.metadata().row_group(0);
@@ -1809,148 +1886,113 @@ mod tests {
         for c in rg_meta.columns() {
             assert_eq!(c.compression(), Compression::ZSTD(ZstdLevel::default()));
         }
-        let ll_rows: Vec<_> = ll.get_row_iter(None).unwrap().map(|r| r.unwrap()).collect();
-        assert_eq!(ll_rows.len(), 4);
-        assert!(ll_rows[0].get_bool(0).unwrap());
-        assert_eq!(ll_rows[0].get_long(1).unwrap(), -42);
-        assert_eq!(ll_rows[2].get_string(10).unwrap(), "cetra");
-
-        // Arrow reader verification (DuckDB/Polars/Arrow interop).
-        let arrow_batches = read_arrow(&bytes);
-        assert_eq!(arrow_batches.len(), 1);
-        let ab = &arrow_batches[0];
-        assert_eq!(ab.num_rows(), 4);
-
-        let b_arr = ab
-            .column(0)
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .unwrap();
-        assert!(b_arr.value(0));
-        assert!(b_arr.is_null(1));
-        assert!(!b_arr.value(2));
-        assert!(b_arr.value(3));
-
-        let i_arr = ab.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(i_arr.value(0), -42);
-        assert!(i_arr.is_null(1));
-        assert_eq!(i_arr.value(3), i64::MAX);
-
-        let f_arr = ab
-            .column(2)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(f_arr.value(0), 1.5);
-        assert!(f_arr.is_null(1));
-        assert!(f_arr.value(2).is_nan());
-        assert_eq!(f_arr.value(3), f64::INFINITY);
-
-        let dp_arr = ab
-            .column(3)
-            .as_any()
-            .downcast_ref::<Decimal128Array>()
-            .unwrap();
-        assert_eq!(dp_arr.data_type(), &ArrowDataType::Decimal128(10, 2));
-        assert_eq!(dp_arr.value(0), 12_345);
-        assert!(dp_arr.is_null(1));
-        assert_eq!(dp_arr.value(2), -98_765);
-
-        let dnr_arr = ab
-            .column(4)
-            .as_any()
-            .downcast_ref::<Decimal128Array>()
-            .unwrap();
-        assert_eq!(dnr_arr.data_type(), &ArrowDataType::Decimal128(12, 0));
-        assert_eq!(dnr_arr.value(0), 4200);
-        assert!(dnr_arr.is_null(1));
-        assert_eq!(dnr_arr.value(2), -700);
-        assert_eq!(dnr_arr.value(3), 12300);
-
-        let dns_arr = ab.column(5).as_any().downcast_ref::<StringArray>().unwrap();
-        assert_eq!(dns_arr.value(0), "420000");
-        assert!(dns_arr.is_null(1));
-        assert_eq!(dns_arr.value(2), "-90000");
-        assert_eq!(dns_arr.value(3), "10000000000000000");
-
-        let ts_utc_arr = ab
-            .column(6)
-            .as_any()
-            .downcast_ref::<TimestampNanosecondArray>()
-            .unwrap();
+        let schema_descr = ll.metadata().file_metadata().schema_descr();
         assert_eq!(
-            ts_utc_arr.data_type(),
-            &ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, Some("UTC".into()))
+            schema_descr.column(3).logical_type_ref(),
+            Some(&LogicalType::decimal(2, 10))
         );
-        assert_eq!(ts_utc_arr.value(0), 1_700_000_000_123_456_789);
-        assert!(ts_utc_arr.is_null(1));
-        assert_eq!(ts_utc_arr.value(2), -1);
-
-        let ts_naive_arr = ab
-            .column(7)
-            .as_any()
-            .downcast_ref::<TimestampNanosecondArray>()
-            .unwrap();
         assert_eq!(
-            ts_naive_arr.data_type(),
-            &ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, None)
+            schema_descr.column(4).logical_type_ref(),
+            Some(&LogicalType::decimal(0, 12))
         );
-        assert_eq!(ts_naive_arr.value(2), -100);
+        assert_eq!(
+            schema_descr.column(6).logical_type_ref(),
+            Some(&LogicalType::timestamp(true, TimeUnit::NANOS))
+        );
+        assert_eq!(
+            schema_descr.column(7).logical_type_ref(),
+            Some(&LogicalType::timestamp(false, TimeUnit::NANOS))
+        );
 
-        let d_arr = ab.column(8).as_any().downcast_ref::<Date32Array>().unwrap();
-        assert_eq!(d_arr.value(0), 0);
-        assert!(d_arr.is_null(1));
-        assert_eq!(d_arr.value(2), 19700);
-        assert_eq!(d_arr.value(3), -1);
+        let rows = read_rows(&bytes);
+        assert_eq!(rows.len(), 4);
 
-        let iv_arr = ab.column(9).as_any().downcast_ref::<StringArray>().unwrap();
-        assert_eq!(iv_arr.value(0), "1 mons -2 days 0.000000300 secs");
-        assert!(iv_arr.is_null(1));
-        assert_eq!(iv_arr.value(2), "0 secs");
-        assert_eq!(iv_arr.value(3), "-1 mons -1 days -10 mins");
+        // col 0: bool
+        assert!(rows[0].get_bool(0).unwrap());
+        assert_eq!(field_at(&rows[1], 0), &ParquetField::Null);
+        assert!(!rows[2].get_bool(0).unwrap());
+        assert!(rows[3].get_bool(0).unwrap());
 
-        let s_arr = ab
-            .column(10)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(s_arr.value(0), "hello");
-        assert!(s_arr.is_null(1));
-        assert_eq!(s_arr.value(3), "🚀");
+        // col 1: i64
+        assert_eq!(rows[0].get_long(1).unwrap(), -42);
+        assert_eq!(field_at(&rows[1], 1), &ParquetField::Null);
+        assert_eq!(rows[2].get_long(1).unwrap(), 99);
+        assert_eq!(rows[3].get_long(1).unwrap(), i64::MAX);
 
-        let bin_arr = ab
-            .column(11)
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .unwrap();
-        assert_eq!(bin_arr.value(0), b"\x00\x01");
-        assert!(bin_arr.is_null(1));
-        assert_eq!(bin_arr.value(2), b"\xff\xfe\xfd");
+        // col 2: f64
+        assert_eq!(rows[0].get_double(2).unwrap(), 1.5);
+        assert_eq!(field_at(&rows[1], 2), &ParquetField::Null);
+        assert!(rows[2].get_double(2).unwrap().is_nan());
+        assert_eq!(rows[3].get_double(2).unwrap(), f64::INFINITY);
 
-        let fb8_arr = ab
-            .column(12)
-            .as_any()
-            .downcast_ref::<FixedSizeBinaryArray>()
-            .unwrap();
-        assert_eq!(fb8_arr.value(0), &[1; 8]);
-        assert!(fb8_arr.is_null(1));
-        assert_eq!(fb8_arr.value(2), &[2; 8]);
+        // col 3: dec_pos (10, 2)
+        assert_eq!(decimal_i128(field_at(&rows[0], 3)), 12_345);
+        assert_eq!(field_at(&rows[1], 3), &ParquetField::Null);
+        assert_eq!(decimal_i128(field_at(&rows[2], 3)), -98_765);
 
-        let fb16_arr = ab
-            .column(13)
-            .as_any()
-            .downcast_ref::<FixedSizeBinaryArray>()
-            .unwrap();
-        assert_eq!(fb16_arr.value(0), &[0xaa; 16]);
-        assert!(fb16_arr.is_null(1));
-        assert_eq!(fb16_arr.value(3), &[0xcc; 16]);
+        // col 4: dec_neg_rescale (12, 0)
+        assert_eq!(decimal_i128(field_at(&rows[0], 4)), 4200);
+        assert_eq!(field_at(&rows[1], 4), &ParquetField::Null);
+        assert_eq!(decimal_i128(field_at(&rows[2], 4)), -700);
+        assert_eq!(decimal_i128(field_at(&rows[3], 4)), 12300);
 
-        let n_arr = ab
-            .column(14)
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .unwrap();
-        assert_eq!(n_arr.null_count(), 4);
+        // col 5: dec_neg_str
+        assert_eq!(rows[0].get_string(5).unwrap(), "420000");
+        assert_eq!(field_at(&rows[1], 5), &ParquetField::Null);
+        assert_eq!(rows[2].get_string(5).unwrap(), "-90000");
+        assert_eq!(rows[3].get_string(5).unwrap(), "10000000000000000");
+
+        // col 6: ts_utc
+        assert_eq!(
+            timestamp_ns(field_at(&rows[0], 6)),
+            1_700_000_000_123_456_789
+        );
+        assert_eq!(field_at(&rows[1], 6), &ParquetField::Null);
+        assert_eq!(timestamp_ns(field_at(&rows[2], 6)), -1);
+
+        // col 7: ts_naive
+        assert_eq!(timestamp_ns(field_at(&rows[2], 7)), -100);
+
+        // col 8: date
+        assert_eq!(date_val(field_at(&rows[0], 8)), 0);
+        assert_eq!(field_at(&rows[1], 8), &ParquetField::Null);
+        assert_eq!(date_val(field_at(&rows[2], 8)), 19700);
+        assert_eq!(date_val(field_at(&rows[3], 8)), -1);
+
+        // col 9: interval (formatted string)
+        assert_eq!(
+            rows[0].get_string(9).unwrap(),
+            "1 mons -2 days 0.000000300 secs"
+        );
+        assert_eq!(field_at(&rows[1], 9), &ParquetField::Null);
+        assert_eq!(rows[2].get_string(9).unwrap(), "0 secs");
+        assert_eq!(rows[3].get_string(9).unwrap(), "-1 mons -1 days -10 mins");
+
+        // col 10: utf8
+        assert_eq!(rows[0].get_string(10).unwrap(), "hello");
+        assert_eq!(field_at(&rows[1], 10), &ParquetField::Null);
+        assert_eq!(rows[2].get_string(10).unwrap(), "cetra");
+        assert_eq!(rows[3].get_string(10).unwrap(), "🚀");
+
+        // col 11: binary
+        assert_eq!(bytes_val(field_at(&rows[0], 11)), b"\x00\x01");
+        assert_eq!(field_at(&rows[1], 11), &ParquetField::Null);
+        assert_eq!(bytes_val(field_at(&rows[2], 11)), b"\xff\xfe\xfd");
+
+        // col 12: fb8
+        assert_eq!(bytes_val(field_at(&rows[0], 12)), &[1; 8]);
+        assert_eq!(field_at(&rows[1], 12), &ParquetField::Null);
+        assert_eq!(bytes_val(field_at(&rows[2], 12)), &[2; 8]);
+
+        // col 13: fb16
+        assert_eq!(bytes_val(field_at(&rows[0], 13)), &[0xaa; 16]);
+        assert_eq!(field_at(&rows[1], 13), &ParquetField::Null);
+        assert_eq!(bytes_val(field_at(&rows[3], 13)), &[0xcc; 16]);
+
+        // col 14: null
+        for row in &rows {
+            assert_eq!(field_at(row, 14), &ParquetField::Null);
+        }
     }
 
     #[test]
@@ -2075,133 +2117,72 @@ mod tests {
 
         let ll = read_low_level(&bytes);
         assert_eq!(ll.metadata().row_group(0).num_rows(), 5);
-        assert_eq!(ll.get_row_iter(None).unwrap().count(), 5);
+        let rows = read_rows(&bytes);
+        assert_eq!(rows.len(), 5);
 
-        let arrow_batches = read_arrow(&bytes);
-        assert_eq!(arrow_batches.len(), 1);
-        let ab = &arrow_batches[0];
-        assert_eq!(ab.num_rows(), 5);
-
-        // Verify list_utf8
-        let l1 = ab.column(0).as_any().downcast_ref::<ListArray>().unwrap();
-        assert!(l1.is_null(0));
-        assert!(!l1.is_null(1) && l1.value(1).is_empty());
-        let r2 = l1.value(2);
-        assert_eq!(r2.len(), 1);
-        assert!(r2.is_null(0));
-        let r3 = l1.value(3);
-        let r3_s = r3.as_any().downcast_ref::<StringArray>().unwrap();
-        assert_eq!(r3_s.len(), 3);
-        assert_eq!(r3_s.value(0), "a");
-        assert!(r3_s.is_null(1));
-        assert_eq!(r3_s.value(2), "b");
+        // Verify list_utf8: [NULL, [], [NULL], ["a", NULL, "b"], ["z"]]
+        assert_eq!(field_at(&rows[0], 0), &ParquetField::Null);
+        assert!(list_elements(field_at(&rows[1], 0)).is_empty());
+        assert_eq!(list_elements(field_at(&rows[2], 0)), &[ParquetField::Null]);
+        let r3 = list_elements(field_at(&rows[3], 0));
+        assert_eq!(r3.len(), 3);
+        assert_eq!(str_val(&r3[0]), "a");
+        assert_eq!(r3[1], ParquetField::Null);
+        assert_eq!(str_val(&r3[2]), "b");
 
         // Verify nested_list: [NULL, [], [NULL, []], [["x", NULL], [], ["y"]], [["z"]]]
-        let l2 = ab.column(1).as_any().downcast_ref::<ListArray>().unwrap();
-        assert!(l2.is_null(0));
-        assert!(!l2.is_null(1) && l2.value(1).is_empty());
-        let l2_r2 = l2.value(2);
-        let l2_r2_list = l2_r2.as_any().downcast_ref::<ListArray>().unwrap();
-        assert_eq!(l2_r2_list.len(), 2);
-        assert!(l2_r2_list.is_null(0));
-        assert!(!l2_r2_list.is_null(1) && l2_r2_list.value(1).is_empty());
+        assert_eq!(field_at(&rows[0], 1), &ParquetField::Null);
+        assert!(list_elements(field_at(&rows[1], 1)).is_empty());
+        let l2_r2 = list_elements(field_at(&rows[2], 1));
+        assert_eq!(l2_r2.len(), 2);
+        assert_eq!(l2_r2[0], ParquetField::Null);
+        assert!(list_elements(&l2_r2[1]).is_empty());
 
-        let l2_r3 = l2.value(3);
-        let l2_r3_list = l2_r3.as_any().downcast_ref::<ListArray>().unwrap();
-        assert_eq!(l2_r3_list.len(), 3);
-        let r3_0 = l2_r3_list.value(0);
-        let r3_0_s = r3_0.as_any().downcast_ref::<StringArray>().unwrap();
-        assert_eq!(r3_0_s.value(0), "x");
-        assert!(r3_0_s.is_null(1));
-        assert!(l2_r3_list.value(1).is_empty());
-        assert_eq!(
-            l2_r3_list
-                .value(2)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap()
-                .value(0),
-            "y"
-        );
+        let l2_r3 = list_elements(field_at(&rows[3], 1));
+        assert_eq!(l2_r3.len(), 3);
+        let r3_0 = list_elements(&l2_r3[0]);
+        assert_eq!(str_val(&r3_0[0]), "x");
+        assert_eq!(r3_0[1], ParquetField::Null);
+        assert!(list_elements(&l2_r3[1]).is_empty());
+        assert_eq!(str_val(&list_elements(&l2_r3[2])[0]), "y");
 
-        // Verify MapUtf8
-        let m_arr = ab.column(2).as_any().downcast_ref::<MapArray>().unwrap();
-        assert!(m_arr.is_null(0));
-        assert!(!m_arr.is_null(1) && m_arr.value(1).is_empty());
-        let m_r2 = m_arr.value(2);
+        // Verify MapUtf8: [NULL, {}, {"k1": "v1", "k2": NULL}, {"a": "b"}, {}]
+        assert_eq!(field_at(&rows[0], 2), &ParquetField::Null);
+        assert!(map_entries(field_at(&rows[1], 2)).is_empty());
+        let m_r2 = map_entries(field_at(&rows[2], 2));
         assert_eq!(m_r2.len(), 2);
-        let m_r2_keys = m_r2
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let m_r2_vals = m_r2
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(m_r2_keys.value(0), "k1");
-        assert_eq!(m_r2_vals.value(0), "v1");
-        assert_eq!(m_r2_keys.value(1), "k2");
-        assert!(m_r2_vals.is_null(1));
+        assert_eq!(str_val(&m_r2[0].0), "k1");
+        assert_eq!(str_val(&m_r2[0].1), "v1");
+        assert_eq!(str_val(&m_r2[1].0), "k2");
+        assert_eq!(m_r2[1].1, ParquetField::Null);
 
-        // Verify Events
-        let ev_arr = ab.column(3).as_any().downcast_ref::<ListArray>().unwrap();
-        assert!(ev_arr.is_null(0));
-        assert!(!ev_arr.is_null(1) && ev_arr.value(1).is_empty());
-        let ev_r2 = ev_arr.value(2);
-        let ev_struct = ev_r2.as_any().downcast_ref::<StructArray>().unwrap();
-        assert_eq!(ev_struct.len(), 2);
-        let ev_times = ev_struct
-            .column(0)
-            .as_any()
-            .downcast_ref::<TimestampNanosecondArray>()
-            .unwrap();
-        let ev_names = ev_struct
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let ev_attrs = ev_struct
-            .column(2)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(ev_times.value(0), 100);
-        assert_eq!(ev_names.value(0), "ev1");
-        assert!(ev_attrs.is_null(0));
-        assert_eq!(ev_times.value(1), 200);
-        assert_eq!(ev_names.value(1), "ev2");
-        assert_eq!(ev_attrs.value(1), r#"{"x":1}"#);
+        // Verify Events: [NULL, [], [ev1(no attrs), ev2(attrs)], [ev3], []]
+        assert_eq!(field_at(&rows[0], 3), &ParquetField::Null);
+        assert!(list_elements(field_at(&rows[1], 3)).is_empty());
+        let ev_r2 = list_elements(field_at(&rows[2], 3));
+        assert_eq!(ev_r2.len(), 2);
+        let ev0 = struct_row(&ev_r2[0]);
+        assert_eq!(timestamp_ns(field_at(ev0, 0)), 100);
+        assert_eq!(str_val(field_at(ev0, 1)), "ev1");
+        assert_eq!(field_at(ev0, 2), &ParquetField::Null);
+        let ev1 = struct_row(&ev_r2[1]);
+        assert_eq!(timestamp_ns(field_at(ev1, 0)), 200);
+        assert_eq!(str_val(field_at(ev1, 1)), "ev2");
+        assert_eq!(str_val(field_at(ev1, 2)), r#"{"x":1}"#);
 
-        // Verify Links
-        let lk_arr = ab.column(4).as_any().downcast_ref::<ListArray>().unwrap();
-        assert!(lk_arr.is_null(0));
-        assert!(!lk_arr.is_null(1) && lk_arr.value(1).is_empty());
-        let lk_r2 = lk_arr.value(2);
-        let lk_struct = lk_r2.as_any().downcast_ref::<StructArray>().unwrap();
-        assert_eq!(lk_struct.len(), 2);
-        let lk_traces = lk_struct
-            .column(0)
-            .as_any()
-            .downcast_ref::<FixedSizeBinaryArray>()
-            .unwrap();
-        let lk_spans = lk_struct
-            .column(1)
-            .as_any()
-            .downcast_ref::<FixedSizeBinaryArray>()
-            .unwrap();
-        let lk_attrs = lk_struct
-            .column(2)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(lk_traces.value(0), &[1; 16]);
-        assert_eq!(lk_spans.value(0), &[0x11; 8]);
-        assert_eq!(lk_attrs.value(0), r#"{"r":"1"}"#);
-        assert_eq!(lk_traces.value(1), &[2; 16]);
-        assert_eq!(lk_spans.value(1), &[0x22; 8]);
-        assert!(lk_attrs.is_null(1));
+        // Verify Links: [NULL, [], [lk1(attrs), lk2(no attrs)], [], [lk3]]
+        assert_eq!(field_at(&rows[0], 4), &ParquetField::Null);
+        assert!(list_elements(field_at(&rows[1], 4)).is_empty());
+        let lk_r2 = list_elements(field_at(&rows[2], 4));
+        assert_eq!(lk_r2.len(), 2);
+        let lk0 = struct_row(&lk_r2[0]);
+        assert_eq!(bytes_val(field_at(lk0, 0)), &[1; 16]);
+        assert_eq!(bytes_val(field_at(lk0, 1)), &[0x11; 8]);
+        assert_eq!(str_val(field_at(lk0, 2)), r#"{"r":"1"}"#);
+        let lk1 = struct_row(&lk_r2[1]);
+        assert_eq!(bytes_val(field_at(lk1, 0)), &[2; 16]);
+        assert_eq!(bytes_val(field_at(lk1, 1)), &[0x22; 8]);
+        assert_eq!(field_at(lk1, 2), &ParquetField::Null);
     }
 
     #[test]
@@ -2283,50 +2264,44 @@ mod tests {
         let bytes = export_batches(schema, vec![b_mask, b_indices], &pool).unwrap();
         assert_eq!(pool.reserved(), 0);
 
-        let arrow_batches = read_arrow(&bytes);
-        assert_eq!(arrow_batches.len(), 1);
-        let ab = &arrow_batches[0];
-        assert_eq!(ab.num_rows(), 7);
+        let rows = read_rows(&bytes);
+        assert_eq!(rows.len(), 7);
 
-        let flat_arr = ab.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(flat_arr.values(), &[10, 30, 50, 60, 60, 20, 40]);
+        let flat_vals: Vec<i64> = rows.iter().map(|r| r.get_long(0).unwrap()).collect();
+        assert_eq!(flat_vals, vec![10, 30, 50, 60, 60, 20, 40]);
 
-        let const_arr = ab.column(1).as_any().downcast_ref::<StringArray>().unwrap();
-        for i in 0..7 {
-            assert_eq!(const_arr.value(i), "shared");
+        for row in &rows {
+            assert_eq!(row.get_string(1).unwrap(), "shared");
         }
 
-        let dict_arr = ab.column(2).as_any().downcast_ref::<StringArray>().unwrap();
         // Selected rows: [0, 2, 4, 5] + [5, 1, 3]
-        assert_eq!(dict_arr.value(0), "alpha");
-        assert_eq!(dict_arr.value(1), "alpha");
-        assert_eq!(dict_arr.value(2), "beta");
-        assert!(dict_arr.is_null(3));
-        assert!(dict_arr.is_null(4));
-        assert!(dict_arr.is_null(5));
-        assert_eq!(dict_arr.value(6), "alpha");
+        assert_eq!(rows[0].get_string(2).unwrap(), "alpha");
+        assert_eq!(rows[1].get_string(2).unwrap(), "alpha");
+        assert_eq!(rows[2].get_string(2).unwrap(), "beta");
+        assert_eq!(field_at(&rows[3], 2), &ParquetField::Null);
+        assert_eq!(field_at(&rows[4], 2), &ParquetField::Null);
+        assert_eq!(field_at(&rows[5], 2), &ParquetField::Null);
+        assert_eq!(rows[6].get_string(2).unwrap(), "alpha");
 
-        let rle_arr = ab.column(3).as_any().downcast_ref::<Int64Array>().unwrap();
         // run 0..2 => 100, run 2..4 => NULL, run 4..6 => 300
         // rows [0, 2, 4, 5, 5, 1, 3] => [100, NULL, 300, 300, 300, 100, NULL]
-        assert_eq!(rle_arr.value(0), 100);
-        assert!(rle_arr.is_null(1));
-        assert_eq!(rle_arr.value(2), 300);
-        assert_eq!(rle_arr.value(3), 300);
-        assert_eq!(rle_arr.value(4), 300);
-        assert_eq!(rle_arr.value(5), 100);
-        assert!(rle_arr.is_null(6));
+        assert_eq!(rows[0].get_long(3).unwrap(), 100);
+        assert_eq!(field_at(&rows[1], 3), &ParquetField::Null);
+        assert_eq!(rows[2].get_long(3).unwrap(), 300);
+        assert_eq!(rows[3].get_long(3).unwrap(), 300);
+        assert_eq!(rows[4].get_long(3).unwrap(), 300);
+        assert_eq!(rows[5].get_long(3).unwrap(), 100);
+        assert_eq!(field_at(&rows[6], 3), &ParquetField::Null);
 
-        let cnull_arr = ab.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(cnull_arr.null_count(), 7);
+        for row in &rows {
+            assert_eq!(field_at(row, 4), &ParquetField::Null);
+        }
 
-        let clist_arr = ab.column(5).as_any().downcast_ref::<ListArray>().unwrap();
-        for i in 0..7 {
-            let item = clist_arr.value(i);
-            let s = item.as_any().downcast_ref::<StringArray>().unwrap();
-            assert_eq!(s.len(), 2);
-            assert_eq!(s.value(0), "x");
-            assert!(s.is_null(1));
+        for row in &rows {
+            let elems = list_elements(field_at(row, 5));
+            assert_eq!(elems.len(), 2);
+            assert_eq!(str_val(&elems[0]), "x");
+            assert_eq!(elems[1], ParquetField::Null);
         }
     }
 
@@ -2394,18 +2369,9 @@ mod tests {
         assert_eq!(ll.metadata().row_group(0).num_rows(), 6);
         assert_eq!(ll.metadata().row_group(1).num_rows(), 2);
 
-        let arrow_batches = read_arrow(&stream_bytes);
-        let collected: Vec<i64> = arrow_batches
+        let collected: Vec<i64> = read_rows(&stream_bytes)
             .iter()
-            .flat_map(|b| {
-                b.column(0)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
-                    .values()
-                    .iter()
-                    .copied()
-            })
+            .map(|r| r.get_long(0).unwrap())
             .collect();
         assert_eq!(collected, (0..8).collect::<Vec<_>>());
 
@@ -2649,36 +2615,30 @@ mod tests {
         let schema_descr = ll.metadata().file_metadata().schema_descr();
         assert_eq!(schema_descr.column(0).max_def_level(), 0);
         assert_eq!(schema_descr.column(1).max_def_level(), 0);
+        // Leaf for list_dec is the last leaf column in the schema.
+        let last_leaf = schema_descr.column(schema_descr.num_columns() - 1);
+        assert_eq!(
+            last_leaf.logical_type_ref(),
+            Some(&LogicalType::decimal(0, 9))
+        );
 
-        let arrow_batches = read_arrow(&bytes);
-        assert_eq!(arrow_batches.len(), 1);
-        let ab = &arrow_batches[0];
-        assert_eq!(ab.num_rows(), 2);
+        let rows = read_rows(&bytes);
+        assert_eq!(rows.len(), 2);
 
-        let dec38 = ab
-            .column(1)
-            .as_any()
-            .downcast_ref::<Decimal128Array>()
-            .unwrap();
-        assert_eq!(dec38.value(0), big_neg);
-        assert_eq!(dec38.value(1), 42);
+        assert_eq!(decimal_i128(field_at(&rows[0], 1)), big_neg);
+        assert_eq!(decimal_i128(field_at(&rows[1], 1)), 42);
 
-        let lm = ab.column(2).as_any().downcast_ref::<ListArray>().unwrap();
-        assert!(!lm.is_null(0));
-        assert!(lm.is_null(1));
-        let lm_0 = lm.value(0);
-        let lm_0_map = lm_0.as_any().downcast_ref::<MapArray>().unwrap();
-        assert_eq!(lm_0_map.len(), 2);
-        assert!(lm_0_map.value(0).is_empty());
-        assert_eq!(lm_0_map.value(1).len(), 2);
+        let lm_0 = list_elements(field_at(&rows[0], 2));
+        assert_eq!(lm_0.len(), 2);
+        assert!(map_entries(&lm_0[0]).is_empty());
+        assert_eq!(map_entries(&lm_0[1]).len(), 2);
+        assert_eq!(field_at(&rows[1], 2), &ParquetField::Null);
 
-        let ld = ab.column(5).as_any().downcast_ref::<ListArray>().unwrap();
-        let ld_0 = ld.value(0);
-        let ld_0_d = ld_0.as_any().downcast_ref::<Decimal128Array>().unwrap();
-        assert_eq!(ld_0_d.data_type(), &ArrowDataType::Decimal128(9, 0));
-        assert_eq!(ld_0_d.value(0), 50);
-        assert!(ld_0_d.is_null(1));
-        assert_eq!(ld_0_d.value(2), -30);
+        let ld_0 = list_elements(field_at(&rows[0], 5));
+        assert_eq!(ld_0.len(), 3);
+        assert_eq!(decimal_i128(&ld_0[0]), 50);
+        assert_eq!(ld_0[1], ParquetField::Null);
+        assert_eq!(decimal_i128(&ld_0[2]), -30);
     }
 
     #[test]
@@ -2727,9 +2687,7 @@ mod tests {
         }
         assert_eq!(pool.reserved(), 0);
 
-        let arrow_batches = read_arrow(&out);
-        let total_rows: usize = arrow_batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total_rows, 256);
+        assert_eq!(read_rows(&out).len(), 256);
 
         // Nullable batch into non-nullable exporter schema must still fail.
         let mut strict_exporter =
@@ -2816,9 +2774,7 @@ mod tests {
             full.extend_from_slice(&c);
         }
         assert_eq!(pool.reserved(), 0);
-        let arrow_batches = read_arrow(&full);
-        let total_rows: usize = arrow_batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total_rows, 256);
+        assert_eq!(read_rows(&full).len(), 256);
     }
 
     #[test]
@@ -2829,9 +2785,7 @@ mod tests {
         let pool = GlobalPool::standalone(1024 * 1024);
         let bytes = export_batches(Arc::clone(&schema), vec![batch], &pool).unwrap();
         assert_eq!(pool.reserved(), 0);
-        let arrow_batches = read_arrow(&bytes);
-        let total_rows: usize = arrow_batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total_rows, 10_000);
+        assert_eq!(read_rows(&bytes).len(), 10_000);
     }
 
     #[test]

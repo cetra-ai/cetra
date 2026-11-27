@@ -1,20 +1,20 @@
-//! The error boundary around Parquet decoding (spec 03 §10): a
+//! The error boundary around Statam decoding (spec 03 §10): a
 //! decoder panic becomes a decode error, so the read fails, its files become
 //! suspects, and verification can quarantine them.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use parquet::errors::ParquetError;
+use cetra_statam::StatamError;
 
 /// The error a caught decoder panic becomes.
-pub(crate) fn decoder_panicked() -> ParquetError {
-    ParquetError::General("decoder panicked".to_owned())
+pub(crate) fn decoder_panicked() -> StatamError {
+    StatamError::Corrupt {
+        reason: "decoder panicked",
+    }
 }
 
 /// Runs `f`, turning a panic into `Err(decoder_panicked())`.
-pub(crate) fn guard_sync<T>(
-    f: impl FnOnce() -> Result<T, ParquetError>,
-) -> Result<T, ParquetError> {
+pub(crate) fn guard_sync<T>(f: impl FnOnce() -> Result<T, StatamError>) -> Result<T, StatamError> {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| Err(decoder_panicked()))
 }
 
@@ -42,7 +42,8 @@ mod tests {
     use crate::error::{AnchorError, CompactionError};
     use crate::fuzz_entry::tests::parquet_bytes;
     use crate::fuzz_entry::{parquet_meta, parquet_query, runtime};
-    use crate::verify::{Verdict, is_store_error, may_be_corrupt, verify_file};
+    use crate::objects::StorageIo;
+    use crate::verify::{Verdict, may_be_corrupt, verify_file};
     use crate::{ListScope, SortOrder, SpanListRequest, SpanSort, span_list};
 
     const DAY_NS: i64 = 86_400 * 1_000_000_000;
@@ -159,8 +160,8 @@ mod tests {
 
     #[test]
     fn guard_sync_turns_a_panic_into_an_error() {
-        let result: Result<(), ParquetError> =
-            guard_sync(|| -> Result<(), ParquetError> { panic!("boom") });
+        let result: Result<(), StatamError> =
+            guard_sync(|| -> Result<(), StatamError> { panic!("boom") });
         assert!(matches!(result, Err(ref error) if error.to_string().contains("decoder panicked")));
     }
 
@@ -195,7 +196,8 @@ mod tests {
     fn verify_reports_a_panicking_read_as_corrupt() {
         let store: Arc<dyn ObjectStore> = Arc::new(PanicStore::default());
         let meta = stored(FileTable::Spans, &store);
-        let verdict = runtime().block_on(verify_file(&store, &meta));
+        let io = StorageIo::from_store(store);
+        let verdict = runtime().block_on(verify_file(&io, &meta));
         assert_eq!(
             verdict,
             Verdict::Corrupt {
@@ -208,10 +210,11 @@ mod tests {
     fn anchor_rebuild_skips_a_panicking_file() {
         let store: Arc<dyn ObjectStore> = Arc::new(PanicStore::default());
         let meta = stored(FileTable::Traces, &store);
+        let io = StorageIo::from_store(store);
         let mut anchors = Anchors::new(DAY_NS);
-        let result = runtime().block_on(anchors.rebuild_file(&meta, store, 0));
+        let result = runtime().block_on(anchors.rebuild_file(&meta, io, 0));
         assert!(
-            matches!(result, Err(AnchorError::Parquet(ref error)) if !is_store_error(error)),
+            matches!(result, Err(AnchorError::Statam(ref error)) if !error.is_store_error()),
             "expected a decode error, got {result:?}"
         );
     }
@@ -220,22 +223,16 @@ mod tests {
     fn time_values_reports_a_panic_as_a_corrupt_read() {
         let store: Arc<dyn ObjectStore> = Arc::new(PanicStore::default());
         let meta = stored(FileTable::Spans, &store);
-        let result = runtime().block_on(time_values(
-            Arc::clone(&store),
-            &[Arc::new(meta)],
-            spans::START_TIME,
-        ));
+        let io = StorageIo::from_store(Arc::clone(&store));
+        let result = runtime().block_on(time_values(io, &[Arc::new(meta)], spans::START_TIME));
         match result {
             Err(CompactionError::Read { source }) => assert!(may_be_corrupt(&source)),
             other => panic!("expected a read error, got {other:?}"),
         }
         // The scores column reads through the same guard.
         let meta = stored(FileTable::Scores, &store);
-        let result = runtime().block_on(time_values(
-            Arc::clone(&store),
-            &[Arc::new(meta)],
-            scores::CREATED_AT,
-        ));
+        let io = StorageIo::from_store(store);
+        let result = runtime().block_on(time_values(io, &[Arc::new(meta)], scores::CREATED_AT));
         assert!(matches!(result, Err(CompactionError::Read { .. })));
     }
 }

@@ -40,6 +40,7 @@ cetra-core = { path = "crates/core" }
 cetra-eval = { path = "crates/eval" }
 cetra-otel = { path = "crates/otel" }
 cetra-query = { path = "crates/query" }
+cetra-statam = { path = "crates/statam" }
 cetra-storage = { path = "crates/storage" }
 cetra-token = { path = "crates/token" }
 cetra-saml = { path = "crates/saml" }
@@ -229,6 +230,10 @@ http-body-util = "0.1.5"
 flate2 = { version = "1.1.11", default-features = false, features = ["zlib-rs"] }
 # zstd OTLP request bodies. Same version as `parquet`'s pin (`Cargo.lock`). Default features stay off.
 zstd = { version = "0.14.3", default-features = false }
+# Cryptographic 128-bit chunk content hashes for Statam packs. Already in `Cargo.lock`.
+blake3 = "1.8.7"
+# Fast SIMD substring search for Statam. Already in `Cargo.lock`.
+memchr = "2.8.3"
 
 [profile.dev]
 debug = "line-tables-only"

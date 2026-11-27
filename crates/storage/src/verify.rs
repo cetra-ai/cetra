@@ -5,16 +5,14 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use object_store::ObjectStore;
-use parquet::errors::ParquetError;
-
 use crate::catalog::{self, FileId, FileMeta};
 use crate::error::{EngineError, EngineErrorKind};
+use crate::objects::StorageIo;
 
-/// Whether `error` may come from a corrupt Parquet file rather than the object
+/// Whether `error` may come from a corrupt Statam file rather than the object
 /// store or the query (spec 03 §10). False positives only cost a verification.
 pub(crate) fn may_be_corrupt(error: &EngineError) -> bool {
-    error.kind() == EngineErrorKind::Parquet
+    error.kind() == EngineErrorKind::Statam
 }
 
 /// Whether an `object_store::Error` represents missing or truncated/corrupt data
@@ -37,19 +35,6 @@ pub(crate) fn is_corrupt_store_error(err: &object_store::Error) -> bool {
         }
     }
     false
-}
-
-/// A `ParquetError::External` holding an `object_store::Error` other than
-/// a corrupt-store error (`NotFound` / `UnexpectedEof`): the store failed, the
-/// file may be fine. A missing or truncated object is not a store failure: it
-/// makes the file a suspect, and verification finds it corrupt.
-pub(crate) fn is_store_error(error: &ParquetError) -> bool {
-    match error {
-        ParquetError::External(source) => source
-            .downcast_ref::<object_store::Error>()
-            .is_some_and(|error| !is_corrupt_store_error(error)),
-        _ => false,
-    }
 }
 
 /// Files waiting for verification, and files verified healthy recently.
@@ -221,9 +206,9 @@ pub(crate) enum Verdict {
     Unavailable,
 }
 
-/// Reads `file` whole from `store`: every row group, every column.
-pub(crate) async fn verify_file(store: &Arc<dyn ObjectStore>, file: &FileMeta) -> Verdict {
-    crate::file_format::verify_parquet_file(store, file).await
+/// Reads `file` whole from `io`: every row group, every column, and optional sibling `.stpk` pack.
+pub(crate) async fn verify_file(io: &StorageIo, file: &FileMeta) -> Verdict {
+    crate::statam_io::verify_statam_file(io, file).await
 }
 
 #[cfg(test)]
@@ -231,45 +216,28 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
+    use cetra_statam::StatamError;
     use object_store::path::Path as ObjectPath;
-    use object_store::{ObjectStoreExt, PutPayload};
-    use parquet::errors::ParquetError;
+    use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
     use uuid::Uuid;
 
     use super::*;
     use crate::catalog::FileTable;
-
-    fn store_error() -> object_store::Error {
-        object_store::Error::Generic {
-            store: "test",
-            source: Box::new(std::io::Error::other("unreachable")),
-        }
-    }
-
-    fn missing() -> object_store::Error {
-        object_store::Error::NotFound {
-            path: "tables/spans/x".to_owned(),
-            source: Box::new(std::io::Error::other("missing")),
-        }
-    }
-
-    fn parquet_error() -> ParquetError {
-        ParquetError::General("bad page".to_owned())
-    }
 
     fn file_id(last: u128) -> FileId {
         FileId(Uuid::from_u128(last))
     }
 
     #[test]
-    fn a_parquet_error_is_corruption_unless_the_store_failed() {
-        assert!(may_be_corrupt(&EngineError::from_parquet(&parquet_error())));
-        assert!(!may_be_corrupt(&EngineError::from_parquet(
-            &ParquetError::External(Box::new(store_error()))
-        )));
-        assert!(may_be_corrupt(&EngineError::from_parquet(
-            &ParquetError::External(Box::new(missing()))
-        )));
+    fn a_statam_error_is_corruption_unless_the_store_failed() {
+        let corrupt = StatamError::Corrupt { reason: "bad page" };
+        let store = StatamError::Store {
+            reason: "object store read failed",
+        };
+        let missing = StatamError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"));
+        assert!(may_be_corrupt(&EngineError::from_statam(&corrupt)));
+        assert!(!may_be_corrupt(&EngineError::from_statam(&store)));
+        assert!(may_be_corrupt(&EngineError::from_statam(&missing)));
     }
 
     #[test]
@@ -277,17 +245,6 @@ mod tests {
         assert!(!may_be_corrupt(&EngineError::from_resources_exhausted()));
         assert!(!may_be_corrupt(&EngineError::from_io()));
         assert!(!may_be_corrupt(&EngineError::internal("plan")));
-    }
-
-    #[test]
-    fn a_store_error_is_not_corruption_but_a_missing_object_is_a_suspect() {
-        assert!(is_store_error(&ParquetError::External(Box::new(
-            store_error()
-        ))));
-        assert!(!is_store_error(&ParquetError::External(
-            Box::new(missing())
-        )));
-        assert!(!is_store_error(&parquet_error()));
     }
 
     #[test]
@@ -300,7 +257,6 @@ mod tests {
             )),
         };
         assert!(!is_corrupt_store_error(&s3_eof));
-        assert!(is_store_error(&ParquetError::External(Box::new(s3_eof))));
 
         for store_name in ["LocalFileSystem", "InMemory"] {
             let local_eof = object_store::Error::Generic {
@@ -311,9 +267,6 @@ mod tests {
                 )),
             };
             assert!(is_corrupt_store_error(&local_eof));
-            assert!(!is_store_error(&ParquetError::External(Box::new(
-                local_eof
-            ))));
         }
     }
 
@@ -350,7 +303,7 @@ mod tests {
             project: crate::compaction::job::tests::project(),
             day: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
             level: 0,
-            path: format!("tables/spans/day=2026-01-01/{id:?}.parquet"),
+            path: format!("tables/spans/day=2026-01-01/{id:?}.statam"),
             size: 1,
             footer_size: 1,
             rows: 1,
@@ -360,6 +313,7 @@ mod tests {
             max_ingest_time: 0,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         })
     }
 
@@ -380,12 +334,8 @@ mod tests {
         assert_eq!(queue.take(usize::MAX).len(), QUEUE_MAX);
     }
 
-    /// The committed `parquet_file` regression input (21 bytes, read as the fuzz
-    /// entry reads it): table byte 0x19 (traces), footer hint 0x00ffffff, a time
-    /// bound, then the file. The file is the 8 bytes `2f 15 00 00 "PAR1"`, whose
-    /// footer claims 0x152f bytes of metadata. Upstream's push decoder underflows
-    /// on it (parquet `push_decoder.rs:391`). The guard turns that panic into a
-    /// decode failure, so every read reports the file corrupt.
+    /// Replays the committed `parquet_file` regression input through Statam verification,
+    /// anchor rebuild, and slice time reads: short/corrupt bytes are rejected cleanly as corrupt.
     #[test]
     fn a_footer_claiming_more_metadata_than_the_file_is_corrupt() {
         const DAY_NS: i64 = 86_400_000_000_000;
@@ -395,13 +345,9 @@ mod tests {
         assert_eq!(REGRESSION.len(), 21);
         let footer_hint = u64::from(u32::from_le_bytes(REGRESSION[1..5].try_into().unwrap()));
         let file = Bytes::copy_from_slice(&REGRESSION[13..]);
-        assert_eq!(
-            &file[..4],
-            &0x152f_u32.to_le_bytes(),
-            "the footer claims 0x152f bytes"
-        );
         let size = u64::try_from(file.len()).unwrap();
         let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let io = StorageIo::from_store(Arc::clone(&store));
         let runtime = crate::fuzz_entry::runtime();
 
         let traces = crate::fuzz_entry::parquet_meta(FileTable::Traces, size, footer_hint);
@@ -413,7 +359,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let verdict = verify_file(&store, &traces).await;
+            let verdict = verify_file(&io, &traces).await;
             assert!(
                 matches!(
                     verdict,
@@ -421,15 +367,10 @@ mod tests {
                         reason: "decode failed"
                     }
                 ),
-                "the footer is reported corrupt"
+                "the malformed bytes are reported corrupt"
             );
             let mut anchors = crate::anchor::Anchors::new(DAY_NS);
-            assert!(
-                anchors
-                    .rebuild_file(&traces, Arc::clone(&store), 0)
-                    .await
-                    .is_err()
-            );
+            assert!(anchors.rebuild_file(&traces, io.clone(), 0).await.is_err());
         });
 
         let spans = crate::fuzz_entry::parquet_meta(FileTable::Spans, size, footer_hint);
@@ -443,7 +384,7 @@ mod tests {
                 .unwrap();
             let files = [Arc::new(spans)];
             let read = crate::compaction::slice::time_values(
-                Arc::clone(&store),
+                io,
                 &files,
                 cetra_core::schema::spans::START_TIME,
             )

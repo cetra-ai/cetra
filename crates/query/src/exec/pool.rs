@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 
@@ -89,6 +89,20 @@ impl fmt::Debug for PoolShared {
 impl PoolShared {
     fn lock(&self) -> MutexGuard<'_, PoolInner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn enqueue(&self, queue: VecDeque<TaskFn>) -> Result<u64, QueryError> {
+        let mut inner = self.lock();
+        if inner.shutdown {
+            drop(inner);
+            drop(queue);
+            return Err(QueryError::internal("worker pool is shut down"));
+        }
+        let qid = inner.next_query_id;
+        inner.next_query_id = inner.next_query_id.wrapping_add(1).max(1);
+        inner.queues.insert(qid, queue);
+        inner.order.push_back(qid);
+        Ok(qid)
     }
 }
 
@@ -214,17 +228,7 @@ impl WorkerPool {
             queue.push_back(boxed);
         }
 
-        let query_id = {
-            let mut inner = self.shared.lock();
-            if inner.shutdown {
-                return Err(QueryError::internal("worker pool is shut down"));
-            }
-            let qid = inner.next_query_id;
-            inner.next_query_id = inner.next_query_id.wrapping_add(1).max(1);
-            inner.queues.insert(qid, queue);
-            inner.order.push_back(qid);
-            qid
-        };
+        let query_id = self.shared.enqueue(queue)?;
         self.shared.cv.notify_all();
 
         let _cancel_guard = cancel.register_waker({
@@ -273,6 +277,109 @@ impl WorkerPool {
             }
         }
         Ok(out)
+    }
+
+    /// Executes `tasks` cooperatively using the calling thread as worker #0 plus up to
+    /// `max_helpers` optional helper workers from the pool under fair round-robin scheduling.
+    ///
+    /// Unlike [`Self::run_scoped`], this method is **deadlock-free even when called recursively
+    /// from inside worker pool threads** (including when 100% of workers are simultaneously
+    /// inside nested `run_helping` calls): the caller actively drains work from the shared
+    /// work index, cancels any unstarted helper tickets once the work queue is drained or
+    /// cancelled, and waits only for helpers that already started executing.
+    ///
+    /// Empty `tasks` returns `Ok(())` immediately. On cancellation, remaining unclaimed tasks
+    /// are dropped synchronously before returning `Err(QueryError::Cancelled)`. Panics inside
+    /// tasks are caught via `std::panic::catch_unwind`, cancel the token, and return
+    /// `Err(QueryError::Internal(_))` without poisoning worker threads.
+    pub fn run_helping<F>(
+        &self,
+        cancel: &CancelToken,
+        max_helpers: usize,
+        tasks: Vec<F>,
+    ) -> Result<(), QueryError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        if tasks.is_empty() {
+            return Ok(());
+        }
+        if cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+
+        let helpers = max_helpers
+            .min(tasks.len() - 1)
+            .min(self.num_workers().saturating_sub(1));
+
+        if helpers == 0 {
+            for task in tasks {
+                if cancel.is_cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
+                if catch_unwind(AssertUnwindSafe(task)).is_err() {
+                    cancel.cancel();
+                    return Err(QueryError::internal("query worker panicked"));
+                }
+            }
+            if cancel.is_cancelled() {
+                return Err(QueryError::Cancelled);
+            }
+            return Ok(());
+        }
+
+        let shared = Arc::new(HelpShared::new(tasks, helpers));
+        let mut queue = VecDeque::with_capacity(helpers);
+        for _ in 0..helpers {
+            let ticket = TicketDropGuard {
+                shared: Arc::clone(&shared),
+            };
+            let helper_cancel = cancel.clone();
+            let boxed: TaskFn = Box::new(move |in_flight_guard| {
+                run_helping_worker(ticket, in_flight_guard, &helper_cancel);
+            });
+            queue.push_back(boxed);
+        }
+
+        let query_id = self.shared.enqueue(queue)?;
+        if helpers >= self.shared.num_workers {
+            self.shared.cv.notify_all();
+        } else {
+            for _ in 0..helpers {
+                self.shared.cv.notify_one();
+            }
+        }
+
+        // Calling thread participates as worker #0 so progress never depends on pool workers.
+        run_helping_loop(&shared, cancel);
+
+        // Stop remaining helper tickets, drain any still queued in the pool, and wait only
+        // for helpers that were already popped by a worker thread to exit.
+        shared.stopped.store(true, Ordering::Release);
+        let _ = self.drain_query(query_id);
+        shared.wait_for_helpers();
+
+        // Drop any unexecuted tasks synchronously on the caller thread before returning so
+        // resources captured by closures (e.g. memory reservations) are released immediately.
+        let claimed = shared.next_idx.load(Ordering::Acquire);
+        if claimed < shared.slots.len() {
+            for slot in &shared.slots[claimed..] {
+                let remaining = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+                if let Some(task) = remaining
+                    && catch_unwind(AssertUnwindSafe(|| drop(task))).is_err()
+                {
+                    shared.panicked.store(true, Ordering::Release);
+                }
+            }
+        }
+
+        if shared.panicked.load(Ordering::Acquire) {
+            return Err(QueryError::internal("query worker panicked"));
+        }
+        if cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        Ok(())
     }
 
     fn drain_query(&self, query_id: u64) -> usize {
@@ -437,6 +544,110 @@ fn run_scoped_task<F, T>(
     completion.completed = true;
     drop(guard);
     scope.cv.notify_all();
+}
+
+struct HelpState {
+    live_tickets: usize,
+}
+
+struct HelpShared<F> {
+    next_idx: AtomicUsize,
+    slots: Vec<Mutex<Option<F>>>,
+    stopped: AtomicBool,
+    panicked: AtomicBool,
+    state: Mutex<HelpState>,
+    cv: Condvar,
+}
+
+impl<F> HelpShared<F> {
+    fn new(tasks: Vec<F>, helpers: usize) -> Self {
+        let slots = tasks.into_iter().map(|t| Mutex::new(Some(t))).collect();
+        Self {
+            next_idx: AtomicUsize::new(0),
+            slots,
+            stopped: AtomicBool::new(false),
+            panicked: AtomicBool::new(false),
+            state: Mutex::new(HelpState {
+                live_tickets: helpers,
+            }),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, HelpState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn wait_for_helpers(&self) {
+        let mut st = self.lock_state();
+        while st.live_tickets > 0 {
+            st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+struct TicketDropGuard<F> {
+    shared: Arc<HelpShared<F>>,
+}
+
+impl<F> Drop for TicketDropGuard<F> {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            self.shared.panicked.store(true, Ordering::Release);
+            self.shared.stopped.store(true, Ordering::Release);
+        }
+        let mut st = self.shared.lock_state();
+        st.live_tickets -= 1;
+        let notify = st.live_tickets == 0;
+        drop(st);
+        if notify {
+            self.shared.cv.notify_all();
+        }
+    }
+}
+
+fn run_helping_worker<F>(
+    ticket: TicketDropGuard<F>,
+    in_flight_guard: InFlightGuard,
+    cancel: &CancelToken,
+) where
+    F: FnOnce() + Send + 'static,
+{
+    // Local drop order is reverse of declaration:
+    // 1. `_in_flight` drops FIRST so `in_flight_count()` reflects this worker exiting
+    //    before the caller is woken.
+    // 2. `_ticket` drops SECOND, decrementing `live_tickets` and waking the caller at 0.
+    let _ticket = ticket;
+    let _in_flight = in_flight_guard;
+    if _ticket.shared.stopped.load(Ordering::Acquire) || cancel.is_cancelled() {
+        return;
+    }
+    run_helping_loop(&_ticket.shared, cancel);
+}
+
+fn run_helping_loop<F>(shared: &HelpShared<F>, cancel: &CancelToken)
+where
+    F: FnOnce() + Send + 'static,
+{
+    loop {
+        if shared.stopped.load(Ordering::Acquire) || cancel.is_cancelled() {
+            break;
+        }
+        let idx = shared.next_idx.fetch_add(1, Ordering::AcqRel);
+        let Some(slot) = shared.slots.get(idx) else {
+            shared.stopped.store(true, Ordering::Release);
+            break;
+        };
+        let Some(task) = slot.lock().unwrap_or_else(PoisonError::into_inner).take() else {
+            continue;
+        };
+        if catch_unwind(AssertUnwindSafe(task)).is_err() {
+            shared.panicked.store(true, Ordering::Release);
+            shared.stopped.store(true, Ordering::Release);
+            cancel.cancel();
+            break;
+        }
+    }
 }
 
 fn worker_loop(shared: &Arc<PoolShared>) {
@@ -846,6 +1057,403 @@ mod tests {
         assert!(matches!(err, QueryError::TooLarge));
         assert!(cancel.is_cancelled());
         assert_eq!(waker_calls.load(Ordering::Acquire), 1);
+        assert_eq!(pool.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn run_helping_executes_inline_and_parallel_with_exact_completeness() {
+        let pool = WorkerPool::new(4).unwrap();
+        let cancel = CancelToken::new();
+
+        // Empty tasks returns Ok(()) immediately.
+        let empty: Vec<fn()> = Vec::new();
+        pool.run_helping(&cancel, 4, empty).unwrap();
+
+        // Already-cancelled token returns Cancelled without executing tasks.
+        let pre_cancel = CancelToken::new();
+        pre_cancel.cancel();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran_c = Arc::clone(&ran);
+        let err = pool
+            .run_helping(
+                &pre_cancel,
+                3,
+                vec![move || {
+                    ran_c.fetch_add(1, Ordering::SeqCst);
+                }],
+            )
+            .unwrap_err();
+        assert!(matches!(err, QueryError::Cancelled));
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+
+        // Inline paths: single task, max_helpers == 0, and 1-worker pool.
+        let single_sum = Arc::new(AtomicUsize::new(0));
+        let s = Arc::clone(&single_sum);
+        pool.run_helping(
+            &cancel,
+            3,
+            vec![move || {
+                s.fetch_add(42, Ordering::SeqCst);
+            }],
+        )
+        .unwrap();
+        assert_eq!(single_sum.load(Ordering::SeqCst), 42);
+
+        let zero_helper_hits: Arc<Vec<AtomicUsize>> =
+            Arc::new((0..8).map(|_| AtomicUsize::new(0)).collect());
+        let tasks: Vec<_> = (0..8)
+            .map(|i| {
+                let hits = Arc::clone(&zero_helper_hits);
+                move || {
+                    hits[i].fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .collect();
+        pool.run_helping(&cancel, 0, tasks).unwrap();
+        for hit in zero_helper_hits.iter() {
+            assert_eq!(hit.load(Ordering::SeqCst), 1);
+        }
+
+        let one_worker_pool = WorkerPool::new(1).unwrap();
+        let one_hits: Arc<Vec<AtomicUsize>> =
+            Arc::new((0..8).map(|_| AtomicUsize::new(0)).collect());
+        let tasks: Vec<_> = (0..8)
+            .map(|i| {
+                let hits = Arc::clone(&one_hits);
+                move || {
+                    hits[i].fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .collect();
+        one_worker_pool.run_helping(&cancel, 4, tasks).unwrap();
+        for hit in one_hits.iter() {
+            assert_eq!(hit.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(one_worker_pool.in_flight_count(), 0);
+
+        // Boxed trait-object tasks (exact shape passed by TaskExecutor::run_batch) + completeness.
+        type BoxedTask = Box<dyn FnOnce() + Send + 'static>;
+        let n = 64usize;
+        let seen: Arc<Vec<AtomicUsize>> = Arc::new((0..n).map(|_| AtomicUsize::new(0)).collect());
+        let boxed_tasks: Vec<BoxedTask> = (0..n)
+            .map(|i| {
+                let s = Arc::clone(&seen);
+                Box::new(move || {
+                    s[i].fetch_add(1, Ordering::SeqCst);
+                }) as BoxedTask
+            })
+            .collect();
+        pool.run_helping(&cancel, 3, boxed_tasks).unwrap();
+        for slot in seen.iter() {
+            assert_eq!(slot.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(pool.in_flight_count(), 0);
+
+        // Genuine multi-core parallelism proof: caller + 3 helpers = 4 concurrent threads
+        // all reaching a 4-way barrier simultaneously on an idle 4-worker pool.
+        let barrier = Arc::new(Barrier::new(4));
+        let parallel_tasks: Vec<_> = (0..4)
+            .map(|_| {
+                let b = Arc::clone(&barrier);
+                move || {
+                    b.wait();
+                }
+            })
+            .collect();
+        pool.run_helping(&cancel, 3, parallel_tasks).unwrap();
+        assert_eq!(pool.in_flight_count(), 0);
+
+        // `max_helpers` cap is strictly respected (caller + at most `max_helpers` helpers).
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let cap_tasks: Vec<_> = (0..16)
+            .map(|_| {
+                let a = Arc::clone(&active);
+                let m = Arc::clone(&max_seen);
+                move || {
+                    let cur = a.fetch_add(1, Ordering::SeqCst) + 1;
+                    m.fetch_max(cur, Ordering::SeqCst);
+                    thread::sleep(Duration::from_millis(2));
+                    a.fetch_sub(1, Ordering::SeqCst);
+                }
+            })
+            .collect();
+        pool.run_helping(&cancel, 1, cap_tasks).unwrap();
+        assert!(
+            max_seen.load(Ordering::SeqCst) <= 2,
+            "max_helpers=1 must allow at most 2 concurrent threads, saw {}",
+            max_seen.load(Ordering::SeqCst)
+        );
+        assert_eq!(pool.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn run_helping_full_saturation_nested_and_two_level_stress_zero_deadlock() {
+        for num_workers in [1, 2, 4] {
+            let pool = Arc::new(WorkerPool::new(num_workers).unwrap());
+            let cancel = CancelToken::new();
+            let all_workers_ready = Arc::new(Barrier::new(num_workers));
+            let outer_subtasks = 32usize;
+            let inner_subtasks = 4usize;
+            let total_leaves = num_workers * outer_subtasks * inner_subtasks;
+            let leaf_hits: Arc<Vec<AtomicUsize>> =
+                Arc::new((0..total_leaves).map(|_| AtomicUsize::new(0)).collect());
+
+            let outer_tasks: Vec<_> = (0..num_workers)
+                .map(|worker_idx| {
+                    let p = Arc::clone(&pool);
+                    let c = cancel.clone();
+                    let ready = Arc::clone(&all_workers_ready);
+                    let hits = Arc::clone(&leaf_hits);
+                    move |_idx: usize| -> Result<usize, QueryError> {
+                        // Force 100% of worker pool threads to enter nested `run_helping` together.
+                        ready.wait();
+
+                        let level1_done = Arc::new(AtomicUsize::new(0));
+                        let subtasks: Vec<_> = (0..outer_subtasks)
+                            .map(|sub_idx| {
+                                let p2 = Arc::clone(&p);
+                                let c2 = c.clone();
+                                let hits2 = Arc::clone(&hits);
+                                let done2 = Arc::clone(&level1_done);
+                                move || {
+                                    // 2nd-level nested `run_helping` inside every level-1 subtask.
+                                    let level2: Vec<_> = (0..inner_subtasks)
+                                        .map(|leaf_idx| {
+                                            let hits3 = Arc::clone(&hits2);
+                                            let global_leaf = (worker_idx * outer_subtasks
+                                                + sub_idx)
+                                                * inner_subtasks
+                                                + leaf_idx;
+                                            move || {
+                                                hits3[global_leaf].fetch_add(1, Ordering::SeqCst);
+                                            }
+                                        })
+                                        .collect();
+                                    p2.run_helping(&c2, num_workers, level2).unwrap();
+                                    done2.fetch_add(1, Ordering::SeqCst);
+                                }
+                            })
+                            .collect();
+
+                        p.run_helping(&c, num_workers, subtasks)?;
+                        Ok(level1_done.load(Ordering::SeqCst))
+                    }
+                })
+                .collect();
+
+            let completed = pool.run_scoped(&cancel, outer_tasks).unwrap();
+            assert_eq!(completed, vec![outer_subtasks; num_workers]);
+            for (leaf_idx, slot) in leaf_hits.iter().enumerate() {
+                assert_eq!(
+                    slot.load(Ordering::SeqCst),
+                    1,
+                    "num_workers={num_workers}: leaf {leaf_idx} ran wrong number of times"
+                );
+            }
+            assert_eq!(pool.in_flight_count(), 0);
+        }
+    }
+
+    #[test]
+    fn run_helping_cancellation_stops_claiming_and_drops_remaining_tasks() {
+        use cetra_column::GlobalPool;
+
+        // 1. Parallel mid-batch cancellation stops claiming remaining tasks, drains active
+        //    helpers cleanly, and drops captured reservations synchronously before returning.
+        let pool = Arc::new(WorkerPool::new(4).unwrap());
+        let global_mem = GlobalPool::standalone(1024 * 64);
+        let cancel = CancelToken::new();
+        let entered = Arc::new(Barrier::new(3)); // caller + 1 helper + trigger thread
+        let ran = Arc::new(AtomicUsize::new(0));
+
+        let tasks: Vec<_> = (0..32)
+            .map(|i| {
+                let mut res = global_mem.register("helping_task", false);
+                res.try_grow(128).unwrap();
+                let c = cancel.clone();
+                let b = Arc::clone(&entered);
+                let r = Arc::clone(&ran);
+                move || {
+                    let _held = res;
+                    r.fetch_add(1, Ordering::SeqCst);
+                    if i < 2 {
+                        b.wait();
+                        while !c.is_cancelled() {
+                            thread::sleep(Duration::from_micros(50));
+                        }
+                    }
+                }
+            })
+            .collect();
+
+        let p_run = Arc::clone(&pool);
+        let c_run = cancel.clone();
+        let handle = thread::spawn(move || p_run.run_helping(&c_run, 1, tasks));
+
+        entered.wait();
+        let t0 = Instant::now();
+        cancel.cancel();
+        let res = handle.join().unwrap();
+        let elapsed = t0.elapsed();
+
+        assert!(matches!(res, Err(QueryError::Cancelled)));
+        assert_eq!(pool.in_flight_count(), 0);
+        assert_eq!(global_mem.reserved(), 0);
+        assert!(
+            ran.load(Ordering::SeqCst) < 32,
+            "expected cancellation to skip remaining tasks, ran {}",
+            ran.load(Ordering::SeqCst)
+        );
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "cancel+drain took {elapsed:?}"
+        );
+
+        // 2. Inline path cancellation stops between tasks and drops remaining reservations.
+        let inline_cancel = CancelToken::new();
+        let inline_ran = Arc::new(AtomicUsize::new(0));
+        let inline_tasks: Vec<_> = (0..8)
+            .map(|i| {
+                let mut res = global_mem.register("helping_inline", false);
+                res.try_grow(64).unwrap();
+                let c = inline_cancel.clone();
+                let r = Arc::clone(&inline_ran);
+                move || {
+                    let _held = res;
+                    r.fetch_add(1, Ordering::SeqCst);
+                    if i == 1 {
+                        c.cancel();
+                    }
+                }
+            })
+            .collect();
+        let err = pool
+            .run_helping(&inline_cancel, 0, inline_tasks)
+            .unwrap_err();
+        assert!(matches!(err, QueryError::Cancelled));
+        assert_eq!(inline_ran.load(Ordering::SeqCst), 2);
+        assert_eq!(global_mem.reserved(), 0);
+    }
+
+    #[test]
+    fn run_helping_panic_isolation_and_pool_recovery() {
+        let pool = WorkerPool::new(4).unwrap();
+
+        // 1. Panic on a helper thread maps to QueryError::Internal, cancels the token,
+        //    drains all workers without hanging, and leaves the pool healthy.
+        let cancel = CancelToken::new();
+        let barrier = Arc::new(Barrier::new(2));
+        let ran_after = Arc::new(AtomicUsize::new(0));
+        let tasks: Vec<_> = (0..16)
+            .map(|i| {
+                let b = Arc::clone(&barrier);
+                let c = cancel.clone();
+                let r = Arc::clone(&ran_after);
+                move || {
+                    if i == 0 {
+                        // Caller waits at barrier, then waits for panic to cancel token.
+                        b.wait();
+                        while !c.is_cancelled() {
+                            thread::sleep(Duration::from_micros(50));
+                        }
+                    } else if i == 1 {
+                        // Helper thread hits barrier, then panics.
+                        b.wait();
+                        panic!("intentional run_helping worker panic");
+                    } else {
+                        r.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            })
+            .collect();
+
+        let err = pool.run_helping(&cancel, 1, tasks).unwrap_err();
+        assert!(matches!(err, QueryError::Internal(_)));
+        assert!(cancel.is_cancelled());
+        assert_eq!(pool.in_flight_count(), 0);
+        assert_eq!(ran_after.load(Ordering::SeqCst), 0);
+
+        // 2. Panic on inline path maps to QueryError::Internal and cancels token.
+        let inline_cancel = CancelToken::new();
+        let inline_after = Arc::new(AtomicUsize::new(0));
+        let inline_after_c = Arc::clone(&inline_after);
+        type BoxedTask = Box<dyn FnOnce() + Send + 'static>;
+        let inline_tasks: Vec<BoxedTask> = vec![
+            Box::new(|| panic!("intentional inline panic")),
+            Box::new(move || {
+                inline_after_c.fetch_add(1, Ordering::SeqCst);
+            }),
+        ];
+        let err = pool
+            .run_helping(&inline_cancel, 0, inline_tasks)
+            .unwrap_err();
+        assert!(matches!(err, QueryError::Internal(_)));
+        assert!(inline_cancel.is_cancelled());
+        assert_eq!(inline_after.load(Ordering::SeqCst), 0);
+
+        // 3. Pool continues executing tasks normally after panics.
+        let ok_count = Arc::new(AtomicUsize::new(0));
+        let recovery_tasks: Vec<_> = (0..12)
+            .map(|_| {
+                let c = Arc::clone(&ok_count);
+                move || {
+                    c.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .collect();
+        pool.run_helping(&CancelToken::new(), 3, recovery_tasks)
+            .unwrap();
+        assert_eq!(ok_count.load(Ordering::SeqCst), 12);
+        assert_eq!(pool.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn run_helping_shutdown_and_mid_flight_drain_do_not_hang() {
+        // 1. Enqueueing after shutdown returns Internal error without hanging.
+        let pool = WorkerPool::new(2).unwrap();
+        {
+            let mut inner = pool.shared.lock();
+            inner.shutdown = true;
+        }
+        pool.shared.cv.notify_all();
+        let err = pool
+            .run_helping(&CancelToken::new(), 1, vec![|| {}, || {}])
+            .unwrap_err();
+        assert!(matches!(err, QueryError::Internal(_)));
+        drop(pool);
+
+        // 2. Simulating shutdown draining queued helper tickets mid-`run_helping`
+        //    lets the caller drain all remaining tasks and exit cleanly without hanging.
+        let pool = Arc::new(WorkerPool::new(2).unwrap());
+        let cancel = CancelToken::new();
+        let done = Arc::new(AtomicUsize::new(0));
+        let p_drain = Arc::clone(&pool);
+        let drained_once = Arc::new(AtomicBool::new(false));
+
+        let tasks: Vec<_> = (0..16)
+            .map(|_| {
+                let d = Arc::clone(&done);
+                let p = Arc::clone(&p_drain);
+                let flag = Arc::clone(&drained_once);
+                move || {
+                    if !flag.swap(true, Ordering::AcqRel) {
+                        let dropped_queues = {
+                            let mut inner = p.shared.lock();
+                            inner.shutdown = true;
+                            inner.order.clear();
+                            std::mem::take(&mut inner.queues)
+                        };
+                        drop(dropped_queues);
+                        p.shared.cv.notify_all();
+                    }
+                    d.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .collect();
+
+        pool.run_helping(&cancel, 1, tasks).unwrap();
+        assert_eq!(done.load(Ordering::SeqCst), 16);
         assert_eq!(pool.in_flight_count(), 0);
     }
 }

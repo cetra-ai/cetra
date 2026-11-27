@@ -4,13 +4,10 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 
-use object_store::path::Path as ObjectPath;
-
 use crate::catalog::{CatalogEdit, FileId, FileMeta, FileTable};
 use crate::compaction::job::{ClaimGuard, Compactor};
 use crate::compaction::plan::{Job, JobKind, Policy};
 use crate::hooks::HookPoint;
-use crate::read_cache::cached_name;
 use crate::read_state::publish_catalog;
 use crate::verify::{Verdict, verify_file};
 
@@ -75,14 +72,22 @@ impl Compactor {
         // The file and, for `spans`, the `traces` file derived from it: a job
         // on either must not run meanwhile.
         let mut claimed = vec![id];
+        let mut derived_traces_paths: Vec<String> = Vec::new();
         if file.table == FileTable::Spans {
             match self.committer.derived_traces(&[id]).await {
-                Ok(pairs) => claimed.extend(
-                    pairs
-                        .into_iter()
-                        .filter(|(_, spans)| *spans == id)
-                        .map(|(traces, _)| traces),
-                ),
+                Ok(pairs) => {
+                    for (traces, spans) in pairs {
+                        if spans == id {
+                            claimed.push(traces);
+                            if let Some(traces_file) = catalog
+                                .files(FileTable::Traces, file.project, file.day..=file.day)
+                                .find(|candidate| candidate.id == traces)
+                            {
+                                derived_traces_paths.push(traces_file.path.clone());
+                            }
+                        }
+                    }
+                }
                 Err(_) => {
                     report.failed += 1;
                     self.verify.requeue(id);
@@ -109,8 +114,8 @@ impl Compactor {
 
         // Straight from the object store: a corrupt cached block must not
         // make a healthy file look corrupt (spec 03 §10).
-        let store = self.objects.raw_store();
-        match verify_file(&store, &file).await {
+        let io = self.objects.raw_io();
+        match verify_file(&io, &file).await {
             Verdict::Healthy => {
                 self.drop_cached_blocks(&file).await;
                 self.verify.healthy(id, now);
@@ -131,7 +136,8 @@ impl Compactor {
                 );
                 match file.table {
                     FileTable::Spans | FileTable::Scores => {
-                        self.quarantine(&file, &claimed, report).await;
+                        self.quarantine(&file, &claimed, &derived_traces_paths, report)
+                            .await;
                     }
                     FileTable::Traces => {
                         // Its rows are the spans' rows: rebuild it from them.
@@ -145,21 +151,14 @@ impl Compactor {
         drop(guard);
     }
 
-    /// Drops the read-cache blocks of a file that verification found healthy,
-    /// so a bad cached block cannot outlive the check (spec 03 §6).
-    ///
-    /// Known narrow race, not fixed here: a reader that fetched the file's bytes before this
-    /// evict can write them back into the cache after it, so a bad block could survive the
-    /// check. The next suspect of M4 (`docs/research/storage/hardening.md` § M4) fixes it.
+    /// Drops the read-cache blocks of a file (and its sibling `.stpk` pack, if any)
+    /// that verification found healthy, so a bad cached block cannot outlive the check (spec 03 §6).
     async fn drop_cached_blocks(&self, file: &FileMeta) {
-        let Some(cache) = self.objects.read_cache() else {
-            return;
-        };
-        let Some(name) = cached_name(&ObjectPath::from(file.path.as_str())) else {
-            return;
-        };
-        let cache = Arc::clone(cache);
-        let _ = tokio::task::spawn_blocking(move || cache.evict_file(&name)).await;
+        let mut paths = vec![file.path.as_str()];
+        if let Some(pack) = &file.pack {
+            paths.push(pack.path.as_str());
+        }
+        self.objects.evict_read_cache(&paths).await;
     }
 
     /// Quarantines a corrupt `spans` or `scores` file with the claimed
@@ -168,6 +167,7 @@ impl Compactor {
         &self,
         file: &Arc<FileMeta>,
         claimed: &[FileId],
+        derived_traces_paths: &[String],
         report: &mut VerifyReport,
     ) {
         self.hooks.pause(HookPoint::QuarantineBeforeCommit);
@@ -187,6 +187,24 @@ impl Compactor {
             .await
         {
             Ok(_) => {
+                let mut paths: Vec<&str> = Vec::with_capacity(2 + derived_traces_paths.len());
+                paths.push(file.path.as_str());
+                if let Some(pack) = &file.pack {
+                    paths.push(pack.path.as_str());
+                }
+                for path in derived_traces_paths {
+                    paths.push(path.as_str());
+                }
+                self.objects.evict_read_cache(&paths).await;
+                for &cid in claimed {
+                    self.merge.qe_runtime.metadata_cache.invalidate_file(cid);
+                }
+                if let Some(pack) = &file.pack {
+                    self.merge
+                        .qe_runtime
+                        .metadata_cache
+                        .invalidate_pack(pack.id);
+                }
                 tracing::error!(
                     file_id = %file.id,
                     table = file.table.as_str(),
@@ -274,6 +292,8 @@ impl Compactor {
                 return;
             }
         }
+        self.drop_cached_blocks(file).await;
+        self.merge.qe_runtime.metadata_cache.invalidate_file(id);
         report.repaired += 1;
         tracing::warn!(
             file_id = %id,

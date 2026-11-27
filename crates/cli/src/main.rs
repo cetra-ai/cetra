@@ -1433,14 +1433,14 @@ mod tests {
         path
     }
 
-    /// The first `.parquet` file under `dir`, searched depth first.
-    fn first_parquet_under(dir: &Path) -> Option<PathBuf> {
+    /// The first `.statam` file under `dir`, searched depth first.
+    fn first_statam_under(dir: &Path) -> Option<PathBuf> {
         for entry in std::fs::read_dir(dir).ok()? {
             let path = entry.ok()?.path();
             let found = if path.is_dir() {
-                first_parquet_under(&path)
+                first_statam_under(&path)
             } else {
-                Some(path).filter(|file| file.extension().is_some_and(|ext| ext == "parquet"))
+                Some(path).filter(|file| file.extension().is_some_and(|ext| ext == "statam"))
             };
             if found.is_some() {
                 return found;
@@ -1555,11 +1555,11 @@ mod tests {
         let data = server.data_dir();
         let config = server.config_path();
         let _dir = server.stop().await;
-        // The stop flushed the trace to Parquet; removing one file makes the catalog need
+        // The stop flushed the trace to Statam; removing one file makes the catalog need
         // an object the store does not have.
-        let parquet = first_parquet_under(&data.join("objects").join("tables"))
-            .expect("a flushed Parquet file");
-        std::fs::remove_file(&parquet).unwrap();
+        let statam = first_statam_under(&data.join("objects").join("tables"))
+            .expect("a flushed Statam file");
+        std::fs::remove_file(&statam).unwrap();
         let error = run_cli([
             "cetra",
             "admin",

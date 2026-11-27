@@ -28,8 +28,8 @@ use chrono::NaiveDate;
 
 use crate::catalog::{Committer, FileMeta, FileTable, now_ns};
 use crate::engine::mem_source::MemtableSource;
+use crate::engine::statam_source::StatamSource;
 use crate::error::{EngineError, MediaError};
-use crate::file_format;
 use crate::hooks::{HookPoint, Hooks};
 use crate::objects::Objects;
 use crate::read_state::Published;
@@ -277,8 +277,8 @@ impl MediaGc {
         })?;
 
         let suspects = Suspects::new(Arc::clone(&self.verify));
-        let parquet_source = file_format::open_table_source(
-            self.objects.store(),
+        let statam_source: Arc<dyn ScanSource> = Arc::new(StatamSource::new(
+            self.objects.io(),
             FileTable::Spans,
             Arc::clone(&schema),
             files,
@@ -286,7 +286,7 @@ impl MediaGc {
             Arc::clone(&self.qe_runtime.metadata_cache),
             suspects,
             self.runtime_handle.clone(),
-        );
+        ));
         let mem_source = MemtableSource::new(
             Table::Spans,
             project,
@@ -295,7 +295,7 @@ impl MediaGc {
             deletions,
         )
         .map_err(|e| query_err_to_media(&e))?;
-        let union = UnionSource::new(schema, vec![parquet_source, Arc::new(mem_source)])
+        let union = UnionSource::new(schema, vec![statam_source, Arc::new(mem_source)])
             .map_err(|e| query_err_to_media(&e))?;
 
         let workers = self

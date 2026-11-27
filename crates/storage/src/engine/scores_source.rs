@@ -17,15 +17,16 @@ use cetra_query::exec::{
     run_pipeline,
 };
 use cetra_query::{BinaryOp, EvalContext, Expr, QueryError, UnaryOp, eval_filter};
-use object_store::ObjectStore;
 
 use crate::catalog::{FileMeta, FileTable};
 use crate::deletion::{PendingDeletion, ProjectMemSnapshot};
-use crate::file_format::{FileMetadataCache, open_table_source};
+use crate::objects::StorageIo;
 use crate::verify::Suspects;
 use crate::wal::Table;
 
 use super::mem_source::MemtableSource;
+use super::metadata_cache::MetadataCache;
+use super::statam_source::StatamSource;
 use super::{
     HashPartitionedSortSink, TimeBounds, cap_partitions, claim_shared_limit, extract_time_bounds,
     handoff_res, read_bool_at, read_str_at, reconcile_res, rollback_res,
@@ -34,13 +35,13 @@ use super::{
 /// Native [`ScanSource`] for the `scores` table with LWW deduplication per `score_id`.
 #[derive(Clone)]
 pub(crate) struct ScoresSource {
-    store: Arc<dyn ObjectStore>,
+    io: StorageIo,
     project: ProjectId,
     schema: Arc<Schema>,
     files: Vec<Arc<FileMeta>>,
     scores_mem: ProjectMemSnapshot,
     deletions: Arc<[Arc<PendingDeletion>]>,
-    metadata_cache: Arc<FileMetadataCache>,
+    metadata_cache: Arc<MetadataCache>,
     suspects: Suspects,
     runtime: tokio::runtime::Handle,
     visible_from: Option<i64>,
@@ -73,18 +74,18 @@ impl ScoresSource {
     /// by `deletion::project_snapshot(Table::Scores, ...)`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        store: Arc<dyn ObjectStore>,
+        io: StorageIo,
         project: ProjectId,
         files: Vec<Arc<FileMeta>>,
         scores_mem: ProjectMemSnapshot,
         deletions: Arc<[Arc<PendingDeletion>]>,
-        metadata_cache: Arc<FileMetadataCache>,
+        metadata_cache: Arc<MetadataCache>,
         suspects: Suspects,
         runtime: tokio::runtime::Handle,
     ) -> Result<Self, QueryError> {
         let schema = scores_schema();
         Ok(Self {
-            store,
+            io,
             project,
             schema,
             files,
@@ -265,8 +266,8 @@ impl ScanSource for ScoresSource {
 
         let mut raw_streams: Vec<Box<dyn PartitionStream>> = Vec::new();
         if !self.files.is_empty() {
-            let parquet_src = open_table_source(
-                Arc::clone(&self.store),
+            let statam_src = Arc::new(StatamSource::new(
+                self.io.clone(),
                 FileTable::Scores,
                 Arc::clone(&self.schema),
                 self.files.clone(),
@@ -274,8 +275,8 @@ impl ScanSource for ScoresSource {
                 Arc::clone(&self.metadata_cache),
                 self.suspects.clone(),
                 self.runtime.clone(),
-            );
-            raw_streams.extend(parquet_src.open_partitions(&inner_spec, ctx)?);
+            ));
+            raw_streams.extend(statam_src.open_partitions(&inner_spec, ctx)?);
         }
 
         let mem_src =
@@ -942,12 +943,12 @@ mod tests {
         )
         .unwrap();
         let source = ScoresSource::new(
-            Arc::new(InMemory::new()),
+            StorageIo::from_store(Arc::new(InMemory::new())),
             test_project(),
             Vec::new(),
             projected,
             Arc::from([]),
-            Arc::new(FileMetadataCache::new(1024 * 1024)),
+            Arc::new(MetadataCache::new(1024 * 1024)),
             Suspects::new(Arc::new(VerifyQueue::default())),
             rt.handle().clone(),
         )
@@ -1001,12 +1002,12 @@ mod tests {
         )
         .unwrap();
         let source = ScoresSource::new(
-            Arc::new(InMemory::new()),
+            StorageIo::from_store(Arc::new(InMemory::new())),
             test_project(),
             Vec::new(),
             projected,
             Arc::from([]),
-            Arc::new(FileMetadataCache::new(1024 * 1024)),
+            Arc::new(MetadataCache::new(1024 * 1024)),
             Suspects::new(Arc::new(VerifyQueue::default())),
             rt.handle().clone(),
         )

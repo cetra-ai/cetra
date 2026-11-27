@@ -26,9 +26,9 @@ use crate::deletion::{self, PendingDeletion, ProjectMemSnapshot};
 use crate::engine::VisibleFromSource;
 use crate::engine::mem_source::MemtableSource;
 use crate::engine::scores_source::ScoresSource;
+use crate::engine::statam_source::StatamSource;
 use crate::engine::traces_source::TracesSource;
 use crate::error::EngineError;
-use crate::file_format;
 use crate::query_error::{InvalidQuery, Position, RunError};
 use crate::verify::Suspects;
 use crate::wal::Table;
@@ -41,6 +41,8 @@ pub(crate) const DURATION_MS: &str = "duration_ms";
 #[derive(Clone)]
 pub(crate) struct EngineContext {
     pub(crate) spans: Arc<dyn ScanSource>,
+    pub(crate) spans_statam: Option<Arc<StatamSource>>,
+    pub(crate) spans_mem: Option<Arc<MemtableSource>>,
     pub(crate) traces: Arc<TracesSource>,
     pub(crate) scores: Arc<ScoresSource>,
     pub(crate) suspects: Suspects,
@@ -55,6 +57,8 @@ pub(crate) struct EngineContext {
 impl fmt::Debug for EngineContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EngineContext")
+            .field("has_spans_statam", &self.spans_statam.is_some())
+            .field("has_spans_mem", &self.spans_mem.is_some())
             .field("visible_from", &self.visible_from)
             .field("around", &self.around)
             .field("force_range_mode", &self.force_range_mode)
@@ -138,7 +142,7 @@ impl EngineContext {
         let state = storage.published.load();
         Self::build_from_state(
             &state,
-            storage.objects.store(),
+            storage.objects.io(),
             project,
             options,
             Arc::clone(&storage.qe_runtime),
@@ -164,14 +168,22 @@ impl EngineContext {
     ) -> Result<Self, EngineError> {
         let pool = cetra_column::GlobalPool::standalone(runtime.query_memory.cap);
         Self::build_from_state(
-            state, store, project, options, runtime, lookback, verify, handle, pool,
+            state,
+            crate::objects::StorageIo::from_store(store),
+            project,
+            options,
+            runtime,
+            lookback,
+            verify,
+            handle,
+            pool,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
     fn build_from_state(
         state: &crate::read_state::ReadState,
-        store: Arc<dyn object_store::ObjectStore>,
+        io: crate::objects::StorageIo,
         project: ProjectId,
         options: &QueryOptions,
         runtime: Arc<QeRuntime>,
@@ -195,7 +207,7 @@ impl EngineContext {
             }
             let traces = Arc::new(
                 TracesSource::new(
-                    Arc::clone(&store),
+                    io.clone(),
                     project,
                     Vec::new(),
                     empty_mem.clone(),
@@ -210,7 +222,7 @@ impl EngineContext {
             );
             let scores = Arc::new(
                 ScoresSource::new(
-                    store,
+                    io,
                     project,
                     Vec::new(),
                     empty_mem,
@@ -224,6 +236,8 @@ impl EngineContext {
             );
             return Ok(Self {
                 spans,
+                spans_statam: None,
+                spans_mem: None,
                 traces,
                 scores,
                 suspects,
@@ -267,8 +281,8 @@ impl EngineContext {
             .cloned()
             .collect();
 
-        let spans_parquet = file_format::open_table_source(
-            Arc::clone(&store),
+        let spans_statam = Arc::new(StatamSource::new(
+            io.clone(),
             FileTable::Spans,
             Arc::clone(&spans_raw),
             spans_files,
@@ -276,12 +290,20 @@ impl EngineContext {
             Arc::clone(&runtime.metadata_cache),
             suspects.clone(),
             handle.clone(),
-        );
-        let spans_mem = MemtableSource::from_projected(Table::Spans, project, &spans_snapshot)
-            .map_err(|e| EngineError::from_query(&e))?;
-        let mut spans: Arc<dyn ScanSource> = Arc::new(
-            UnionSource::new(spans_raw, vec![spans_parquet, Arc::new(spans_mem)])
+        ));
+        let spans_mem = Arc::new(
+            MemtableSource::from_projected(Table::Spans, project, &spans_snapshot)
                 .map_err(|e| EngineError::from_query(&e))?,
+        );
+        let mut spans: Arc<dyn ScanSource> = Arc::new(
+            UnionSource::new(
+                spans_raw,
+                vec![
+                    Arc::clone(&spans_statam) as Arc<dyn ScanSource>,
+                    Arc::clone(&spans_mem) as Arc<dyn ScanSource>,
+                ],
+            )
+            .map_err(|e| EngineError::from_query(&e))?,
         );
         if let Some(vf) = visible_from {
             spans = Arc::new(VisibleFromSource::new(spans, spans::START_TIME, vf));
@@ -289,7 +311,7 @@ impl EngineContext {
 
         let traces = Arc::new(
             TracesSource::new(
-                Arc::clone(&store),
+                io.clone(),
                 project,
                 traces_files,
                 spans_snapshot,
@@ -305,7 +327,7 @@ impl EngineContext {
 
         let scores = Arc::new(
             ScoresSource::new(
-                store,
+                io,
                 project,
                 scores_files,
                 scores_snapshot,
@@ -320,6 +342,8 @@ impl EngineContext {
 
         Ok(Self {
             spans,
+            spans_statam: Some(spans_statam),
+            spans_mem: Some(spans_mem),
             traces,
             scores,
             suspects,
@@ -336,13 +360,20 @@ impl EngineContext {
     #[cfg(test)]
     pub(crate) fn with_visible_from(mut self, visible_from: Option<i64>) -> Self {
         self.visible_from = visible_from;
+        let sources: Vec<Arc<dyn ScanSource>> = match (&self.spans_statam, &self.spans_mem) {
+            (Some(statam), Some(mem)) => vec![
+                Arc::clone(statam) as Arc<dyn ScanSource>,
+                Arc::clone(mem) as Arc<dyn ScanSource>,
+            ],
+            _ => Vec::new(),
+        };
+        let mut spans: Arc<dyn ScanSource> = Arc::new(
+            UnionSource::new(spans_schema(), sources).expect("spans sources match spans schema"),
+        );
         if let Some(vf) = visible_from {
-            self.spans = Arc::new(VisibleFromSource::new(
-                Arc::clone(&self.spans),
-                spans::START_TIME,
-                vf,
-            ));
+            spans = Arc::new(VisibleFromSource::new(spans, spans::START_TIME, vf));
         }
+        self.spans = spans;
         self.traces = Arc::new(self.traces.as_ref().clone().with_visible_from(visible_from));
         self.scores = Arc::new(self.scores.as_ref().clone().with_visible_from(visible_from));
         self
@@ -1076,7 +1107,7 @@ fn rollback_res(res: Option<&mut Reservation>, before: usize) {
 
 /// Remaps an expression bound against a view schema to `raw_schema`, converting hex-encoded
 /// binary ID comparisons (`encode(col, 'hex') = '...'`, `!=`, `IN`, `NOT IN`) into native
-/// `FixedBytes16` / `FixedBytes8` comparisons so `ParquetSource` and `TracesSource` can prune.
+/// `FixedBytes16` / `FixedBytes8` comparisons so `StatamSource` and `TracesSource` can prune.
 pub(crate) fn rewrite_view_expr_for_raw(
     expr: &Expr,
     raw_schema: &Schema,

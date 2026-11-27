@@ -47,7 +47,6 @@ pub(crate) mod deletion;
 pub(crate) mod disk;
 pub(crate) mod engine;
 pub mod error;
-pub(crate) mod file_format;
 pub(crate) mod flush;
 pub(crate) mod format;
 pub(crate) mod fs;
@@ -63,6 +62,7 @@ pub(crate) mod read_cache;
 mod reads;
 mod snapshot;
 mod sql;
+pub(crate) mod statam_io;
 pub(crate) mod unwind;
 pub(crate) mod verify;
 mod views;
@@ -138,7 +138,7 @@ pub(crate) mod wal;
 pub mod fuzz_entry;
 
 #[doc(hidden)]
-pub use file_format::read_parquet_rows_for_test;
+pub use engine::parquet_export::read_parquet_rows_for_test;
 
 // The shipped binary's allocator (D56), so the lib resource tests (`model_tests::resources::memory`)
 // measure the memory `cetra` uses rather than glibc per-thread arenas (M5-8).
@@ -299,7 +299,7 @@ pub(crate) struct QeRuntime {
     bg_workers: std::sync::OnceLock<Arc<cetra_query::exec::WorkerPool>>,
     bg_workers_init: Mutex<()>,
     pub(crate) coordinator_slots: Arc<tokio::sync::Semaphore>,
-    pub(crate) metadata_cache: Arc<file_format::FileMetadataCache>,
+    pub(crate) metadata_cache: Arc<engine::metadata_cache::MetadataCache>,
     pub(crate) spill: Arc<cetra_query::exec::SpillManager>,
     pub(crate) target_partitions: usize,
     pub(crate) query_memory: QueryMemory,
@@ -308,7 +308,7 @@ pub(crate) struct QeRuntime {
 impl QeRuntime {
     pub(crate) fn new(
         admission: Arc<engine::admission::AsyncAdmissionPool>,
-        metadata_cache: Arc<file_format::FileMetadataCache>,
+        metadata_cache: Arc<engine::metadata_cache::MetadataCache>,
         spill: Arc<cetra_query::exec::SpillManager>,
         target_partitions: usize,
         query_memory: QueryMemory,
@@ -378,7 +378,9 @@ impl QeRuntime {
     pub(crate) fn for_test_with_cache(metadata_cache_bytes: usize) -> Arc<Self> {
         Self::new(
             Arc::new(engine::admission::AsyncAdmissionPool::new(64 << 20)),
-            Arc::new(file_format::FileMetadataCache::new(metadata_cache_bytes)),
+            Arc::new(engine::metadata_cache::MetadataCache::new(
+                metadata_cache_bytes,
+            )),
             Arc::new(cetra_query::exec::SpillManager::with_fixed_cap(
                 PathBuf::new(),
                 0,
@@ -580,8 +582,9 @@ impl Storage {
             disk.set_engine_spilled(spill.spilled_bytes_counter());
             let metadata_cache_bytes =
                 usize::try_from(config.query.metadata_cache_bytes.0).unwrap_or(usize::MAX);
-            let metadata_cache =
-                Arc::new(file_format::FileMetadataCache::new(metadata_cache_bytes));
+            let metadata_cache = Arc::new(engine::metadata_cache::MetadataCache::new(
+                metadata_cache_bytes,
+            ));
             QeRuntime::new(
                 admission,
                 metadata_cache,
@@ -643,7 +646,7 @@ impl Storage {
                     config.compaction.threads,
                     compaction_pool,
                     Arc::clone(&qe_runtime),
-                    objects.store(),
+                    objects.io(),
                     Arc::clone(&verify),
                     tokio::runtime::Handle::current(),
                 ),
@@ -684,6 +687,7 @@ impl Storage {
             max_age,
             upload_concurrency,
             anchors: Some(Arc::clone(&anchors)),
+            qe_runtime: Arc::clone(&qe_runtime),
         });
         let scores_flush = flush::spawn(flush::FlushStart {
             table: Table::Scores,
@@ -697,6 +701,7 @@ impl Storage {
             max_age,
             upload_concurrency,
             anchors: None,
+            qe_runtime: Arc::clone(&qe_runtime),
         });
         if let Err(error) =
             gc::collect_once(&committer, &objects, &hooks, catalog::now_ns(), gc::MAX_AGE).await
@@ -2119,7 +2124,7 @@ mod tests {
     use crate::objects::PutSizes;
     use crate::partials::partials_from_spans_batch;
     use crate::reads::columns::{active_rows, i64_at, require_col, string_at};
-    use crate::test_support::{Call, ChaosStore, parquet_rows, score_rows, span_row, span_rows};
+    use crate::test_support::{Call, ChaosStore, score_rows, span_row, span_rows, statam_rows};
     use crate::views::QueryContext;
     use crate::wal::segment::SEGMENT_HEADER_LEN;
     use crate::wal::{parse_segment_name, segment_name, spans_at, spans_keyed, spans_named};
@@ -2281,10 +2286,10 @@ mod tests {
         span_rows(&rows)
     }
 
-    /// Reads one Parquet object back with the sync reader.
+    /// Reads one Statam object back with the sync reader.
     fn read_parquet(dir: &Path, path: &str) -> Batch {
         let bytes = std::fs::read(dir.join("objects").join(path)).unwrap();
-        parquet_rows(bytes::Bytes::from(bytes))
+        statam_rows(bytes::Bytes::from(bytes), None)
     }
 
     /// Compares two batches column by column.
@@ -2633,12 +2638,11 @@ mod tests {
             let idx = batch.schema().index_of(spans::SPAN_ID).unwrap();
             let col = batch.columns()[idx].as_ref();
             for phys in active_rows(batch) {
-                if let Column::Flat(flat) = col
-                    && let FlatData::FixedBytes8(arr) = flat.data()
-                {
-                    ids.push(arr[phys].to_vec());
-                } else {
-                    panic!("unexpected span_id encoding");
+                match col.get_scalar(phys).unwrap() {
+                    cetra_column::ScalarValue::FixedBytes8(bytes) => {
+                        ids.push(bytes.to_vec());
+                    }
+                    other => panic!("unexpected span_id encoding: {other:?}"),
                 }
             }
         }

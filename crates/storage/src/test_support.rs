@@ -7,17 +7,16 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bytes::Bytes;
-use cetra_column::{Batch, Column, FlatData};
+use cetra_column::{Batch, FlatData};
 use cetra_core::batch::{scores_to_batch, spans_to_batch};
 use cetra_core::enums::{SpanKind, SpanStatus};
 use cetra_core::ids::TraceId;
 use cetra_core::schema::{scores_schema, spans_schema, traces_schema};
 use cetra_core::score::Score;
 use cetra_core::span::Span;
-use parquet::file::reader::{FileReader as _, SerializedFileReader};
 use serde_json::{Map, Value};
 
-use crate::catalog::{Catalog, FileTable};
+use crate::catalog::Catalog;
 use crate::config::StorageConfig;
 use crate::engine::DAY_NS;
 use crate::memtable::Memtable;
@@ -65,32 +64,30 @@ fn read_text(name: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
-/// The rows stored in one catalogued file's Parquet object, under `objects/`.
+/// The rows stored in one catalogued file's Statam object (and optional sibling `.stpk` pack),
+/// under `objects/`.
 pub(crate) fn object_rows(dir: &Path, file: &crate::catalog::FileMeta) -> Batch {
     let bytes = fs::read(dir.join("objects").join(&file.path)).unwrap();
-    parquet_rows(Bytes::from(bytes))
+    let pack = file.pack.as_ref().map(|p| {
+        let pack_bytes = fs::read(dir.join("objects").join(&p.path)).unwrap();
+        (p.id, Bytes::from(pack_bytes))
+    });
+    statam_rows(Bytes::from(bytes), pack)
 }
 
-/// The rows of one Parquet object, given its bytes (R4.4: the model reads objects of a store too).
-pub(crate) fn parquet_rows(bytes: Bytes) -> Batch {
-    let reader = SerializedFileReader::new(bytes.clone()).unwrap();
-    let names: Vec<&str> = reader
-        .metadata()
-        .file_metadata()
-        .schema_descr()
-        .root_schema()
-        .get_fields()
-        .iter()
-        .map(|f| f.name())
-        .collect();
-    let (table, schema) = if names.contains(&"partial_count") {
-        (FileTable::Traces, traces_schema())
-    } else if names.contains(&"score_id") {
-        (FileTable::Scores, scores_schema())
-    } else {
-        (FileTable::Spans, spans_schema())
+/// The rows of one Statam object (and optional sibling `.stpk` pack), given its bytes.
+pub(crate) fn statam_rows(bytes: Bytes, pack: Option<([u8; 16], Bytes)>) -> Batch {
+    let meta = cetra_statam::StatamFileMeta::read_from(
+        &cetra_statam::SliceReader::new(bytes.clone()),
+        None,
+    )
+    .unwrap();
+    let schema = match meta.schema_meta.table_kind {
+        cetra_statam::TableKind::Traces => traces_schema(),
+        cetra_statam::TableKind::Scores => scores_schema(),
+        cetra_statam::TableKind::Spans | cetra_statam::TableKind::Generic => spans_schema(),
     };
-    crate::engine::parquet_source::tests::read_stored_parquet(bytes, table, schema)
+    crate::engine::statam_source::tests::read_stored_statam(bytes, pack, schema)
 }
 
 /// The `trace_id` bytes of every row of a stored batch.
@@ -98,12 +95,10 @@ pub(crate) fn trace_ids_of(rows: &Batch) -> Vec<[u8; 16]> {
     let column = rows
         .column_by_name(cetra_core::schema::spans::TRACE_ID)
         .unwrap();
-    match column {
-        Column::Flat(flat) => match flat.data() {
-            FlatData::FixedBytes16(arr) => active_rows(rows).map(|row| arr[row]).collect(),
-            other => panic!("unexpected trace_id flat data: {other:?}"),
-        },
-        other => panic!("unexpected trace_id column encoding: {other:?}"),
+    let flat = column.materialize(None).unwrap();
+    match flat.data() {
+        FlatData::FixedBytes16(arr) => active_rows(rows).map(|row| arr[row]).collect(),
+        other => panic!("unexpected trace_id flat data: {other:?}"),
     }
 }
 

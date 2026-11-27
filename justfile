@@ -163,7 +163,7 @@ fuzz-seed:
 
 # The fuzzing toolchain, updated by hand like rust-toolchain.toml (track R M3)
 fuzz_toolchain := "nightly-2026-11-03"
-fuzz_targets := "wal_record wal_replay parquet_file read_cache_block catalog_rows filter_dsl otlp_http_protobuf otlp_http_json otlp_grpc saml_response saml_metadata saml_assertion column_frame query_expr sql"
+fuzz_targets := "wal_record wal_replay parquet_file read_cache_block catalog_rows filter_dsl otlp_http_protobuf otlp_http_json otlp_grpc saml_response saml_metadata saml_assertion column_frame query_expr sql statam_file"
 
 # Install the fuzzing toolchain and cargo-fuzz (track R M3)
 # Install the fuzzing toolchain (track R M3); CI installs cargo-fuzz with taiki-e instead
@@ -228,7 +228,7 @@ fuzz-cmin: fuzz-lock
 _fuzz-max-len target:
     #!/usr/bin/env bash
     case "{{target}}" in
-        parquet_file) echo 1048576 ;;
+        parquet_file|statam_file) echo 1048576 ;;
         wal_replay|otlp_http_protobuf|otlp_http_json|otlp_grpc|saml_response|saml_metadata|saml_assertion) echo 262144 ;;
         *) echo 65536 ;;
     esac
@@ -238,7 +238,7 @@ _fuzz-max-len target:
 _fuzz-max-files target:
     #!/usr/bin/env bash
     case "{{target}}" in
-        parquet_file|filter_dsl|catalog_rows|sql) echo 300 ;;
+        parquet_file|filter_dsl|catalog_rows|sql|statam_file) echo 300 ;;
         *) echo 2000 ;;
     esac
 

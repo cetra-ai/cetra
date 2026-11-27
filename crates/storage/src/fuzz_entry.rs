@@ -30,6 +30,7 @@ use crate::config::{CompactionConfig, WalConfig};
 use crate::disk::Disk;
 use crate::hooks::Hooks;
 use crate::memtable::Memtable;
+use crate::objects::StorageIo;
 use crate::read_cache::{BLOCK, CacheStore, ReadCache};
 use crate::read_state::ReadState;
 use crate::verify::{VerifyQueue, verify_file};
@@ -291,7 +292,7 @@ fn seed_midnight() -> i64 {
         .expect("the seed day is in range")
 }
 
-/// The catalog row of the one file a Parquet entry reads, at its fixed path.
+/// The catalog row of the one file a Statam entry reads, at its fixed path.
 pub(crate) fn parquet_meta(table: FileTable, size: u64, footer_size: u64) -> FileMeta {
     FileMeta {
         id: FileId(Uuid::from_u128(1)),
@@ -299,7 +300,7 @@ pub(crate) fn parquet_meta(table: FileTable, size: u64, footer_size: u64) -> Fil
         project: project(),
         day: seed_day(),
         level: 0,
-        path: format!("tables/{}/fuzz.parquet", table.as_str()),
+        path: format!("tables/{}/fuzz.statam", table.as_str()),
         size,
         footer_size,
         rows: 1,
@@ -310,6 +311,7 @@ pub(crate) fn parquet_meta(table: FileTable, size: u64, footer_size: u64) -> Fil
         max_ingest_time: i64::MAX,
         fully_merged: false,
         deletions_applied_seq: 0,
+        pack: None,
     }
 }
 
@@ -327,11 +329,7 @@ pub(crate) fn parquet_query(
 ) -> (QueryContext, Arc<VerifyQueue>) {
     let edit = CatalogEdit {
         add: vec![meta.clone()],
-        remove: Vec::new(),
-        flushed_seq: None,
-        sources: Vec::new(),
-        raise: Vec::new(),
-        quarantine: Vec::new(),
+        ..CatalogEdit::default()
     };
     let (catalog, _, _) = Catalog::empty()
         .apply(&edit)
@@ -485,20 +483,19 @@ pub fn parquet_file(data: &[u8]) {
             },
         )
         .await;
-        let _ = verify_file(&store, &meta).await;
+        let io = StorageIo::from_store(Arc::clone(&store));
+        let _ = verify_file(&io, &meta).await;
         match table {
             FileTable::Traces => {
-                let _ = Anchors::new(DAY_NS)
-                    .rebuild_file(&meta, Arc::clone(&store), bound)
-                    .await;
+                let _ = Anchors::new(DAY_NS).rebuild_file(&meta, io, bound).await;
             }
             FileTable::Spans => {
                 let files = [Arc::new(meta.clone())];
-                let _ = time_values(Arc::clone(&store), &files, spans::START_TIME).await;
+                let _ = time_values(io, &files, spans::START_TIME).await;
             }
             FileTable::Scores => {
                 let files = [Arc::new(meta.clone())];
-                let _ = time_values(Arc::clone(&store), &files, scores::CREATED_AT).await;
+                let _ = time_values(io, &files, scores::CREATED_AT).await;
             }
         }
     });
@@ -814,6 +811,26 @@ impl Text {
     }
 }
 
+/// A `pack_id` blob for catalog fuzzing: either a valid 16-byte UUIDv7 or raw bytes.
+#[derive(Debug, Arbitrary)]
+enum PackIdBlob {
+    Valid(u8),
+    Raw(Vec<u8>),
+}
+
+impl PackIdBlob {
+    fn render(&self) -> Vec<u8> {
+        match self {
+            Self::Valid(n) => {
+                Uuid::from_u128(0x0192_e5a0_7c1a_7000_8000_0000_0000_0000 | u128::from(*n))
+                    .as_bytes()
+                    .to_vec()
+            }
+            Self::Raw(bytes) => bytes.clone(),
+        }
+    }
+}
+
 /// One `data_files` row.
 #[derive(Debug, Arbitrary)]
 struct FileRow {
@@ -833,6 +850,10 @@ struct FileRow {
     fully_merged: i64,
     state: Text,
     applied_seq: i64,
+    pack_id: Option<PackIdBlob>,
+    pack_path: Option<Text>,
+    pack_size: Option<i64>,
+    pack_toc_size: Option<i64>,
 }
 
 /// One pending or applied deletion, with its scope rows.
@@ -870,8 +891,9 @@ async fn insert_rows(connection: &mut SqliteConnection, input: &CatalogInput) {
         let _ = sqlx::query(
             "INSERT INTO data_files (id, table_name, project_id, day, level, path, size_bytes, \
              footer_size, row_count, min_time, max_time, min_ingest_time, max_ingest_time, \
-             fully_merged, state, created_at, deletions_applied_seq) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+             fully_merged, state, created_at, deletions_applied_seq, \
+             pack_id, pack_path, pack_size_bytes, pack_toc_size) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
         )
         .bind(row.id.render())
         .bind(row.table.render())
@@ -889,6 +911,10 @@ async fn insert_rows(connection: &mut SqliteConnection, input: &CatalogInput) {
         .bind(row.fully_merged)
         .bind(row.state.render())
         .bind(row.applied_seq)
+        .bind(row.pack_id.as_ref().map(PackIdBlob::render))
+        .bind(row.pack_path.as_ref().map(Text::render))
+        .bind(row.pack_size)
+        .bind(row.pack_toc_size)
         .execute(&mut *connection)
         .await;
     }
@@ -1018,7 +1044,7 @@ pub(crate) mod tests {
     use chrono::DateTime;
 
     use super::*;
-    use crate::file_format::{WrittenFile, write_file_batch};
+    use crate::statam_io::{WrittenFile, write_file_batch};
     use crate::test_support::{dataset_scores, dataset_spans, score_rows, span_rows, trace_batch};
     use crate::wal::{HEADER_LEN, sample_span_batch};
 
@@ -1302,6 +1328,10 @@ pub(crate) mod tests {
             fully_merged: 0,
             state: Text::State(0),
             applied_seq: 0,
+            pack_id: None,
+            pack_path: None,
+            pack_size: None,
+            pack_toc_size: None,
         };
         let input = CatalogInput {
             // The spans file (index 0) and its traces file (index 1).
