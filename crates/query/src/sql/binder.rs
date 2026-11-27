@@ -8,11 +8,12 @@ use std::sync::Arc;
 use cetra_column::{Batch, CancelToken, DataType, Field, ScalarValue, Schema};
 use sqlparser::ast::{
     CastKind, DescribeAlias, Distinct, Expr as SqlExpr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArguments, GroupByExpr, Ident, Join, JoinConstraint, JoinOperator, LimitClause,
-    ObjectName, ObjectNamePart, OrderBy, OrderByExpr, OrderByKind, Query, Select, SelectItem,
-    SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Spanned, Statement,
-    TableAlias, TableAliasColumnDef, TableFactor, TableWithJoins, Value, Values, WindowFrameBound,
-    WindowFrameUnits, WindowSpec as AstWindowSpec, WindowType,
+    FunctionArguments, GroupByExpr, Ident, InTarget, Join, JoinConstraint, JoinOperator,
+    LimitClause, ObjectName, ObjectNamePart, OrderBy, OrderByExpr, OrderByKind, OrderByOptions,
+    OrderBySort, Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, SetOperator,
+    SetQuantifier, Spanned, Statement, TableAlias, TableAliasColumnDef, TableFactor,
+    TableWithJoins, Value, Values, WindowFrameBound, WindowFrameUnits, WindowSpec as AstWindowSpec,
+    WindowType,
 };
 
 use crate::bind::{
@@ -679,13 +680,11 @@ fn clone_sql_expr_node(expr: &SqlExpr) -> SqlExpr {
             kind,
             expr,
             data_type,
-            array,
             format,
         } => SqlExpr::Cast {
             kind: kind.clone(),
             expr: Box::new(clone_sql_expr(expr)),
             data_type: data_type.clone(),
-            array: *array,
             format: format.clone(),
         },
         SqlExpr::Ceil { expr, field } => SqlExpr::Ceil {
@@ -720,14 +719,28 @@ fn clone_sql_expr_node(expr: &SqlExpr) -> SqlExpr {
             low: Box::new(clone_sql_expr(low)),
             high: Box::new(clone_sql_expr(high)),
         },
-        SqlExpr::InList {
+        SqlExpr::In {
             expr,
-            list,
+            target,
             negated,
-        } => SqlExpr::InList {
+            global,
+        } => SqlExpr::In {
             expr: Box::new(clone_sql_expr(expr)),
-            list: list.iter().map(clone_sql_expr).collect(),
+            target: match target {
+                InTarget::List(list) => InTarget::List(list.iter().map(clone_sql_expr).collect()),
+                InTarget::Subquery(subquery) => InTarget::Subquery(Box::new(clone_query(subquery))),
+                InTarget::Unnest(array_expr) => {
+                    InTarget::Unnest(Box::new(clone_sql_expr(array_expr)))
+                }
+                InTarget::Table { name, args } => InTarget::Table {
+                    name: name.clone(),
+                    args: args
+                        .as_ref()
+                        .map(|a| a.iter().map(clone_function_arg).collect()),
+                },
+            },
             negated: *negated,
+            global: *global,
         },
         SqlExpr::Like {
             negated,
@@ -740,7 +753,7 @@ fn clone_sql_expr_node(expr: &SqlExpr) -> SqlExpr {
             any: *any,
             expr: Box::new(clone_sql_expr(expr)),
             pattern: Box::new(clone_sql_expr(pattern)),
-            escape_char: escape_char.clone(),
+            escape_char: escape_char.as_deref().map(|e| Box::new(clone_sql_expr(e))),
         },
         SqlExpr::ILike {
             negated,
@@ -753,7 +766,7 @@ fn clone_sql_expr_node(expr: &SqlExpr) -> SqlExpr {
             any: *any,
             expr: Box::new(clone_sql_expr(expr)),
             pattern: Box::new(clone_sql_expr(pattern)),
-            escape_char: escape_char.clone(),
+            escape_char: escape_char.as_deref().map(|e| Box::new(clone_sql_expr(e))),
         },
         SqlExpr::Case {
             case_token,
@@ -876,29 +889,11 @@ fn clone_sql_expr_node(expr: &SqlExpr) -> SqlExpr {
             fractional_seconds_precision: iv.fractional_seconds_precision,
         }),
         SqlExpr::Tuple(exprs) => SqlExpr::Tuple(exprs.iter().map(clone_sql_expr).collect()),
-        SqlExpr::InSubquery {
-            expr,
-            subquery,
-            negated,
-        } => SqlExpr::InSubquery {
-            expr: Box::new(clone_sql_expr(expr)),
-            subquery: Box::new(clone_query(subquery)),
-            negated: *negated,
-        },
         SqlExpr::Exists { subquery, negated } => SqlExpr::Exists {
             subquery: Box::new(clone_query(subquery)),
             negated: *negated,
         },
         SqlExpr::Subquery(subquery) => SqlExpr::Subquery(Box::new(clone_query(subquery))),
-        SqlExpr::InUnnest {
-            expr,
-            array_expr,
-            negated,
-        } => SqlExpr::InUnnest {
-            expr: Box::new(clone_sql_expr(expr)),
-            array_expr: Box::new(clone_sql_expr(array_expr)),
-            negated: *negated,
-        },
         SqlExpr::AtTimeZone {
             timestamp,
             time_zone,
@@ -915,7 +910,7 @@ fn clone_sql_expr_node(expr: &SqlExpr) -> SqlExpr {
             negated: *negated,
             expr: Box::new(clone_sql_expr(expr)),
             pattern: Box::new(clone_sql_expr(pattern)),
-            escape_char: escape_char.clone(),
+            escape_char: escape_char.as_deref().map(|e| Box::new(clone_sql_expr(e))),
         },
         SqlExpr::RLike {
             negated,
@@ -977,6 +972,17 @@ fn clone_sql_expr_node(expr: &SqlExpr) -> SqlExpr {
         SqlExpr::Collate { expr, collation } => SqlExpr::Collate {
             expr: Box::new(clone_sql_expr(expr)),
             collation: collation.clone(),
+        },
+        SqlExpr::IsJson {
+            expr,
+            kind,
+            unique_keys,
+            negated,
+        } => SqlExpr::IsJson {
+            expr: Box::new(clone_sql_expr(expr)),
+            kind: *kind,
+            unique_keys: *unique_keys,
+            negated: *negated,
         },
         SqlExpr::IsNormalized {
             expr,
@@ -1246,6 +1252,9 @@ fn clone_function_arguments(args: &FunctionArguments) -> FunctionArguments {
                                 obes.iter().map(clone_order_by_expr).collect(),
                             )
                         }
+                        sqlparser::ast::FunctionArgumentClause::Where(e) => {
+                            sqlparser::ast::FunctionArgumentClause::Where(clone_sql_expr(e))
+                        }
                         sqlparser::ast::FunctionArgumentClause::Limit(e) => {
                             sqlparser::ast::FunctionArgumentClause::Limit(clone_sql_expr(e))
                         }
@@ -1311,7 +1320,7 @@ fn clone_window_frame(frame: &sqlparser::ast::WindowFrame) -> sqlparser::ast::Wi
 fn clone_order_by_expr(e: &OrderByExpr) -> OrderByExpr {
     OrderByExpr {
         expr: clone_sql_expr(&e.expr),
-        options: e.options,
+        options: e.options.clone(),
         with_fill: e.with_fill.as_ref().map(|wf| sqlparser::ast::WithFill {
             from: wf.from.as_ref().map(clone_sql_expr),
             to: wf.to.as_ref().map(clone_sql_expr),
@@ -1424,13 +1433,31 @@ fn contains_placeholder(ast: &SqlExpr) -> bool {
                 stack.push(low);
                 stack.push(high);
             }
-            SqlExpr::InList { expr, list, .. } => {
+            SqlExpr::In { expr, target, .. } => {
                 stack.push(expr);
-                stack.extend(list.iter());
+                match target {
+                    InTarget::List(list) => stack.extend(list.iter()),
+                    InTarget::Unnest(arr) => stack.push(arr),
+                    InTarget::Subquery(_) | InTarget::Table { .. } => {}
+                }
             }
-            SqlExpr::Like { expr, pattern, .. } | SqlExpr::ILike { expr, pattern, .. } => {
+            SqlExpr::Like {
+                expr,
+                pattern,
+                escape_char,
+                ..
+            }
+            | SqlExpr::ILike {
+                expr,
+                pattern,
+                escape_char,
+                ..
+            } => {
                 stack.push(expr);
                 stack.push(pattern);
+                if let Some(esc) = escape_char {
+                    stack.push(esc);
+                }
             }
             SqlExpr::Case {
                 operand,
@@ -1645,7 +1672,6 @@ fn precoerce_expr(
             kind: CastKind::Cast | CastKind::DoubleColon,
             expr,
             data_type,
-            array: false,
             format: None,
         } => {
             if let Some((name, pos)) = unwrap_placeholder_mut(expr)
@@ -1670,7 +1696,6 @@ fn precoerce_expr(
         SqlExpr::Cast {
             kind: CastKind::TryCast | CastKind::SafeCast,
             expr,
-            array: false,
             format: None,
             ..
         } => {
@@ -1874,7 +1899,11 @@ fn precoerce_expr(
                 )?;
             }
         }
-        SqlExpr::InList { expr, list, .. } => {
+        SqlExpr::In {
+            expr,
+            target: InTarget::List(list),
+            ..
+        } => {
             let pos = at(expr.as_ref());
             if unwrap_placeholder(expr).is_none() {
                 if contains_placeholder(expr) {
@@ -4316,6 +4345,9 @@ fn bind_join(
                 _ => Ok((join_plan, combined_scope, out_depth)),
             }
         }
+        JoinConstraint::UsingAlias(_, _) => {
+            Err(InvalidQuery::new("JOIN USING (...) AS alias is not supported", pos).into())
+        }
         JoinConstraint::Natural => {
             Err(InvalidQuery::new("NATURAL JOIN is not supported; use ON or USING", pos).into())
         }
@@ -4463,11 +4495,15 @@ fn apply_filter_with_subqueries(
         let conj_pos = at(conj);
         let (node, outer_negated) = unwrap_not_subquery(conj);
         match node {
-            SqlExpr::InSubquery {
+            SqlExpr::In {
                 expr,
-                subquery,
+                target: InTarget::Subquery(subquery),
                 negated,
+                global,
             } => {
+                if *global {
+                    return Err(InvalidQuery::new("GLOBAL IN is not supported", conj_pos).into());
+                }
                 ctx.record_subquery_join(conj_pos)?;
                 if !plain_exprs.is_empty()
                     && let Some(pred) = combine_conjuncts(std::mem::take(&mut plain_exprs))
@@ -4662,7 +4698,11 @@ fn is_direct_subquery(mut expr: &SqlExpr) -> bool {
                 op: sqlparser::ast::UnaryOperator::Not,
                 expr: inner,
             } => expr = inner,
-            SqlExpr::InSubquery { .. } | SqlExpr::Exists { .. } => return true,
+            SqlExpr::In {
+                target: InTarget::Subquery(_),
+                ..
+            }
+            | SqlExpr::Exists { .. } => return true,
             _ => return false,
         }
     }
@@ -4672,7 +4712,12 @@ fn contains_subquery(ast: &SqlExpr) -> bool {
     let mut stack = vec![ast];
     while let Some(node) = stack.pop() {
         match node {
-            SqlExpr::InSubquery { .. } | SqlExpr::Exists { .. } | SqlExpr::Subquery(_) => {
+            SqlExpr::In {
+                target: InTarget::Subquery(_),
+                ..
+            }
+            | SqlExpr::Exists { .. }
+            | SqlExpr::Subquery(_) => {
                 return true;
             }
             SqlExpr::Nested(inner)
@@ -4706,13 +4751,31 @@ fn contains_subquery(ast: &SqlExpr) -> bool {
                 stack.push(low);
                 stack.push(high);
             }
-            SqlExpr::InList { expr, list, .. } => {
+            SqlExpr::In { expr, target, .. } => {
                 stack.push(expr);
-                stack.extend(list.iter());
+                match target {
+                    InTarget::List(list) => stack.extend(list.iter()),
+                    InTarget::Unnest(arr) => stack.push(arr),
+                    InTarget::Subquery(_) | InTarget::Table { .. } => {}
+                }
             }
-            SqlExpr::Like { expr, pattern, .. } | SqlExpr::ILike { expr, pattern, .. } => {
+            SqlExpr::Like {
+                expr,
+                pattern,
+                escape_char,
+                ..
+            }
+            | SqlExpr::ILike {
+                expr,
+                pattern,
+                escape_char,
+                ..
+            } => {
                 stack.push(expr);
                 stack.push(pattern);
+                if let Some(esc) = escape_char {
+                    stack.push(esc);
+                }
             }
             SqlExpr::Case {
                 operand,
@@ -5029,7 +5092,7 @@ fn bind_select(
                     &select_schema,
                 )?;
                 ensure_sortable_order_by(&key_expr.data_type(), at(ob_expr))?;
-                let descending = matches!(ob_expr.options.asc, Some(false));
+                let descending = order_by_descending(&ob_expr.options, at(ob_expr))?;
                 let nulls_first = ob_expr.options.nulls_first.unwrap_or(descending);
                 sort_keys.push(SortKey {
                     expr: key_expr,
@@ -5078,7 +5141,7 @@ fn bind_select(
                 idx
             };
             let f = &all_fields[col_idx];
-            let descending = matches!(ob_expr.options.asc, Some(false));
+            let descending = order_by_descending(&ob_expr.options, at(ob_expr))?;
             let nulls_first = ob_expr.options.nulls_first.unwrap_or(descending);
             sort_keys.push(SortKey {
                 expr: Expr::Column {
@@ -5608,7 +5671,11 @@ fn push_expr_children<'a>(node: &'a SqlExpr, stack: &mut Vec<&'a SqlExpr>) {
             stack.push(low);
             stack.push(high);
         }
-        SqlExpr::InList { expr, list, .. } => {
+        SqlExpr::In {
+            expr,
+            target: InTarget::List(list),
+            ..
+        } => {
             stack.push(expr);
             stack.extend(list.iter());
         }
@@ -5953,7 +6020,12 @@ fn rewrite_agg_subquery_expr(
             stack.push(left);
             continue;
         }
-        if let SqlExpr::InSubquery { expr, .. } = cur {
+        if let SqlExpr::In {
+            expr,
+            target: InTarget::Subquery(_),
+            ..
+        } = cur
+        {
             rewrite_agg_expr(expr, from_scope, ctx, collector, None)?;
             continue;
         }
@@ -6099,7 +6171,12 @@ fn expr_has_agg_win_or_subquery(ast: &SqlExpr) -> bool {
     let mut stack = vec![ast];
     while let Some(node) = stack.pop() {
         match node {
-            SqlExpr::InSubquery { .. } | SqlExpr::Exists { .. } | SqlExpr::Subquery(_) => {
+            SqlExpr::In {
+                target: InTarget::Subquery(_),
+                ..
+            }
+            | SqlExpr::Exists { .. }
+            | SqlExpr::Subquery(_) => {
                 return true;
             }
             SqlExpr::Function(f) => {
@@ -6612,7 +6689,7 @@ fn bind_agg_call(
                     InvalidQuery::new("percentile_cont requires numeric input", pos).into(),
                 );
             }
-            let quantile = if matches!(ob.options.asc, Some(false)) {
+            let quantile = if order_by_descending(&ob.options, at(ob))? {
                 1.0 - raw_q
             } else {
                 raw_q
@@ -6675,6 +6752,19 @@ fn ensure_sortable_order_by(dt: &DataType, pos: Option<Position>) -> Result<(), 
         .into());
     }
     Ok(())
+}
+
+fn order_by_descending(
+    options: &OrderByOptions,
+    pos: Option<Position>,
+) -> Result<bool, QueryError> {
+    match &options.sort {
+        None | Some(OrderBySort::Asc) => Ok(false),
+        Some(OrderBySort::Desc) => Ok(true),
+        Some(OrderBySort::Using(_)) => {
+            Err(InvalidQuery::new("ORDER BY ... USING is not supported", pos).into())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6911,7 +7001,7 @@ fn extract_windows_in_expr(
                     }
                     let expr = bind_sql_expr(&ob.expr, scope, ctx, None)?;
                     ensure_sortable_order_by(&expr.data_type(), at(ob))?;
-                    let descending = matches!(ob.options.asc, Some(false));
+                    let descending = order_by_descending(&ob.options, at(ob))?;
                     let nulls_first = ob.options.nulls_first.unwrap_or(descending);
                     order_by.push(SortKey {
                         expr,
@@ -7645,7 +7735,7 @@ fn apply_order_by_plain(
             bind_sql_expr(&ob.expr, &scope, ctx, None)?
         };
         ensure_sortable_order_by(&expr.data_type(), at(ob))?;
-        let descending = matches!(ob.options.asc, Some(false));
+        let descending = order_by_descending(&ob.options, at(ob))?;
         let nulls_first = ob.options.nulls_first.unwrap_or(descending);
         keys.push(SortKey {
             expr,
@@ -7841,7 +7931,11 @@ fn push_expr_children_mut<'a>(node: &'a mut SqlExpr, stack: &mut Vec<&'a mut Sql
             stack.push(low);
             stack.push(high);
         }
-        SqlExpr::InList { expr, list, .. } => {
+        SqlExpr::In {
+            expr,
+            target: InTarget::List(list),
+            ..
+        } => {
             stack.push(expr);
             stack.extend(list.iter_mut());
         }
