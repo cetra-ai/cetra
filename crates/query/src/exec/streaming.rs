@@ -844,12 +844,123 @@ fn remap_col_name(name: &str, union_schema: &Schema, child_schema: &Schema) -> S
     }
 }
 
+fn remap_expr_column_names(expr: &mut Expr, child_schema: &Schema) {
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Column {
+                index,
+                name,
+                data_type: _,
+            } => {
+                if let Some(field) = child_schema.fields().get(*index)
+                    && *name != field.name
+                {
+                    *name = field.name.clone();
+                }
+            }
+            Expr::Literal(_) => {}
+            Expr::Unary {
+                op: _,
+                expr,
+                data_type: _,
+            } => stack.push(expr),
+            Expr::Binary {
+                left,
+                op: _,
+                right,
+                data_type: _,
+            } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            Expr::Cast {
+                expr,
+                target: _,
+                mode: _,
+            } => stack.push(expr),
+            Expr::Between {
+                expr,
+                low,
+                high,
+                negated: _,
+            } => {
+                stack.push(high);
+                stack.push(low);
+                stack.push(expr);
+            }
+            Expr::InList {
+                expr,
+                list,
+                negated: _,
+                redacted: _,
+            } => {
+                for item in list {
+                    stack.push(item);
+                }
+                stack.push(expr);
+            }
+            Expr::Like {
+                expr,
+                pattern,
+                escape: _,
+                case_insensitive: _,
+                negated: _,
+            } => {
+                stack.push(pattern);
+                stack.push(expr);
+            }
+            Expr::Case {
+                operand,
+                when_then,
+                else_expr,
+                data_type: _,
+            } => {
+                if let Some(el) = else_expr {
+                    stack.push(el);
+                }
+                for (when, then) in when_then {
+                    stack.push(then);
+                    stack.push(when);
+                }
+                if let Some(op) = operand {
+                    stack.push(op);
+                }
+            }
+            Expr::MapIndex { map, key } => {
+                stack.push(key);
+                stack.push(map);
+            }
+            Expr::MakeArray {
+                elems,
+                item_type: _,
+            } => {
+                for elem in elems {
+                    stack.push(elem);
+                }
+            }
+            Expr::Call {
+                func: _,
+                args,
+                data_type: _,
+            } => {
+                for arg in args {
+                    stack.push(arg);
+                }
+            }
+        }
+    }
+}
+
 fn remap_scan_spec_hints(
     spec: &ScanSpec,
     union_schema: &Schema,
     child_schema: &Schema,
 ) -> ScanSpec {
     let mut out = spec.clone();
+    for filter in &mut out.filters {
+        remap_expr_column_names(filter, child_schema);
+    }
     let mut remapped_maps: BTreeMap<String, MapProjection> = BTreeMap::new();
     for (col, proj) in &spec.map_projections {
         let name = remap_col_name(col, union_schema, child_schema);
@@ -1037,12 +1148,24 @@ fn compare_heap_items(
     compare_rows_across_borrowed(cols_a, row_a, cols_b, row_b, keys).then_with(|| a.seq.cmp(&b.seq))
 }
 
+fn unshared_key_bytes(batch: &Batch, key_cols: &[Arc<Column>]) -> usize {
+    let mut total = 0usize;
+    for (k_idx, kcol) in key_cols.iter().enumerate() {
+        let shared_with_batch = batch.columns().iter().any(|bcol| Arc::ptr_eq(bcol, kcol));
+        let shared_with_prev = key_cols[..k_idx].iter().any(|prev| Arc::ptr_eq(prev, kcol));
+        if !shared_with_batch && !shared_with_prev {
+            total = total.saturating_add(kcol.memory_bytes());
+        }
+    }
+    total
+}
+
 fn kept_bytes(row_batches: &[Batch], key_batches: &[Vec<Arc<Column>>], heap: &[HeapItem]) -> usize {
     let batch_bytes: usize = row_batches.iter().map(Batch::memory_bytes).sum();
-    let key_bytes: usize = key_batches
+    let key_bytes: usize = row_batches
         .iter()
-        .flat_map(|cols| cols.iter())
-        .map(|c| c.memory_bytes())
+        .zip(key_batches.iter())
+        .map(|(batch, cols)| unshared_key_bytes(batch, cols))
         .sum();
     let heap_bytes = heap.len().saturating_mul(size_of::<HeapItem>());
     batch_bytes + key_bytes + heap_bytes
@@ -1160,6 +1283,12 @@ impl TopKSink {
             let mut new_key_cols = Vec::with_capacity(self.keys.len());
             let key_batch_sample = live_refs[0].0;
             for k_idx in 0..self.keys.len() {
+                if let Expr::Column { index, .. } = &self.keys[k_idx].expr
+                    && let Some(shared_col) = new_batch.columns().get(*index)
+                {
+                    new_key_cols.push(Arc::clone(shared_col));
+                    continue;
+                }
                 let dt = self.key_batches[key_batch_sample][k_idx].data_type();
                 let sources: Vec<Option<(&Column, usize)>> = live_refs
                     .iter()
@@ -1189,9 +1318,8 @@ impl TopKSink {
         };
 
         let heap_bytes = self.heap.len().saturating_mul(size_of::<HeapItem>());
-        let target_bytes = new_batch.memory_bytes()
-            + new_key_cols.iter().map(|c| c.memory_bytes()).sum::<usize>()
-            + heap_bytes;
+        let target_bytes =
+            new_batch.memory_bytes() + unshared_key_bytes(&new_batch, &new_key_cols) + heap_bytes;
         if let Err(err) = reconcile_res(&mut self.res, target_bytes) {
             let cur = self.res.size();
             if cur > before {
@@ -1249,7 +1377,29 @@ impl TopKSink {
             };
 
         let mut out_keys = Vec::with_capacity(key_cols.len());
-        for kcol in key_cols {
+        for (k_idx, kcol) in key_cols.iter().enumerate() {
+            if let Expr::Column { index, .. } = &self.keys[k_idx].expr
+                && let Some(shared_col) = out_batch.columns().get(*index)
+            {
+                out_keys.push(Arc::clone(shared_col));
+                continue;
+            }
+            if let Some(col_idx) = batch
+                .columns()
+                .iter()
+                .position(|bcol| Arc::ptr_eq(bcol, kcol))
+                && let Some(shared_col) = out_batch.columns().get(col_idx)
+            {
+                out_keys.push(Arc::clone(shared_col));
+                continue;
+            }
+            if let Some(prev_idx) = key_cols[..k_idx]
+                .iter()
+                .position(|prev| Arc::ptr_eq(prev, kcol))
+            {
+                out_keys.push(Arc::clone(&out_keys[prev_idx]));
+                continue;
+            }
             match kcol.take(winner_rows, Some(&mut self.res)) {
                 Ok(fc) => out_keys.push(Arc::new(Column::Flat(fc))),
                 Err(err) => {
@@ -1524,7 +1674,7 @@ impl PushSink for TopKSink {
                 winner_rows.len() == batch.raw_len() && batch.selection().is_all(batch.raw_len());
             if all_rows_won {
                 let batch_bytes = batch.memory_bytes();
-                let key_bytes: usize = key_cols.iter().map(|c| c.memory_bytes()).sum();
+                let key_bytes = unshared_key_bytes(&batch, &key_cols);
                 let transfer_all = |this: &mut Self,
                                     batch_res: &mut Reservation|
                  -> Result<(), QueryError> {
@@ -2950,5 +3100,214 @@ mod tests {
         assert!(sink.reserved_bytes() >= expected_batch_bytes + 3 * size_of::<HeapItem>());
         drop(sink);
         assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn union_source_remaps_filter_expr_column_names_recursively() {
+        use std::sync::Mutex;
+
+        #[derive(Debug)]
+        struct CaptureFilterSource {
+            inner: BatchSource,
+            captured: Arc<Mutex<Option<ScanSpec>>>,
+        }
+
+        impl ScanSource for CaptureFilterSource {
+            fn schema(&self) -> Arc<Schema> {
+                self.inner.schema()
+            }
+
+            fn projected_schema(&self, spec: &ScanSpec) -> Result<Arc<Schema>, QueryError> {
+                self.inner.projected_schema(spec)
+            }
+
+            fn open_partitions(
+                &self,
+                spec: &ScanSpec,
+                ctx: &ExecContext,
+            ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+                *self.captured.lock().unwrap() = Some(spec.clone());
+                self.inner.open_partitions(spec, ctx)
+            }
+
+            fn explain_summary(&self, spec: &ScanSpec) -> String {
+                self.inner.explain_summary(spec)
+            }
+        }
+
+        let (ctx, _dir) = test_ctx(1024 * 1024, 1);
+        let union_schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("note", DataType::Utf8, true),
+        ])
+        .unwrap();
+        let child_schema = Schema::try_new_arc(vec![
+            Field::new("child_id", DataType::I64, false),
+            Field::new("child_note", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        let captured = Arc::new(Mutex::new(None));
+        let child = Arc::new(CaptureFilterSource {
+            inner: BatchSource::empty(child_schema),
+            captured: Arc::clone(&captured),
+        });
+        let union = UnionSource::new(union_schema, vec![child]).unwrap();
+
+        let filter = Expr::Binary {
+            left: Box::new(Expr::Between {
+                expr: Box::new(col_expr(0, "id", DataType::I64)),
+                low: Box::new(Expr::Literal(ScalarValue::I64(1))),
+                high: Box::new(Expr::Literal(ScalarValue::I64(10))),
+                negated: false,
+            }),
+            op: BinaryOp::And,
+            right: Box::new(Expr::InList {
+                expr: Box::new(col_expr(1, "note", DataType::Utf8)),
+                list: vec![Expr::Literal(ScalarValue::Utf8("ok".to_owned()))],
+                negated: false,
+                redacted: false,
+            }),
+            data_type: DataType::Bool,
+        };
+        let spec = ScanSpec {
+            filters: vec![filter],
+            ..ScanSpec::default()
+        };
+
+        let _ = union.open_partitions(&spec, &ctx).unwrap();
+        let got = captured.lock().unwrap().take().unwrap();
+        assert_eq!(got.filters.len(), 1);
+        let rendered = got.filters[0].fmt_plan();
+        assert!(
+            rendered.contains("child_id") && rendered.contains("child_note"),
+            "expected remapped child column names in filter: {rendered}"
+        );
+    }
+
+    #[test]
+    fn topk_avoids_double_counting_shared_column_and_duplicate_sort_keys() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("v", DataType::I64, false),
+            Field::new("payload", DataType::Utf8, false),
+        ])
+        .unwrap();
+        let vals: Vec<i64> = (0..256).collect();
+        let payloads: Vec<String> = vals.iter().map(|v| format!("row-{v:0>40}")).collect();
+        let payload_refs: Vec<&str> = payloads.iter().map(String::as_str).collect();
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vals), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(payload_refs).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            256,
+        )
+        .unwrap();
+        let batch_bytes = batch.memory_bytes();
+
+        // Duplicate column sort keys on both columns
+        let keys = vec![
+            SortKey {
+                expr: col_expr(0, "v", DataType::I64),
+                descending: false,
+                nulls_first: false,
+            },
+            SortKey {
+                expr: col_expr(1, "payload", DataType::Utf8),
+                descending: false,
+                nulls_first: false,
+            },
+            SortKey {
+                expr: col_expr(1, "payload", DataType::Utf8),
+                descending: true,
+                nulls_first: false,
+            },
+        ];
+
+        // Cap strictly below 2 * batch_bytes: all_rows_won must succeed without double-counting keys
+        let cap = batch_bytes + 256 * size_of::<HeapItem>() + 4096;
+        assert!(cap < batch_bytes * 2);
+        let (ctx, _dir) = test_ctx(cap, 1);
+        let mut sink = TopKSink::new(Arc::clone(&schema), keys.clone(), 512, 0, ctx.clone());
+        let mut in_res = ctx.pool.register("in", false);
+        in_res.try_grow(batch_bytes).unwrap();
+        sink.consume(batch.clone(), &mut in_res).unwrap();
+        drop(in_res);
+        assert_eq!(
+            sink.reserved_bytes(),
+            batch_bytes + 256 * size_of::<HeapItem>()
+        );
+        assert!(Arc::ptr_eq(
+            &sink.row_batches[0].columns()[0],
+            &sink.key_batches[0][0]
+        ));
+        assert!(Arc::ptr_eq(
+            &sink.row_batches[0].columns()[1],
+            &sink.key_batches[0][1]
+        ));
+        assert!(Arc::ptr_eq(
+            &sink.key_batches[0][1],
+            &sink.key_batches[0][2]
+        ));
+        drop(sink);
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        // Partial winners (take_winners) and compact_kept also share Arcs and avoid double-counting
+        let (ctx2, _dir2) = test_ctx(1024 * 1024, 1);
+        let mut sink2 = TopKSink::new(Arc::clone(&schema), keys, 4, 0, ctx2.clone());
+        let mut in_res2 = ctx2.pool.register("in2", false);
+        sink2.consume(batch, &mut in_res2).unwrap();
+        assert!(Arc::ptr_eq(
+            &sink2.row_batches[0].columns()[0],
+            &sink2.key_batches[0][0]
+        ));
+        assert!(Arc::ptr_eq(
+            &sink2.row_batches[0].columns()[1],
+            &sink2.key_batches[0][1]
+        ));
+        assert_eq!(
+            sink2.reserved_bytes(),
+            sink2.row_batches[0].memory_bytes() + 4 * size_of::<HeapItem>()
+        );
+        // Trigger compact_kept after evicting some rows
+        let smaller = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![-2, -1]), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(["a", "b"]).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            2,
+        )
+        .unwrap();
+        sink2.consume(smaller, &mut in_res2).unwrap();
+        sink2.compact_kept().unwrap();
+        assert!(Arc::ptr_eq(
+            &sink2.row_batches[0].columns()[0],
+            &sink2.key_batches[0][0]
+        ));
+        assert!(Arc::ptr_eq(
+            &sink2.row_batches[0].columns()[1],
+            &sink2.key_batches[0][1]
+        ));
+        assert_eq!(
+            sink2.reserved_bytes(),
+            sink2.row_batches[0].memory_bytes() + 4 * size_of::<HeapItem>()
+        );
+        drop(in_res2);
+        drop(sink2);
+        assert_eq!(ctx2.pool.reserved(), 0);
     }
 }

@@ -7,7 +7,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cetra_column::frame::{FRAME_HEADER_LEN, MAX_PAYLOAD, decode_batch, encode_batch};
+use cetra_column::frame::{
+    FLAG_LZ4, FRAME_HEADER_LEN, FRAME_MAGIC, FRAME_VERSION, LZ4_MAX_RATIO, LZ4_SLACK,
+    MAX_DECODED_BYTES, MAX_PAYLOAD, decode_batch, encode_batch,
+};
 use cetra_column::{Batch, ColumnError, Reservation, Schema};
 
 use crate::error::QueryError;
@@ -141,6 +144,7 @@ impl SpillManager {
                         spilled_bytes: Arc::clone(&self.spilled_bytes),
                         cap: Arc::clone(&self.cap),
                         committed: false,
+                        poisoned: false,
                         scratch_buf: Vec::new(),
                     });
                 }
@@ -165,6 +169,7 @@ pub struct SpillWriter {
     spilled_bytes: Arc<AtomicU64>,
     cap: SpillCapFn,
     committed: bool,
+    poisoned: bool,
     scratch_buf: Vec<u8>,
 }
 
@@ -173,6 +178,7 @@ impl fmt::Debug for SpillWriter {
         f.debug_struct("SpillWriter")
             .field("bytes_written", &self.bytes_written)
             .field("committed", &self.committed)
+            .field("poisoned", &self.poisoned)
             .finish()
     }
 }
@@ -182,9 +188,15 @@ impl SpillWriter {
     /// before writing. Maps `StorageFull`/`QuotaExceeded`/cap-exceeded to `QueryError::TooLarge`
     /// and other I/O errors to `QueryError::Internal(...)`.
     pub fn write_batch(&mut self, batch: &Batch) -> Result<(), QueryError> {
-        self.scratch_buf.clear();
-        encode_batch(batch, &mut self.scratch_buf, None)?;
-        let frame_len = u64::try_from(self.scratch_buf.len()).map_err(|_| QueryError::TooLarge)?;
+        if self.poisoned {
+            return Err(QueryError::internal(
+                "spill writer is poisoned after write failure",
+            ));
+        }
+        let scratch = ScratchTrimGuard(&mut self.scratch_buf);
+        scratch.0.clear();
+        encode_batch(batch, scratch.0, None)?;
+        let frame_len = u64::try_from(scratch.0.len()).map_err(|_| QueryError::TooLarge)?;
         reserve_spill_bytes(&self.spilled_bytes, &self.cap, frame_len)?;
 
         let Some(file) = self.file.as_mut() else {
@@ -192,7 +204,8 @@ impl SpillWriter {
             return Err(QueryError::internal("spill writer already closed"));
         };
 
-        if let Err(err) = file.write_all(&self.scratch_buf) {
+        if let Err(err) = file.write_all(scratch.0) {
+            self.poisoned = true;
             self.spilled_bytes.fetch_sub(frame_len, Ordering::AcqRel);
             return Err(map_spill_io_err(&err));
         }
@@ -203,6 +216,11 @@ impl SpillWriter {
 
     /// Flushes and converts into a readable [`SpillFile`] (auto-deleted on `SpillFile::drop`).
     pub fn finish(mut self) -> Result<SpillFile, QueryError> {
+        if self.poisoned {
+            return Err(QueryError::internal(
+                "spill writer is poisoned after write failure",
+            ));
+        }
         if let Some(mut file) = self.file.take() {
             file.flush().map_err(|e| map_spill_io_err(&e))?;
         }
@@ -460,20 +478,12 @@ impl SpillReader {
             }
         }
 
-        let payload_len = u32::from_le_bytes([header[12], header[13], header[14], header[15]]);
-        if payload_len > MAX_PAYLOAD {
-            rollback_res(res, before);
-            return Err(ColumnError::InvalidFrame {
-                reason: "payload length exceeds MAX_PAYLOAD",
+        let total_len = match validate_spill_header(&header) {
+            Ok(len) => len,
+            Err(err) => {
+                rollback_res(res, before);
+                return Err(err.into());
             }
-            .into());
-        }
-        let Some(total_len) = FRAME_HEADER_LEN.checked_add(payload_len as usize) else {
-            rollback_res(res, before);
-            return Err(ColumnError::Overflow {
-                reason: "spill frame length overflows usize",
-            }
-            .into());
         };
 
         self.frame_buf.resize(total_len, 0);
@@ -501,6 +511,63 @@ impl SpillReader {
             }
         }
     }
+}
+
+fn validate_spill_header(header: &[u8; FRAME_HEADER_LEN]) -> Result<usize, ColumnError> {
+    if header[0..4] != FRAME_MAGIC {
+        return Err(ColumnError::InvalidFrame {
+            reason: "invalid spill frame magic",
+        });
+    }
+    if header[4] != FRAME_VERSION {
+        return Err(ColumnError::InvalidFrame {
+            reason: "unsupported spill frame version",
+        });
+    }
+    let flags = header[5];
+    if flags & !FLAG_LZ4 != 0 {
+        return Err(ColumnError::InvalidFrame {
+            reason: "unknown spill frame flags",
+        });
+    }
+    let reserved = u16::from_le_bytes([header[6], header[7]]);
+    if reserved != 0 {
+        return Err(ColumnError::InvalidFrame {
+            reason: "non-zero spill frame reserved bytes",
+        });
+    }
+    let uncompressed_len = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+    let payload_len = u32::from_le_bytes([header[12], header[13], header[14], header[15]]);
+    if uncompressed_len > MAX_DECODED_BYTES {
+        return Err(ColumnError::InvalidFrame {
+            reason: "uncompressed length exceeds MAX_DECODED_BYTES",
+        });
+    }
+    if payload_len > MAX_PAYLOAD {
+        return Err(ColumnError::InvalidFrame {
+            reason: "payload length exceeds MAX_PAYLOAD",
+        });
+    }
+    if flags == 0 && payload_len != uncompressed_len {
+        return Err(ColumnError::InvalidFrame {
+            reason: "uncompressed frame payload_len differs from uncompressed_len",
+        });
+    }
+    if (flags & FLAG_LZ4) != 0
+        && u64::from(uncompressed_len)
+            > u64::from(payload_len)
+                .saturating_mul(LZ4_MAX_RATIO)
+                .saturating_add(LZ4_SLACK)
+    {
+        return Err(ColumnError::InvalidFrame {
+            reason: "spill frame LZ4 expansion ratio exceeds limit",
+        });
+    }
+    FRAME_HEADER_LEN
+        .checked_add(payload_len as usize)
+        .ok_or(ColumnError::Overflow {
+            reason: "spill frame length overflows usize",
+        })
 }
 
 fn rollback_res(res: Option<&mut Reservation>, before: usize) {
@@ -790,5 +857,125 @@ mod tests {
         }
         assert_eq!(spill.spilled_bytes(), 0);
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn spill_writer_poison_rejects_writes_and_finish_and_trims_large_scratch() {
+        let dir = tempfile::tempdir().unwrap();
+        let spill = SpillManager::with_fixed_cap(dir.path().to_path_buf(), 16 * 1024 * 1024);
+
+        // Large batch (>64 KiB encoded) triggers ScratchTrimGuard after write_batch
+        let large = sample_batch(8192);
+        let mut w = spill.create_file().unwrap();
+        w.write_batch(&large).unwrap();
+        assert!(
+            w.scratch_buf.capacity() <= MAX_SCRATCH_BUF_KEEP_CAP,
+            "scratch_buf was not trimmed: cap={}",
+            w.scratch_buf.capacity()
+        );
+        let sf = w.finish().unwrap();
+        drop(sf);
+        assert_eq!(spill.spilled_bytes(), 0);
+
+        // Poisoned SpillWriter rejects subsequent write_batch and finish(), and cleans up on drop
+        let mut pw = spill.create_file().unwrap();
+        pw.write_batch(&sample_batch(8)).unwrap();
+        assert!(spill.spilled_bytes() > 0);
+        pw.poisoned = true;
+        assert!(matches!(
+            pw.write_batch(&sample_batch(4)),
+            Err(QueryError::Internal(_))
+        ));
+        assert!(matches!(pw.finish(), Err(QueryError::Internal(_))));
+        assert_eq!(spill.spilled_bytes(), 0);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn spill_reader_validates_header_before_resizing_frame_buf() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Schema::try_new_arc(vec![Field::new("id", DataType::I64, false)]).unwrap();
+        let scope = GlobalPool::standalone(1024 * 1024);
+
+        let make_header = |magic: [u8; 4],
+                           version: u8,
+                           flags: u8,
+                           reserved: u16,
+                           uncompressed_len: u32,
+                           payload_len: u32|
+         -> [u8; FRAME_HEADER_LEN] {
+            let mut h = [0u8; FRAME_HEADER_LEN];
+            h[0..4].copy_from_slice(&magic);
+            h[4] = version;
+            h[5] = flags;
+            h[6..8].copy_from_slice(&reserved.to_le_bytes());
+            h[8..12].copy_from_slice(&uncompressed_len.to_le_bytes());
+            h[12..16].copy_from_slice(&payload_len.to_le_bytes());
+            h
+        };
+
+        let cases: Vec<(&str, [u8; FRAME_HEADER_LEN])> = vec![
+            (
+                "bad_magic",
+                make_header(*b"XXXX", FRAME_VERSION, 0, 0, 1024, 1024),
+            ),
+            (
+                "bad_version",
+                make_header(FRAME_MAGIC, FRAME_VERSION + 1, 0, 0, 1024, 1024),
+            ),
+            (
+                "unknown_flags",
+                make_header(FRAME_MAGIC, FRAME_VERSION, 0x02, 0, 1024, 1024),
+            ),
+            (
+                "non_zero_reserved",
+                make_header(FRAME_MAGIC, FRAME_VERSION, 0, 1, 1024, 1024),
+            ),
+            (
+                "uncompressed_exceeds_max",
+                make_header(
+                    FRAME_MAGIC,
+                    FRAME_VERSION,
+                    FLAG_LZ4,
+                    0,
+                    MAX_DECODED_BYTES + 1,
+                    128 * 1024 * 1024,
+                ),
+            ),
+            (
+                "uncompressed_len_mismatch",
+                make_header(FRAME_MAGIC, FRAME_VERSION, 0, 0, 100, 64 * 1024 * 1024),
+            ),
+            (
+                "lz4_bomb_ratio",
+                make_header(FRAME_MAGIC, FRAME_VERSION, FLAG_LZ4, 0, 10_000_000, 16),
+            ),
+        ];
+
+        for (label, hdr) in cases {
+            let path = dir.path().join(format!("corrupt-{label}.cbm"));
+            fs::write(&path, hdr).unwrap();
+            let sf = SpillFile {
+                inner: Arc::new(SpillFileInner {
+                    path,
+                    byte_len: AtomicU64::new(FRAME_HEADER_LEN as u64),
+                    spilled_bytes: Arc::new(AtomicU64::new(FRAME_HEADER_LEN as u64)),
+                }),
+            };
+            let mut reader = sf.open_reader(Arc::clone(&schema)).unwrap();
+            let mut res = scope.register("hdr_check", true);
+            res.try_grow(64).unwrap();
+            let err = reader.next_batch(Some(&mut res)).unwrap_err();
+            assert!(
+                matches!(err, QueryError::Column(ColumnError::InvalidFrame { .. })),
+                "case {label} returned unexpected err: {err:?}"
+            );
+            assert_eq!(
+                reader.frame_buf.capacity(),
+                0,
+                "case {label} allocated frame_buf before header validation"
+            );
+            assert_eq!(res.size(), 64, "case {label} leaked reservation");
+        }
     }
 }

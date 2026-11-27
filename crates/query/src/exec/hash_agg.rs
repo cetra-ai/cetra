@@ -29,6 +29,13 @@ use super::source::{PartitionStream, ScanSource, ScanSpec};
 use super::spill::{SpillAppender, SpillFile};
 
 const NUM_SPILL_PARTITIONS: usize = 32;
+const _: () = assert!(NUM_SPILL_PARTITIONS == 32);
+const TABLE_HASH_DOMAIN_BIT: u64 = 1u64 << 63;
+
+#[inline]
+fn spill_partition(h: u64) -> usize {
+    (h >> 59) as usize
+}
 const MAX_REPARTITION_DEPTH: usize = 4;
 const DDSKETCH_ALPHA: f64 = 0.005;
 const DDSKETCH_MAX_BUCKETS: usize = 2048;
@@ -511,7 +518,7 @@ impl PartialEq for KeyAtom {
             (Self::Binary(a), Self::Binary(b)) => a == b,
             (Self::FixedBytes8(a), Self::FixedBytes8(b)) => a == b,
             (Self::FixedBytes16(a), Self::FixedBytes16(b)) => a == b,
-            (Self::Scalar(a), Self::Scalar(b)) => a.semantic_eq(b),
+            (Self::Scalar(a), Self::Scalar(b)) => scalar_key_eq(a, b),
             _ => false,
         }
     }
@@ -582,6 +589,48 @@ impl KeyAtom {
             Self::FixedBytes16(b) => ScalarValue::FixedBytes16(*b),
             Self::Scalar(sv) => sv.clone(),
         }
+    }
+}
+
+fn scalar_key_eq(a: &ScalarValue, b: &ScalarValue) -> bool {
+    match (a, b) {
+        (ScalarValue::Null(_), ScalarValue::Null(_)) => true,
+        (ScalarValue::Bool(x), ScalarValue::Bool(y)) => x == y,
+        (ScalarValue::I64(x), ScalarValue::I64(y)) => x == y,
+        (ScalarValue::F64(x), ScalarValue::F64(y)) => {
+            f64_canonical_bits(*x) == f64_canonical_bits(*y)
+        }
+        (
+            ScalarValue::Decimal128 {
+                value: v1,
+                scale: s1,
+                ..
+            },
+            ScalarValue::Decimal128 {
+                value: v2,
+                scale: s2,
+                ..
+            },
+        ) => v1 == v2 && s1 == s2,
+        (
+            ScalarValue::TimestampNs { value: v1, utc: u1 },
+            ScalarValue::TimestampNs { value: v2, utc: u2 },
+        ) => v1 == v2 && u1 == u2,
+        (ScalarValue::Date(x), ScalarValue::Date(y)) => x == y,
+        (ScalarValue::Interval(x), ScalarValue::Interval(y)) => {
+            x.canonical_key() == y.canonical_key()
+        }
+        (ScalarValue::Utf8(x), ScalarValue::Utf8(y)) => x == y,
+        (ScalarValue::Binary(x), ScalarValue::Binary(y)) => x == y,
+        (ScalarValue::FixedBytes8(x), ScalarValue::FixedBytes8(y)) => x == y,
+        (ScalarValue::FixedBytes16(x), ScalarValue::FixedBytes16(y)) => x == y,
+        (ScalarValue::List { values: v1, .. }, ScalarValue::List { values: v2, .. }) => {
+            v1.len() == v2.len() && v1.iter().zip(v2).all(|(x, y)| scalar_key_eq(x, y))
+        }
+        (ScalarValue::MapUtf8(x), ScalarValue::MapUtf8(y)) => x == y,
+        (ScalarValue::Events(x), ScalarValue::Events(y)) => x == y,
+        (ScalarValue::Links(x), ScalarValue::Links(y)) => x == y,
+        _ => false,
     }
 }
 
@@ -708,7 +757,7 @@ fn col_row_eq_atom(col: &Column, row: usize, atom: &KeyAtom) -> bool {
         (
             DataType::List(_) | DataType::MapUtf8 | DataType::Events | DataType::Links,
             KeyAtom::Scalar(sv),
-        ) => read_scalar(col, row).semantic_eq(sv),
+        ) => scalar_key_eq(&read_scalar(col, row), sv),
         _ => false,
     }
 }
@@ -1418,15 +1467,15 @@ impl AccState {
         row: usize,
     ) -> (usize, usize) {
         match (self, kind) {
-            (Self::CountDistinct { .. }, _) => {
+            (Self::CountDistinct { set, .. }, _) => {
                 let col = inputs[0];
                 if col.is_null(row) {
                     (0, 0)
                 } else {
-                    (
-                        col_row_heap_estimate(col, row) + size_of::<KeyAtom>() + 64,
-                        0,
-                    )
+                    let item = col_row_heap_estimate(col, row);
+                    let table_growth = hashset_growth_slots(set.len(), set.capacity(), 1)
+                        .saturating_mul(size_of::<KeyAtom>() + 8);
+                    (item.saturating_add(table_growth), 0)
                 }
             }
             (Self::Min(_) | Self::Max(_), _) => {
@@ -1438,22 +1487,40 @@ impl AccState {
                 }
             }
             (Self::ApproxPercentile(_), _) => (size_of::<(i32, u64)>() * 2, 0),
-            (Self::Percentile(_), _) => {
+            (Self::Percentile(vals), _) => {
                 let col = inputs[0];
                 if col.is_null(row) {
                     (0, 0)
                 } else {
-                    (0, size_of::<f64>() * 2)
+                    let vec_growth = vec_growth_slots(vals.len(), vals.capacity(), 1)
+                        .saturating_mul(size_of::<f64>());
+                    (0, vec_growth)
                 }
             }
-            (Self::ArrayAgg { .. }, _) => {
+            (Self::ArrayAgg { values, set, .. }, _) => {
                 let col = inputs[0];
                 let item = if col.is_null(row) {
                     0
                 } else {
                     col_row_heap_estimate(col, row)
                 };
-                (0, item + size_of::<KeyAtom>() * 2 + 64)
+                let item_heap = if set.is_some() {
+                    item.saturating_mul(2)
+                } else {
+                    item
+                };
+                let vec_growth = vec_growth_slots(values.len(), values.capacity(), 1)
+                    .saturating_mul(size_of::<KeyAtom>());
+                let set_growth = set.as_ref().map_or(0, |s| {
+                    hashset_growth_slots(s.len(), s.capacity(), 1)
+                        .saturating_mul(size_of::<KeyAtom>() + 8)
+                });
+                (
+                    0,
+                    item_heap
+                        .saturating_add(vec_growth)
+                        .saturating_add(set_growth),
+                )
             }
             (Self::FirstNonNullByOrder { .. }, AccKind::FirstNonNullByOrder { order_by, .. }) => {
                 let val_col = inputs[0];
@@ -1494,16 +1561,22 @@ impl AccState {
     /// Upper-bound additional `(spillable, unspillable)` bytes that merging `partial_cols[row]` could allocate.
     fn estimate_merge_growth(&self, partial_cols: &[&Column], row: usize) -> (usize, usize) {
         match self {
-            Self::CountDistinct { .. } => {
+            Self::CountDistinct { set, .. } => {
                 let col = partial_cols[0];
                 if col.is_null(row) {
                     (0, 0)
                 } else if let Some(lref) = eval::list_ref_at(col, row) {
                     let n = list_ref_len(lref);
-                    (
-                        n * (size_of::<KeyAtom>() + 48) + col_row_heap_estimate(col, row),
-                        0,
-                    )
+                    if n == 0 {
+                        (0, 0)
+                    } else {
+                        let table_growth = hashset_growth_slots(set.len(), set.capacity(), n)
+                            .saturating_mul(size_of::<KeyAtom>() + 8);
+                        (
+                            col_row_heap_estimate(col, row).saturating_add(table_growth),
+                            0,
+                        )
+                    }
                 } else {
                     (0, 0)
                 }
@@ -1520,24 +1593,45 @@ impl AccState {
                 let col = partial_cols[0];
                 (eval::read_bytes(col, row).map_or(0, <[u8]>::len) * 2, 0)
             }
-            Self::Percentile(_) => {
+            Self::Percentile(vals) => {
                 let col = partial_cols[0];
                 if let Some(lref) = eval::list_ref_at(col, row) {
-                    (0, list_ref_len(lref) * size_of::<f64>() * 2)
+                    let n = list_ref_len(lref);
+                    let vec_growth = vec_growth_slots(vals.len(), vals.capacity(), n)
+                        .saturating_mul(size_of::<f64>());
+                    (0, vec_growth)
                 } else {
                     (0, 0)
                 }
             }
-            Self::ArrayAgg { .. } => {
+            Self::ArrayAgg { values, set, .. } => {
                 let col = partial_cols[0];
                 if col.is_null(row) {
                     (0, 0)
                 } else if let Some(lref) = eval::list_ref_at(col, row) {
                     let n = list_ref_len(lref);
-                    (
-                        0,
-                        n * (size_of::<KeyAtom>() * 2 + 48) + col_row_heap_estimate(col, row),
-                    )
+                    if n == 0 {
+                        (0, 0)
+                    } else {
+                        let item = col_row_heap_estimate(col, row);
+                        let item_heap = if set.is_some() {
+                            item.saturating_mul(2)
+                        } else {
+                            item
+                        };
+                        let vec_growth = vec_growth_slots(values.len(), values.capacity(), n)
+                            .saturating_mul(size_of::<KeyAtom>());
+                        let set_growth = set.as_ref().map_or(0, |s| {
+                            hashset_growth_slots(s.len(), s.capacity(), n)
+                                .saturating_mul(size_of::<KeyAtom>() + 8)
+                        });
+                        (
+                            0,
+                            item_heap
+                                .saturating_add(vec_growth)
+                                .saturating_add(set_growth),
+                        )
+                    }
                 } else {
                     (0, 0)
                 }
@@ -2373,6 +2467,29 @@ fn elem_ref_to_key_atom(elem: ElemRef<'_>) -> KeyAtom {
     }
 }
 
+fn vec_growth_slots(len: usize, cap: usize, add: usize) -> usize {
+    let needed = len.saturating_add(add);
+    if needed <= cap {
+        return 0;
+    }
+    let next_pow2 = needed.checked_next_power_of_two().unwrap_or(usize::MAX);
+    let new_cap = cap.saturating_mul(2).max(next_pow2).max(4);
+    new_cap.saturating_sub(cap)
+}
+
+fn hashset_growth_slots(len: usize, cap: usize, add: usize) -> usize {
+    let needed = len.saturating_add(add);
+    if needed <= cap {
+        return 0;
+    }
+    let next_pow2 = needed.checked_next_power_of_two().unwrap_or(usize::MAX);
+    let new_cap = cap
+        .saturating_mul(2)
+        .max(next_pow2.saturating_mul(2))
+        .max(8);
+    new_cap.saturating_sub(cap)
+}
+
 fn col_row_heap_estimate(col: &Column, row: usize) -> usize {
     match col.data_type() {
         DataType::Utf8 => read_str(col, row).map_or(0, str::len),
@@ -3137,7 +3254,7 @@ impl HashAgg {
             if !sink.spilled {
                 sink.drain_in_memory_into(&mut combined)?;
             } else {
-                let spill_files = sink.finish_into_spill_files();
+                let spill_files = sink.finish_into_spill_files()?;
                 let mut reader_res = ctx.pool.register("hash_agg_combine_read", false);
                 let mut max_frame_bytes = target_spill_frame_bytes(ctx);
                 for file in spill_files {
@@ -3818,33 +3935,59 @@ impl HashAgg {
                     if d_sp > 0
                         && let Err(err) = self.res.try_grow(d_sp)
                     {
-                        if matches!(err, ColumnError::MemoryLimit { .. })
-                            && matches!(kind, AccKind::CountDistinct(_))
-                        {
-                            let other_sp: usize = states
-                                .iter()
-                                .enumerate()
-                                .filter(|&(i, _)| i != agg_idx)
-                                .map(|(_, s)| s.spillable_heap_bytes())
-                                .sum();
-                            if let Some(slot) = self.distinct_spills[agg_idx].as_mut() {
-                                flush_distinct_slot_global(
-                                    slot,
-                                    &mut states[agg_idx],
-                                    &mut self.res,
-                                    other_sp,
-                                    &self.ctx,
-                                )?;
-                                slot.spilled = true;
-                                spill_global_distinct_partial_list(slot, slice[0], row, &self.ctx)?;
+                        if matches!(err, ColumnError::MemoryLimit { .. }) {
+                            if matches!(kind, AccKind::CountDistinct(_)) {
+                                let other_sp: usize = states
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|&(i, _)| i != agg_idx)
+                                    .map(|(_, s)| s.spillable_heap_bytes())
+                                    .sum();
+                                if let Some(slot) = self.distinct_spills[agg_idx].as_mut() {
+                                    flush_distinct_slot_global(
+                                        slot,
+                                        &mut states[agg_idx],
+                                        &mut self.res,
+                                        other_sp,
+                                        &self.ctx,
+                                    )?;
+                                    slot.spilled = true;
+                                    spill_global_distinct_partial_list(
+                                        slot, slice[0], row, &self.ctx,
+                                    )?;
+                                }
+                                offset += width;
+                                continue;
                             }
-                            offset += width;
-                            continue;
+                            if flush_global_distinct_sets_inner(
+                                states,
+                                &mut self.distinct_spills,
+                                &mut self.res,
+                                &self.ctx,
+                            )? {
+                                self.res.try_grow(d_sp)?;
+                            } else {
+                                return Err(err.into());
+                            }
+                        } else {
+                            return Err(err.into());
                         }
-                        return Err(err.into());
                     }
-                    if d_unsp > 0 {
-                        self.unspillable_res.try_grow(d_unsp)?;
+                    if d_unsp > 0
+                        && let Err(err) = self.unspillable_res.try_grow(d_unsp)
+                    {
+                        if matches!(err, ColumnError::MemoryLimit { .. })
+                            && flush_global_distinct_sets_inner(
+                                states,
+                                &mut self.distinct_spills,
+                                &mut self.res,
+                                &self.ctx,
+                            )?
+                        {
+                            self.unspillable_res.try_grow(d_unsp)?;
+                        } else {
+                            return Err(err.into());
+                        }
                     }
                     states[agg_idx].merge_row(kind, slice, row)?;
                     offset += width;
@@ -3852,8 +3995,35 @@ impl HashAgg {
             }
             let target_sp: usize = states.iter().map(AccState::spillable_heap_bytes).sum();
             let target_unsp: usize = states.iter().map(AccState::unspillable_heap_bytes).sum();
-            self.res.resize(target_sp)?;
-            self.unspillable_res.resize(target_unsp)?;
+            if let Err(err) = self.res.resize(target_sp) {
+                if matches!(err, ColumnError::MemoryLimit { .. })
+                    && flush_global_distinct_sets_inner(
+                        states,
+                        &mut self.distinct_spills,
+                        &mut self.res,
+                        &self.ctx,
+                    )?
+                {
+                    let target_sp2: usize = states.iter().map(AccState::spillable_heap_bytes).sum();
+                    self.res.resize(target_sp2)?;
+                } else {
+                    return Err(err.into());
+                }
+            }
+            if let Err(err) = self.unspillable_res.resize(target_unsp) {
+                if matches!(err, ColumnError::MemoryLimit { .. })
+                    && flush_global_distinct_sets_inner(
+                        states,
+                        &mut self.distinct_spills,
+                        &mut self.res,
+                        &self.ctx,
+                    )?
+                {
+                    self.unspillable_res.resize(target_unsp)?;
+                } else {
+                    return Err(err.into());
+                }
+            }
             return Ok(());
         }
 
@@ -4076,9 +4246,9 @@ impl HashAgg {
         Ok(())
     }
 
-    fn finish_into_spill_files(mut self) -> Vec<SpillFile> {
+    fn finish_into_spill_files(mut self) -> Result<Vec<SpillFile>, QueryError> {
         if self.table.num_groups() > 0 {
-            let _ = self.drain_table_to_writers(0);
+            self.drain_table_to_writers(0)?;
         }
         let writers = std::mem::take(&mut self.partition_writers);
         self.res.free();
@@ -4089,21 +4259,33 @@ impl HashAgg {
                 files.push(f);
             }
         }
-        files
+        Ok(files)
     }
 
     /// Leaves enough pool headroom after a batch or finished partition so sibling workers'
     /// unspillable `scan_res` / `eval_res` reservations cannot starve on `QueryCap`, including
     /// when `partitions.len() > workers.num_workers()` and completed sinks await combine.
-    fn enforce_post_batch_headroom(&mut self) -> Result<(), QueryError> {
-        if self.res.size() == 0 || self.max_batch_bytes == 0 {
+    fn enforce_post_batch_headroom(&mut self, in_finish: bool) -> Result<(), QueryError> {
+        let min_res = if in_finish { 1 } else { 4096 };
+        if self.res.size() < min_res || self.max_batch_bytes == 0 {
+            return Ok(());
+        }
+        let workers = self
+            .ctx
+            .workers
+            .num_workers()
+            .min(self.ctx.target_partitions.max(1))
+            .max(1);
+        if in_finish && workers == 1 && self.ctx.target_partitions <= 1 {
             return Ok(());
         }
         let cap = self.ctx.pool.cap();
-        let workers = self.ctx.workers.num_workers().max(1);
-        let headroom = self
-            .max_batch_bytes
-            .saturating_mul(workers.saturating_add(1));
+        let mult = if workers == 1 {
+            1
+        } else {
+            workers.saturating_add(1)
+        };
+        let headroom = self.max_batch_bytes.saturating_mul(mult).min(cap / 2);
         if self.ctx.pool.reserved().saturating_add(headroom) <= cap {
             return Ok(());
         }
@@ -4125,7 +4307,7 @@ impl HashAgg {
                 &mut self.res,
                 &self.ctx,
             )?;
-            if self.res.size() > 0
+            if self.res.size() >= min_res
                 && self.table.num_groups() > 0
                 && self.ctx.pool.reserved().saturating_add(headroom) > cap
             {
@@ -4225,17 +4407,36 @@ impl PushSink for HashAgg {
                 if !self.spec.group_by.is_empty() && self.table.num_groups() > 0 =>
             {
                 eval_res.free();
-                if !flush_distinct_slots_grouped(
+                let flushed = flush_distinct_slots_grouped(
                     &mut self.distinct_spills,
                     false,
                     &mut self.table,
                     &self.group_types,
                     &mut self.res,
                     &self.ctx,
-                )? {
+                )?;
+                if !flushed {
                     self.drain_table_to_writers(0)?;
+                    evaluate_batch_inputs(&batch, &self.spec, &self.ctx.eval, &mut eval_res)?
+                } else {
+                    match evaluate_batch_inputs(&batch, &self.spec, &self.ctx.eval, &mut eval_res) {
+                        Ok(ev) => ev,
+                        Err(QueryError::TooLarge) if self.table.num_groups() > 0 => {
+                            eval_res.free();
+                            self.drain_table_to_writers(0)?;
+                            evaluate_batch_inputs(
+                                &batch,
+                                &self.spec,
+                                &self.ctx.eval,
+                                &mut eval_res,
+                            )?
+                        }
+                        Err(err) => {
+                            eval_res.free();
+                            return Err(err);
+                        }
+                    }
                 }
-                evaluate_batch_inputs(&batch, &self.spec, &self.ctx.eval, &mut eval_res)?
             }
             Err(err) => {
                 eval_res.free();
@@ -4278,9 +4479,78 @@ impl PushSink for HashAgg {
                 }
                 let cur_sp: usize = states.iter().map(AccState::spillable_heap_bytes).sum();
                 let cur_unsp: usize = states.iter().map(AccState::unspillable_heap_bytes).sum();
-                if cur_sp.saturating_add(need_sp) > self.res.size() {
-                    let add = cur_sp.saturating_add(need_sp) - self.res.size();
-                    if let Err(err) = self.res.try_grow(add) {
+                let target_sp = cur_sp.saturating_add(need_sp);
+                let workers = self
+                    .ctx
+                    .workers
+                    .num_workers()
+                    .min(self.ctx.target_partitions.max(1))
+                    .max(1);
+                let other_workers_headroom = if workers > 1 && self.res.size() >= 4096 {
+                    self.max_batch_bytes
+                        .saturating_mul(workers - 1)
+                        .saturating_add(4096)
+                        .min(self.ctx.pool.cap() / 2)
+                } else {
+                    0
+                };
+                let grow_res = if target_sp > self.res.size() {
+                    self.res.try_grow(target_sp - self.res.size())
+                } else {
+                    Ok(())
+                };
+                let headroom_exceeded = grow_res.is_ok()
+                    && other_workers_headroom > 0
+                    && self
+                        .ctx
+                        .pool
+                        .reserved()
+                        .saturating_add(other_workers_headroom)
+                        > self.ctx.pool.cap();
+                if grow_res.is_err() || headroom_exceeded {
+                    let soft_only = grow_res.is_ok();
+                    let err = grow_res.err();
+                    let can_flush =
+                        soft_only || matches!(err, Some(ColumnError::MemoryLimit { .. }));
+                    if can_flush
+                        && flush_global_distinct_sets_inner(
+                            states,
+                            &mut self.distinct_spills,
+                            &mut self.res,
+                            &self.ctx,
+                        )?
+                    {
+                        let cur_sp2: usize =
+                            states.iter().map(AccState::spillable_heap_bytes).sum();
+                        let mut need_sp2 = 0usize;
+                        for (agg_idx, kind) in self.acc_kinds.iter().enumerate() {
+                            if let Some(mask) = &filter_masks[agg_idx]
+                                && !mask.get(row)
+                            {
+                                continue;
+                            }
+                            let (ds, _) = states[agg_idx].estimate_fold_growth(
+                                kind,
+                                &agg_inputs[agg_idx],
+                                row,
+                            );
+                            need_sp2 = need_sp2.saturating_add(ds);
+                        }
+                        if cur_sp2.saturating_add(need_sp2) > self.res.size() {
+                            let add2 = cur_sp2.saturating_add(need_sp2) - self.res.size();
+                            if let Err(err2) = self.res.try_grow(add2) {
+                                eval_res.free();
+                                return Err(err2.into());
+                            }
+                        }
+                    } else if let Some(err) = err {
+                        eval_res.free();
+                        return Err(err.into());
+                    }
+                }
+                if cur_unsp.saturating_add(need_unsp) > self.unspillable_res.size() {
+                    let add = cur_unsp.saturating_add(need_unsp) - self.unspillable_res.size();
+                    if let Err(err) = self.unspillable_res.try_grow(add) {
                         if matches!(err, ColumnError::MemoryLimit { .. })
                             && flush_global_distinct_sets_inner(
                                 states,
@@ -4289,26 +4559,14 @@ impl PushSink for HashAgg {
                                 &self.ctx,
                             )?
                         {
-                            let cur_sp2: usize =
-                                states.iter().map(AccState::spillable_heap_bytes).sum();
-                            if cur_sp2.saturating_add(need_sp) > self.res.size() {
-                                let add2 = cur_sp2.saturating_add(need_sp) - self.res.size();
-                                if let Err(err2) = self.res.try_grow(add2) {
-                                    eval_res.free();
-                                    return Err(err2.into());
-                                }
+                            if let Err(err2) = self.unspillable_res.try_grow(add) {
+                                eval_res.free();
+                                return Err(err2.into());
                             }
                         } else {
                             eval_res.free();
                             return Err(err.into());
                         }
-                    }
-                }
-                if cur_unsp.saturating_add(need_unsp) > self.unspillable_res.size() {
-                    let add = cur_unsp.saturating_add(need_unsp) - self.unspillable_res.size();
-                    if let Err(err) = self.unspillable_res.try_grow(add) {
-                        eval_res.free();
-                        return Err(err.into());
                     }
                 }
 
@@ -4343,8 +4601,22 @@ impl PushSink for HashAgg {
                 }
             }
             if let Err(err) = self.unspillable_res.resize(cur_unsp) {
-                eval_res.free();
-                return Err(err.into());
+                if matches!(err, ColumnError::MemoryLimit { .. })
+                    && flush_global_distinct_sets_inner(
+                        states,
+                        &mut self.distinct_spills,
+                        &mut self.res,
+                        &self.ctx,
+                    )?
+                {
+                    if let Err(err2) = self.unspillable_res.resize(cur_unsp) {
+                        eval_res.free();
+                        return Err(err2.into());
+                    }
+                } else {
+                    eval_res.free();
+                    return Err(err.into());
+                }
             }
             drop(group_cols);
             drop(agg_inputs);
@@ -4352,7 +4624,7 @@ impl PushSink for HashAgg {
             drop(batch);
             eval_res.free();
             batch_res.free();
-            self.enforce_post_batch_headroom()?;
+            self.enforce_post_batch_headroom(false)?;
             return Ok(ControlFlow::Continue);
         }
 
@@ -4409,26 +4681,61 @@ impl PushSink for HashAgg {
         if self.spilled && self.table.num_groups() > 0 {
             self.drain_table_to_writers(0)?;
         } else {
-            match self.res.resize(self.table.spillable_bytes) {
-                Ok(()) => {}
-                Err(ColumnError::MemoryLimit { .. }) if self.table.num_groups() > 0 => {
-                    if !flush_distinct_slots_grouped(
+            if let Err(err) = self.res.resize(self.table.spillable_bytes) {
+                if matches!(err, ColumnError::MemoryLimit { .. }) && self.table.num_groups() > 0 {
+                    let flushed = flush_distinct_slots_grouped(
                         &mut self.distinct_spills,
                         false,
                         &mut self.table,
                         &self.group_types,
                         &mut self.res,
                         &self.ctx,
-                    )? {
+                    )?;
+                    if !flushed {
                         self.drain_table_to_writers(0)?;
+                    } else if let Err(err2) = self.res.resize(self.table.spillable_bytes) {
+                        if matches!(err2, ColumnError::MemoryLimit { .. })
+                            && self.table.num_groups() > 0
+                        {
+                            self.drain_table_to_writers(0)?;
+                        } else {
+                            return Err(err2.into());
+                        }
                     }
-                    self.enforce_post_batch_headroom()?;
-                    return Ok(ControlFlow::Continue);
+                } else {
+                    return Err(err.into());
                 }
-                Err(err) => return Err(err.into()),
             }
-            self.unspillable_res.resize(self.table.unspillable_bytes)?;
-            self.enforce_post_batch_headroom()?;
+            if !self.spilled
+                && let Err(err) = self.unspillable_res.resize(self.table.unspillable_bytes)
+            {
+                if matches!(err, ColumnError::MemoryLimit { .. }) && self.table.num_groups() > 0 {
+                    let flushed = flush_distinct_slots_grouped(
+                        &mut self.distinct_spills,
+                        false,
+                        &mut self.table,
+                        &self.group_types,
+                        &mut self.res,
+                        &self.ctx,
+                    )?;
+                    if !flushed {
+                        self.drain_table_to_writers(0)?;
+                    } else if let Err(err2) =
+                        self.unspillable_res.resize(self.table.unspillable_bytes)
+                    {
+                        if matches!(err2, ColumnError::MemoryLimit { .. })
+                            && self.table.num_groups() > 0
+                        {
+                            self.drain_table_to_writers(0)?;
+                        } else {
+                            return Err(err2.into());
+                        }
+                    }
+                } else {
+                    return Err(err.into());
+                }
+            }
+            self.enforce_post_batch_headroom(false)?;
         }
 
         Ok(ControlFlow::Continue)
@@ -4449,7 +4756,7 @@ impl PushSink for HashAgg {
         if self.spilled && self.table.num_groups() > 0 {
             self.drain_table_to_writers(0)?;
         }
-        self.enforce_post_batch_headroom()?;
+        self.enforce_post_batch_headroom(true)?;
         Ok(())
     }
 }
@@ -4699,7 +5006,11 @@ fn fold_grouped_row_with_spill(
 
         // Leave spill-share and pool-wide headroom when multiple workers share a tight pool so
         // sibling workers' unspillable `scan_res` / fresh `GroupTable` allocations cannot starve.
-        let workers = ctx.workers.num_workers().max(1);
+        let workers = ctx
+            .workers
+            .num_workers()
+            .min(ctx.target_partitions.max(1))
+            .max(1);
         let spill_headroom = if workers > 1 && state.table.num_groups() >= 16 && !table_drained {
             (ctx.pool.spill_share() / 8).min(4096)
         } else {
@@ -4967,10 +5278,11 @@ fn fold_partial_batch_into_table(
             Err(err) => return Err(err.into()),
         }
     }
-    state
-        .unspillable_res
-        .resize(state.table.unspillable_bytes)?;
-    Ok(None)
+    match state.unspillable_res.resize(state.table.unspillable_bytes) {
+        Ok(()) => Ok(None),
+        Err(ColumnError::MemoryLimit { .. }) if state.table.num_groups() > 0 => Ok(Some(num_rows)),
+        Err(err) => Err(err.into()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5123,7 +5435,7 @@ fn drain_group_table_to_writers(
     for (gi, key) in keys.iter().enumerate() {
         if let Some(k) = key {
             let h = hash_atoms(k, mix_round);
-            let p = (h as usize) & (NUM_SPILL_PARTITIONS - 1);
+            let p = spill_partition(h);
             buckets[p].push(gi);
         }
     }
@@ -5263,7 +5575,7 @@ fn route_partial_batch_to_writers(
             return Err(QueryError::Cancelled);
         }
         let h = hash_cols_row(group_cols, row, mix_round);
-        let p = (h as usize) & (NUM_SPILL_PARTITIONS - 1);
+        let p = spill_partition(h);
         part_rows[p].push(row as u32);
     }
 
@@ -5634,7 +5946,7 @@ fn fold_spill_partition_or_repartition(
                 start_row,
                 layout,
                 &mut group_state,
-                depth as u64,
+                (depth as u64) | TABLE_HASH_DOMAIN_BIT,
                 headroom,
                 &ctx.eval,
             );
@@ -6564,6 +6876,7 @@ struct DistinctCountPerGroupStream {
     cur_count: i64,
     pending: VecDeque<(Vec<KeyAtom>, i64)>,
     pending_bytes: usize,
+    pending_res: Reservation,
     sorted_eof: bool,
     done: bool,
 }
@@ -6582,6 +6895,7 @@ impl DistinctCountPerGroupStream {
         }
         fields.push(Field::new("count", DataType::I64, false));
         let out_schema = Arc::new(Schema::try_new(fields)?);
+        let pending_res = ctx.pool.register("distinct_per_group_pending", false);
         Ok(Self {
             sorted,
             group_types,
@@ -6592,6 +6906,7 @@ impl DistinctCountPerGroupStream {
             cur_count: 0,
             pending: VecDeque::new(),
             pending_bytes: 0,
+            pending_res,
             sorted_eof: false,
             done: false,
         })
@@ -6624,6 +6939,7 @@ impl DistinctCountPerGroupStream {
                 counts.push(c);
             }
         }
+        self.pending_res.shrink(emitted_bytes);
         let take_n = keys.len();
         let mut r = res;
         let mut scratch = r
@@ -6670,6 +6986,7 @@ impl PartitionStream for DistinctCountPerGroupStream {
                 self.done = true;
                 self.pending.clear();
                 self.pending_bytes = 0;
+                self.pending_res.free();
                 rollback_res(res, before);
                 return Err(QueryError::Cancelled);
             }
@@ -6696,9 +7013,9 @@ impl PartitionStream for DistinctCountPerGroupStream {
                         let dv = read_key_atom(&cols[k], row);
                         if self.cur_group.as_ref() != Some(&gk) {
                             if let Some(prev) = self.cur_group.take() {
-                                self.pending_bytes = self
-                                    .pending_bytes
-                                    .saturating_add(pending_group_entry_bytes(&prev));
+                                let eb = pending_group_entry_bytes(&prev);
+                                self.pending_res.try_grow(eb)?;
+                                self.pending_bytes = self.pending_bytes.saturating_add(eb);
                                 self.pending.push_back((prev, self.cur_count));
                             }
                             self.cur_group = Some(gk);
@@ -6719,9 +7036,9 @@ impl PartitionStream for DistinctCountPerGroupStream {
                 None => {
                     in_res.free();
                     if let Some(prev) = self.cur_group.take() {
-                        self.pending_bytes = self
-                            .pending_bytes
-                            .saturating_add(pending_group_entry_bytes(&prev));
+                        let eb = pending_group_entry_bytes(&prev);
+                        self.pending_res.try_grow(eb)?;
+                        self.pending_bytes = self.pending_bytes.saturating_add(eb);
                         self.pending.push_back((prev, self.cur_count));
                     }
                     self.sorted_eof = true;
@@ -8851,7 +9168,7 @@ mod tests {
             m
         };
 
-        let single_batches = vec![b1a.clone(), b1b.clone(), b2, b3];
+        let single_batches = vec![b1a, b1b, b2, b3];
         let src_single = BatchSource::new(Arc::clone(&schema), single_batches).unwrap();
         let (mut ctx_single, _dir1) = test_ctx(64 * 1024);
         ctx_single.target_partitions = 1;
@@ -8878,28 +9195,36 @@ mod tests {
 
         // H3a-B1 (b) multi-worker: worker 0 spills partition_writers (NULLs + normal g1) and
         // worker 1 spills distinct_spills (skewed g2).
-        let mut p0_g1_groups = Vec::new();
-        let mut p0_g1_vals = Vec::new();
-        for v in [1i64, 2, 2, 3, 4, 5] {
-            p0_g1_groups.push("g1".to_owned());
-            p0_g1_vals.push(Some(v));
+        // Keep each batch well below `cap / 2` (64 KiB pool across 2 concurrent workers) so
+        // an unspillable scan reservation can never exceed `cap - sibling_spill_share` mid-batch.
+        // First 10 batches -> partition 0 (400 p1_ NULLs across 8x50 + g1 across 2 batches)
+        // Next 10 batches -> partition 1 (5_000 distinct values for g2 across 10x500 + dup 0)
+        let mut multi_batches = Vec::with_capacity(20);
+        for chunk in 0..8 {
+            let start = chunk * 50;
+            multi_batches.push(mk_batch(
+                (start..start + 50).map(|i| format!("p1_{i:04}")).collect(),
+                vec![None; 50],
+            ));
         }
-        // First 3 batches -> partition 0 (400 p1_ NULLs across first 2 batches + g1 in batch 2)
-        // Next 3 batches -> partition 1 (5_000 distinct values for g2 in 2_500 + 2_500 + 0-dup)
-        let multi_batches = vec![
-            b1a,
-            b1b,
-            mk_batch(p0_g1_groups, p0_g1_vals),
-            mk_batch(
-                vec!["g2".to_owned(); 2_500],
-                (0..2_500i64).map(Some).collect(),
-            ),
-            mk_batch(
-                vec!["g2".to_owned(); 2_500],
-                (2_500..5_000i64).map(Some).collect(),
-            ),
-            mk_batch(vec!["g2".to_owned()], vec![Some(0)]),
-        ];
+        multi_batches.push(mk_batch(
+            vec!["g1".to_owned(); 3],
+            vec![Some(1), Some(2), Some(2)],
+        ));
+        multi_batches.push(mk_batch(
+            vec!["g1".to_owned(); 3],
+            vec![Some(3), Some(4), Some(5)],
+        ));
+        for chunk in 0..10 {
+            let start = (chunk * 500) as i64;
+            let mut gs = vec!["g2".to_owned(); 500];
+            let mut vs: Vec<Option<i64>> = (start..start + 500).map(Some).collect();
+            if chunk == 9 {
+                gs.push("g2".to_owned());
+                vs.push(Some(0));
+            }
+            multi_batches.push(mk_batch(gs, vs));
+        }
         let src_multi = BatchSource::new(Arc::clone(&schema), multi_batches).unwrap();
         let (mut ctx_multi, _dir2) = test_ctx(64 * 1024);
         ctx_multi.target_partitions = 2;
@@ -9027,5 +9352,336 @@ mod tests {
             ScalarValue::I64(n_distinct as i64)
         );
         assert_eq!(ctx_f16.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn hash_agg_canonical_interval_inside_list_groups_and_distinct_together() {
+        // `List(Interval)` containing `1 day` vs `24 hours` must compare equal via `scalar_key_eq`
+        // in both `KeyAtom::PartialEq` and `col_row_eq_atom` (matching `hash_scalar_value`).
+        let list_dt = DataType::List(Box::new(DataType::Interval));
+        let schema = Schema::try_new_arc(vec![
+            Field::new("iv_list", list_dt.clone(), false),
+            Field::new("v", DataType::I64, false),
+        ])
+        .unwrap();
+
+        let iv_1day = Interval {
+            months: 0,
+            days: 1,
+            nanos: 0,
+        };
+        let iv_24h = Interval {
+            months: 0,
+            days: 0,
+            nanos: 24 * 3_600_000_000_000,
+        };
+        let inner = Column::Flat(
+            FlatColumn::try_new(FlatData::Interval(vec![iv_1day, iv_24h]), None).unwrap(),
+        );
+        let list_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Interval,
+                    offsets: vec![0, 1, 2],
+                    values: Box::new(inner),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                list_col,
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![10, 20]), None).unwrap()),
+            ],
+            2,
+        )
+        .unwrap();
+
+        // Direct KeyAtom + col_row_eq_atom checks
+        let a0 = read_key_atom(batch.column(0).unwrap(), 0);
+        let a1 = read_key_atom(batch.column(0).unwrap(), 1);
+        assert!(a0 == a1);
+        assert!(col_row_eq_atom(batch.column(0).unwrap(), 1, &a0));
+
+        // End-to-end GROUP BY `List(Interval)` + COUNT(DISTINCT `List(Interval)`)
+        let src = BatchSource::new(Arc::clone(&schema), vec![batch]).unwrap();
+        let (ctx, _dir) = test_ctx(1024 * 1024);
+        let spec = HashAggSpec {
+            group_by: vec![("iv_list".to_owned(), col_ref(0, "iv_list", list_dt.clone()))],
+            aggs: vec![
+                AggExpr {
+                    func: AggFunc::Sum(col_ref(1, "v", DataType::I64)),
+                    filter: None,
+                    output_name: "s".to_owned(),
+                },
+                AggExpr {
+                    func: AggFunc::CountDistinct(col_ref(0, "iv_list", list_dt)),
+                    filter: None,
+                    output_name: "cd".to_owned(),
+                },
+            ],
+        };
+        let out = execute_hash_agg(&src, &ScanSpec::default(), spec, &ctx).unwrap();
+        assert_eq!(out.iter().map(Batch::num_rows).sum::<usize>(), 1);
+        assert_eq!(
+            out[0].column(1).unwrap().get_scalar(0).unwrap(),
+            ScalarValue::I64(30)
+        );
+        assert_eq!(
+            out[0].column(2).unwrap().get_scalar(0).unwrap(),
+            ScalarValue::I64(1)
+        );
+        assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn estimate_growth_gates_doubling_on_capacity_and_charges_2x_array_agg_distinct() {
+        // 1. Percentile: 0 growth when len < capacity; exact doubling when len >= capacity.
+        let mut pct = AccState::Percentile(Vec::with_capacity(8));
+        if let AccState::Percentile(v) = &mut pct {
+            v.extend_from_slice(&[1.0, 2.0, 3.0]);
+        }
+        let col_f64 = Column::Flat(FlatColumn::try_new(FlatData::F64(vec![4.0]), None).unwrap());
+        let pct_kind = AccKind::Percentile {
+            input_type: DataType::F64,
+            quantile: 0.5,
+        };
+        assert_eq!(pct.estimate_fold_growth(&pct_kind, &[&col_f64], 0), (0, 0));
+
+        if let AccState::Percentile(v) = &mut pct {
+            v.extend_from_slice(&[4.0, 5.0, 6.0, 7.0, 8.0]);
+            assert_eq!(v.len(), v.capacity());
+        }
+        let (_, pct_realloc) = pct.estimate_fold_growth(&pct_kind, &[&col_f64], 0);
+        assert!(pct_realloc >= 8 * size_of::<f64>());
+
+        // 2. ArrayAgg(distinct = true) charges 2x item heap and gates Vec/HashSet doubling on capacity.
+        let arr_kind = AccKind::ArrayAgg {
+            input_type: DataType::Utf8,
+            distinct: true,
+        };
+        let mut arr_st = AccState::ArrayAgg {
+            seen_any: true,
+            values: Vec::with_capacity(8),
+            set: Some(HashSet::with_capacity(8)),
+            heap_bytes: 0,
+        };
+        let payload = "x".repeat(200);
+        let col_str = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices([payload.as_str()]).unwrap()),
+                None,
+            )
+            .unwrap(),
+        );
+        // Both values and set have spare capacity -> charges strictly 2x item heap (400), no table doubling.
+        let (sp, unsp) = arr_st.estimate_fold_growth(&arr_kind, &[&col_str], 0);
+        assert_eq!(sp, 0);
+        assert_eq!(unsp, 400);
+
+        // Non-distinct ArrayAgg charges 1x item heap (200) when values has spare capacity.
+        let arr_non_distinct_kind = AccKind::ArrayAgg {
+            input_type: DataType::Utf8,
+            distinct: false,
+        };
+        let arr_nd = AccState::ArrayAgg {
+            seen_any: true,
+            values: Vec::with_capacity(8),
+            set: None,
+            heap_bytes: 0,
+        };
+        assert_eq!(
+            arr_nd.estimate_fold_growth(&arr_non_distinct_kind, &[&col_str], 0),
+            (0, 200)
+        );
+        // Fold into distinct state and verify actual heap_bytes matches 2x item.
+        arr_st.fold_row(&arr_kind, &[&col_str], 0).unwrap();
+        if let AccState::ArrayAgg { heap_bytes, .. } = arr_st {
+            assert_eq!(heap_bytes, 400);
+        }
+    }
+
+    #[test]
+    fn hash_agg_global_distinct_flushes_to_unblock_unspillable_array_agg_and_propagates_finish_err()
+    {
+        // 1. Global aggregation with both COUNT(DISTINCT v) (spillable) and ARRAY_AGG(tag) (unspillable)
+        // under tight memory flushes global distinct sets when unspillable_res hits MemoryLimit.
+        let schema = Schema::try_new_arc(vec![
+            Field::new("v", DataType::Utf8, false),
+            Field::new("tag", DataType::Utf8, false),
+        ])
+        .unwrap();
+        let mut batches = Vec::new();
+        for chunk in 0..8usize {
+            let n = 64usize;
+            let vs: Vec<String> = (0..n)
+                .map(|i| format!("distinct-key-{chunk}-{i:0>40}"))
+                .collect();
+            let tags: Vec<String> = (0..n)
+                .map(|i| format!("t-{}", (chunk * n + i) % 16))
+                .collect();
+            batches.push(
+                Batch::try_new_all(
+                    Arc::clone(&schema),
+                    vec![
+                        Column::Flat(
+                            FlatColumn::try_new(
+                                FlatData::Utf8(
+                                    Utf8Data::try_from_slices(vs.iter().map(String::as_str))
+                                        .unwrap(),
+                                ),
+                                None,
+                            )
+                            .unwrap(),
+                        ),
+                        Column::Flat(
+                            FlatColumn::try_new(
+                                FlatData::Utf8(
+                                    Utf8Data::try_from_slices(tags.iter().map(String::as_str))
+                                        .unwrap(),
+                                ),
+                                None,
+                            )
+                            .unwrap(),
+                        ),
+                    ],
+                    n,
+                )
+                .unwrap(),
+            );
+        }
+        let src = BatchSource::new(Arc::clone(&schema), batches).unwrap();
+        let (mut ctx, _dir) = test_ctx(96 * 1024);
+        ctx.target_partitions = 2;
+        let spec = HashAggSpec {
+            group_by: vec![],
+            aggs: vec![
+                AggExpr {
+                    func: AggFunc::CountDistinct(col_ref(0, "v", DataType::Utf8)),
+                    filter: None,
+                    output_name: "cd".to_owned(),
+                },
+                AggExpr {
+                    func: AggFunc::ArrayAgg {
+                        expr: col_ref(1, "tag", DataType::Utf8),
+                        distinct: true,
+                    },
+                    filter: None,
+                    output_name: "tags".to_owned(),
+                },
+            ],
+        };
+        let out = execute_hash_agg(&src, &ScanSpec::default(), spec, &ctx).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].column(0).unwrap().get_scalar(0).unwrap(),
+            ScalarValue::I64(8 * 64)
+        );
+        match out[0].column(1).unwrap().get_scalar(0).unwrap() {
+            ScalarValue::List { values, .. } => assert_eq!(values.len(), 16),
+            other => panic!("expected list, got {other:?}"),
+        }
+        assert_eq!(ctx.pool.reserved(), 0);
+        assert_eq!(ctx.spill.spilled_bytes(), 0);
+
+        // 2. finish_into_spill_files propagates spill cap failure instead of swallowing it.
+        let dir2 = tempfile::tempdir().unwrap();
+        let ctx_zero_spill = ExecContext {
+            pool: GlobalPool::standalone(1024 * 1024),
+            eval: EvalContext::new(0, CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(dir2.path().to_path_buf(), 0)),
+            workers: Arc::new(WorkerPool::new(1).unwrap()),
+            batch_size: 8192,
+            target_partitions: 1,
+            metrics: ExecMetrics::new(),
+        };
+        let g_schema = Schema::try_new_arc(vec![Field::new("g", DataType::I64, false)]).unwrap();
+        let g_batch = Batch::try_new_all(
+            Arc::clone(&g_schema),
+            vec![Column::Flat(
+                FlatColumn::try_new(FlatData::I64(vec![1, 2, 3]), None).unwrap(),
+            )],
+            3,
+        )
+        .unwrap();
+        let g_spec = HashAggSpec {
+            group_by: vec![("g".to_owned(), col_ref(0, "g", DataType::I64))],
+            aggs: vec![AggExpr {
+                func: AggFunc::CountStar,
+                filter: None,
+                output_name: "c".to_owned(),
+            }],
+        };
+        let mut agg = HashAgg::new(g_spec, Arc::clone(&g_schema), ctx_zero_spill.clone()).unwrap();
+        let mut bres = ctx_zero_spill.pool.register("in", false);
+        agg.consume(g_batch, &mut bres).unwrap();
+        drop(bres);
+        let err = agg.finish_into_spill_files().unwrap_err();
+        assert!(matches!(err, QueryError::TooLarge));
+        assert_eq!(ctx_zero_spill.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn distinct_count_per_group_stream_tracks_pending_res_and_frees_on_cancel() {
+        let row_schema = Schema::try_new_arc(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::I64, false),
+        ])
+        .unwrap();
+        let gs: Vec<String> = (0..64).map(|i| format!("grp-{i:0>40}")).collect();
+        let vs: Vec<i64> = (0..64).collect();
+        let batch = Batch::try_new_all(
+            Arc::clone(&row_schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(gs.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vs), None).unwrap()),
+            ],
+            64,
+        )
+        .unwrap();
+        let (mut ctx, _dir) = test_ctx(512 * 1024);
+        ctx.batch_size = 16;
+
+        let src = BatchSource::new(Arc::clone(&row_schema), vec![batch]).unwrap();
+        let sorted = src
+            .open_partitions(&ScanSpec::default(), &ctx)
+            .unwrap()
+            .remove(0);
+        let mut stream =
+            DistinctCountPerGroupStream::new(sorted, &row_schema, vec![DataType::Utf8], &ctx)
+                .unwrap();
+
+        // Pull first chunk (16 groups); remaining groups stay in `pending` with `pending_res.size() == pending_bytes`.
+        let mut out_res = ctx.pool.register("out", false);
+        let first = stream
+            .next_batch(&ctx.eval.cancel, Some(&mut out_res))
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.num_rows(), 16);
+        assert_eq!(stream.pending_res.size(), stream.pending_bytes);
+        assert!(stream.pending_res.size() > 0);
+        drop(first);
+        out_res.free();
+
+        // Cancelling clears `pending` and frees `pending_res` to 0.
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let err = stream.next_batch(&cancel, Some(&mut out_res)).unwrap_err();
+        assert!(matches!(err, QueryError::Cancelled));
+        assert_eq!(stream.pending_bytes, 0);
+        assert_eq!(stream.pending_res.size(), 0);
+        drop(stream);
+        drop(out_res);
+        assert_eq!(ctx.pool.reserved(), 0);
     }
 }

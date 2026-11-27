@@ -89,8 +89,10 @@ pub struct ExecContext {
     pub metrics: ExecMetrics,
 }
 
-/// Moves `bytes` from `src` into `dst` without double-counting; if `src.size() < bytes`,
-/// transfers `src.size()` first and grows `dst` by the remainder (rolling back on error).
+/// Moves `bytes` from `src` into `dst` without double-counting; if `src.size() < bytes`:
+/// - when `src.can_spill()`, grows `dst` by the shortfall first then transfers `src.size()`
+///   (rolling back via infallible `dst.shrink` on error);
+/// - otherwise transfers `src.size()` first and grows `dst` by the remainder (rolling back on error).
 pub(crate) fn transfer_or_grow(
     src: &mut Reservation,
     dst: &mut Reservation,
@@ -102,6 +104,16 @@ pub(crate) fn transfer_or_grow(
     let avail = src.size();
     if avail >= bytes {
         src.transfer_to(dst, bytes)
+    } else if src.can_spill() {
+        let extra = bytes - avail;
+        dst.try_grow(extra)?;
+        if avail > 0
+            && let Err(err) = src.transfer_to(dst, avail)
+        {
+            dst.shrink(extra);
+            return Err(err);
+        }
+        Ok(())
     } else {
         if avail > 0 {
             src.transfer_to(dst, avail)?;
@@ -287,6 +299,9 @@ where
                         if parent_cancel.is_cancelled() {
                             return Err(QueryError::Cancelled);
                         }
+                        if stop_cancel.is_cancelled() {
+                            break;
+                        }
                         let mut downstream_flow = ControlFlow::Continue;
                         let mut emit_ns: u64 = 0;
                         let (head, tail) = chain.split_at_mut(i + 1);
@@ -295,7 +310,7 @@ where
                         let op_prof = &mut prof_head[i];
 
                         let t0 = Instant::now();
-                        op.finish(&mut |out_batch, out_res| {
+                        let finish_res = op.finish(&mut |out_batch, out_res| {
                             op_prof.rows_out =
                                 op_prof.rows_out.saturating_add(out_batch.num_rows() as u64);
                             op_prof.batches_out = op_prof.batches_out.saturating_add(1);
@@ -305,16 +320,36 @@ where
                             emit_ns = emit_ns.saturating_add(
                                 te.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                             );
-                            let f = f?;
-                            if f == ControlFlow::Stop {
-                                downstream_flow = ControlFlow::Stop;
+                            match f {
+                                Ok(ControlFlow::Continue) => Ok(ControlFlow::Continue),
+                                Ok(ControlFlow::Stop) => {
+                                    downstream_flow = ControlFlow::Stop;
+                                    Ok(ControlFlow::Stop)
+                                }
+                                Err(QueryError::Cancelled)
+                                    if !parent_cancel.is_cancelled()
+                                        && stop_cancel.is_cancelled() =>
+                                {
+                                    downstream_flow = ControlFlow::Stop;
+                                    Ok(ControlFlow::Stop)
+                                }
+                                Err(err) => Err(err),
                             }
-                            Ok(f)
-                        })?;
+                        });
                         let total_ns = t0.elapsed().as_nanos().min(u64::MAX as u128) as u64;
                         op_prof.elapsed_ns = op_prof
                             .elapsed_ns
                             .saturating_add(total_ns.saturating_sub(emit_ns));
+
+                        match finish_res {
+                            Ok(()) => {}
+                            Err(QueryError::Cancelled)
+                                if !parent_cancel.is_cancelled() && stop_cancel.is_cancelled() =>
+                            {
+                                break;
+                            }
+                            Err(err) => return Err(err),
+                        }
 
                         if downstream_flow == ControlFlow::Stop {
                             break;
@@ -325,7 +360,12 @@ where
                 if parent_cancel.is_cancelled() {
                     return Err(QueryError::Cancelled);
                 }
-                sink.finish()?;
+                match sink.finish() {
+                    Ok(()) => {}
+                    Err(QueryError::Cancelled)
+                        if !parent_cancel.is_cancelled() && stop_cancel.is_cancelled() => {}
+                    Err(err) => return Err(err),
+                }
                 for prof in profiles {
                     metrics.record(prof);
                 }
@@ -704,6 +744,196 @@ mod tests {
         assert_eq!(sinks[0].inner.batches().len(), 1);
         assert!(sinks[0].inner.batches()[0].semantic_eq(&batch));
         drop(sinks);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn transfer_or_grow_spillable_src_grows_before_transfer_and_rolls_back_cleanly() {
+        let pool = GlobalPool::standalone(100);
+        let mut src = pool.register("spillable_src", true);
+        let mut dst = pool.register("unspillable_dst", false);
+        src.try_grow(40).unwrap();
+        assert_eq!(src.size(), 40);
+        assert_eq!(dst.size(), 0);
+
+        // Request 120 bytes (> pool cap 100): dst.try_grow(80) fails BEFORE src.transfer_to(dst, 40),
+        // leaving both reservations untouched.
+        let err = transfer_or_grow(&mut src, &mut dst, 120).unwrap_err();
+        assert!(matches!(err, ColumnError::MemoryLimit { .. }));
+        assert_eq!(src.size(), 40);
+        assert_eq!(dst.size(), 0);
+        assert_eq!(pool.reserved(), 40);
+
+        // Request 90 bytes (<= pool cap 100): dst grows by 50, then receives 40 from src.
+        transfer_or_grow(&mut src, &mut dst, 90).unwrap();
+        assert_eq!(src.size(), 0);
+        assert_eq!(dst.size(), 90);
+        assert_eq!(pool.reserved(), 90);
+        drop(src);
+        drop(dst);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn run_pipeline_with_stop_absorbs_stop_cancel_during_finish_phases() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = GlobalPool::standalone(1024 * 1024);
+        let ctx = ExecContext {
+            pool: Arc::clone(&pool),
+            eval: EvalContext::new(0, CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(
+                dir.path().to_path_buf(),
+                1024 * 1024,
+            )),
+            workers: Arc::new(WorkerPool::new(1).unwrap()),
+            batch_size: DEFAULT_BATCH_SIZE,
+            target_partitions: 1,
+            metrics: ExecMetrics::new(),
+        };
+        let schema = Schema::try_new_arc(vec![Field::new("v", DataType::I64, false)]).unwrap();
+        let b1 = make_int_batch(&schema, vec![1, 2]);
+
+        struct CancelDuringOpFinish {
+            stop_cancel: CancelToken,
+            emit_batch: Option<Batch>,
+            return_cancelled: bool,
+            scratch: Reservation,
+        }
+
+        impl PushOperator for CancelDuringOpFinish {
+            fn name(&self) -> &'static str {
+                "CancelDuringOpFinish"
+            }
+
+            fn push(
+                &mut self,
+                batch: Batch,
+                batch_res: &mut Reservation,
+                emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
+            ) -> Result<ControlFlow, QueryError> {
+                emit(batch, batch_res)
+            }
+
+            fn finish(
+                &mut self,
+                emit: &mut dyn FnMut(Batch, &mut Reservation) -> Result<ControlFlow, QueryError>,
+            ) -> Result<(), QueryError> {
+                if let Some(b) = self.emit_batch.take() {
+                    self.scratch.try_grow(b.memory_bytes())?;
+                    let res = emit(b, &mut self.scratch);
+                    self.scratch.free();
+                    let _ = res?;
+                }
+                if self.return_cancelled {
+                    self.stop_cancel.cancel();
+                    return Err(QueryError::Cancelled);
+                }
+                Ok(())
+            }
+        }
+
+        struct CancelInSinkFinish {
+            inner: CollectSink,
+            stop_cancel: CancelToken,
+            cancel_on_consume: bool,
+            cancel_on_finish: bool,
+            seen_batches: usize,
+        }
+
+        impl PushSink for CancelInSinkFinish {
+            fn consume(
+                &mut self,
+                batch: Batch,
+                batch_res: &mut Reservation,
+            ) -> Result<ControlFlow, QueryError> {
+                self.seen_batches += 1;
+                if self.cancel_on_consume && self.seen_batches >= 2 {
+                    self.stop_cancel.cancel();
+                    return Err(QueryError::Cancelled);
+                }
+                self.inner.consume(batch, batch_res)
+            }
+
+            fn finish(&mut self) -> Result<(), QueryError> {
+                if self.cancel_on_finish {
+                    self.stop_cancel.cancel();
+                    return Err(QueryError::Cancelled);
+                }
+                Ok(())
+            }
+        }
+
+        // Case 1: stop_cancel fires inside op.finish emit closure and sink.finish
+        let stop1 = CancelToken::new();
+        let src1 = BatchSource::new(Arc::clone(&schema), vec![b1.clone()]).unwrap();
+        let parts1 = src1.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+        let stop1_op = stop1.clone();
+        let stop1_sink = stop1.clone();
+        let b_flush = make_int_batch(&schema, vec![3, 4]);
+        let pool_op = Arc::clone(&pool);
+        let pool_sink = Arc::clone(&pool);
+        let sinks1 = run_pipeline_with_stop(
+            &ctx,
+            Some(stop1),
+            parts1,
+            move |_| {
+                Ok(vec![Box::new(CancelDuringOpFinish {
+                    stop_cancel: stop1_op.clone(),
+                    emit_batch: Some(b_flush.clone()),
+                    return_cancelled: false,
+                    scratch: pool_op.register("test_op", false),
+                }) as Box<dyn PushOperator>])
+            },
+            move |_| {
+                Ok(CancelInSinkFinish {
+                    inner: CollectSink::new(&pool_sink),
+                    stop_cancel: stop1_sink.clone(),
+                    cancel_on_consume: true,
+                    cancel_on_finish: true,
+                    seen_batches: 0,
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(sinks1.len(), 1);
+        assert!(!ctx.eval.cancel.is_cancelled());
+        drop(sinks1);
+        assert_eq!(pool.reserved(), 0);
+
+        // Case 2: op.finish returns Err(Cancelled) when stop_cancel fires
+        let stop2 = CancelToken::new();
+        let src2 = BatchSource::new(Arc::clone(&schema), vec![b1]).unwrap();
+        let parts2 = src2.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+        let stop2_op = stop2.clone();
+        let stop2_sink = stop2.clone();
+        let pool_op2 = Arc::clone(&pool);
+        let pool_sink2 = Arc::clone(&pool);
+        let sinks2 = run_pipeline_with_stop(
+            &ctx,
+            Some(stop2),
+            parts2,
+            move |_| {
+                Ok(vec![Box::new(CancelDuringOpFinish {
+                    stop_cancel: stop2_op.clone(),
+                    emit_batch: None,
+                    return_cancelled: true,
+                    scratch: pool_op2.register("test_op2", false),
+                }) as Box<dyn PushOperator>])
+            },
+            move |_| {
+                Ok(CancelInSinkFinish {
+                    inner: CollectSink::new(&pool_sink2),
+                    stop_cancel: stop2_sink.clone(),
+                    cancel_on_consume: false,
+                    cancel_on_finish: false,
+                    seen_batches: 0,
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(sinks2.len(), 1);
+        assert!(!ctx.eval.cancel.is_cancelled());
+        drop(sinks2);
         assert_eq!(pool.reserved(), 0);
     }
 }

@@ -21,8 +21,16 @@ use crate::exec::{
 };
 use crate::ir::{EvalContext, Expr};
 
+use super::pipeline::transfer_or_grow;
+
 /// Number of hash partitions created on each Grace spill pass.
 pub const NUM_JOIN_PARTITIONS: usize = 32;
+const _: () = assert!(NUM_JOIN_PARTITIONS == 32);
+
+#[inline]
+fn join_partition(h: u64) -> usize {
+    (h >> 59) as usize
+}
 
 /// Maximum recursive salted re-partitioning depth before failing with [`QueryError::TooLarge`].
 pub const MAX_JOIN_SPILL_DEPTH: usize = 4;
@@ -369,12 +377,22 @@ fn splitmix64(mut x: u64) -> u64 {
 }
 
 #[inline]
-fn hash_seed(depth: usize) -> u64 {
+fn hash_seed(salt: usize) -> u64 {
     splitmix64(
-        (depth as u64)
+        (salt as u64)
             .wrapping_add(1)
             .wrapping_mul(0x517C_C1B7_2722_0A95),
     )
+}
+
+#[inline]
+fn partition_hash_seed(depth: usize) -> u64 {
+    hash_seed(depth * 2)
+}
+
+#[inline]
+fn table_hash_seed(depth: usize) -> u64 {
+    hash_seed(depth * 2 + 1)
 }
 
 #[inline]
@@ -929,7 +947,7 @@ fn partition_batch_into_writers(
             continue;
         }
         let h = hash_key_row(key_cols, r, sink.seed);
-        let p = (h as usize) & (NUM_JOIN_PARTITIONS - 1);
+        let p = join_partition(h);
         if let Some(allowed) = sink.allowed_partitions
             && !allowed[p]
         {
@@ -1366,10 +1384,10 @@ impl HashJoinStream {
     }
 
     fn eval_ctx(&self, cancel: &CancelToken) -> EvalContext {
-        if cancel.is_cancelled() {
-            self.ctx.eval.with_cancel(cancel.clone())
-        } else {
+        if self.ctx.eval.cancel.is_cancelled() {
             self.ctx.eval.clone()
+        } else {
+            self.ctx.eval.with_cancel(cancel.clone())
         }
     }
 
@@ -1390,24 +1408,27 @@ impl HashJoinStream {
         }
         let orig_bytes = batch.memory_bytes();
         if batch.num_rows() <= self.batch_size {
-            self.scratch_res.shrink(orig_bytes);
-            self.pending_res.try_grow(orig_bytes)?;
+            transfer_or_grow(&mut self.scratch_res, &mut self.pending_res, orig_bytes)?;
             self.pending_out.push_back(batch);
             return Ok(());
         }
+        let pending_before = self.pending_res.size();
         let mut slices = Vec::new();
-        let mut slices_bytes = 0usize;
         let mut offset = 0usize;
         while offset < batch.num_rows() {
             let len = (batch.num_rows() - offset).min(self.batch_size);
-            let slice = batch.slice(offset, len, None)?;
-            slices_bytes = slices_bytes.saturating_add(slice.memory_bytes());
-            slices.push(slice);
+            match batch.slice(offset, len, Some(&mut self.pending_res)) {
+                Ok(slice) => slices.push(slice),
+                Err(err) => {
+                    rollback_res(Some(&mut self.pending_res), pending_before);
+                    return Err(err.into());
+                }
+            }
             offset += len;
         }
         drop(batch);
-        self.scratch_res.shrink(orig_bytes);
-        self.pending_res.try_grow(slices_bytes)?;
+        self.scratch_res
+            .shrink(orig_bytes.min(self.scratch_res.size()));
         self.pending_out.extend(slices);
         Ok(())
     }
@@ -1417,9 +1438,11 @@ impl HashJoinStream {
             return Ok(None);
         };
         let bytes = b.memory_bytes();
-        self.pending_res.shrink(bytes);
-        let before = res.as_ref().map_or(0, |r| r.size());
-        reconcile_res(res, before, bytes)?;
+        if let Some(cr) = res {
+            transfer_or_grow(&mut self.pending_res, cr, bytes)?;
+        } else {
+            self.pending_res.shrink(bytes.min(self.pending_res.size()));
+        }
         Ok(Some(b))
     }
 
@@ -1447,8 +1470,8 @@ impl HashJoinStream {
             {
                 self.check_cancel(cancel)?;
                 let bytes = batch.memory_bytes();
+                transfer_or_grow(&mut self.pull_res, &mut st.build_res, bytes)?;
                 self.pull_res.free();
-                st.build_res.try_grow(bytes)?;
                 st.total_right_rows = st.total_right_rows.saturating_add(batch.num_rows());
                 st.right_batches.push(batch);
             }
@@ -1513,18 +1536,32 @@ impl HashJoinStream {
                 let mask = eval_filter(pred, &out, &eval_ctx, Some(&mut self.scratch_res))?;
                 let filtered = out.into_filter_mask(&mask)?;
                 drop(mask);
-                self.scratch_res.free();
+                let filtered_bytes = filtered.memory_bytes();
+                if self.scratch_res.size() > filtered_bytes {
+                    self.scratch_res
+                        .shrink(self.scratch_res.size() - filtered_bytes);
+                }
                 if filtered.is_empty() {
+                    self.scratch_res.free();
                     continue;
                 }
-                filtered.compact(Some(&mut self.scratch_res))?
+                let compacted = filtered.compact(Some(&mut self.scratch_res))?;
+                drop(filtered);
+                let compacted_bytes = compacted.memory_bytes();
+                if self.scratch_res.size() > compacted_bytes {
+                    self.scratch_res
+                        .shrink(self.scratch_res.size() - compacted_bytes);
+                }
+                compacted
             } else {
                 out
             };
+            let out_bytes = final_out.memory_bytes();
+            if let Some(cr) = res {
+                transfer_or_grow(&mut self.scratch_res, cr, out_bytes)?;
+            }
             self.scratch_res.free();
 
-            let before = res.as_ref().map_or(0, |r| r.size());
-            reconcile_res(res, before, final_out.memory_bytes())?;
             self.phase = Phase::Cross(st);
             return Ok(Some(final_out));
         }
@@ -1604,7 +1641,8 @@ impl HashJoinStream {
             return Ok(());
         };
         let eval_ctx = self.eval_ctx(cancel);
-        let seed = hash_seed(0);
+        let part_seed = partition_hash_seed(0);
+        let table_seed = table_hash_seed(0);
         let frame_budget = self.frame_budget();
         let emit_null_build = matches!(self.spec.join_type, JoinType::Right | JoinType::Full);
 
@@ -1627,7 +1665,7 @@ impl HashJoinStream {
                         &mut st,
                         &self.right_key_evals,
                         self.spec.null_equals_null,
-                        seed,
+                        part_seed,
                         &self.ctx.spill,
                         frame_budget,
                         &mut self.scratch_res,
@@ -1684,7 +1722,7 @@ impl HashJoinStream {
                                 &mut st,
                                 &self.right_key_evals,
                                 self.spec.null_equals_null,
-                                seed,
+                                part_seed,
                                 &self.ctx.spill,
                                 frame_budget,
                                 &mut self.scratch_res,
@@ -1725,7 +1763,7 @@ impl HashJoinStream {
                                     &mut st,
                                     &self.right_key_evals,
                                     self.spec.null_equals_null,
-                                    seed,
+                                    part_seed,
                                     &self.ctx.spill,
                                     frame_budget,
                                     &mut self.scratch_res,
@@ -1748,7 +1786,7 @@ impl HashJoinStream {
                                 &mut st,
                                 &self.right_key_evals,
                                 self.spec.null_equals_null,
-                                seed,
+                                part_seed,
                                 &self.ctx.spill,
                                 frame_budget,
                                 &mut self.scratch_res,
@@ -1795,12 +1833,14 @@ impl HashJoinStream {
                         st.buffered_batches.push(non_null_batch);
                         st.buffered_computed_keys.push(non_null_keys);
                     }
-                    Err(ColumnError::MemoryLimit { .. }) if st.buffered_rows > 0 => {
+                    Err(ColumnError::MemoryLimit { .. })
+                        if st.buffered_rows > 0 || non_null_batch.num_rows() > 1 =>
+                    {
                         Self::spill_build_right_state(
                             &mut st,
                             &self.right_key_evals,
                             self.spec.null_equals_null,
-                            seed,
+                            part_seed,
                             &self.ctx.spill,
                             frame_budget,
                             &mut self.scratch_res,
@@ -1814,7 +1854,7 @@ impl HashJoinStream {
                         let mut sink = PartitionSink {
                             null_equals_null: self.spec.null_equals_null,
                             drop_null_keys: false,
-                            seed,
+                            seed: part_seed,
                             writers: &mut st.build_writers,
                             spill: &self.ctx.spill,
                             frame_budget,
@@ -1831,7 +1871,7 @@ impl HashJoinStream {
                 let mut sink = PartitionSink {
                     null_equals_null: self.spec.null_equals_null,
                     drop_null_keys: false,
-                    seed,
+                    seed: part_seed,
                     writers: &mut st.build_writers,
                     spill: &self.ctx.spill,
                     frame_budget,
@@ -1880,7 +1920,7 @@ impl HashJoinStream {
                         key_evals: &self.right_key_evals,
                         null_equals_null: self.spec.null_equals_null,
                         track_matched,
-                        seed,
+                        seed: table_seed,
                     };
                     let table = BuildTable::populate_from_buffers(
                         std::mem::take(&mut st.buffered_batches),
@@ -1892,7 +1932,7 @@ impl HashJoinStream {
                         table,
                         source: ProbeSource::Streams(left_streams),
                         cur: None,
-                        seed,
+                        seed: table_seed,
                         build_res: st.build_res,
                         remaining_tasks: None,
                     }));
@@ -1901,7 +1941,7 @@ impl HashJoinStream {
                     let mut sink = PartitionSink {
                         null_equals_null: self.spec.null_equals_null,
                         drop_null_keys: false,
-                        seed,
+                        seed: part_seed,
                         writers: &mut st.build_writers,
                         spill: &self.ctx.spill,
                         frame_budget,
@@ -1978,7 +2018,7 @@ impl HashJoinStream {
             return Ok(());
         };
         let eval_ctx = self.eval_ctx(cancel);
-        let seed = hash_seed(0);
+        let seed = partition_hash_seed(0);
         let frame_budget = self.frame_budget();
         let emit_unmatched_left = matches!(
             self.spec.join_type,
@@ -2065,7 +2105,7 @@ impl HashJoinStream {
     ) -> Result<(), QueryError> {
         let next_depth = input.next_depth;
         let frame_budget = input.frame_budget;
-        let next_seed = hash_seed(next_depth);
+        let next_seed = partition_hash_seed(next_depth);
         let mut sub_build_writers = new_writer_array();
         {
             let mut build_sink = PartitionSink {
@@ -2336,7 +2376,9 @@ impl HashJoinStream {
                                 buffered_batches.push(batch);
                                 buffered_keys.push(key_cols_eval);
                             }
-                            Err(ColumnError::MemoryLimit { .. }) if buffered_rows > 0 => {
+                            Err(ColumnError::MemoryLimit { .. })
+                                if buffered_rows > 0 || batch.num_rows() > 1 =>
+                            {
                                 overflow_cur = Some((batch, Some(key_cols_eval)));
                                 break;
                             }
@@ -2382,7 +2424,7 @@ impl HashJoinStream {
                     ) {
                         Ok((_, num_buckets)) => {
                             drop(build_file);
-                            let seed = hash_seed(depth);
+                            let seed = table_hash_seed(depth);
                             let cfg = BuildTableConfig {
                                 total_rows: buffered_rows,
                                 num_buckets,
@@ -3752,13 +3794,13 @@ mod tests {
 
         // Depth-2 salted re-partitioning success: pick 80 distinct keys that all collide into
         // partition 0 at depth 0, with enough rows per key to overflow depth 1, then succeed at depth 2.
-        let seed0 = hash_seed(0);
+        let seed0 = partition_hash_seed(0);
         let mut colliding_keys = Vec::with_capacity(80);
         let mut cand: i64 = 0;
         while colliding_keys.len() < 80 {
             let kcol = Column::Flat(FlatColumn::try_new(FlatData::I64(vec![cand]), None).unwrap());
             let h = hash_key_row(&[&kcol], 0, seed0);
-            if (h as usize) & (NUM_JOIN_PARTITIONS - 1) == 0 {
+            if join_partition(h) == 0 {
                 colliding_keys.push(cand);
             }
             cand += 1;
@@ -3986,21 +4028,21 @@ mod tests {
         assert!(matches!(err, QueryError::Internal(_)));
 
         // 2. Depth-2 repartition with Left/Full/LeftAnti emitting bypassed probe rows via EmitUnmatchedProbe.
-        let seed0 = hash_seed(0);
-        let seed1 = hash_seed(1);
+        // Depth-0 spill partitions with `partition_hash_seed(0)`, and depth-1 overflow repartitions
+        // with `next_depth = 2` (`partition_hash_seed(2)`).
+        let seed0 = partition_hash_seed(0);
+        let seed2 = partition_hash_seed(2);
         let mut build_keys = Vec::new();
         let mut unmatched_p0_keys = Vec::new();
         let mut cand: i64 = 0;
         while build_keys.len() < 40 || unmatched_p0_keys.len() < 10 {
             let kcol = Column::Flat(FlatColumn::try_new(FlatData::I64(vec![cand]), None).unwrap());
             let h0 = hash_key_row(&[&kcol], 0, seed0);
-            if (h0 as usize) & (NUM_JOIN_PARTITIONS - 1) == 0 {
-                let h1 = hash_key_row(&[&kcol], 0, seed1);
-                if (h1 as usize) & (NUM_JOIN_PARTITIONS - 1) == 0 && build_keys.len() < 40 {
+            if join_partition(h0) == 0 {
+                let h2 = hash_key_row(&[&kcol], 0, seed2);
+                if join_partition(h2) == 0 && build_keys.len() < 40 {
                     build_keys.push(cand);
-                } else if (h1 as usize) & (NUM_JOIN_PARTITIONS - 1) != 0
-                    && unmatched_p0_keys.len() < 10
-                {
+                } else if join_partition(h2) != 0 && unmatched_p0_keys.len() < 10 {
                     unmatched_p0_keys.push(cand);
                 }
             }
@@ -4466,5 +4508,197 @@ mod tests {
             }
         }
         assert_eq!(pairs, vec![(10, 20)]);
+    }
+
+    #[test]
+    fn hash_join_single_oversized_right_batch_spills_instead_of_failing() {
+        // Single right batch with >1 rows whose `build_res` exceeds `spill_share()` triggers
+        // Grace spill when `buffered_rows == 0 && num_rows > 1`, splits across 32 partitions,
+        // and joins cleanly.
+        let schema = Schema::try_new_arc(vec![
+            Field::new("k", DataType::I64, false),
+            Field::new("pad", DataType::Utf8, false),
+        ])
+        .unwrap();
+
+        let n = 256usize;
+        let ks: Vec<i64> = (0..n as i64).collect();
+        let pads: Vec<String> = (0..n).map(|i| format!("payload-{i:0>120}")).collect();
+        let pad_refs: Vec<&str> = pads.iter().map(String::as_str).collect();
+        let big_right = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(ks), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(pad_refs).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n,
+        )
+        .unwrap();
+
+        let probe_ks: Vec<i64> = vec![0, 42, 127, 255, 999];
+        let probe_pads = vec!["p0", "p1", "p2", "p3", "p4"];
+        let left_batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(probe_ks), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(probe_pads).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            5,
+        )
+        .unwrap();
+
+        let right_bytes = big_right.memory_bytes();
+        // Pool holds `pull_res` + `right_bytes` while reading, plus a sibling spillable
+        // consumer so `build_res`'s fair spill share (~cap/2 = 0.75 * right_bytes) is strictly
+        // below `right_bytes`, forcing spill on the very first right batch (`buffered_rows == 0 && num_rows > 1`).
+        let cap = right_bytes + (right_bytes / 2).max(16 * 1024);
+        assert!(cap / 2 < right_bytes);
+        let (ctx, _dir) = make_ctx(cap, 16 * 1024 * 1024);
+        let mut sibling_spillable = ctx.pool.register("sibling_spill", true);
+        sibling_spillable.try_grow(8 * 1024).unwrap();
+
+        let l_src = BatchSource::new(Arc::clone(&schema), vec![left_batch]).unwrap();
+        let r_src = BatchSource::new(Arc::clone(&schema), vec![big_right]).unwrap();
+        let stream = execute_hash_join(
+            l_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            Arc::clone(&schema),
+            r_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            Arc::clone(&schema),
+            HashJoinSpec {
+                join_type: JoinType::Inner,
+                left_keys: vec![col_expr(0, "k", DataType::I64)],
+                right_keys: vec![col_expr(0, "k", DataType::I64)],
+                null_equals_null: false,
+                residual_filter: None,
+            },
+            &ctx,
+        )
+        .unwrap();
+        let out = drain_stream(stream, &ctx.eval.cancel).unwrap();
+        drop(sibling_spillable);
+        assert_eq!(ctx.spill.spilled_bytes(), 0);
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        let mut matched: Vec<i64> = out
+            .iter()
+            .flat_map(|b| {
+                let c = b.column(0).unwrap();
+                (0..b.num_rows()).map(move |r| read_i64(c, r).unwrap())
+            })
+            .collect();
+        matched.sort_unstable();
+        assert_eq!(matched, vec![0, 42, 127, 255]);
+    }
+
+    #[test]
+    fn hash_join_eval_ctx_propagates_caller_cancel_and_cross_transfers_atomically() {
+        let schema = Schema::try_new_arc(vec![Field::new("k", DataType::I64, false)]).unwrap();
+        let l_batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![Column::Flat(
+                FlatColumn::try_new(FlatData::I64(vec![1, 2, 3, 4]), None).unwrap(),
+            )],
+            4,
+        )
+        .unwrap();
+        let r_batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![Column::Flat(
+                FlatColumn::try_new(FlatData::I64(vec![10, 20]), None).unwrap(),
+            )],
+            2,
+        )
+        .unwrap();
+
+        let (mut ctx, _dir) = make_ctx(64 * 1024, 1024 * 1024);
+        ctx.batch_size = 3; // Exercise slicing in queue_sliced_batch / cross chunking
+
+        // Cross join with residual filter (`left.k + right.k > 20`)
+        let pred = Expr::Binary {
+            left: Box::new(Expr::Binary {
+                left: Box::new(col_expr(0, "k", DataType::I64)),
+                op: BinaryOp::Add,
+                right: Box::new(col_expr(1, "k", DataType::I64)),
+                data_type: DataType::I64,
+            }),
+            op: BinaryOp::Gt,
+            right: Box::new(Expr::Literal(ScalarValue::I64(20))),
+            data_type: DataType::Bool,
+        };
+        let l_src = BatchSource::new(Arc::clone(&schema), vec![l_batch.clone()]).unwrap();
+        let r_src = BatchSource::new(Arc::clone(&schema), vec![r_batch.clone()]).unwrap();
+        let mut cross_stream = execute_hash_join(
+            l_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            Arc::clone(&schema),
+            r_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            Arc::clone(&schema),
+            HashJoinSpec {
+                join_type: JoinType::Cross,
+                left_keys: vec![],
+                right_keys: vec![],
+                null_equals_null: false,
+                residual_filter: Some(pred),
+            },
+            &ctx,
+        )
+        .unwrap();
+        let mut cr = ctx.pool.register("caller", false);
+        let mut pairs = Vec::new();
+        while let Some(b) = cross_stream
+            .next_batch(&ctx.eval.cancel, Some(&mut cr))
+            .unwrap()
+        {
+            assert_eq!(cr.size(), b.memory_bytes());
+            for r in 0..b.num_rows() {
+                pairs.push((
+                    read_i64(b.column(0).unwrap(), r).unwrap(),
+                    read_i64(b.column(1).unwrap(), r).unwrap(),
+                ));
+            }
+            cr.free();
+        }
+        drop(cross_stream);
+        assert_eq!(pairs, vec![(1, 20), (2, 20), (3, 20), (4, 20)]);
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        // Verify caller-supplied cancel token propagates into `eval_ctx` even when
+        // `ctx.eval.cancel` is NOT cancelled, AND partition vs table seeds are distinct.
+        assert_ne!(partition_hash_seed(0), table_hash_seed(0));
+        let stop_cancel = CancelToken::new();
+        let l_src2 = BatchSource::new(Arc::clone(&schema), vec![l_batch]).unwrap();
+        let r_src2 = BatchSource::new(Arc::clone(&schema), vec![r_batch]).unwrap();
+        let mut stream2 = execute_hash_join(
+            l_src2.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            Arc::clone(&schema),
+            r_src2.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            Arc::clone(&schema),
+            HashJoinSpec {
+                join_type: JoinType::Inner,
+                left_keys: vec![col_expr(0, "k", DataType::I64)],
+                right_keys: vec![col_expr(0, "k", DataType::I64)],
+                null_equals_null: false,
+                residual_filter: None,
+            },
+            &ctx,
+        )
+        .unwrap();
+        stop_cancel.cancel();
+        let err = stream2.next_batch(&stop_cancel, None).unwrap_err();
+        assert!(matches!(err, QueryError::Cancelled));
+        assert!(!ctx.eval.cancel.is_cancelled());
+        drop(stream2);
+        assert_eq!(ctx.pool.reserved(), 0);
     }
 }

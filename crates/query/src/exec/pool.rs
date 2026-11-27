@@ -238,9 +238,9 @@ impl WorkerPool {
         let mut guard = scope.lock();
         loop {
             if !guard.drained_pool && (guard.first_err.is_some() || cancel.is_cancelled()) {
-                cancel.cancel();
                 guard.aborted = true;
                 drop(guard);
+                cancel.cancel();
                 let drained = self.drain_query(query_id);
                 guard = scope.lock();
                 guard.drained_pool = true;
@@ -812,6 +812,40 @@ mod tests {
             elapsed < Duration::from_millis(20),
             "cancel wakeup took {elapsed:?}"
         );
+        assert_eq!(pool.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn run_scoped_abort_does_not_deadlock_when_cancel_waker_fires() {
+        let pool = Arc::new(WorkerPool::new(2).unwrap());
+        let cancel = CancelToken::new();
+        let waker_calls = Arc::new(AtomicUsize::new(0));
+        let _waker_guard = cancel.register_waker({
+            let calls = Arc::clone(&waker_calls);
+            move || {
+                calls.fetch_add(1, Ordering::AcqRel);
+            }
+        });
+
+        // One task errors while queued sibling tasks remain to be drained;
+        // `run_scoped` must drop `scope` mutex before calling `cancel.cancel()`.
+        type UnitTask = Box<dyn FnOnce(usize) -> Result<(), QueryError> + Send>;
+        let tasks: Vec<UnitTask> = (0..8)
+            .map(|i| {
+                Box::new(move |_| {
+                    if i == 0 {
+                        Err(QueryError::TooLarge)
+                    } else {
+                        Ok(())
+                    }
+                }) as UnitTask
+            })
+            .collect();
+
+        let err = pool.run_scoped(&cancel, tasks).unwrap_err();
+        assert!(matches!(err, QueryError::TooLarge));
+        assert!(cancel.is_cancelled());
+        assert_eq!(waker_calls.load(Ordering::Acquire), 1);
         assert_eq!(pool.in_flight_count(), 0);
     }
 }

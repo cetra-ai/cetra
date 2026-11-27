@@ -234,7 +234,7 @@ pub struct ExternalSort {
     buffered_rows: usize,
     max_batch_bytes: usize,
     runs: Vec<SpillFile>,
-    res: Reservation,
+    res: Option<Reservation>,
 }
 
 impl fmt::Debug for ExternalSort {
@@ -247,7 +247,7 @@ impl fmt::Debug for ExternalSort {
             .field("buffered_rows", &self.buffered_rows)
             .field("max_batch_bytes", &self.max_batch_bytes)
             .field("runs", &self.runs.len())
-            .field("reserved_bytes", &self.res.size())
+            .field("reserved_bytes", &self.res_size())
             .finish()
     }
 }
@@ -260,7 +260,7 @@ impl ExternalSort {
         limit: Option<usize>,
         ctx: ExecContext,
     ) -> Self {
-        let res = ctx.pool.register("external_sort", true);
+        let res = Some(ctx.pool.register("external_sort", true));
         Self {
             schema,
             keys,
@@ -287,12 +287,29 @@ impl ExternalSort {
         self.runs.len()
     }
 
+    fn res_mut(&mut self) -> &mut Reservation {
+        let pool = &self.ctx.pool;
+        self.res
+            .get_or_insert_with(|| pool.register("external_sort", true))
+    }
+
+    fn res_size(&self) -> usize {
+        self.res.as_ref().map_or(0, Reservation::size)
+    }
+
+    fn drop_res(&mut self) {
+        self.res = None;
+    }
+
     fn try_buffer_batch(
         &mut self,
         batch: &Batch,
         batch_res: &mut Reservation,
     ) -> Result<(), QueryError> {
-        let before = self.res.size();
+        let res = self
+            .res
+            .get_or_insert_with(|| self.ctx.pool.register("external_sort", true));
+        let before = res.size();
         let batch_res_before = batch_res.size();
         let rollback = |res: &mut Reservation, batch_res: &mut Reservation| {
             let transferred = batch_res_before.saturating_sub(batch_res.size());
@@ -309,35 +326,34 @@ impl ExternalSort {
         };
         let compacted = if batch.selection().is_all(batch.raw_len()) {
             let mem = batch.memory_bytes();
-            if let Err(err) = transfer_or_grow(batch_res, &mut self.res, mem) {
-                rollback(&mut self.res, batch_res);
+            if let Err(err) = transfer_or_grow(batch_res, res, mem) {
+                rollback(res, batch_res);
                 return Err(err.into());
             }
             match batch.clone().into_with_selection(Selection::All) {
                 Ok(b) => b,
                 Err(err) => {
-                    rollback(&mut self.res, batch_res);
+                    rollback(res, batch_res);
                     return Err(err.into());
                 }
             }
         } else {
-            match batch.compact(Some(&mut self.res)) {
+            match batch.compact(Some(res)) {
                 Ok(b) => b,
                 Err(err) => {
-                    rollback(&mut self.res, batch_res);
+                    rollback(res, batch_res);
                     return Err(err.into());
                 }
             }
         };
 
-        let extra_keys =
-            match eval_extra_sort_keys(&self.keys, &compacted, &self.ctx.eval, &mut self.res) {
-                Ok(ek) => ek,
-                Err(err) => {
-                    rollback(&mut self.res, batch_res);
-                    return Err(err);
-                }
-            };
+        let extra_keys = match eval_extra_sort_keys(&self.keys, &compacted, &self.ctx.eval, res) {
+            Ok(ek) => ek,
+            Err(err) => {
+                rollback(res, batch_res);
+                return Err(err);
+            }
+        };
 
         let rows = compacted.num_rows();
         self.buffered.push(BufferedBatch {
@@ -387,7 +403,9 @@ impl ExternalSort {
     fn spill_buffered(&mut self) -> Result<(), QueryError> {
         if self.buffered_rows == 0 {
             self.buffered.clear();
-            self.res.free();
+            if let Some(res) = &mut self.res {
+                res.free();
+            }
             return Ok(());
         }
 
@@ -395,7 +413,9 @@ impl ExternalSort {
         if refs.is_empty() {
             self.buffered.clear();
             self.buffered_rows = 0;
-            self.res.free();
+            if let Some(res) = &mut self.res {
+                res.free();
+            }
             return Ok(());
         }
 
@@ -423,7 +443,88 @@ impl ExternalSort {
         self.runs.push(spill_file);
         self.buffered.clear();
         self.buffered_rows = 0;
-        self.res.free();
+        self.res_mut().free();
+        Ok(())
+    }
+
+    fn spill_single_batch(
+        &mut self,
+        batch: &Batch,
+        _batch_res: &mut Reservation,
+    ) -> Result<(), QueryError> {
+        if let Some(res) = &mut self.res {
+            res.free();
+        }
+        let active_rows = batch.num_rows();
+        if active_rows == 0 {
+            return Ok(());
+        }
+
+        let mut key_res = self.ctx.pool.register("external_sort_single_keys", false);
+        let extra_keys = eval_extra_sort_keys(&self.keys, batch, &self.ctx.eval, &mut key_res)?;
+
+        let mut refs: Vec<(u32, u32)> = Vec::with_capacity(active_rows);
+        match batch.selection() {
+            Selection::All => {
+                for r_idx in 0..batch.raw_len() {
+                    let r_u32 = u32::try_from(r_idx).map_err(|_| ColumnError::Overflow {
+                        reason: "batch row index exceeds u32::MAX",
+                    })?;
+                    refs.push((0, r_u32));
+                }
+            }
+            Selection::Mask(mask) => {
+                for r_idx in mask.iter_ones() {
+                    let r_u32 = u32::try_from(r_idx).map_err(|_| ColumnError::Overflow {
+                        reason: "batch row index exceeds u32::MAX",
+                    })?;
+                    refs.push((0, r_u32));
+                }
+            }
+            Selection::Indices(indices) => {
+                for &r_u32 in indices {
+                    refs.push((0, r_u32));
+                }
+            }
+        }
+
+        {
+            let key_refs = resolve_key_col_refs(&self.keys, batch, &extra_keys)?;
+            refs.sort_by(|&(_, ra), &(_, rb)| {
+                compare_key_refs_across(&key_refs, ra as usize, &key_refs, rb as usize, &self.keys)
+            });
+        }
+        if let Some(limit) = self.limit {
+            refs.truncate(limit);
+        }
+        drop(extra_keys);
+        key_res.free();
+        drop(key_res);
+
+        if refs.is_empty() {
+            return Ok(());
+        }
+
+        let merge_way = effective_merge_way(&self.ctx.pool, self.max_merge_way);
+        let frame_bytes = target_frame_bytes(&self.ctx.pool, merge_way);
+        let avg_row = (batch.memory_bytes() / active_rows.max(1)).max(1);
+        let rows_per_chunk = (frame_bytes / avg_row)
+            .max(1)
+            .min(self.ctx.batch_size.max(1));
+
+        let batch_refs = [batch];
+        let mut writer = self.ctx.spill.create_file()?;
+        for chunk in refs.chunks(rows_per_chunk) {
+            if self.ctx.eval.cancel.is_cancelled() {
+                return Err(QueryError::Cancelled);
+            }
+            let out_batch =
+                build_batch_from_refs(&self.schema, &batch_refs, chunk, None, &self.ctx.eval)?;
+            write_batch_framed(&mut writer, &out_batch, frame_bytes)?;
+        }
+
+        let spill_file = writer.finish()?;
+        self.runs.push(spill_file);
         Ok(())
     }
 
@@ -434,7 +535,7 @@ impl ExternalSort {
             self.buffered.clear();
             self.buffered_rows = 0;
             self.runs.clear();
-            self.res.free();
+            self.drop_res();
             return Ok(Box::new(EmptyStream));
         }
 
@@ -443,11 +544,15 @@ impl ExternalSort {
             if refs.is_empty() {
                 self.buffered.clear();
                 self.buffered_rows = 0;
-                self.res.free();
+                self.drop_res();
                 return Ok(Box::new(EmptyStream));
             }
             let merge_way = effective_merge_way(&self.ctx.pool, self.max_merge_way);
             let frame_bytes = target_frame_bytes(&self.ctx.pool, merge_way);
+            let res = self
+                .res
+                .take()
+                .unwrap_or_else(|| self.ctx.pool.register("external_sort", true));
             return Ok(Box::new(InMemorySortedStream {
                 schema: self.schema,
                 ctx: self.ctx,
@@ -455,7 +560,7 @@ impl ExternalSort {
                 refs,
                 cursor: 0,
                 frame_bytes,
-                res: self.res,
+                res,
                 fallback_reader: None,
                 fallback_file: None,
             }));
@@ -464,8 +569,7 @@ impl ExternalSort {
         if self.buffered_rows > 0 {
             self.spill_buffered()?;
         }
-        self.res.free();
-        drop(self.res);
+        self.drop_res();
 
         let merge_way = effective_merge_way(&self.ctx.pool, self.max_merge_way);
         merge_spill_passes(
@@ -522,12 +626,11 @@ impl ExternalSort {
             .min()
             .unwrap_or(MAX_MERGE_WAY)
             .max(2);
-        let merge_way = effective_merge_way(&ctx.pool, max_merge_way);
 
         let mut non_empty: Vec<Self> = Vec::with_capacity(sinks.len());
         for mut sink in sinks {
             if sink.runs.is_empty() && sink.buffered_rows == 0 {
-                sink.res.free();
+                sink.drop_res();
                 continue;
             }
             non_empty.push(sink);
@@ -549,9 +652,10 @@ impl ExternalSort {
             return single.into_stream();
         }
 
-        let any_spilled = non_empty.iter().any(|s| !s.runs.is_empty());
-        let total_reserved: usize = non_empty.iter().map(|s| s.res.size()).sum();
+        let merge_way = effective_merge_way(&ctx.pool, max_merge_way);
         let frame_bytes = target_frame_bytes(&ctx.pool, merge_way);
+        let any_spilled = non_empty.iter().any(|s| !s.runs.is_empty());
+        let total_reserved: usize = non_empty.iter().map(Self::res_size).sum();
         let can_stay_in_memory =
             !any_spilled && non_empty.len() <= merge_way && total_reserved <= ctx.pool.cap() / 2;
 
@@ -588,10 +692,12 @@ impl ExternalSort {
             if sink.buffered_rows > 0 {
                 sink.spill_buffered()?;
             }
-            sink.res.free();
+            sink.drop_res();
             all_runs.append(&mut sink.runs);
         }
 
+        let merge_way = effective_merge_way(&ctx.pool, max_merge_way);
+        let frame_bytes = target_frame_bytes(&ctx.pool, merge_way);
         merge_spill_passes(&mut all_runs, &schema, &keys, limit, merge_way, ctx)?;
 
         MergeStream::from_spill_files(
@@ -629,14 +735,32 @@ impl PushSink for ExternalSort {
         }
 
         self.max_batch_bytes = self.max_batch_bytes.max(batch.memory_bytes());
-        match self.try_buffer_batch(&batch, batch_res) {
-            Ok(()) => {}
-            Err(QueryError::TooLarge) if self.buffered_rows > 0 => {
-                self.spill_buffered()?;
-                // Buffered rows are now 0; never loop if this batch still exceeds memory.
-                self.try_buffer_batch(&batch, batch_res)?;
+        let buffered = match self.try_buffer_batch(&batch, batch_res) {
+            Ok(()) => true,
+            Err(QueryError::TooLarge) => {
+                if self.buffered_rows > 0 {
+                    self.spill_buffered()?;
+                    match self.try_buffer_batch(&batch, batch_res) {
+                        Ok(()) => true,
+                        Err(QueryError::TooLarge)
+                            if batch.memory_bytes() <= self.ctx.pool.cap() =>
+                        {
+                            self.spill_single_batch(&batch, batch_res)?;
+                            false
+                        }
+                        Err(err) => return Err(err),
+                    }
+                } else if batch.memory_bytes() <= self.ctx.pool.cap() {
+                    self.spill_single_batch(&batch, batch_res)?;
+                    false
+                } else {
+                    return Err(QueryError::TooLarge);
+                }
             }
             Err(err) => return Err(err),
+        };
+        if !buffered {
+            return Ok(ControlFlow::Continue);
         }
         // Leave enough pool headroom after `consume` returns: an upstream `OpStream`
         // (source pull + operator scratch + output queue) can transiently hold ~3x one batch
@@ -644,8 +768,7 @@ impl PushSink for ExternalSort {
         let cap = self.ctx.pool.cap();
         if self.buffered_rows > 0
             && (self
-                .res
-                .size()
+                .res_size()
                 .saturating_add(self.max_batch_bytes.saturating_mul(3))
                 > cap
                 || self
@@ -658,6 +781,31 @@ impl PushSink for ExternalSort {
             self.spill_buffered()?;
         }
         Ok(ControlFlow::Continue)
+    }
+
+    fn finish(&mut self) -> Result<(), QueryError> {
+        if self.buffered_rows == 0 {
+            self.drop_res();
+            return Ok(());
+        }
+        if !self.runs.is_empty() {
+            self.spill_buffered()?;
+            self.drop_res();
+            return Ok(());
+        }
+        if self.ctx.target_partitions > 1 {
+            let cap = self.ctx.pool.cap();
+            let workers = self.ctx.workers.num_workers().max(1);
+            let headroom = self
+                .max_batch_bytes
+                .saturating_mul(workers.saturating_add(1))
+                .min(cap / 2);
+            if self.ctx.pool.reserved().saturating_add(headroom) > cap {
+                self.spill_buffered()?;
+                self.drop_res();
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2385,28 +2533,29 @@ impl WindowStream {
             })
             .collect();
 
-        let part_extra = if part_sort_keys.is_empty() {
-            Vec::new()
-        } else {
-            eval_extra_sort_keys(&part_sort_keys, &batch, &eval_ctx, &mut self.res)?
-        };
-        let needs_peers = !self.order_by.is_empty()
-            && self
-                .specs
-                .iter()
-                .any(|s| matches!(s.func, WindowFunc::Rank | WindowFunc::DenseRank));
-        let order_extra = if needs_peers {
-            eval_extra_sort_keys(&self.order_by, &batch, &eval_ctx, &mut self.res)?
-        } else {
-            Vec::new()
-        };
-
         let mut st = self
             .streaming
             .take()
             .ok_or_else(|| QueryError::internal("missing streaming window state"))?;
 
         let eval_res = (|| -> Result<Batch, QueryError> {
+            let mut key_res = self.ctx.pool.register("window_stream_keys", false);
+            let part_extra = if part_sort_keys.is_empty() {
+                Vec::new()
+            } else {
+                eval_extra_sort_keys(&part_sort_keys, &batch, &eval_ctx, &mut key_res)?
+            };
+            let needs_peers = !self.order_by.is_empty()
+                && self
+                    .specs
+                    .iter()
+                    .any(|s| matches!(s.func, WindowFunc::Rank | WindowFunc::DenseRank));
+            let order_extra = if needs_peers {
+                eval_extra_sort_keys(&self.order_by, &batch, &eval_ctx, &mut key_res)?
+            } else {
+                Vec::new()
+            };
+
             let mut part_reset = vec![false; n];
             let mut part_row = vec![0usize; n];
             let mut is_new_peer = vec![false; n];
@@ -2509,6 +2658,7 @@ impl WindowStream {
 
             drop(part_extra);
             drop(order_extra);
+            drop(key_res);
 
             let mut out_cols: Vec<Column> = Vec::with_capacity(self.specs.len());
             for (spec_idx, spec) in self.specs.iter().enumerate() {
@@ -2603,11 +2753,12 @@ impl WindowStream {
             })
             .collect();
 
+        let mut first_key_res = self.ctx.pool.register("window_part_keys", false);
         let first_keys = eval_extra_sort_keys(
             &part_sort_keys,
             &first,
             &self.ctx.eval.with_cancel(cancel.clone()),
-            &mut self.res,
+            &mut first_key_res,
         )?;
         let n_first = first.num_rows();
         let split_at = {
@@ -2616,8 +2767,9 @@ impl WindowStream {
         };
         if split_at < n_first {
             drop(first_keys);
-            let head = first.slice(0, split_at, None)?;
-            let tail = first.slice(split_at, n_first - split_at, None)?;
+            drop(first_key_res);
+            let head = first.slice(0, split_at, Some(&mut self.res))?;
+            let tail = first.slice(split_at, n_first - split_at, Some(&mut self.res))?;
             drop(first);
             self.lookahead = Some(tail);
             let target = self.current_held_bytes(head.memory_bytes());
@@ -2631,17 +2783,19 @@ impl WindowStream {
             let next_opt = self.pull_next_sorted_batch(cancel)?;
             let Some(next_b) = next_opt else {
                 drop(first_keys);
+                drop(first_key_res);
                 let total_parts: usize = parts.iter().map(Batch::memory_bytes).sum();
                 let target = self.current_held_bytes(total_parts);
                 self.res.resize(target)?;
                 break;
             };
 
+            let mut next_key_res = self.ctx.pool.register("window_part_next_keys", false);
             let next_keys = eval_extra_sort_keys(
                 &part_sort_keys,
                 &next_b,
                 &self.ctx.eval.with_cancel(cancel.clone()),
-                &mut self.res,
+                &mut next_key_res,
             )?;
 
             let diff_partition = {
@@ -2653,7 +2807,9 @@ impl WindowStream {
 
             if diff_partition {
                 drop(next_keys);
+                drop(next_key_res);
                 drop(first_keys);
+                drop(first_key_res);
                 self.lookahead = Some(next_b);
                 let total_parts: usize = parts.iter().map(Batch::memory_bytes).sum();
                 let target = self.current_held_bytes(total_parts);
@@ -2667,11 +2823,13 @@ impl WindowStream {
                 partition_boundary(&next_key_refs, &part_sort_keys, n_next)
             };
             drop(next_keys);
+            drop(next_key_res);
 
             if split < n_next {
                 drop(first_keys);
-                let head = next_b.slice(0, split, None)?;
-                let tail = next_b.slice(split, n_next - split, None)?;
+                drop(first_key_res);
+                let head = next_b.slice(0, split, Some(&mut self.res))?;
+                let tail = next_b.slice(split, n_next - split, Some(&mut self.res))?;
                 drop(next_b);
                 parts.push(head);
                 self.lookahead = Some(tail);
@@ -2769,14 +2927,16 @@ impl WindowStream {
         if n <= chunk_size {
             self.queued_out.push_back(full_out);
         } else {
+            let mut slices = Vec::with_capacity(n.div_ceil(chunk_size));
             let mut offset = 0usize;
             while offset < n {
                 let len = (n - offset).min(chunk_size);
-                let slice = full_out.slice(offset, len, None)?;
-                self.queued_out.push_back(slice);
+                let slice = full_out.slice(offset, len, Some(&mut self.res))?;
+                slices.push(slice);
                 offset += len;
             }
             drop(full_out);
+            self.queued_out.extend(slices);
         }
         self.reconcile_window_res()?;
         Ok(())
@@ -2829,7 +2989,21 @@ impl PartitionStream for WindowStream {
             return Ok(None);
         };
         let batch_bytes = batch.memory_bytes();
-        self.reconcile_window_res()?;
+        let keep_bytes = self.current_held_bytes(0);
+        if let Some(cr) = res.as_deref_mut() {
+            let xfer = self.res.size().saturating_sub(keep_bytes).min(batch_bytes);
+            if xfer > 0
+                && let Err(err) = self.res.transfer_to(cr, xfer)
+            {
+                let _ = self.reconcile_window_res();
+                rollback_to(&mut res, before);
+                return Err(err.into());
+            }
+        }
+        if let Err(err) = self.reconcile_window_res() {
+            rollback_to(&mut res, before);
+            return Err(err);
+        }
         if let Err(err) = reconcile_output(&mut res, before, batch_bytes) {
             rollback_to(&mut res, before);
             return Err(err);
@@ -3906,6 +4080,9 @@ fn eval_window_count(
                 }
                 let (_, e) = compute_row_frame_bounds(frame, order_empty, peers, i, n);
                 while pos < e {
+                    if (pos & CANCEL_CHECK_MASK) == 0 {
+                        check_cancel(eval_ctx, &mut Some(res), before)?;
+                    }
                     if !col.is_null(pos) {
                         prefix += 1;
                     }
@@ -3921,6 +4098,9 @@ fn eval_window_count(
                 let (s, e) = compute_row_frame_bounds(frame, order_empty, peers, i, n);
                 let mut c = 0i64;
                 for r in s..e {
+                    if (r & CANCEL_CHECK_MASK) == 0 {
+                        check_cancel(eval_ctx, &mut Some(res), before)?;
+                    }
                     if !col.is_null(r) {
                         c += 1;
                     }
@@ -3981,6 +4161,9 @@ fn eval_window_sum(
                     }
                     let (_, e) = compute_row_frame_bounds(frame, order_empty, peers, i, n);
                     while pos < e {
+                        if (pos & CANCEL_CHECK_MASK) == 0 {
+                            check_cancel(eval_ctx, &mut Some(res), before)?;
+                        }
                         if let Some(v) = eval::read_i64(col, pos) {
                             acc = Some(match acc {
                                 Some(cur) => cur.checked_add(v).ok_or_else(|| {
@@ -4004,6 +4187,9 @@ fn eval_window_sum(
                     let (s, e) = compute_row_frame_bounds(frame, order_empty, peers, i, n);
                     let mut acc: Option<i64> = None;
                     for r in s..e {
+                        if (r & CANCEL_CHECK_MASK) == 0 {
+                            check_cancel(eval_ctx, &mut Some(res), before)?;
+                        }
                         if let Some(v) = eval::read_i64(col, r) {
                             acc = Some(match acc {
                                 Some(cur) => cur.checked_add(v).ok_or_else(|| {
@@ -4034,6 +4220,9 @@ fn eval_window_sum(
                     }
                     let (_, e) = compute_row_frame_bounds(frame, order_empty, peers, i, n);
                     while pos < e {
+                        if (pos & CANCEL_CHECK_MASK) == 0 {
+                            check_cancel(eval_ctx, &mut Some(res), before)?;
+                        }
                         if let Some(v) = eval::read_f64(col, pos) {
                             acc = Some(acc.map_or(v, |cur| cur + v));
                         }
@@ -4052,6 +4241,9 @@ fn eval_window_sum(
                     let (s, e) = compute_row_frame_bounds(frame, order_empty, peers, i, n);
                     let mut acc: Option<f64> = None;
                     for r in s..e {
+                        if (r & CANCEL_CHECK_MASK) == 0 {
+                            check_cancel(eval_ctx, &mut Some(res), before)?;
+                        }
                         if let Some(v) = eval::read_f64(col, r) {
                             acc = Some(acc.map_or(v, |cur| cur + v));
                         }
@@ -4077,6 +4269,9 @@ fn eval_window_sum(
                     }
                     let (_, e) = compute_row_frame_bounds(frame, order_empty, peers, i, n);
                     while pos < e {
+                        if (pos & CANCEL_CHECK_MASK) == 0 {
+                            check_cancel(eval_ctx, &mut Some(res), before)?;
+                        }
                         if let Some(v) = eval::read_decimal(col, pos) {
                             acc = Some(match acc {
                                 Some(cur) => cur.checked_add(v).ok_or_else(|| {
@@ -4100,6 +4295,9 @@ fn eval_window_sum(
                     let (s, e) = compute_row_frame_bounds(frame, order_empty, peers, i, n);
                     let mut acc: Option<i128> = None;
                     for r in s..e {
+                        if (r & CANCEL_CHECK_MASK) == 0 {
+                            check_cancel(eval_ctx, &mut Some(res), before)?;
+                        }
                         if let Some(v) = eval::read_decimal(col, r) {
                             acc = Some(match acc {
                                 Some(cur) => cur.checked_add(v).ok_or_else(|| {
@@ -4170,6 +4368,9 @@ fn eval_window_avg(
                     }
                     let (_, e) = compute_row_frame_bounds(frame, order_empty, peers, i, n);
                     while pos < e {
+                        if (pos & CANCEL_CHECK_MASK) == 0 {
+                            check_cancel(eval_ctx, &mut Some(res), before)?;
+                        }
                         if let Some(v) = eval::read_i64(col, pos) {
                             sum += i128::from(v);
                             cnt += 1;
@@ -4190,6 +4391,9 @@ fn eval_window_avg(
                     let mut sum: i128 = 0;
                     let mut cnt: u64 = 0;
                     for r in s..e {
+                        if (r & CANCEL_CHECK_MASK) == 0 {
+                            check_cancel(eval_ctx, &mut Some(res), before)?;
+                        }
                         if let Some(v) = eval::read_i64(col, r) {
                             sum += i128::from(v);
                             cnt += 1;
@@ -4217,6 +4421,9 @@ fn eval_window_avg(
                     }
                     let (_, e) = compute_row_frame_bounds(frame, order_empty, peers, i, n);
                     while pos < e {
+                        if (pos & CANCEL_CHECK_MASK) == 0 {
+                            check_cancel(eval_ctx, &mut Some(res), before)?;
+                        }
                         if let Some(v) = eval::read_f64(col, pos) {
                             sum += v;
                             cnt += 1;
@@ -4237,6 +4444,9 @@ fn eval_window_avg(
                     let mut sum: f64 = 0.0;
                     let mut cnt: u64 = 0;
                     for r in s..e {
+                        if (r & CANCEL_CHECK_MASK) == 0 {
+                            check_cancel(eval_ctx, &mut Some(res), before)?;
+                        }
                         if let Some(v) = eval::read_f64(col, r) {
                             sum += v;
                             cnt += 1;
@@ -4277,6 +4487,9 @@ fn eval_window_avg(
                     }
                     let (_, e) = compute_row_frame_bounds(frame, order_empty, peers, i, n);
                     while pos < e {
+                        if (pos & CANCEL_CHECK_MASK) == 0 {
+                            check_cancel(eval_ctx, &mut Some(res), before)?;
+                        }
                         if let Some(v) = eval::read_decimal(col, pos) {
                             sum = sum.checked_add(v).ok_or_else(|| {
                                 QueryError::failed("window AVG(Decimal128) overflow")
@@ -4299,6 +4512,9 @@ fn eval_window_avg(
                     let mut sum: i128 = 0;
                     let mut cnt: u128 = 0;
                     for r in s..e {
+                        if (r & CANCEL_CHECK_MASK) == 0 {
+                            check_cancel(eval_ctx, &mut Some(res), before)?;
+                        }
                         if let Some(v) = eval::read_decimal(col, r) {
                             sum = sum.checked_add(v).ok_or_else(|| {
                                 QueryError::failed("window AVG(Decimal128) overflow")
@@ -4374,6 +4590,9 @@ fn eval_window_min_max(
             }
             let (_, e) = compute_row_frame_bounds(frame, order_empty, peers, i, n);
             while pos < e {
+                if (pos & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(eval_ctx, &mut Some(res), before)?;
+                }
                 if !col.is_null(pos) {
                     best = Some(match best {
                         Some(cur) if !better(pos, cur) => cur,
@@ -4392,6 +4611,9 @@ fn eval_window_min_max(
             let (s, e) = compute_row_frame_bounds(frame, order_empty, peers, i, n);
             let mut best: Option<usize> = None;
             for r in s..e {
+                if (r & CANCEL_CHECK_MASK) == 0 {
+                    check_cancel(eval_ctx, &mut Some(res), before)?;
+                }
                 if !col.is_null(r) {
                     best = Some(match best {
                         Some(cur) if !better(r, cur) => cur,
@@ -5848,5 +6070,230 @@ mod tests {
         drop(wide_win);
         assert!(matches!(err, QueryError::TooLarge));
         assert_eq!(tight_ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn external_sort_spill_single_batch_respects_selection_and_finish_releases_res() {
+        use crate::ir::BinaryOp;
+
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Schema::try_new_arc(vec![
+            Field::new("k", DataType::I64, false),
+            Field::new("payload", DataType::Utf8, false),
+        ])
+        .unwrap();
+
+        // Build a batch with Selection::Mask where only even rows are active.
+        let n = 64usize;
+        let k_vals: Vec<i64> = (0..n as i64).rev().collect();
+        let pads: Vec<String> = (0..n).map(|i| format!("row-{i:0>200}")).collect();
+        let pad_refs: Vec<&str> = pads.iter().map(String::as_str).collect();
+        let mask_bools: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
+        let filtered_batch = Batch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(k_vals), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(pad_refs).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n,
+            Selection::Mask(Bitmap::from_bools(&mask_bools)),
+        )
+        .unwrap();
+
+        let batch_bytes = filtered_batch.memory_bytes();
+        // Pool cap allows holding `batch_res` + small expression key column, but NOT compacting
+        // `filtered_batch` into a second reservation (forces `spill_single_batch`).
+        let cap = batch_bytes + 4096;
+        let ctx = test_ctx(dir.path(), cap, 4 * 1024 * 1024);
+
+        // Expression sort key: `k + 1` ASC
+        let keys = vec![SortKey {
+            expr: Expr::Binary {
+                left: Box::new(col_expr(0, "k", DataType::I64)),
+                op: BinaryOp::Add,
+                right: Box::new(Expr::Literal(ScalarValue::I64(1))),
+                data_type: DataType::I64,
+            },
+            descending: false,
+            nulls_first: false,
+        }];
+
+        let mut sink = ExternalSort::new(Arc::clone(&schema), keys.clone(), None, ctx.clone());
+        let mut scan_res = ctx.pool.register("scan", false);
+        scan_res.try_grow(batch_bytes).unwrap();
+        assert_eq!(
+            sink.consume(filtered_batch, &mut scan_res).unwrap(),
+            ControlFlow::Continue
+        );
+        scan_res.free();
+        drop(scan_res);
+        assert_eq!(sink.spilled_run_count(), 1);
+
+        // `finish()` drops `res` for spilled / empty sinks so sibling partitions & merge_sinks
+        // observe full `spill_share()`.
+        sink.finish().unwrap();
+        assert!(sink.res.is_none());
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        let mut empty_sink =
+            ExternalSort::new(Arc::clone(&schema), keys.clone(), None, ctx.clone());
+        empty_sink.finish().unwrap();
+        assert!(empty_sink.res.is_none());
+
+        let mut merged = ExternalSort::merge_sinks(
+            vec![empty_sink, sink],
+            Arc::clone(&schema),
+            keys,
+            None,
+            &ctx,
+        )
+        .unwrap();
+        let out = drain_stream(merged.as_mut(), &ctx).unwrap();
+        drop(merged);
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        let got_keys: Vec<i64> = out
+            .iter()
+            .flat_map(|b| {
+                let c = b.column(0).unwrap();
+                (0..b.num_rows()).map(move |r| match c.get_scalar(r).unwrap() {
+                    ScalarValue::I64(v) => v,
+                    other => panic!("unexpected scalar: {other:?}"),
+                })
+            })
+            .collect();
+        // Active rows had indices 0, 2, 4, ..., 62 -> k values 63, 61, ..., 1 -> sorted ASC: 1, 3, ..., 63
+        let expected: Vec<i64> = (1..64).step_by(2).collect();
+        assert_eq!(got_keys, expected);
+    }
+
+    #[test]
+    fn window_multi_batch_partition_expr_key_and_inner_loop_cancel() {
+        use crate::ir::BinaryOp;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_ctx(dir.path(), 512 * 1024, 4 * 1024 * 1024);
+        ctx.batch_size = 16;
+        ctx.target_partitions = 1;
+
+        let schema = Schema::try_new_arc(vec![
+            Field::new("p", DataType::I64, false),
+            Field::new("v", DataType::I64, false),
+        ])
+        .unwrap();
+
+        // 4 batches of 16 rows in the same partition (p=1), plus 1 batch of p=2.
+        let mut batches = Vec::new();
+        for chunk in 0..4 {
+            let p = vec![1i64; 16];
+            let v: Vec<i64> = (chunk * 16..(chunk + 1) * 16).map(|x| x as i64).collect();
+            batches.push(
+                Batch::try_new_all(
+                    Arc::clone(&schema),
+                    vec![
+                        Column::Flat(FlatColumn::try_new(FlatData::I64(p), None).unwrap()),
+                        Column::Flat(FlatColumn::try_new(FlatData::I64(v), None).unwrap()),
+                    ],
+                    16,
+                )
+                .unwrap(),
+            );
+        }
+        batches.push(
+            Batch::try_new_all(
+                Arc::clone(&schema),
+                vec![
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(vec![2; 8]), None).unwrap()),
+                    Column::Flat(
+                        FlatColumn::try_new(FlatData::I64((0..8).collect()), None).unwrap(),
+                    ),
+                ],
+                8,
+            )
+            .unwrap(),
+        );
+
+        let src = BatchSource::new(Arc::clone(&schema), batches).unwrap();
+        let input = src
+            .open_partitions(&ScanSpec::default(), &ctx)
+            .unwrap()
+            .remove(0);
+
+        // Expression PARTITION BY (`p + 0`) + non-streamable frame (UNBOUNDED FOLLOWING)
+        let part_expr = Expr::Binary {
+            left: Box::new(col_expr(0, "p", DataType::I64)),
+            op: BinaryOp::Add,
+            right: Box::new(Expr::Literal(ScalarValue::I64(0))),
+            data_type: DataType::I64,
+        };
+        let order_by = vec![SortKey {
+            expr: col_expr(1, "v", DataType::I64),
+            descending: false,
+            nulls_first: false,
+        }];
+        let specs = vec![WindowSpec {
+            partition_by: vec![part_expr.clone()],
+            order_by: order_by.clone(),
+            frame: Some((FrameBound::CurrentRow, FrameBound::UnboundedFollowing)),
+            func: WindowFunc::Sum(col_expr(1, "v", DataType::I64)),
+            output_name: "suffix_sum".to_owned(),
+        }];
+
+        let mut win = eval_window_group(
+            input,
+            Arc::clone(&schema),
+            vec![part_expr],
+            order_by,
+            specs,
+            &ctx,
+        )
+        .unwrap();
+        let out = drain_stream(win.as_mut(), &ctx).unwrap();
+        drop(win);
+        assert_eq!(ctx.pool.reserved(), 0);
+        let total_rows: usize = out.iter().map(Batch::num_rows).sum();
+        assert_eq!(total_rows, 72);
+        // First row of partition p=1 has suffix_sum = 0+1+...+63 = 2016
+        assert_eq!(
+            out[0].column(2).unwrap().get_scalar(0).unwrap(),
+            ScalarValue::I64(63 * 64 / 2)
+        );
+
+        // Cancelled token is observed immediately inside non-prefix and prefix window loops
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+        let cancel_eval = EvalContext::new(0, cancelled);
+        let big_n = 2048usize;
+        let big_batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![1; big_n]), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::I64((0..big_n as i64).collect()), None).unwrap(),
+                ),
+            ],
+            big_n,
+        )
+        .unwrap();
+        let mut res = ctx.pool.register("cancel_win", false);
+        let err = eval_window_sum(
+            &col_expr(1, "v", DataType::I64),
+            &DataType::I64,
+            Some((FrameBound::CurrentRow, FrameBound::UnboundedFollowing)),
+            false,
+            None,
+            &big_batch,
+            &cancel_eval,
+            &mut res,
+        )
+        .unwrap_err();
+        assert!(matches!(err, QueryError::Cancelled));
+        assert_eq!(res.size(), 0);
     }
 }
