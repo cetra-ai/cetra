@@ -80,6 +80,17 @@ pub fn s3_only_mode() -> bool {
     )
 }
 
+/// Returns `true` when `STATAM_S3_TRACE=1` is set (opt-in privacy-safe per-GET stderr trace).
+fn s3_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("STATAM_S3_TRACE").as_deref(),
+            Ok("1" | "true" | "yes" | "TRUE")
+        )
+    })
+}
+
 /// Shared real S3 client + idempotent content-addressed uploader.
 pub struct RealS3Client {
     store: Arc<dyn ObjectStore14>,
@@ -332,6 +343,7 @@ impl BenchS3Reader {
     async fn fetch_raw_range(
         client: &RealS3Client,
         path: &ObjectPath14,
+        mode: RealS3Mode,
         gets: &AtomicU64,
         bytes: &AtomicU64,
         range: Range<u64>,
@@ -339,11 +351,25 @@ impl BenchS3Reader {
         if range.is_empty() {
             return Ok(Bytes::new());
         }
+        let trace = s3_trace_enabled();
+        let t0 = trace.then(Instant::now);
+        let range_start = range.start;
+        let range_end = range.end;
         let data = client
             .store
             .get_range(path, range)
             .await
             .map_err(|e| StatamError::Io(std::io::Error::other(e.to_string())))?;
+        if let Some(t0) = t0 {
+            eprintln!(
+                "[s3-trace] mode={} start={} end={} len={} elapsed_ms={:.2}",
+                mode.label(),
+                range_start,
+                range_end,
+                data.len(),
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         gets.fetch_add(1, Ordering::Relaxed);
         bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
         Ok(data)
@@ -371,7 +397,7 @@ impl BenchS3Reader {
                     return Ok(Bytes::new());
                 }
                 if *mode == RealS3Mode::Direct {
-                    return Self::fetch_raw_range(client, path, gets, bytes, range).await;
+                    return Self::fetch_raw_range(client, path, *mode, gets, bytes, range).await;
                 }
                 // ReadCache1MiB mode: 1 MiB aligned blocks + contiguous run coalescing
                 let _ = cache;
@@ -460,9 +486,15 @@ impl BenchS3Reader {
                     let byte_start = rs * S3_CACHE_BLOCK_BYTES;
                     let byte_end = ((re + 1) * S3_CACHE_BLOCK_BYTES).min(*file_len);
                     async move {
-                        let data =
-                            Self::fetch_raw_range(client, path, gets, bytes, byte_start..byte_end)
-                                .await?;
+                        let data = Self::fetch_raw_range(
+                            client,
+                            path,
+                            RealS3Mode::ReadCache1MiB,
+                            gets,
+                            bytes,
+                            byte_start..byte_end,
+                        )
+                        .await?;
                         Ok::<_, StatamError>((rs, re, data))
                     }
                 }))
@@ -594,7 +626,8 @@ impl BenchS3Reader {
                 let fetched: Vec<(Range<u64>, Vec<usize>, Bytes)> =
                     stream::iter(spans.into_iter().map(|(span, members)| async move {
                         let data =
-                            Self::fetch_raw_range(client, path, gets, bytes, span.clone()).await?;
+                            Self::fetch_raw_range(client, path, *mode, gets, bytes, span.clone())
+                                .await?;
                         Ok::<_, StatamError>((span, members, data))
                     }))
                     .buffer_unordered(MAX_CONCURRENT_GETS)
@@ -622,6 +655,10 @@ impl RangeReader for BenchS3Reader {
             BenchS3Inner::Sim(sim) => sim.file_len(),
             BenchS3Inner::Real { file_len, .. } => *file_len,
         }
+    }
+
+    fn is_remote(&self) -> bool {
+        self.is_real_s3()
     }
 
     fn read_range(&self, range: Range<u64>) -> Result<Bytes, StatamError> {

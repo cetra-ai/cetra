@@ -73,6 +73,15 @@ impl StatamFileMeta {
         reader: &dyn RangeReader,
         tail_hint: Option<u32>,
     ) -> Result<Self, StatamError> {
+        Self::read_from_with_tail(reader, tail_hint).map(|(meta, _, _)| meta)
+    }
+
+    /// Reads and validates the Hot Tail, also returning `(tail_start, tail)` from the initial
+    /// tail prefetch so remote readers can retain covered data bytes in [`crate::io::TailCachedReader`].
+    pub(crate) fn read_from_with_tail(
+        reader: &dyn RangeReader,
+        tail_hint: Option<u32>,
+    ) -> Result<(Self, u64, Bytes), StatamError> {
         let file_len = reader.file_len();
         let min_len = (FILE_HEADER_LEN + POSTSCRIPT_LEN) as u64;
         if file_len < min_len {
@@ -449,19 +458,23 @@ impl StatamFileMeta {
             }
         }
 
-        Ok(Self {
-            file_len,
-            postscript: ps,
-            schema_meta,
-            col_dir,
-            rg_dir,
-            block_dir,
-            hot_bloom_bytes,
-            hot_dict_bytes,
-            lazy_dir,
-            hot_tail_start,
-            inline_lazy,
-        })
+        Ok((
+            Self {
+                file_len,
+                postscript: ps,
+                schema_meta,
+                col_dir,
+                rg_dir,
+                block_dir,
+                hot_bloom_bytes,
+                hot_dict_bytes,
+                lazy_dir,
+                hot_tail_start,
+                inline_lazy,
+            },
+            tail_start,
+            tail,
+        ))
     }
 
     /// Returns the logical [`Schema`].
@@ -803,6 +816,36 @@ impl StatamReader {
     ) -> Result<(), StatamError> {
         let _ = self.collect_missing_lazy_entries(bloom_cols, trigram_cols, dict_cols)?;
         Ok(())
+    }
+
+    /// Sums the byte lengths of all unique uncached, non-inline lazy dictionaries required by
+    /// `dict_cols` (deduping `dict_cols` first so shared dicts across RGs are counted once).
+    pub(super) fn uncached_non_inline_lazy_dict_bytes(&self, dict_cols: &[usize]) -> u64 {
+        if dict_cols.is_empty() {
+            return 0;
+        }
+        let mut unique_cols = dict_cols.to_vec();
+        unique_cols.sort_unstable();
+        unique_cols.dedup();
+        let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
+        let mut total = 0u64;
+        for pidx in unique_cols {
+            let cd = &self.meta.col_dir[pidx];
+            if (cd.col_flags & COL_FLAG_HAS_FILE_DICT) == 0 || guard.dicts.contains_key(&pidx) {
+                continue;
+            }
+            if let Some((idx, entry)) = self
+                .meta
+                .lazy_dir
+                .iter()
+                .enumerate()
+                .find(|(_, e)| e.kind == LazyIndexKind::Dict && e.phys_col_id as usize == pidx)
+                && !self.meta.inline_lazy.contains_key(&idx)
+            {
+                total = total.saturating_add(u64::from(entry.len));
+            }
+        }
+        total
     }
 
     /// Fetches `block_ranges` AND any remaining uncached lazy indexes (`bloom_cols`,

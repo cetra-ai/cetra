@@ -1978,6 +1978,10 @@ impl ChunkPackReader {
 
         let trailer_sections = validate_trailer_sections(&ps, data_end)?;
 
+        let retain_tail = reader.is_remote()
+            && tail_start < data_end
+            && tail.len() <= crate::io::MAX_RETAINED_TAIL_BYTES;
+
         let slice_inline = |off: u64, len: u32| -> Option<Bytes> {
             if len == 0
                 || off < tail_start
@@ -1988,10 +1992,15 @@ impl ChunkPackReader {
                 return None;
             }
             usize::try_from(off - tail_start).ok().and_then(|start| {
-                start
-                    .checked_add(len as usize)
-                    .and_then(|end| tail.get(start..end))
-                    .map(Bytes::copy_from_slice)
+                let end = start.checked_add(len as usize)?;
+                if end > tail.len() {
+                    return None;
+                }
+                if retain_tail {
+                    Some(tail.slice(start..end))
+                } else {
+                    Some(Bytes::copy_from_slice(&tail[start..end]))
+                }
             })
         };
 
@@ -2130,6 +2139,12 @@ impl ChunkPackReader {
             chunks.push(loc);
         }
 
+        let reader: Arc<dyn RangeReader> = if retain_tail {
+            Arc::new(crate::io::TailCachedReader::new(reader, tail_start, tail)?)
+        } else {
+            reader
+        };
+
         Ok(Self {
             reader,
             toc: PackToc {
@@ -2171,6 +2186,31 @@ impl ChunkPackReader {
         Ok(Some(start..end))
     }
 
+    fn install_decoder_dict_locked(
+        &self,
+        _guard: &std::sync::MutexGuard<'_, ()>,
+        framed: &[u8],
+    ) -> Result<Arc<PackDecoderDict>, StatamError> {
+        let ps = &self.toc.postscript;
+        if framed.len() != ps.dict_len as usize {
+            return Err(StatamError::Corrupt {
+                reason: "short read on pack dict section",
+            });
+        }
+        if let Some(Some(cached)) = self.dict_cache.get() {
+            return Ok(Arc::clone(cached));
+        }
+        let (_, flags, dict_bytes) = read_framed_pack_frame(framed, MAX_PACK_DICT_BYTES)?;
+        if flags != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "pack dict section frame has unexpected flags",
+            });
+        }
+        let decoder_dict = Arc::new(PackDecoderDict::new(&dict_bytes)?);
+        let _ = self.dict_cache.set(Some(Arc::clone(&decoder_dict)));
+        Ok(decoder_dict)
+    }
+
     fn install_decoder_dict_from_framed(
         &self,
         framed: &[u8],
@@ -2184,19 +2224,8 @@ impl ChunkPackReader {
         if let Some(Some(cached)) = self.dict_cache.get() {
             return Ok(Arc::clone(cached));
         }
-        let _guard = self.dict_init.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(Some(cached)) = self.dict_cache.get() {
-            return Ok(Arc::clone(cached));
-        }
-        let (_, flags, dict_bytes) = read_framed_pack_frame(framed, MAX_PACK_DICT_BYTES)?;
-        if flags != 0 {
-            return Err(StatamError::Corrupt {
-                reason: "pack dict section frame has unexpected flags",
-            });
-        }
-        let decoder_dict = Arc::new(PackDecoderDict::new(&dict_bytes)?);
-        let _ = self.dict_cache.set(Some(Arc::clone(&decoder_dict)));
-        Ok(decoder_dict)
+        let guard = self.dict_init.lock().unwrap_or_else(|p| p.into_inner());
+        self.install_decoder_dict_locked(&guard, framed)
     }
 
     fn resolve_or_append_dict_range(
@@ -2256,14 +2285,18 @@ impl ChunkPackReader {
         if let Some(cached) = self.dict_cache.get() {
             return Ok(cached.clone());
         }
+        let guard = self.dict_init.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(cached) = self.dict_cache.get() {
+            return Ok(cached.clone());
+        }
         if let Some(ref inline) = self.inline_dict_framed {
-            return Ok(Some(self.install_decoder_dict_from_framed(inline)?));
+            return Ok(Some(self.install_decoder_dict_locked(&guard, inline)?));
         }
         let Some(range) = self.validated_dict_range()? else {
             return Ok(None);
         };
         let bytes = self.reader.read_range(range)?;
-        Ok(Some(self.install_decoder_dict_from_framed(&bytes)?))
+        Ok(Some(self.install_decoder_dict_locked(&guard, &bytes)?))
     }
 
     /// Returns the decoded [`PackToc`].

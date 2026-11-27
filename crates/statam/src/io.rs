@@ -15,6 +15,9 @@ use crate::StatamError;
 /// Exact `ReadCache` alignment unit (1 MiB, matching `crates/storage/src/read_cache.rs`).
 pub const S3_CACHE_BLOCK_BYTES: u64 = 1 << 20;
 
+/// Maximum prefetched tail buffer size retained by [`TailCachedReader`] (`1 MiB`).
+pub(crate) const MAX_RETAINED_TAIL_BYTES: usize = 1024 * 1024;
+
 /// Abstract synchronous byte-range reader for `.statam` and `.stpk` files.
 pub trait RangeReader: Send + Sync {
     /// Total length of the underlying file/object in bytes.
@@ -28,6 +31,219 @@ pub trait RangeReader: Send + Sync {
         let mut out = Vec::with_capacity(ranges.len());
         for range in ranges {
             out.push(self.read_range(range.clone())?);
+        }
+        Ok(out)
+    }
+
+    /// Returns `true` when backed by a high-latency remote store (e.g. S3) where
+    /// eliminating sequential round-trip waves outweighs small speculative reads
+    /// or lightweight concurrency overlap.
+    ///
+    /// Implementations returning `true` MUST support concurrent `read_range` /
+    /// `read_ranges` calls from scoped OS threads (e.g. async bridges must use a
+    /// multi-threaded or background reactor, never `tokio::runtime::current_thread`).
+    /// Local slice/file readers return `false`.
+    fn is_remote(&self) -> bool {
+        false
+    }
+}
+
+/// Wraps a remote [`RangeReader`] with the already-fetched tail buffer `[tail_start..tail_end)`,
+/// serving full hits with zero I/O and trimming straddling ranges to only their uncached prefix.
+pub(crate) struct TailCachedReader {
+    inner: Arc<dyn RangeReader>,
+    tail_start: u64,
+    tail_end: u64,
+    tail: Bytes,
+}
+
+impl fmt::Debug for TailCachedReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TailCachedReader")
+            .field("file_len", &self.inner.file_len())
+            .field("tail_start", &self.tail_start)
+            .field("tail_end", &self.tail_end)
+            .field("tail_len", &self.tail.len())
+            .finish()
+    }
+}
+
+impl TailCachedReader {
+    /// Constructs a [`TailCachedReader`] covering `[tail_start .. tail_start + tail.len())`.
+    pub(crate) fn new(
+        inner: Arc<dyn RangeReader>,
+        tail_start: u64,
+        tail: Bytes,
+    ) -> Result<Self, StatamError> {
+        let tail_end =
+            tail_start
+                .checked_add(tail.len() as u64)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "tail cache end overflows u64",
+                })?;
+        if tail_end > inner.file_len() {
+            return Err(StatamError::Corrupt {
+                reason: "tail cache extends past file_len",
+            });
+        }
+        Ok(Self {
+            inner,
+            tail_start,
+            tail_end,
+            tail,
+        })
+    }
+
+    fn slice_tail(&self, start: u64, end: u64) -> Result<Bytes, StatamError> {
+        let rel_s =
+            usize::try_from(start - self.tail_start).map_err(|_| StatamError::BoundsExceeded {
+                reason: "tail slice start overflows usize",
+            })?;
+        let rel_e =
+            usize::try_from(end - self.tail_start).map_err(|_| StatamError::BoundsExceeded {
+                reason: "tail slice end overflows usize",
+            })?;
+        if rel_s > rel_e || rel_e > self.tail.len() {
+            return Err(StatamError::Corrupt {
+                reason: "tail slice out of bounds",
+            });
+        }
+        Ok(self.tail.slice(rel_s..rel_e))
+    }
+}
+
+impl RangeReader for TailCachedReader {
+    fn file_len(&self) -> u64 {
+        self.inner.file_len()
+    }
+
+    fn is_remote(&self) -> bool {
+        self.inner.is_remote()
+    }
+
+    fn read_range(&self, range: Range<u64>) -> Result<Bytes, StatamError> {
+        validate_range(&range, self.inner.file_len())?;
+        if range.start == range.end {
+            return Ok(Bytes::new());
+        }
+        if range.start >= self.tail_start && range.end <= self.tail_end {
+            return self.slice_tail(range.start, range.end);
+        }
+        if range.start < self.tail_start
+            && range.end > self.tail_start
+            && range.end <= self.tail_end
+        {
+            let expected_prefix = self.tail_start - range.start;
+            let prefix = self.inner.read_range(range.start..self.tail_start)?;
+            if prefix.len() as u64 != expected_prefix {
+                return Err(StatamError::Corrupt {
+                    reason: "short read on straddling tail prefix",
+                });
+            }
+            let suffix = self.slice_tail(self.tail_start, range.end)?;
+            let total_len = usize::try_from(range.end - range.start).map_err(|_| {
+                StatamError::BoundsExceeded {
+                    reason: "straddling range exceeds usize",
+                }
+            })?;
+            let mut buf = BytesMut::with_capacity(total_len);
+            buf.extend_from_slice(&prefix);
+            buf.extend_from_slice(&suffix);
+            return Ok(buf.freeze());
+        }
+        self.inner.read_range(range)
+    }
+
+    fn read_ranges(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>, StatamError> {
+        let file_len = self.inner.file_len();
+        for r in ranges {
+            validate_range(r, file_len)?;
+        }
+        if ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        enum SlotPlan {
+            Ready(Bytes),
+            FullMiss(usize),
+            Straddle {
+                miss_idx: usize,
+                expected_prefix: u64,
+                suffix: Bytes,
+            },
+        }
+
+        let mut plans = Vec::with_capacity(ranges.len());
+        let mut misses: Vec<Range<u64>> = Vec::new();
+        for r in ranges {
+            if r.start == r.end {
+                plans.push(SlotPlan::Ready(Bytes::new()));
+            } else if r.start >= self.tail_start && r.end <= self.tail_end {
+                plans.push(SlotPlan::Ready(self.slice_tail(r.start, r.end)?));
+            } else if r.start < self.tail_start && r.end > self.tail_start && r.end <= self.tail_end
+            {
+                let suffix = self.slice_tail(self.tail_start, r.end)?;
+                let miss_idx = misses.len();
+                let expected_prefix = self.tail_start - r.start;
+                misses.push(r.start..self.tail_start);
+                plans.push(SlotPlan::Straddle {
+                    miss_idx,
+                    expected_prefix,
+                    suffix,
+                });
+            } else {
+                let miss_idx = misses.len();
+                misses.push(r.clone());
+                plans.push(SlotPlan::FullMiss(miss_idx));
+            }
+        }
+
+        let mut fetched_slots: Vec<Option<Bytes>> = if misses.is_empty() {
+            Vec::new()
+        } else {
+            let fetched = self.inner.read_ranges(&misses)?;
+            if fetched.len() != misses.len() {
+                return Err(StatamError::Corrupt {
+                    reason: "inner read_ranges returned wrong range count",
+                });
+            }
+            fetched.into_iter().map(Some).collect()
+        };
+
+        let mut out = Vec::with_capacity(plans.len());
+        for plan in plans {
+            match plan {
+                SlotPlan::Ready(bytes) => out.push(bytes),
+                SlotPlan::FullMiss(miss_idx) => {
+                    let bytes = fetched_slots[miss_idx].take().ok_or(StatamError::Corrupt {
+                        reason: "missing fetched range from inner reader",
+                    })?;
+                    out.push(bytes);
+                }
+                SlotPlan::Straddle {
+                    miss_idx,
+                    expected_prefix,
+                    suffix,
+                } => {
+                    let prefix = fetched_slots[miss_idx].take().ok_or(StatamError::Corrupt {
+                        reason: "missing straddling prefix from inner reader",
+                    })?;
+                    if prefix.len() as u64 != expected_prefix {
+                        return Err(StatamError::Corrupt {
+                            reason: "short read on straddling tail prefix",
+                        });
+                    }
+                    let total_len = prefix.len().checked_add(suffix.len()).ok_or(
+                        StatamError::BoundsExceeded {
+                            reason: "straddling range exceeds usize",
+                        },
+                    )?;
+                    let mut buf = BytesMut::with_capacity(total_len);
+                    buf.extend_from_slice(&prefix);
+                    buf.extend_from_slice(&suffix);
+                    out.push(buf.freeze());
+                }
+            }
         }
         Ok(out)
     }
@@ -273,6 +489,7 @@ struct S3State {
 pub struct SimulatedS3Reader {
     backing: Arc<dyn RangeReader>,
     config: SimulatedS3Config,
+    remote_hint: bool,
     state: Mutex<S3State>,
 }
 
@@ -282,6 +499,7 @@ impl fmt::Debug for SimulatedS3Reader {
         f.debug_struct("SimulatedS3Reader")
             .field("file_len", &self.backing.file_len())
             .field("config", &self.config)
+            .field("remote_hint", &self.remote_hint)
             .field("cached_blocks", &guard.cache.len())
             .field("counters", &guard.counters)
             .finish()
@@ -294,11 +512,18 @@ impl SimulatedS3Reader {
         Self {
             backing,
             config,
+            remote_hint: false,
             state: Mutex::new(S3State {
                 cache: LruBlockCache::new(config.cache_capacity_blocks),
                 counters: IoCounters::default(),
             }),
         }
+    }
+
+    /// Sets the value returned by [`RangeReader::is_remote`] (defaults to `false`).
+    pub fn with_remote_hint(mut self, is_remote: bool) -> Self {
+        self.remote_hint = is_remote;
+        self
     }
 
     /// Convenience constructor over an in-memory byte buffer.
@@ -354,6 +579,10 @@ impl SimulatedS3Reader {
 impl RangeReader for SimulatedS3Reader {
     fn file_len(&self) -> u64 {
         self.backing.file_len()
+    }
+
+    fn is_remote(&self) -> bool {
+        self.remote_hint
     }
 
     fn read_range(&self, range: Range<u64>) -> Result<Bytes, StatamError> {
@@ -771,5 +1000,171 @@ mod tests {
         assert!(s3.read_range(0..64).is_err());
         assert_eq!(s3.counters().cache_misses, 0);
         assert_eq!(s3.counters().gets, 0);
+    }
+
+    #[test]
+    fn pass18_tail_cached_reader_hit_miss_straddle_short_read_empty_bounds() {
+        struct RecordingReader {
+            data: Bytes,
+            remote: bool,
+            calls: Mutex<Vec<Vec<Range<u64>>>>,
+        }
+        impl RecordingReader {
+            fn new(data: Vec<u8>, remote: bool) -> Self {
+                Self {
+                    data: Bytes::from(data),
+                    remote,
+                    calls: Mutex::new(Vec::new()),
+                }
+            }
+            fn take_calls(&self) -> Vec<Vec<Range<u64>>> {
+                std::mem::take(&mut *self.calls.lock().unwrap())
+            }
+        }
+        impl RangeReader for RecordingReader {
+            fn file_len(&self) -> u64 {
+                self.data.len() as u64
+            }
+            fn is_remote(&self) -> bool {
+                self.remote
+            }
+            fn read_range(&self, range: Range<u64>) -> Result<Bytes, StatamError> {
+                validate_range(&range, self.file_len())?;
+                self.calls.lock().unwrap().push(vec![range.clone()]);
+                Ok(self.data.slice(range.start as usize..range.end as usize))
+            }
+            fn read_ranges(&self, ranges: &[Range<u64>]) -> Result<Vec<Bytes>, StatamError> {
+                for r in ranges {
+                    validate_range(r, self.file_len())?;
+                }
+                self.calls.lock().unwrap().push(ranges.to_vec());
+                Ok(ranges
+                    .iter()
+                    .map(|r| self.data.slice(r.start as usize..r.end as usize))
+                    .collect())
+            }
+        }
+
+        // Default is_remote() on SliceReader and SimulatedS3Reader is false; with_remote_hint toggles it.
+        let data = make_pattern_bytes(1024);
+        assert!(!SliceReader::new(data.clone()).is_remote());
+        let sim_default = SimulatedS3Reader::from_bytes(data.clone(), SimulatedS3Config::default());
+        assert!(!sim_default.is_remote());
+        let sim_remote = SimulatedS3Reader::from_bytes(data.clone(), SimulatedS3Config::default())
+            .with_remote_hint(true);
+        assert!(sim_remote.is_remote());
+
+        let inner = Arc::new(RecordingReader::new(data.clone(), true));
+        // Tail covers [600..1024).
+        let tail_start = 600u64;
+        let tail = Bytes::copy_from_slice(&data[tail_start as usize..]);
+
+        // Constructor rejects tail extending past file_len.
+        assert!(matches!(
+            TailCachedReader::new(inner.clone(), 800, tail.clone()),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        let cached = TailCachedReader::new(inner.clone(), tail_start, tail.clone()).unwrap();
+        assert_eq!(cached.file_len(), 1024);
+        assert!(cached.is_remote());
+
+        // 1. Empty range -> 0 inner calls.
+        assert!(cached.read_range(100..100).unwrap().is_empty());
+        assert!(cached.read_range(700..700).unwrap().is_empty());
+        assert!(cached.read_ranges(&[]).unwrap().is_empty());
+        assert!(inner.take_calls().is_empty());
+
+        // 2. Bounds errors -> rejected without hitting inner.
+        let reversed = Range { start: 50, end: 40 };
+        assert!(matches!(
+            cached.read_range(reversed.clone()),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            cached.read_range(0..1025),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            cached.read_ranges(&[10..20, reversed]),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            cached.read_ranges(&[10..20, 1000..1025]),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(inner.take_calls().is_empty());
+
+        // 3. Full hit -> 0 inner calls.
+        let hit = cached.read_range(600..750).unwrap();
+        assert_eq!(hit.as_ref(), &data[600..750]);
+        let hit_end = cached.read_range(900..1024).unwrap();
+        assert_eq!(hit_end.as_ref(), &data[900..1024]);
+        let all_hits = cached
+            .read_ranges(&[600..650, 700..700, 950..1024])
+            .unwrap();
+        assert_eq!(all_hits[0].as_ref(), &data[600..650]);
+        assert!(all_hits[1].is_empty());
+        assert_eq!(all_hits[2].as_ref(), &data[950..1024]);
+        assert!(inner.take_calls().is_empty());
+
+        // 4. Out-of-tail miss -> exact range forwarded to inner.
+        let miss = cached.read_range(100..250).unwrap();
+        assert_eq!(miss.as_ref(), &data[100..250]);
+        assert_eq!(inner.take_calls(), vec![vec![100..250]]);
+
+        // 5. Straddling range in read_range -> trims to [r.start..tail_start) and splices cleanly!
+        let straddle = cached.read_range(500..720).unwrap();
+        assert_eq!(straddle.as_ref(), &data[500..720]);
+        assert_eq!(inner.take_calls(), vec![vec![500..600]]);
+
+        // 6. Mixed hit + miss + straddle + empty batch in read_ranges -> ONE inner call with
+        // ONLY the miss and trimmed straddle prefix, scattered back in original order!
+        let batch_ranges = [
+            10..10u64, // empty
+            610..660,  // full hit
+            50..120,   // full miss
+            550..680,  // straddle -> trimmed to 550..600
+            900..1024, // full hit
+            580..620,  // second straddle -> trimmed to 580..600
+        ];
+        let batch_out = cached.read_ranges(&batch_ranges).unwrap();
+        assert_eq!(batch_out.len(), batch_ranges.len());
+        for (r, got) in batch_ranges.iter().zip(batch_out.iter()) {
+            assert_eq!(got.as_ref(), &data[r.start as usize..r.end as usize]);
+        }
+        assert_eq!(inner.take_calls(), vec![vec![50..120, 550..600, 580..600]]);
+
+        // 7. Short-read check on straddling prefix (both read_range and read_ranges).
+        struct ShortPrefixReader {
+            file_len: u64,
+        }
+        impl RangeReader for ShortPrefixReader {
+            fn file_len(&self) -> u64 {
+                self.file_len
+            }
+            fn is_remote(&self) -> bool {
+                true
+            }
+            fn read_range(&self, range: Range<u64>) -> Result<Bytes, StatamError> {
+                let len = (range.end - range.start).saturating_sub(1) as usize;
+                Ok(Bytes::from(vec![0u8; len]))
+            }
+        }
+        let short_cached =
+            TailCachedReader::new(Arc::new(ShortPrefixReader { file_len: 1024 }), 600, tail)
+                .unwrap();
+        assert!(matches!(
+            short_cached.read_range(500..700),
+            Err(StatamError::Corrupt {
+                reason: "short read on straddling tail prefix"
+            })
+        ));
+        assert!(matches!(
+            short_cached.read_ranges(&[610..620, 500..700]),
+            Err(StatamError::Corrupt {
+                reason: "short read on straddling tail prefix"
+            })
+        ));
     }
 }
