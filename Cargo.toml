@@ -75,7 +75,7 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 # RFC 9535 JSONPath on mapping expressions (D162).
 serde_json_path = "0.7.2"
 # Filter DSL and Shape B SQL parser (D-QE-1).
-sqlparser = { version = "0.62.0", features = ["visitor", "recursive-protection"] }
+sqlparser = { version = "0.64.0", features = ["visitor", "recursive-protection"] }
 # Dataset CSV import and export (track J, D-J-6).
 csv = "1.4.0"
 # Judge prompt templates (D163) and email templates (spec 08; `.html` names auto-escape).
