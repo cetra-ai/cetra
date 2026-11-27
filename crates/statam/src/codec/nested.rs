@@ -427,6 +427,27 @@ impl<'a> SubColUtf8Ref<'a> {
             Self::Const(opt) => opt.unwrap_or(""),
         }
     }
+    #[inline]
+    fn get_seq(&self, row: usize, cursor: &mut usize) -> &'a str {
+        match self {
+            Self::Rle {
+                run_vals,
+                run_nulls,
+                run_ends,
+            } => {
+                while *cursor < run_ends.len() && (run_ends[*cursor] as usize) <= row {
+                    *cursor += 1;
+                }
+                let run_idx = *cursor;
+                if run_nulls.is_some_and(|bm| !bm.get(run_idx)) {
+                    ""
+                } else {
+                    run_vals.get(run_idx).unwrap_or("")
+                }
+            }
+            _ => self.get(row),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -437,6 +458,8 @@ struct ResidualMapRef<'a> {
     val_nulls: Option<&'a Bitmap>,
     row_nulls: Option<&'a Bitmap>,
     entry_count: usize,
+    key_bytes_len: usize,
+    val_bytes_len: usize,
 }
 
 type UnshredInputs<'a> = (Option<ResidualMapRef<'a>>, Vec<SubColUtf8Ref<'a>>);
@@ -485,6 +508,8 @@ fn validate_unshred_inputs<'a>(
                 val_nulls: m.value_nulls(),
                 row_nulls: fc.nulls(),
                 entry_count: m.entry_count(),
+                key_bytes_len: m.keys().bytes().len(),
+                val_bytes_len: m.values().bytes().len(),
             })
         }
         None => None,
@@ -498,20 +523,135 @@ fn validate_unshred_inputs<'a>(
     Ok((res_map, sub_refs))
 }
 
+struct UnshredOut {
+    key_offs: Vec<u32>,
+    key_bytes: Vec<u8>,
+    val_offs: Vec<u32>,
+    val_bytes: Vec<u8>,
+    val_valid: Option<Vec<bool>>,
+}
+
+impl UnshredOut {
+    fn with_capacity(
+        est_entries: usize,
+        est_key_bytes: usize,
+        est_val_bytes: usize,
+        track_val_nulls: bool,
+    ) -> Self {
+        let mut key_offs = Vec::with_capacity(est_entries + 1);
+        key_offs.push(0u32);
+        let mut val_offs = Vec::with_capacity(est_entries + 1);
+        val_offs.push(0u32);
+        let val_valid = if track_val_nulls {
+            Some(Vec::with_capacity(est_entries))
+        } else {
+            None
+        };
+        Self {
+            key_offs,
+            key_bytes: Vec::with_capacity(est_key_bytes),
+            val_offs,
+            val_bytes: Vec::with_capacity(est_val_bytes),
+            val_valid,
+        }
+    }
+
+    #[inline]
+    fn entry_count(&self) -> usize {
+        self.key_offs.len() - 1
+    }
+
+    #[inline]
+    fn push_entry(&mut self, k: &str, v: &str, valid: bool) -> Result<(), StatamError> {
+        self.key_bytes.extend_from_slice(k.as_bytes());
+        let k_end =
+            u32::try_from(self.key_bytes.len()).map_err(|_| StatamError::BoundsExceeded {
+                reason: "unshred_map key bytes exceed u32::MAX",
+            })?;
+        self.key_offs.push(k_end);
+
+        self.val_bytes.extend_from_slice(v.as_bytes());
+        let v_end =
+            u32::try_from(self.val_bytes.len()).map_err(|_| StatamError::BoundsExceeded {
+                reason: "unshred_map value bytes exceed u32::MAX",
+            })?;
+        self.val_offs.push(v_end);
+
+        if let Some(vv) = self.val_valid.as_mut() {
+            vv.push(valid);
+        }
+        Ok(())
+    }
+
+    fn finish(
+        self,
+        out_offsets: Vec<u32>,
+        out_nulls: Option<Bitmap>,
+    ) -> Result<FlatColumn, StatamError> {
+        let keys_data = Utf8Data::try_new(self.key_offs, self.key_bytes)?;
+        let vals_data = Utf8Data::try_new(self.val_offs, self.val_bytes)?;
+        let val_nulls = self.val_valid.and_then(|vv| {
+            if vv.iter().all(|&b| b) {
+                None
+            } else {
+                Some(Bitmap::from_bools(&vv))
+            }
+        });
+        let map = MapData::try_new(out_offsets, keys_data, vals_data, val_nulls)?;
+        Ok(FlatColumn::try_new(
+            FlatData::MapUtf8(Box::new(map)),
+            out_nulls,
+        )?)
+    }
+}
+
+#[inline]
+fn unshred_has_any_val_nulls(
+    subcols: &[(&str, &ShreddedSubCol)],
+    res_map: Option<ResidualMapRef<'_>>,
+) -> bool {
+    subcols.iter().any(|(_, s)| {
+        s.in_map
+            .words()
+            .iter()
+            .zip(s.value_null.words().iter())
+            .any(|(&im, &vn)| (im & !vn) != 0)
+    }) || res_map.is_some_and(|rm| rm.val_nulls.is_some_and(|bm| !bm.all_ones()))
+}
+
 #[inline]
 fn merge_unshred_row<'a>(
     row: usize,
     subcols: &[(&'a str, &ShreddedSubCol)],
     sub_refs: &[SubColUtf8Ref<'a>],
+    rle_cursors: &mut [usize],
     res_map: Option<ResidualMapRef<'a>>,
-    out_keys: &mut Vec<&'a str>,
-    out_vals: &mut Vec<&'a str>,
-    out_val_valid: &mut Vec<bool>,
-) {
+    out: &mut UnshredOut,
+) -> Result<(), StatamError> {
     let (res_range_start, res_range_end) = if let Some(rm) = res_map {
         (rm.offsets[row] as usize, rm.offsets[row + 1] as usize)
     } else {
         (0, 0)
+    };
+    let check_val_nulls = out.val_valid.is_some();
+
+    if res_range_start == res_range_end {
+        for (p_idx, &(pk, sub)) in subcols.iter().enumerate() {
+            if sub.in_map.get(row) {
+                let valid = !check_val_nulls || sub.value_null.get(row);
+                let v = if valid {
+                    sub_refs[p_idx].get_seq(row, &mut rle_cursors[p_idx])
+                } else {
+                    ""
+                };
+                out.push_entry(pk, v, valid)?;
+            }
+        }
+        return Ok(());
+    }
+
+    let Some(rm) = res_map else {
+        return Ok(());
     };
 
     // Merge promoted keys (lexicographically ordered) with residual entries.
@@ -524,53 +664,52 @@ fn merge_unshred_row<'a>(
             continue;
         }
         let pk = subcols[p_idx].0;
-        let rk = res_map.and_then(|rm| rm.keys.get(r_idx)).unwrap_or("");
+        let rk = rm.keys.get(r_idx).unwrap_or("");
         if pk <= rk {
-            let valid = subcols[p_idx].1.value_null.get(row);
-            let v = if valid { sub_refs[p_idx].get(row) } else { "" };
-            out_keys.push(pk);
-            out_vals.push(v);
-            out_val_valid.push(valid);
+            let valid = !check_val_nulls || subcols[p_idx].1.value_null.get(row);
+            let v = if valid {
+                sub_refs[p_idx].get_seq(row, &mut rle_cursors[p_idx])
+            } else {
+                ""
+            };
+            out.push_entry(pk, v, valid)?;
             p_idx += 1;
-        } else if let Some(rm) = res_map {
-            let valid = rm.val_nulls.is_none_or(|bm| bm.get(r_idx));
+        } else {
+            let valid = !check_val_nulls || rm.val_nulls.is_none_or(|bm| bm.get(r_idx));
             let v = if valid {
                 rm.vals.get(r_idx).unwrap_or("")
             } else {
                 ""
             };
-            out_keys.push(rk);
-            out_vals.push(v);
-            out_val_valid.push(valid);
+            out.push_entry(rk, v, valid)?;
             r_idx += 1;
         }
     }
     while p_idx < subcols.len() {
         if subcols[p_idx].1.in_map.get(row) {
             let pk = subcols[p_idx].0;
-            let valid = subcols[p_idx].1.value_null.get(row);
-            let v = if valid { sub_refs[p_idx].get(row) } else { "" };
-            out_keys.push(pk);
-            out_vals.push(v);
-            out_val_valid.push(valid);
-        }
-        p_idx += 1;
-    }
-    if let Some(rm) = res_map {
-        while r_idx < res_range_end {
-            let rk = rm.keys.get(r_idx).unwrap_or("");
-            let valid = rm.val_nulls.is_none_or(|bm| bm.get(r_idx));
+            let valid = !check_val_nulls || subcols[p_idx].1.value_null.get(row);
             let v = if valid {
-                rm.vals.get(r_idx).unwrap_or("")
+                sub_refs[p_idx].get_seq(row, &mut rle_cursors[p_idx])
             } else {
                 ""
             };
-            out_keys.push(rk);
-            out_vals.push(v);
-            out_val_valid.push(valid);
-            r_idx += 1;
+            out.push_entry(pk, v, valid)?;
         }
+        p_idx += 1;
     }
+    while r_idx < res_range_end {
+        let rk = rm.keys.get(r_idx).unwrap_or("");
+        let valid = !check_val_nulls || rm.val_nulls.is_none_or(|bm| bm.get(r_idx));
+        let v = if valid {
+            rm.vals.get(r_idx).unwrap_or("")
+        } else {
+            ""
+        };
+        out.push_entry(rk, v, valid)?;
+        r_idx += 1;
+    }
+    Ok(())
 }
 
 /// Reconstructs a full `MapUtf8` [`FlatColumn`] from an optional residual map and
@@ -595,68 +734,78 @@ pub fn unshred_map(
                 .and_then(|rm| rm.row_nulls)
                 .map_or(row_count, Bitmap::count_ones),
         );
-    const MAX_UNSHRED_PREALLOC_ENTRIES: usize = 1 << 20; // 1M entries (~33 MiB max hint)
-    let est_entries = if valid_rows == 0 {
-        0
+    const MAX_UNSHRED_PREALLOC_ENTRIES: usize = 1 << 20; // 1M entries
+    const MAX_UNSHRED_PREALLOC_BYTES: usize = 16 * 1024 * 1024; // 16 MiB hint cap
+    let (est_entries, est_key_bytes, est_val_bytes) = if valid_rows == 0 {
+        (0, 0, 0)
     } else {
         let residual_entries = res_map.map_or(0, |rm| rm.entry_count);
-        let promoted_present: usize = subcols.iter().fold(0usize, |acc, (_, sub)| {
-            acc.saturating_add(sub.in_map.count_ones().min(valid_rows))
-        });
-        residual_entries
+        let mut promoted_present = 0usize;
+        let mut promoted_key_bytes = 0usize;
+        for &(k, sub) in subcols {
+            let count = sub.in_map.count_ones().min(valid_rows);
+            promoted_present = promoted_present.saturating_add(count);
+            promoted_key_bytes = promoted_key_bytes.saturating_add(count.saturating_mul(k.len()));
+        }
+        let entries = residual_entries
             .saturating_add(promoted_present)
-            .min(MAX_UNSHRED_PREALLOC_ENTRIES)
+            .min(MAX_UNSHRED_PREALLOC_ENTRIES);
+        let key_bytes = res_map
+            .map_or(0, |rm| rm.key_bytes_len)
+            .saturating_add(promoted_key_bytes)
+            .min(MAX_UNSHRED_PREALLOC_BYTES);
+        let val_bytes = res_map
+            .map_or(0, |rm| rm.val_bytes_len)
+            .saturating_add(promoted_present.saturating_mul(16))
+            .min(MAX_UNSHRED_PREALLOC_BYTES);
+        (entries, key_bytes, val_bytes)
     };
+
+    let has_any_val_nulls = unshred_has_any_val_nulls(subcols, res_map);
+    let has_any_row_nulls = row_nulls.is_some_and(|bm| !bm.all_ones())
+        || res_map.is_some_and(|rm| rm.row_nulls.is_some_and(|bm| !bm.all_ones()));
 
     let mut out_offsets = Vec::with_capacity(row_count + 1);
     out_offsets.push(0u32);
-    let mut out_keys: Vec<&str> = Vec::with_capacity(est_entries);
-    let mut out_vals: Vec<&str> = Vec::with_capacity(est_entries);
-    let mut out_val_valid: Vec<bool> = Vec::with_capacity(est_entries);
-    let mut out_row_valid = vec![true; row_count];
+    let mut out =
+        UnshredOut::with_capacity(est_entries, est_key_bytes, est_val_bytes, has_any_val_nulls);
+    let mut rle_cursors = vec![0usize; sub_refs.len()];
 
-    for (row, valid_slot) in out_row_valid.iter_mut().enumerate().take(row_count) {
-        let is_row_null = row_nulls.is_some_and(|bm| !bm.get(row))
-            || res_map.is_some_and(|rm| rm.row_nulls.is_some_and(|bm| !bm.get(row)));
-        if is_row_null {
-            *valid_slot = false;
-            out_offsets.push(out_keys.len() as u32);
-            continue;
+    let out_nulls = if !has_any_row_nulls {
+        for row in 0..row_count {
+            merge_unshred_row(row, subcols, &sub_refs, &mut rle_cursors, res_map, &mut out)?;
+            let end_u32 =
+                u32::try_from(out.entry_count()).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "unshred_map entry count exceeds u32::MAX",
+                })?;
+            out_offsets.push(end_u32);
         }
-
-        merge_unshred_row(
-            row,
-            subcols,
-            &sub_refs,
-            res_map,
-            &mut out_keys,
-            &mut out_vals,
-            &mut out_val_valid,
-        );
-
-        let end_u32 = u32::try_from(out_keys.len()).map_err(|_| StatamError::BoundsExceeded {
-            reason: "unshred_map entry count exceeds u32::MAX",
-        })?;
-        out_offsets.push(end_u32);
-    }
-
-    let keys_data = Utf8Data::try_from_slices(out_keys)?;
-    let vals_data = Utf8Data::try_from_slices(out_vals)?;
-    let val_nulls = if out_val_valid.iter().all(|&b| b) {
         None
     } else {
-        Some(Bitmap::from_bools(&out_val_valid))
+        let mut out_row_bm = Bitmap::new_ones(row_count);
+        let mut any_row_null = false;
+        for row in 0..row_count {
+            let is_row_null = row_nulls.is_some_and(|bm| !bm.get(row))
+                || res_map.is_some_and(|rm| rm.row_nulls.is_some_and(|bm| !bm.get(row)));
+            if is_row_null {
+                any_row_null = true;
+                let _ = out_row_bm.set(row, false);
+                out_offsets.push(out.entry_count() as u32);
+                continue;
+            }
+
+            merge_unshred_row(row, subcols, &sub_refs, &mut rle_cursors, res_map, &mut out)?;
+
+            let end_u32 =
+                u32::try_from(out.entry_count()).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "unshred_map entry count exceeds u32::MAX",
+                })?;
+            out_offsets.push(end_u32);
+        }
+        any_row_null.then_some(out_row_bm)
     };
-    let map = MapData::try_new(out_offsets, keys_data, vals_data, val_nulls)?;
-    let out_nulls = if out_row_valid.iter().all(|&b| b) {
-        None
-    } else {
-        Some(Bitmap::from_bools(&out_row_valid))
-    };
-    Ok(FlatColumn::try_new(
-        FlatData::MapUtf8(Box::new(map)),
-        out_nulls,
-    )?)
+
+    out.finish(out_offsets, out_nulls)
 }
 
 /// Reconstructs a `MapUtf8` [`FlatColumn`] from an optional residual map and promoted
@@ -681,19 +830,19 @@ pub fn unshred_map_selected(
     }
 
     let (res_map, sub_refs) = validate_unshred_inputs(row_count, row_nulls, residual, subcols)?;
+    let has_any_val_nulls = unshred_has_any_val_nulls(subcols, res_map);
 
     let mut out_offsets = Vec::with_capacity(row_count + 1);
     out_offsets.push(0u32);
-    let mut out_keys: Vec<&str> = Vec::new();
-    let mut out_vals: Vec<&str> = Vec::new();
-    let mut out_val_valid: Vec<bool> = Vec::new();
+    let mut out = UnshredOut::with_capacity(0, 0, 0, has_any_val_nulls);
+    let mut rle_cursors = vec![0usize; sub_refs.len()];
     let mut out_nulls: Option<Bitmap> = None;
 
     for row in mask.iter_ones() {
         if row >= row_count {
             break;
         }
-        let cur_off = out_keys.len() as u32;
+        let cur_off = out.entry_count() as u32;
         if out_offsets.len() <= row {
             out_offsets.resize(row + 1, cur_off);
         }
@@ -707,39 +856,21 @@ pub fn unshred_map_selected(
             continue;
         }
 
-        merge_unshred_row(
-            row,
-            subcols,
-            &sub_refs,
-            res_map,
-            &mut out_keys,
-            &mut out_vals,
-            &mut out_val_valid,
-        );
+        merge_unshred_row(row, subcols, &sub_refs, &mut rle_cursors, res_map, &mut out)?;
 
-        let end_u32 = u32::try_from(out_keys.len()).map_err(|_| StatamError::BoundsExceeded {
-            reason: "unshred_map entry count exceeds u32::MAX",
-        })?;
+        let end_u32 =
+            u32::try_from(out.entry_count()).map_err(|_| StatamError::BoundsExceeded {
+                reason: "unshred_map entry count exceeds u32::MAX",
+            })?;
         out_offsets.push(end_u32);
     }
 
-    let tail_off = out_keys.len() as u32;
+    let tail_off = out.entry_count() as u32;
     if out_offsets.len() < row_count + 1 {
         out_offsets.resize(row_count + 1, tail_off);
     }
 
-    let keys_data = Utf8Data::try_from_slices(out_keys)?;
-    let vals_data = Utf8Data::try_from_slices(out_vals)?;
-    let val_nulls = if out_val_valid.iter().all(|&b| b) {
-        None
-    } else {
-        Some(Bitmap::from_bools(&out_val_valid))
-    };
-    let map = MapData::try_new(out_offsets, keys_data, vals_data, val_nulls)?;
-    Ok(FlatColumn::try_new(
-        FlatData::MapUtf8(Box::new(map)),
-        out_nulls,
-    )?)
+    out.finish(out_offsets, out_nulls)
 }
 
 /// Fast single-key `MapUtf8` projection (`map_keys` optimization).
@@ -790,6 +921,8 @@ pub fn decode_single_map_key(
             val_nulls: m.value_nulls(),
             row_nulls: fc.nulls(),
             entry_count: m.entry_count(),
+            key_bytes_len: m.keys().bytes().len(),
+            val_bytes_len: m.values().bytes().len(),
         })
     } else {
         None
@@ -4749,5 +4882,269 @@ mod tests {
         assert_eq!(u.len(), item_count);
         assert_eq!(u.get(0), Some(items[0].as_str()));
         assert_eq!(u.get(item_count - 1), Some(items[item_count - 1].as_str()));
+    }
+
+    #[test]
+    fn pass15b_unshred_map_rle_nulls_empty_and_mixed_residual_exact() {
+        let row_count = 32usize;
+
+        // Build an RLE subcolumn ("env") with 4 runs: [0..8]="prod", [8..16]="staging", [16..24]="dev", [24..32]="prod".
+        let env_rle_vals = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(["prod", "staging", "dev", "prod"]).unwrap()),
+            None,
+        )
+        .unwrap();
+        let env_rle = Column::Rle(RleColumn::try_new(env_rle_vals, vec![8, 16, 24, 32]).unwrap());
+
+        // Build a Dict subcolumn ("region") and a Const subcolumn ("svc").
+        let region_dict = Column::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(["us-east", "eu-west"]).unwrap()),
+                    None,
+                )
+                .unwrap(),
+                (0..row_count).map(|r| (r % 2) as u32).collect(),
+                None,
+            )
+            .unwrap(),
+        );
+        let svc_const = Column::Const {
+            value: ScalarValue::Utf8("api".to_owned()),
+            len: row_count,
+        };
+
+        // Case 1: All-non-null rows & values, sparse promoted key presence, empty residual (None and Some empty).
+        let env_in = Bitmap::from_bools(&(0..row_count).map(|r| r % 3 != 0).collect::<Vec<_>>());
+        let region_in = Bitmap::new_ones(row_count);
+        let svc_in = Bitmap::from_bools(&(0..row_count).map(|r| r % 2 == 0).collect::<Vec<_>>());
+        let sub_env_clean = ShreddedSubCol {
+            in_map: env_in.clone(),
+            value_null: env_in.clone(),
+            values: env_rle.clone(),
+        };
+        let sub_region_clean = ShreddedSubCol {
+            in_map: region_in.clone(),
+            value_null: region_in,
+            values: region_dict,
+        };
+        let sub_svc_clean = ShreddedSubCol {
+            in_map: svc_in.clone(),
+            value_null: svc_in,
+            values: svc_const,
+        };
+
+        let mut exp_offs = Vec::with_capacity(row_count + 1);
+        exp_offs.push(0u32);
+        let mut exp_keys = Vec::new();
+        let mut exp_vals = Vec::new();
+        let env_for = |r: usize| match r {
+            0..8 => "prod",
+            8..16 => "staging",
+            16..24 => "dev",
+            _ => "prod",
+        };
+        for r in 0..row_count {
+            if r % 3 != 0 {
+                exp_keys.push("env");
+                exp_vals.push(env_for(r));
+            }
+            exp_keys.push("region");
+            exp_vals.push(if r % 2 == 0 { "us-east" } else { "eu-west" });
+            if r % 2 == 0 {
+                exp_keys.push("svc");
+                exp_vals.push("api");
+            }
+            exp_offs.push(exp_keys.len() as u32);
+        }
+        let expected_clean = FlatColumn::try_new(
+            FlatData::MapUtf8(Box::new(
+                MapData::try_new(
+                    exp_offs,
+                    Utf8Data::try_from_slices(exp_keys).unwrap(),
+                    Utf8Data::try_from_slices(exp_vals).unwrap(),
+                    None,
+                )
+                .unwrap(),
+            )),
+            None,
+        )
+        .unwrap();
+
+        let empty_res = FlatColumn::try_new(
+            FlatData::MapUtf8(Box::new(
+                MapData::try_new(
+                    vec![0u32; row_count + 1],
+                    Utf8Data::try_from_slices(std::iter::empty::<&str>()).unwrap(),
+                    Utf8Data::try_from_slices(std::iter::empty::<&str>()).unwrap(),
+                    None,
+                )
+                .unwrap(),
+            )),
+            None,
+        )
+        .unwrap();
+
+        let subcols_clean = [
+            ("env", &sub_env_clean),
+            ("region", &sub_region_clean),
+            ("svc", &sub_svc_clean),
+        ];
+        for res in [None, Some(&empty_res)] {
+            let got = unshred_map(row_count, None, res, &subcols_clean).unwrap();
+            assert!(got.nulls().is_none());
+            let FlatData::MapUtf8(m) = got.data() else {
+                panic!("expected MapUtf8");
+            };
+            assert!(m.value_nulls().is_none());
+            assert!(got.semantic_eq(&expected_clean));
+        }
+
+        // Case 2: RLE subcol + value nulls + row nulls + mixed residual (keys before, between, and after promoted keys).
+        let mut env_vn = env_in.clone();
+        let _ = env_vn.set(5, false); // value null in promoted RLE subcol
+        let _ = env_vn.set(17, false);
+        let sub_env_nulls = ShreddedSubCol {
+            in_map: env_in,
+            value_null: env_vn,
+            values: env_rle,
+        };
+
+        let mut row_nulls = Bitmap::new_ones(row_count);
+        let _ = row_nulls.set(0, false);
+        let _ = row_nulls.set(15, false);
+        let mut res_row_nulls = Bitmap::new_ones(row_count);
+        let _ = res_row_nulls.set(31, false);
+
+        let mut res_offs = Vec::with_capacity(row_count + 1);
+        res_offs.push(0u32);
+        let mut res_keys = Vec::new();
+        let mut res_vals = Vec::new();
+        let mut res_vvalid = Vec::new();
+        for r in 0..row_count {
+            if r == 1 || r == 17 || r == 25 {
+                res_keys.push("aaa");
+                res_vals.push("first");
+                res_vvalid.push(true);
+                res_keys.push("mid");
+                res_vals.push("");
+                res_vvalid.push(false); // residual null value
+                res_keys.push("zzz");
+                res_vals.push("last");
+                res_vvalid.push(true);
+            }
+            res_offs.push(res_keys.len() as u32);
+        }
+        let mixed_res = FlatColumn::try_new(
+            FlatData::MapUtf8(Box::new(
+                MapData::try_new(
+                    res_offs,
+                    Utf8Data::try_from_slices(res_keys).unwrap(),
+                    Utf8Data::try_from_slices(res_vals).unwrap(),
+                    Some(Bitmap::from_bools(&res_vvalid)),
+                )
+                .unwrap(),
+            )),
+            Some(res_row_nulls),
+        )
+        .unwrap();
+
+        // Build exact expected column independently.
+        let mut m_offs = Vec::with_capacity(row_count + 1);
+        m_offs.push(0u32);
+        let mut m_keys = Vec::new();
+        let mut m_vals = Vec::new();
+        let mut m_vvalid = Vec::new();
+        let mut m_rvalid = vec![true; row_count];
+        for (r, rv) in m_rvalid.iter_mut().enumerate().take(row_count) {
+            if r == 0 || r == 15 || r == 31 {
+                *rv = false;
+                m_offs.push(m_keys.len() as u32);
+                continue;
+            }
+            let has_res = r == 1 || r == 17 || r == 25;
+            if has_res {
+                m_keys.push("aaa");
+                m_vals.push("first");
+                m_vvalid.push(true);
+            }
+            if r % 3 != 0 {
+                m_keys.push("env");
+                if r == 5 || r == 17 {
+                    m_vals.push("");
+                    m_vvalid.push(false);
+                } else {
+                    m_vals.push(env_for(r));
+                    m_vvalid.push(true);
+                }
+            }
+            if has_res {
+                m_keys.push("mid");
+                m_vals.push("");
+                m_vvalid.push(false);
+            }
+            m_keys.push("region");
+            m_vals.push(if r % 2 == 0 { "us-east" } else { "eu-west" });
+            m_vvalid.push(true);
+            if r % 2 == 0 {
+                m_keys.push("svc");
+                m_vals.push("api");
+                m_vvalid.push(true);
+            }
+            if has_res {
+                m_keys.push("zzz");
+                m_vals.push("last");
+                m_vvalid.push(true);
+            }
+            m_offs.push(m_keys.len() as u32);
+        }
+        let expected_mixed = FlatColumn::try_new(
+            FlatData::MapUtf8(Box::new(
+                MapData::try_new(
+                    m_offs,
+                    Utf8Data::try_from_slices(m_keys).unwrap(),
+                    Utf8Data::try_from_slices(m_vals).unwrap(),
+                    Some(Bitmap::from_bools(&m_vvalid)),
+                )
+                .unwrap(),
+            )),
+            Some(Bitmap::from_bools(&m_rvalid)),
+        )
+        .unwrap();
+
+        let subcols_mixed = [
+            ("env", &sub_env_nulls),
+            ("region", &sub_region_clean),
+            ("svc", &sub_svc_clean),
+        ];
+        let got_mixed = unshred_map(
+            row_count,
+            Some(&row_nulls),
+            Some(&mixed_res),
+            &subcols_mixed,
+        )
+        .unwrap();
+        assert!(got_mixed.semantic_eq(&expected_mixed));
+
+        // Verify sparse unshred_map_selected also matches on selected rows (including row null & mixed residual).
+        let mut sparse_mask = Bitmap::new_zeroed(row_count);
+        let _ = sparse_mask.set(17, true);
+        let _ = sparse_mask.set(31, true);
+        let got_sparse = unshred_map_selected(
+            row_count,
+            Some(&row_nulls),
+            Some(&mixed_res),
+            &subcols_mixed,
+            &sparse_mask,
+        )
+        .unwrap();
+        assert_eq!(
+            Column::Flat(got_sparse.clone()).get_scalar(17).unwrap(),
+            Column::Flat(expected_mixed.clone()).get_scalar(17).unwrap()
+        );
+        assert_eq!(
+            Column::Flat(got_sparse).get_scalar(31).unwrap(),
+            Column::Flat(expected_mixed).get_scalar(31).unwrap()
+        );
     }
 }

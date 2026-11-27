@@ -901,6 +901,7 @@ impl FsstDecodeTable {
                 };
                 out_bytes.resize(grown, 0);
             }
+            let out_slice = &mut out_bytes[..needed];
             let mut p = *pos;
             let mut i = 0usize;
             while i < coded_row.len() {
@@ -911,7 +912,7 @@ impl FsstDecodeTable {
                             reason: "truncated fsst literal escape",
                         });
                     }
-                    out_bytes[p] = coded_row[i + 1];
+                    out_slice[p] = coded_row[i + 1];
                     p += 1;
                     i += 2;
                 } else {
@@ -921,7 +922,7 @@ impl FsstDecodeTable {
                             reason: "fsst symbol code out of bounds",
                         });
                     }
-                    out_bytes[p..p + FSST_MAX_SYM_LEN].copy_from_slice(&self.words[usize::from(b)]);
+                    out_slice[p..p + FSST_MAX_SYM_LEN].copy_from_slice(&self.words[usize::from(b)]);
                     p += usize::from(slen);
                     i += 1;
                 }

@@ -643,4 +643,27 @@ Driven by `perf` profiling on `precision-5770-vm` (`WildChat`, `Nested`, `Random
 - **Tests, Security & Cross-Arch:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (0 warnings), `just check-ee`, `just deny-policy` (bans/licenses/sources ok); **209 unit + 2 `fuzz_replay` tests passing** on local `x86_64` and Apple Silicon M4 `macbook-m4-vm` (`aarch64` NEON, `1.18 s` release, verifying unaligned NEON `ascii_lowercase_append`).
 - **ASan libFuzzer (`statam_file`, 90s × 4 workers):** **`352,786` total runs** (`~969` exec/s/worker — `1.7×` faster fuzz throughput), **`21,224` cov edges**, **`61,069` features**, **`606 MiB` peak RSS**, **0 crashes, 0 OOMs, 0 ASan errors**.
 
+---
+
+## 19. Pass 15: Exact ASCII-Anchor Unicode `ILIKE`, Direct-Buffer `unshred_map`, & FSST Slice Hoisting
+
+1. **Pass 15A — Exact ASCII-Anchor Pre-Filter & Caseless CJK/Hangul Fast-Copy (`payload/search.rs`, `reader/eval.rs`):**
+   - Under Unicode `char::to_lowercase()`, the only non-ASCII scalars (`U+0080..=U+10FFFF`) emitting any ASCII byte are `U+0130` (`'İ' -> "i\u{0307}"`, where `'i'` is always immediately followed by non-ASCII `0xCC`) and `U+212A` (`'K' -> "k"`), proven exhaustively across all `1,114,112` codepoints by unit test `pass15a_exhaustive_unicode_tolower_ascii_and_caseless_cjk_invariants`.
+   - `extract_unicode_ilike_ascii_anchor` extracts the longest safe ASCII anchor (`len >= 2`, splitting on `'k'`, trimming trailing `'i'`, and verifying inclusion in `needle_raw_lower`), letting AVX2/NEON `ascii_lowercase_into + memmem` reject 99.98% of multilingual chunks without touching `std::str::from_utf8` or Unicode lookup tables, while reusing `scratch` on the invalid-UTF-8 fallback.
+   - `unicode_lowercase_context_free_into_bytes` also fast-copies caseless 3-byte CJK/Hangul runs (`U+3000..=U+9FFF`, `U+AC00..=U+D7AF`) directly.
+2. **Pass 15B — Direct-Buffer `unshred_map` & O(1) RLE Cursor (`codec/nested.rs`):**
+   - Added monotonic `SubColUtf8Ref::get_seq` (O(1) amortized RLE cursor replacing per-row binary search), direct pre-sized `(key_offs, key_bytes, val_offs, val_bytes)` writes (`UnshredOut`, capped at `1M` entries / `16 MiB` prealloc) eliminating `Vec<&str>` / `Vec<bool>` / `realloc` churn, lazy null-bitmap allocation (`unshred_has_any_val_nulls` word-level check), and an empty-residual fast path in `merge_unshred_row`.
+3. **Pass 15C — Slice Hoisting in `FsstDecodeTable::decode_row_fast` (`codec/fsst.rs`):**
+   - Hoisted `let out_slice = &mut out_bytes[..needed];` outside the per-symbol loop (zero `unsafe`).
+
+### 19.1 Pass 15 Results & Verification
+- **File Sizes:** **Bit-identical (`+0.00%`) across all 17 workloads** (`clickbench_100k = 8,411.2 KiB`, Gate 1 PASS).
+- **Local CPU (`precision-5770-vm`):**
+  - **`WC_Q4_unicode_ilike` (`151.7 MiB` multilingual UTF-8):** `108.37 ms` (Pass 13) → `84.40 ms` (Pass 14) → **`23.48 ms` (1C, `4.62×` faster, `6.3 GiB/s` on 1 core!)** / **`13.23 ms` (8R, `3.72×` faster than `49.18 ms`, `11.2 GiB/s`!)** — beating Parquet (`117 ms`) by **`5.0×`**, Vortex (`121 ms`) by **`5.2×`**, and Lance (`195 ms`) by **`8.3×`** on 1 core!
+  - **`wildchat_15k` write (8W):** `258.8 → 198.9 ms` (`744.9 MiB/s`, `1.30×` faster vs Pass 12).
+  - **`NS_scan_full` (1C):** `38.10 ms` (Pass 13) → `29.45 ms` (Pass 14) → **`28.28 ms` (`1.35×` overall)**; `NS_filter_map`: `2.23 ms (1C) / 0.493 ms (8T)`; `CB_Q24` (1C): `20.16 → 19.86 ms`.
+- **Cold Code Review:** **APPROVED** on first pass (0 Blockers, 0 Majors).
+- **Tests, Security & Cross-Arch:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (0 warnings), `just check-ee`, `just deny-policy` (bans/licenses/sources ok); **212 unit + 2 `fuzz_replay` tests passing** on local `x86_64` and Apple Silicon M4 `macbook-m4-vm` (`aarch64` NEON, `1.16 s` release).
+- **ASan libFuzzer (`statam_file`, 90s × 4 workers):** **`327,593` total runs**, **`21,239` cov edges**, **`61,215` features**, **`641 MiB` peak RSS**, **0 crashes, 0 OOMs, 0 ASan errors**.
+
 **Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Awaiting explicit user go-ahead for Stage 3 (`cetra-storage` integration).

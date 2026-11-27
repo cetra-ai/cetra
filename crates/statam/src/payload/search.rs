@@ -293,11 +293,57 @@ fn ascii_prefix_len(bytes: &[u8]) -> usize {
     bytes.len()
 }
 
+/// Extracts an exact ASCII pre-filter anchor from a context-free Unicode-lowercased `ILIKE` needle.
+///
+/// Under Rust's `char::to_lowercase()`, the only non-ASCII scalar values (`c >= '\u{0080}'`) whose
+/// lowercase expansion emits any ASCII byte (`0x00..=0x7F`) are:
+/// - `U+0130` (`'İ' -> "i\u{0307}"`), where `'i'` is always immediately followed by non-ASCII `0xCC`,
+/// - `U+212A` (`'K' -> "k"`).
+///
+/// Therefore, any contiguous ASCII slice inside `uni_lower` that contains no `b'k'` and does not end
+/// with a trailing `b'i'` at the end of its maximal ASCII run can only arise from matching ASCII
+/// bytes in the haystack (under `ascii_lowercase`). Requiring `memmem::find(needle_raw_lower, cand)`
+/// additionally guarantees zero false negatives on the invalid-UTF-8 raw-ASCII fallback path.
+pub(crate) fn extract_unicode_ilike_ascii_anchor(
+    uni_lower: &[u8],
+    needle_raw_lower: &[u8],
+) -> Option<Vec<u8>> {
+    let mut best: Option<&[u8]> = None;
+    let mut i = 0usize;
+    while i < uni_lower.len() {
+        if uni_lower[i] >= 0x80 {
+            i += 1;
+            continue;
+        }
+        let run_start = i;
+        while i < uni_lower.len() && uni_lower[i] < 0x80 {
+            i += 1;
+        }
+        let mut run = &uni_lower[run_start..i];
+        // A trailing 'i' at the end of a maximal ASCII run may be followed by non-ASCII `0xCC`
+        // (from `U+0130` -> "i\u{0307}"); an 'i' followed by another ASCII byte inside the run
+        // cannot come from `U+0130`.
+        if run.last() == Some(&b'i') {
+            run = &run[..run.len() - 1];
+        }
+        for cand in run.split(|&b| b == b'k') {
+            if cand.len() >= 2
+                && best.is_none_or(|b| cand.len() > b.len())
+                && memmem::find(needle_raw_lower, cand).is_some()
+            {
+                best = Some(cand);
+            }
+        }
+    }
+    best.map(<[u8]>::to_vec)
+}
+
 /// Fast SIMD-accelerated context-free Unicode lowercasing into a UTF-8 byte buffer.
 ///
 /// Scans contiguous ASCII runs and lowers them directly via SIMD `ascii_lowercase_append`
-/// without invoking `char::to_lowercase`, falling back to scalar `char::to_lowercase`
-/// (with Greek Final Sigma `'ς'` -> `'σ'` folding) only on non-ASCII codepoints.
+/// without invoking `char::to_lowercase`, copies caseless 3-byte CJK/Hangul runs directly,
+/// and falls back to scalar `char::to_lowercase` (with Greek Final Sigma `'ς'` -> `'σ'` folding)
+/// only on other non-ASCII codepoints.
 ///
 /// Output is bit-exact with [`unicode_lowercase_context_free_into`] for every UTF-8 input.
 pub(crate) fn unicode_lowercase_context_free_into_bytes(s: &str, out: &mut Vec<u8>) {
@@ -307,17 +353,39 @@ pub(crate) fn unicode_lowercase_context_free_into_bytes(s: &str, out: &mut Vec<u
     let mut i = 0usize;
     let mut enc = [0u8; 4];
     while i < bytes.len() {
-        let ascii_len = ascii_prefix_len(&bytes[i..]);
-        if ascii_len > 0 {
+        if bytes[i] < 0x80 {
+            let ascii_len = ascii_prefix_len(&bytes[i..]);
             ascii_lowercase_append(&bytes[i..i + ascii_len], out);
             i += ascii_len;
-            if i == bytes.len() {
-                break;
-            }
+            continue;
         }
         let Some(c) = s[i..].chars().next() else {
             break;
         };
+        // CJK punctuation/Kana/CJK Unified Ideographs (`U+3000..=U+9FFF`) and Hangul Syllables
+        // (`U+AC00..=U+D7AF`) are 100% caseless and 3-byte UTF-8; copy contiguous runs directly.
+        if matches!(c, '\u{3000}'..='\u{9FFF}' | '\u{AC00}'..='\u{D7AF}') {
+            let run_start = i;
+            i += 3;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if (0xE3..=0xE9).contains(&b) || b == 0xEB || b == 0xEC {
+                    i += 3;
+                } else if b == 0xEA || b == 0xED {
+                    if let Some(nc) = s[i..].chars().next()
+                        && matches!(nc, '\u{AC00}'..='\u{D7AF}')
+                    {
+                        i += 3;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            out.extend_from_slice(&bytes[run_start..i]);
+            continue;
+        }
         if c == '\u{03C2}' {
             out.extend_from_slice('\u{03C3}'.encode_utf8(&mut enc).as_bytes());
         } else {
@@ -338,6 +406,7 @@ enum NeedleMatcher {
     },
     UnicodeIlike {
         finder: memmem::Finder<'static>,
+        ascii_anchor: Option<Box<memmem::Finder<'static>>>,
         needle_has_non_ascii: bool,
         needle_raw_lower: Vec<u8>,
         scratch: Vec<u8>,
@@ -366,8 +435,11 @@ impl NeedleMatcher {
                 let mut uni_lower = Vec::new();
                 unicode_lowercase_context_free_into_bytes(s, &mut uni_lower);
                 let needle_has_non_ascii = !uni_lower.is_ascii();
+                let ascii_anchor = extract_unicode_ilike_ascii_anchor(&uni_lower, &ascii_lowered)
+                    .map(|anchor| Box::new(memmem::Finder::new(&anchor).into_owned()));
                 Self::UnicodeIlike {
                     finder: memmem::Finder::new(&uni_lower).into_owned(),
+                    ascii_anchor,
                     needle_has_non_ascii,
                     needle_raw_lower: ascii_lowered,
                     scratch: Vec::new(),
@@ -390,6 +462,7 @@ impl NeedleMatcher {
             }
             Self::UnicodeIlike {
                 finder,
+                ascii_anchor,
                 needle_has_non_ascii,
                 needle_raw_lower,
                 scratch,
@@ -397,6 +470,12 @@ impl NeedleMatcher {
             } => {
                 if *needle_has_non_ascii && haystack.is_ascii() {
                     return false;
+                }
+                if let Some(anchor) = ascii_anchor {
+                    ascii_lowercase_into(haystack, scratch);
+                    if anchor.find(scratch).is_none() {
+                        return false;
+                    }
                 }
                 if let Ok(s) = std::str::from_utf8(haystack) {
                     unicode_lowercase_context_free_into_bytes(s, uni_scratch);
@@ -409,7 +488,9 @@ impl NeedleMatcher {
                     if finder.find(uni_scratch).is_some() {
                         return true;
                     }
-                    ascii_lowercase_into(haystack, scratch);
+                    if ascii_anchor.is_none() {
+                        ascii_lowercase_into(haystack, scratch);
+                    }
                     memmem::find(scratch, needle_raw_lower).is_some()
                 }
             }
@@ -2869,6 +2950,122 @@ mod tests {
         assert!(!alien.matches("PURE ASCII ".repeat(20).as_bytes()));
         assert!(alien.matches("la ALIENACIÓN moderna".as_bytes()));
         assert!(alien.matches("alienación".as_bytes()));
+    }
+
+    #[test]
+    fn pass15a_exhaustive_unicode_tolower_ascii_and_caseless_cjk_invariants() {
+        // 1. Exhaustive proof over all non-ASCII Unicode scalars (`0x80..=0x10_FFFF`):
+        //    the ONLY scalars whose `char::to_lowercase()` emits any ASCII byte are
+        //    U+0130 ('İ' -> "i\u{0307}", 'i' immediately followed by non-ASCII 0xCC)
+        //    and U+212A ('K' -> "k").
+        // 2. Every scalar in U+3000..=U+9FFF | U+AC00..=U+D7AF is caseless (`to_lowercase == [c]`)
+        //    and 3-byte UTF-8 (`len_utf8() == 3`).
+        for cp in 0x80u32..=0x10_FFFF {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            let lowered: Vec<char> = c.to_lowercase().collect();
+            if lowered.iter().any(char::is_ascii) {
+                assert!(
+                    c == '\u{0130}' || c == '\u{212A}',
+                    "unexpected non-ASCII scalar U+{cp:04X} ({c:?}) lowercasing to ASCII: {lowered:?}"
+                );
+                if c == '\u{0130}' {
+                    assert_eq!(lowered, vec!['i', '\u{0307}']);
+                    let utf8: String = lowered.iter().collect();
+                    assert_eq!(utf8.as_bytes(), &[b'i', 0xCC, 0x87]);
+                } else {
+                    assert_eq!(lowered, vec!['k']);
+                }
+            }
+            if matches!(c, '\u{3000}'..='\u{9FFF}' | '\u{AC00}'..='\u{D7AF}') {
+                assert_eq!(
+                    lowered,
+                    vec![c],
+                    "expected caseless CJK/Hangul U+{cp:04X}, got {lowered:?}"
+                );
+                assert_eq!(c.len_utf8(), 3, "expected 3-byte UTF-8 for U+{cp:04X}");
+            }
+        }
+
+        // Verify CJK/Hangul fast-copy matches scalar reference across all range boundaries
+        // (including adjacent non-CJK scalars such as U+2FFF, U+A640 Cyrillic uppercase, U+D7B0).
+        let boundary_str = "ABC\u{2FFF}\u{3000}日本語テスト\u{9FFF}\u{A000}\u{A640}\u{ABFF}\u{AC00}한국어테스트\u{D7AF}\u{D7B0}XYZ";
+        let mut scalar = String::new();
+        let mut fast = Vec::new();
+        unicode_lowercase_context_free_into(boundary_str, &mut scalar);
+        unicode_lowercase_context_free_into_bytes(boundary_str, &mut fast);
+        assert_eq!(fast.as_slice(), scalar.as_bytes());
+
+        // Verify anchor extraction directly on representative needles.
+        let anchor_for = |needle: &str| {
+            let mut raw_lower = Vec::new();
+            ascii_lowercase_into(needle.as_bytes(), &mut raw_lower);
+            let mut uni_lower = Vec::new();
+            unicode_lowercase_context_free_into_bytes(needle, &mut uni_lower);
+            extract_unicode_ilike_ascii_anchor(&uni_lower, &raw_lower)
+        };
+        assert_eq!(anchor_for("Alienación").as_deref(), Some(&b"alienac"[..]));
+        assert_eq!(anchor_for("café").as_deref(), Some(&b"caf"[..]));
+        assert_eq!(anchor_for("İSTANBUL").as_deref(), Some(&b"stanbul"[..]));
+        assert_eq!(anchor_for("Kelvin").as_deref(), Some(&b"elvin"[..]));
+        assert_eq!(anchor_for("ΟΔΥΣΣΕΥΣ"), None);
+        assert_eq!(anchor_for("ς"), None);
+        assert_eq!(anchor_for("i\u{0307}"), None);
+        assert_eq!(anchor_for("aKb"), None);
+
+        // 3. Zero false negatives on NeedleMatcher across special foldings, CJK, and invalid UTF-8.
+        let mut alien = NeedleMatcher::new("Alienación".as_bytes(), true);
+        assert!(alien.matches("la ALIENACIÓN moderna".as_bytes()));
+        assert!(alien.matches("alienación".as_bytes()));
+        assert!(!alien.matches("la ALIENACION moderna".as_bytes()));
+        assert!(!alien.matches("日本語テキスト zonder match".as_bytes()));
+
+        let mut cafe = NeedleMatcher::new("café".as_bytes(), true);
+        assert!(cafe.matches("CAFÉ au lait".as_bytes()));
+        assert!(cafe.matches("le café".as_bytes()));
+        assert!(!cafe.matches("日本語コーヒー".as_bytes()));
+
+        let mut istanbul = NeedleMatcher::new("İSTANBUL".as_bytes(), true);
+        assert!(istanbul.matches("i\u{0307}stanbul".as_bytes()));
+        assert!(istanbul.matches("visit İSTANBUL today".as_bytes()));
+        assert!(!istanbul.matches("visit istanbul today".as_bytes()));
+
+        let mut istanbul_decomp = NeedleMatcher::new("i\u{0307}stanbul".as_bytes(), true);
+        assert!(istanbul_decomp.matches("İSTANBUL".as_bytes()));
+        assert!(istanbul_decomp.matches("I\u{0307}STANBUL".as_bytes()));
+
+        let mut kelvin = NeedleMatcher::new("Kelvin".as_bytes(), true);
+        assert!(kelvin.matches("kelvin".as_bytes()));
+        assert!(kelvin.matches("KELVIN".as_bytes()));
+        assert!(kelvin.matches("300 KELVIN".as_bytes()));
+        assert!(!kelvin.matches("celsius".as_bytes()));
+
+        let mut sigma = NeedleMatcher::new("ς".as_bytes(), true);
+        assert!(sigma.matches("ΟΔΥΣΣΕΥΣ".as_bytes()));
+        assert!(!sigma.matches(b"odysseus"));
+
+        // Invalid UTF-8 slices with both valid Unicode match inside lossy text AND raw-ASCII match.
+        let mut invalid_lossy = vec![0xFF, 0xFE];
+        invalid_lossy.extend_from_slice("prefix ALIENACIÓN suffix".as_bytes());
+        invalid_lossy.push(0xC3);
+        assert!(std::str::from_utf8(&invalid_lossy).is_err());
+        assert!(alien.matches(&invalid_lossy));
+
+        let mut invalid_cafe = vec![0x80];
+        invalid_cafe.extend_from_slice("CAFÉ".as_bytes());
+        invalid_cafe.push(0xC3);
+        assert!(cafe.matches(&invalid_cafe));
+
+        let mut invalid_raw_only = vec![0xFF];
+        invalid_raw_only.extend_from_slice("ALIENACI\u{00F3}N".as_bytes());
+        invalid_raw_only.push(0x80);
+        assert!(alien.matches(&invalid_raw_only));
+
+        // Trailing 'i' before U+0307 vs U+0130 in haystack: needle "abci\u{0307}" must match "ABCİ".
+        let mut trailing_i = NeedleMatcher::new("abci\u{0307}".as_bytes(), true);
+        assert!(trailing_i.matches("xxABC\u{0130}yy".as_bytes()));
+        assert!(trailing_i.matches("xxabci\u{0307}yy".as_bytes()));
     }
 
     proptest::proptest! {

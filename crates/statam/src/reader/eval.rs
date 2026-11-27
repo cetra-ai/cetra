@@ -23,7 +23,8 @@ use crate::format::{
 };
 use crate::parallel::{MAX_PARALLEL_THREADS, parallel_map_in_order};
 use crate::payload::search::{
-    RetainedPackChunks, pack_short_circuits_all, unicode_lowercase_context_free_into_bytes,
+    RetainedPackChunks, extract_unicode_ilike_ascii_anchor, pack_short_circuits_all,
+    unicode_lowercase_context_free_into_bytes,
 };
 use crate::payload::{
     FLAT_REF_NULL, FlatPayloadRefs, decode_payload_refs_flat, scan_payload_refs_inline_substring,
@@ -1751,6 +1752,7 @@ pub(super) enum Utf8Matcher {
     },
     UnicodeIlike {
         finder: memmem::Finder<'static>,
+        ascii_anchor: Option<Box<memmem::Finder<'static>>>,
         needle_has_non_ascii: bool,
         needle_raw_lower: Vec<u8>,
         scratch: Vec<u8>,
@@ -1778,8 +1780,11 @@ impl Utf8Matcher {
                 let mut uni_lower = Vec::new();
                 unicode_lowercase_context_free_into_bytes(s, &mut uni_lower);
                 let needle_has_non_ascii = !uni_lower.is_ascii();
+                let ascii_anchor = extract_unicode_ilike_ascii_anchor(&uni_lower, &ascii_lowered)
+                    .map(|anchor| Box::new(memmem::Finder::new(&anchor).into_owned()));
                 Self::UnicodeIlike {
                     finder: memmem::Finder::new(&uni_lower).into_owned(),
+                    ascii_anchor,
                     needle_has_non_ascii,
                     needle_raw_lower: ascii_lowered,
                     scratch: Vec::new(),
@@ -1802,6 +1807,7 @@ impl Utf8Matcher {
             }
             Self::UnicodeIlike {
                 finder,
+                ascii_anchor,
                 needle_has_non_ascii,
                 needle_raw_lower,
                 scratch,
@@ -1809,6 +1815,12 @@ impl Utf8Matcher {
             } => {
                 if *needle_has_non_ascii && haystack.is_ascii() {
                     return false;
+                }
+                if let Some(anchor) = ascii_anchor {
+                    ascii_lowercase_into(haystack, scratch);
+                    if anchor.find(scratch).is_none() {
+                        return false;
+                    }
                 }
                 if let Ok(s) = std::str::from_utf8(haystack) {
                     unicode_lowercase_context_free_into_bytes(s, uni_scratch);
@@ -1819,7 +1831,9 @@ impl Utf8Matcher {
                     if finder.find(uni_scratch).is_some() {
                         return true;
                     }
-                    ascii_lowercase_into(haystack, scratch);
+                    if ascii_anchor.is_none() {
+                        ascii_lowercase_into(haystack, scratch);
+                    }
                     memmem::find(scratch, needle_raw_lower).is_some()
                 }
             }
@@ -1862,5 +1876,50 @@ mod tests {
         assert!(!alien.matches("PURE ASCII ".repeat(20).as_bytes()));
         assert!(alien.matches("la ALIENACIÓN moderna".as_bytes()));
         assert!(alien.matches("alienación".as_bytes()));
+    }
+
+    #[test]
+    fn pass15a_utf8_matcher_ascii_anchor_prefilter_and_invalid_utf8_invariants() {
+        let mut alien = Utf8Matcher::new("Alienación".as_bytes(), true);
+        assert!(alien.matches("ALIENACIÓN".as_bytes()));
+        assert!(!alien.matches("日本語テキスト".as_bytes()));
+
+        let mut cafe = Utf8Matcher::new("café".as_bytes(), true);
+        assert!(cafe.matches("CAFÉ".as_bytes()));
+        assert!(cafe.matches("un café noir".as_bytes()));
+        assert!(!cafe.matches("日本語テキスト".as_bytes()));
+
+        let mut istanbul = Utf8Matcher::new("İSTANBUL".as_bytes(), true);
+        assert!(istanbul.matches("i\u{0307}stanbul".as_bytes()));
+        assert!(istanbul.matches("İSTANBUL".as_bytes()));
+        assert!(!istanbul.matches(b"istanbul"));
+
+        let mut istanbul_decomp = Utf8Matcher::new("i\u{0307}stanbul".as_bytes(), true);
+        assert!(istanbul_decomp.matches("İSTANBUL".as_bytes()));
+
+        let mut kelvin = Utf8Matcher::new("Kelvin".as_bytes(), true);
+        assert!(kelvin.matches(b"kelvin"));
+        assert!(kelvin.matches(b"KELVIN"));
+        assert!(kelvin.matches("KELVIN".as_bytes()));
+        assert!(!kelvin.matches(b"celsius"));
+
+        let mut sigma = Utf8Matcher::new("ς".as_bytes(), true);
+        assert!(sigma.matches("ΟΔΥΣΣΕΥΣ".as_bytes()));
+        assert!(!sigma.matches("한국어".as_bytes()));
+
+        let mut trailing_i = Utf8Matcher::new("abci\u{0307}".as_bytes(), true);
+        assert!(trailing_i.matches("xxABC\u{0130}yy".as_bytes()));
+
+        // Invalid UTF-8 slices must have zero false negatives on both lossy & raw-ASCII fallbacks.
+        let mut invalid_alien = vec![0xFF, 0xFE];
+        invalid_alien.extend_from_slice("ALIENACIÓN".as_bytes());
+        invalid_alien.push(0xC3);
+        assert!(std::str::from_utf8(&invalid_alien).is_err());
+        assert!(alien.matches(&invalid_alien));
+
+        let mut invalid_cafe = vec![0x80];
+        invalid_cafe.extend_from_slice("CAFÉ".as_bytes());
+        invalid_cafe.push(0xFF);
+        assert!(cafe.matches(&invalid_cafe));
     }
 }
