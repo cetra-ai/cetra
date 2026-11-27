@@ -36,6 +36,9 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "object_store"
         update-types: ["version-update:semver-major"]
+      # x509-cert stays on bergshamra's line (D-SA-11): 0.3 would put two versions in the graph.
+      - dependency-name: "x509-cert"
+        versions: [">=0.3.0"]
     schedule:
       interval: weekly
       day: monday
