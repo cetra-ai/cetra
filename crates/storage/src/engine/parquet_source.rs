@@ -5908,6 +5908,7 @@ pub(crate) mod tests {
                 max_ingest_time: i64::MAX,
                 fully_merged: false,
                 deletions_applied_seq: 0,
+                pack: None,
             });
             let cache = Arc::new(MetadataCache::new(1024 * 1024));
             let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
@@ -6116,6 +6117,7 @@ pub(crate) mod tests {
             max_ingest_time: written.max_ingest_time,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         })
     }
 
@@ -6427,6 +6429,7 @@ pub(crate) mod tests {
             max_ingest_time: 100,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         });
 
         let schema = Schema::try_new_arc(vec![Field::new(spans::NAME, DataType::Utf8, false)])
@@ -6472,6 +6475,7 @@ pub(crate) mod tests {
             max_ingest_time: 100,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         });
         counting.transient_fail.store(true, Ordering::Relaxed);
         let transient_source = ParquetSource::new(
@@ -6571,6 +6575,7 @@ pub(crate) mod tests {
             max_ingest_time: t + 1_000,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         })
     }
 
@@ -6642,6 +6647,7 @@ pub(crate) mod tests {
                 max_ingest_time: 1000,
                 fully_merged: false,
                 deletions_applied_seq: 0,
+                pack: None,
             })
         };
         let dict_source = ParquetSource::new(
@@ -6711,6 +6717,7 @@ pub(crate) mod tests {
                 max_ingest_time: 1000,
                 fully_merged: false,
                 deletions_applied_seq: 0,
+                pack: None,
             })
         };
         let fb_col_schema = Schema::try_new_arc(vec![Field::new("tag", DataType::Utf8, true)])
@@ -6881,6 +6888,7 @@ pub(crate) mod tests {
                 max_ingest_time: t + 1_000,
                 fully_merged: false,
                 deletions_applied_seq: 0,
+                pack: None,
             })
         };
         let files = vec![make_file(d0), make_file(d5), make_file(d9)];
@@ -7082,6 +7090,7 @@ pub(crate) mod tests {
             max_ingest_time: written.max_ingest_time,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         });
 
         let source = ParquetSource::new(
@@ -7675,6 +7684,7 @@ pub(crate) mod tests {
             max_ingest_time: 0,
             fully_merged: true,
             deletions_applied_seq: 0,
+            pack: None,
         });
         let schema = Schema::try_new_arc(vec![
             Field::new("id", DataType::I64, false),
@@ -7787,6 +7797,7 @@ pub(crate) mod tests {
             max_ingest_time: written.max_ingest_time,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         });
         let queue = Arc::new(VerifyQueue::default());
         let suspects = Suspects::new(Arc::clone(&queue));
@@ -7881,6 +7892,7 @@ pub(crate) mod tests {
             max_ingest_time: written.max_ingest_time,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         });
         let schema = spans_schema();
         let attrs_idx = schema.index_of(spans::ATTRIBUTES).unwrap();
@@ -8082,6 +8094,7 @@ pub(crate) mod tests {
             max_ingest_time: 0,
             fully_merged: true,
             deletions_applied_seq: 0,
+            pack: None,
         });
         let schema = Schema::try_new_arc(vec![
             Field::new("id", DataType::I64, false),
@@ -8167,6 +8180,7 @@ pub(crate) mod tests {
             max_ingest_time: 0,
             fully_merged: true,
             deletions_applied_seq: 0,
+            pack: None,
         };
         let pool = GlobalPool::standalone(1024 * 1024);
 

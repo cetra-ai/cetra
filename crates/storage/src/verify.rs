@@ -360,6 +360,7 @@ mod tests {
             max_ingest_time: 0,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         })
     }
 

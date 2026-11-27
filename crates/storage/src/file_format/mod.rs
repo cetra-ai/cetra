@@ -1847,6 +1847,7 @@ mod tests {
             max_ingest_time: written.max_ingest_time,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         }
     }
 
@@ -2417,6 +2418,7 @@ mod tests {
             max_ingest_time: 500,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         };
 
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -2507,6 +2509,7 @@ mod tests {
             max_ingest_time: 500,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         }
     }
 

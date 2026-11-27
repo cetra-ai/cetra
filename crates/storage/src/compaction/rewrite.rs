@@ -237,12 +237,8 @@ impl Compactor {
         if !raise.is_empty() {
             let raised = u64::try_from(raise.len()).unwrap_or(u64::MAX);
             let edit = CatalogEdit {
-                add: Vec::new(),
-                remove: Vec::new(),
-                flushed_seq: None,
-                sources: Vec::new(),
                 raise,
-                quarantine: Vec::new(),
+                ..CatalogEdit::default()
             };
             let published = Arc::clone(&self.published);
             match self

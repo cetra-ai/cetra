@@ -109,6 +109,19 @@ impl FileState {
     }
 }
 
+/// Sibling `.stpk` payload pack owned 1:1 by an L1 `spans` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PackMeta {
+    /// 16-byte UUIDv7 pack identifier.
+    pub(crate) id: [u8; 16],
+    /// Store-relative object key (`tables/spans/project=.../day=.../<level>-<pack_id>.stpk`).
+    pub(crate) path: String,
+    /// Pack object size in bytes.
+    pub(crate) size: u64,
+    /// Stored TOC + postscript tail size in bytes, for 1-GET remote tail prefetch.
+    pub(crate) toc_size: u64,
+}
+
 /// One active file. Immutable once it is inside a published [`Catalog`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileMeta {
@@ -143,6 +156,17 @@ pub(crate) struct FileMeta {
     /// No row of a deletion with `deletion_seq` at or below this remains in the
     /// file (spec 03 §7).
     pub(crate) deletions_applied_seq: u64,
+    /// Optional sibling `.stpk` payload pack owned 1:1 by this file.
+    pub(crate) pack: Option<PackMeta>,
+}
+
+impl FileMeta {
+    /// Total bytes owned by this entry: the table file plus its sibling `.stpk`
+    /// pack, if any.
+    pub(crate) fn total_bytes(&self) -> u64 {
+        self.size
+            .saturating_add(self.pack.as_ref().map_or(0, |pack| pack.size))
+    }
 }
 
 /// `spans`, `traces`, then `scores`, indexed by [`FileTable`] via [`file_index`].
@@ -379,6 +403,7 @@ mod tests {
             max_ingest_time: min_time,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         }
     }
 
@@ -388,11 +413,7 @@ mod tests {
         let raised_id = first.id;
         let added = CatalogEdit {
             add: vec![first, file(20, day(2))],
-            remove: Vec::new(),
-            flushed_seq: None,
-            sources: Vec::new(),
-            raise: Vec::new(),
-            quarantine: Vec::new(),
+            ..CatalogEdit::default()
         };
         let (before, _, _) = Catalog::empty().apply(&added).unwrap();
         let pre_raise = Arc::clone(
@@ -404,12 +425,8 @@ mod tests {
         assert_eq!(pre_raise.id, raised_id);
 
         let raise = CatalogEdit {
-            add: Vec::new(),
-            remove: Vec::new(),
-            flushed_seq: None,
-            sources: Vec::new(),
             raise: vec![(raised_id, 7)],
-            quarantine: Vec::new(),
+            ..CatalogEdit::default()
         };
         let (after, removed, superseded) = before.apply(&raise).unwrap();
         assert!(removed.is_empty());
@@ -437,11 +454,7 @@ mod tests {
     fn files_are_ordered_and_a_reversed_range_is_empty() {
         let edit = CatalogEdit {
             add: vec![file(20, day(2)), file(10, day(2)), file(5, day(3))],
-            remove: Vec::new(),
-            flushed_seq: None,
-            sources: Vec::new(),
-            raise: Vec::new(),
-            quarantine: Vec::new(),
+            ..CatalogEdit::default()
         };
         let (catalog, removed, superseded) = Catalog::empty().apply(&edit).unwrap();
         assert!(removed.is_empty());

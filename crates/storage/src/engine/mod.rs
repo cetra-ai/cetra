@@ -1401,6 +1401,7 @@ mod tests {
                 max_ingest_time: written.max_ingest_time,
                 fully_merged: false,
                 deletions_applied_seq,
+                pack: None,
             })
         }
 

@@ -340,7 +340,7 @@ impl Compactor {
         let reserved = job
             .inputs
             .iter()
-            .fold(0_u64, |sum, file| sum.saturating_add(file.size));
+            .fold(0_u64, |sum, file| sum.saturating_add(file.total_bytes()));
         let _reservation = self
             .disk
             .try_reserve(reserved)
@@ -418,7 +418,7 @@ impl Compactor {
         let input_bytes = job
             .inputs
             .iter()
-            .fold(0_u64, |sum, file| sum.saturating_add(file.size));
+            .fold(0_u64, |sum, file| sum.saturating_add(file.total_bytes()));
         let values = time_values(self.objects.store(), &job.inputs, time_column(job.table)).await?;
         let slice_list = slices(&values, slice_count(input_bytes, policy.target_file_size));
         let counts: Vec<usize> = slice_list
@@ -555,6 +555,7 @@ impl Compactor {
                 max_ingest_time: summary.max_ingest_time,
                 fully_merged,
                 deletions_applied_seq: known,
+                pack: None,
             });
 
             if job.table == FileTable::Spans {
@@ -588,6 +589,7 @@ impl Compactor {
                     max_ingest_time: written.max_ingest_time,
                     fully_merged,
                     deletions_applied_seq: known,
+                    pack: None,
                 });
                 sources.push((traces_id, id));
             }
@@ -617,10 +619,8 @@ impl Compactor {
         let edit = CatalogEdit {
             add,
             remove,
-            flushed_seq: None,
             sources,
-            raise: Vec::new(),
-            quarantine: Vec::new(),
+            ..CatalogEdit::default()
         };
         let published = Arc::clone(&self.published);
         self.committer
@@ -1320,7 +1320,6 @@ pub(crate) mod tests {
             .unwrap()
         };
         let edit = crate::catalog::CatalogEdit {
-            add: Vec::new(),
             remove: vec![
                 (
                     crate::catalog::FileId(Uuid::parse_str(&removed.0).unwrap()),
@@ -1331,10 +1330,7 @@ pub(crate) mod tests {
                     crate::catalog::FileState::Active,
                 ),
             ],
-            flushed_seq: None,
-            sources: Vec::new(),
-            raise: Vec::new(),
-            quarantine: Vec::new(),
+            ..crate::catalog::CatalogEdit::default()
         };
         storage.commit_test_edit(&edit).await.unwrap();
 

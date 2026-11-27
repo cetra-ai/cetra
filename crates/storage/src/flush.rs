@@ -372,11 +372,9 @@ async fn flush_once(params: &FlushParams) -> Result<Option<u64>, FlushError> {
     }
     let edit = CatalogEdit {
         add: files.into_iter().map(|file| file.meta).collect(),
-        remove: Vec::new(),
         flushed_seq: Some((params.table, max_seq)),
         sources,
-        raise: Vec::new(),
-        quarantine: Vec::new(),
+        ..CatalogEdit::default()
     };
     let published = Arc::clone(&params.published);
     let shared = Arc::clone(&params.shared);
@@ -707,6 +705,7 @@ fn prepared_file(
             max_ingest_time: written.max_ingest_time,
             fully_merged: false,
             deletions_applied_seq: known_seq,
+            pack: None,
         },
         bytes: written.bytes,
     }

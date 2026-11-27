@@ -120,7 +120,7 @@ struct Partition<'a> {
     day_end: i64,
     files: &'a [Arc<FileMeta>],
     l0: Vec<&'a Arc<FileMeta>>,
-    /// Sum of `size` over `files`.
+    /// Sum of `total_bytes()` over `files`.
     total: u64,
     /// Greatest `max_ingest_time` over `l0`, if any.
     newest_l0: Option<i64>,
@@ -148,7 +148,7 @@ fn partition_job(
     let l0: Vec<&Arc<FileMeta>> = files.iter().filter(|file| file.level == 0).collect();
     let total = files
         .iter()
-        .fold(0_u64, |sum, file| sum.saturating_add(file.size));
+        .fold(0_u64, |sum, file| sum.saturating_add(file.total_bytes()));
     let newest_l0 = l0.iter().map(|file| file.max_ingest_time).max();
 
     let closed = match table {
@@ -204,7 +204,7 @@ fn l0_merge_job(part: &Partition<'_>, policy: &Policy, now: i64) -> Option<Job> 
     let l0_total = part
         .l0
         .iter()
-        .fold(0_u64, |sum, file| sum.saturating_add(file.size));
+        .fold(0_u64, |sum, file| sum.saturating_add(file.total_bytes()));
     let due = part.l0.len() >= policy.l0_files
         || l0_total >= policy.l0_bytes
         || (part.l0.len() >= 2
@@ -218,15 +218,16 @@ fn l0_merge_job(part: &Partition<'_>, policy: &Policy, now: i64) -> Option<Job> 
     // at least `size_ratio` times its size, smallest first.
     let mut l1: Vec<&Arc<FileMeta>> = part.files.iter().filter(|file| file.level == 1).collect();
     l1.sort_unstable_by(|left, right| {
-        left.size
-            .cmp(&right.size)
+        left.total_bytes()
+            .cmp(&right.total_bytes())
             .then_with(|| left.id.cmp(&right.id))
     });
     let mut inputs: Vec<Arc<FileMeta>> = part.l0.iter().map(|file| Arc::clone(*file)).collect();
     let mut out = l0_total;
     for file in l1 {
-        if out >= policy.size_ratio.saturating_mul(file.size) {
-            out = out.saturating_add(file.size);
+        let size = file.total_bytes();
+        if out >= policy.size_ratio.saturating_mul(size) {
+            out = out.saturating_add(size);
             inputs.push(Arc::clone(file));
         } else {
             break;
@@ -308,6 +309,7 @@ mod tests {
             max_ingest_time,
             fully_merged,
             deletions_applied_seq: 0,
+            pack: None,
         }
     }
 
@@ -315,11 +317,7 @@ mod tests {
         Catalog::empty()
             .apply(&CatalogEdit {
                 add: files.to_vec(),
-                remove: Vec::new(),
-                flushed_seq: None,
-                sources: Vec::new(),
-                raise: Vec::new(),
-                quarantine: Vec::new(),
+                ..CatalogEdit::default()
             })
             .unwrap()
             .0
@@ -641,5 +639,42 @@ mod tests {
             8
         ];
         assert!(plan(&catalog(&last), &HashSet::new(), &policy(), noon()).is_empty());
+    }
+
+    #[test]
+    fn total_bytes_including_pack_size_drives_day_close_and_l0_merge() {
+        let with_pack = |level: u8, size: u64, pack_size: u64, max_ingest_time: i64| {
+            let mut file = meta(FileTable::Spans, day(), level, size, max_ingest_time, false);
+            file.pack = Some(crate::catalog::PackMeta {
+                id: [1_u8; 16],
+                path: format!("tables/spans/{}.stpk", file.id),
+                size: pack_size,
+                toc_size: 112,
+            });
+            file
+        };
+
+        // Two L1 files whose table sizes sum 60 (<= target 100), but whose total_bytes
+        // sum 60 + 80 = 140 (> target 100): the day is already closed.
+        let due = after_delay();
+        let closed_by_pack = vec![with_pack(1, 30, 40, 0), with_pack(1, 30, 40, 0)];
+        assert!(plan(&catalog(&closed_by_pack), &HashSet::new(), &policy(), due).is_empty());
+
+        // Size ratio check uses L1 total_bytes(): two aged L0s sum 40; an L1 with
+        // size=5 + pack=15 (total=20) fails `40 >= 4 * 20`, while an L1 with
+        // size=5 + pack=5 (total=10) passes `40 >= 4 * 10`.
+        let mut files: Vec<FileMeta> = (0..2)
+            .map(|_| meta(FileTable::Spans, day(), 0, 20, minutes_ago(30), false))
+            .collect();
+        let small_l1 = with_pack(1, 5, 5, 0);
+        let big_pack_l1 = with_pack(1, 5, 15, 0);
+        let (small_id, big_id) = (small_l1.id, big_pack_l1.id);
+        files.push(big_pack_l1);
+        files.push(small_l1);
+        let jobs = plan(&catalog(&files), &HashSet::new(), &policy(), noon());
+        assert_eq!(kinds(&jobs), vec![JobKind::L0Merge]);
+        let input_ids: HashSet<_> = jobs[0].inputs.iter().map(|file| file.id).collect();
+        assert!(input_ids.contains(&small_id));
+        assert!(!input_ids.contains(&big_id));
     }
 }

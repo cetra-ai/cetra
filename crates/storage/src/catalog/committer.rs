@@ -57,6 +57,9 @@ pub(crate) struct CatalogEdit {
     /// Active files to mark `quarantined` (spec 03 §10). A `spans` file must
     /// come with its active `traces` file, like a removal.
     pub quarantine: Vec<FileId>,
+    /// Staged paths to remove from `staged_objects` without inserting into
+    /// `data_files` (for example, a 0-chunk `.stpk` pack discarded before commit).
+    pub unstage: Vec<String>,
 }
 
 /// What a commit writes besides the file edit, inside the same transaction.
@@ -1079,17 +1082,13 @@ impl Committer {
                     .files(table, project, NaiveDate::MIN..=last_day)
                 {
                     remove.push((file.id, FileState::Active));
-                    bytes = bytes.saturating_add(file.size);
+                    bytes = bytes.saturating_add(file.total_bytes());
                 }
             }
         }
         let edit = CatalogEdit {
-            add: Vec::new(),
             remove,
-            flushed_seq: None,
-            sources: Vec::new(),
-            raise: Vec::new(),
-            quarantine: Vec::new(),
+            ..CatalogEdit::default()
         };
         let next = commit_inner(
             &mut inner,
@@ -1153,12 +1152,8 @@ impl Committer {
             }
         }
         let edit = CatalogEdit {
-            add: Vec::new(),
             remove,
-            flushed_seq: None,
-            sources: Vec::new(),
-            raise: Vec::new(),
-            quarantine: Vec::new(),
+            ..CatalogEdit::default()
         };
         let next = commit_inner(&mut inner, &edit, &Extra::Drop { project, now }).await?;
         inner.tombstones = Arc::new(inner.tombstones.without_project(project));
@@ -1178,15 +1173,22 @@ impl Committer {
 
     // ---- Orphan collection (N M2, D-N-21) ----
 
-    /// Store keys the catalog needs: active data files, and media of projects
-    /// that are not dropping or dropped. Read before the store is listed.
+    /// Store keys the catalog needs: active data files (including sibling
+    /// `.stpk` packs), and media of projects that are not dropping or dropped.
+    /// Read before the store is listed.
     pub(crate) async fn needed_keys(&self) -> Result<HashSet<String>, OrphanError> {
         let mut inner = self.inner.lock().await;
-        let paths: Vec<String> =
-            sqlx::query_scalar("SELECT path FROM data_files WHERE state = 'active'")
+        let paths: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT path, pack_path FROM data_files WHERE state = 'active'")
                 .fetch_all(open_connection(&mut inner.connection)?)
                 .await?;
-        let mut keys: HashSet<String> = paths.into_iter().collect();
+        let mut keys: HashSet<String> = HashSet::with_capacity(paths.len());
+        for (path, pack_path) in paths {
+            keys.insert(path);
+            if let Some(pack_path) = pack_path {
+                keys.insert(pack_path);
+            }
+        }
         let media: Vec<(String, String)> = sqlx::query_as(
             "SELECT m.project_id, m.sha256 FROM media m
              WHERE NOT EXISTS (
@@ -1201,21 +1203,30 @@ impl Committer {
         Ok(keys)
     }
 
-    /// Store keys the catalog knows in any state: every data file, every media
-    /// blob of every project, and every staged path. Read after the store is
-    /// listed, so an object published during the listing is found here.
+    /// Store keys the catalog knows in any state: every data file (including
+    /// sibling `.stpk` packs), every media blob of every project, and every
+    /// staged path. Read after the store is listed, so an object published
+    /// during the listing is found here.
     pub(crate) async fn known_keys(&self) -> Result<HashSet<String>, OrphanError> {
         let mut inner = self.inner.lock().await;
-        let paths: Vec<String> = sqlx::query_scalar("SELECT path FROM data_files")
-            .fetch_all(open_connection(&mut inner.connection)?)
-            .await?;
+        let paths: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT path, pack_path FROM data_files")
+                .fetch_all(open_connection(&mut inner.connection)?)
+                .await?;
         let staged: Vec<String> = sqlx::query_scalar("SELECT path FROM staged_objects")
             .fetch_all(open_connection(&mut inner.connection)?)
             .await?;
         let media: Vec<(String, String)> = sqlx::query_as("SELECT project_id, sha256 FROM media")
             .fetch_all(open_connection(&mut inner.connection)?)
             .await?;
-        let mut keys: HashSet<String> = paths.into_iter().chain(staged).collect();
+        let mut keys: HashSet<String> = HashSet::with_capacity(paths.len() + staged.len());
+        for (path, pack_path) in paths {
+            keys.insert(path);
+            if let Some(pack_path) = pack_path {
+                keys.insert(pack_path);
+            }
+        }
+        keys.extend(staged);
         for (project, sha) in media {
             keys.insert(media_key(&project, &sha)?);
         }
@@ -1227,11 +1238,11 @@ impl Committer {
     ///
     /// `delete` runs while this mutex is held, so a commit cannot publish the
     /// same path between the check and the delete. A missing object is success
-    /// and still drops the row. A path that is also in `data_files` is left
-    /// untouched, and so is the object of a path with a `media` row: only its
-    /// staged row goes (spec 03 §9). A staged row re-created at or after
-    /// `before` (a `put_media` re-staged it since the listing) is left
-    /// completely alone.
+    /// and still drops the row. A path that is also in `data_files` (as `path`
+    /// or `pack_path`) is left untouched, and so is the object of a path with a
+    /// `media` row: only its staged row goes (spec 03 §9). A staged row
+    /// re-created at or after `before` (a `put_media` re-staged it since the
+    /// listing) is left completely alone.
     pub(crate) async fn collect_staged_path<F, Fut>(
         &self,
         path: &str,
@@ -1244,11 +1255,13 @@ impl Committer {
         Fut: Future<Output = Result<u64, ObjectError>>,
     {
         let mut inner = self.lock_running().await?;
-        let published: Option<i64> = sqlx::query_scalar("SELECT 1 FROM data_files WHERE path = ?")
-            .bind(path)
-            .fetch_optional(open_connection(&mut inner.connection)?)
-            .await
-            .map_err(CatalogError::db)?;
+        let published: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM data_files WHERE path = ? OR pack_path = ? LIMIT 1")
+                .bind(path)
+                .bind(path)
+                .fetch_optional(open_connection(&mut inner.connection)?)
+                .await
+                .map_err(CatalogError::db)?;
         if published.is_some() {
             return Ok(StagedRemoval::Published);
         }
@@ -1303,8 +1316,8 @@ impl Committer {
         let mut inner = self.lock_running().await?;
         let rows = match after {
             Some((time, id)) => {
-                sqlx::query_as::<_, (String, String, i64)>(
-                    "SELECT id, path, obsoleted_at FROM data_files
+                sqlx::query_as::<_, (String, String, Option<String>, i64)>(
+                    "SELECT id, path, pack_path, obsoleted_at FROM data_files
                      WHERE state = 'obsolete' AND obsoleted_at <= ?
                        AND (obsoleted_at, id) > (?, ?)
                      ORDER BY obsoleted_at, id LIMIT ?",
@@ -1317,8 +1330,8 @@ impl Committer {
                 .await
             }
             None => {
-                sqlx::query_as::<_, (String, String, i64)>(
-                    "SELECT id, path, obsoleted_at FROM data_files
+                sqlx::query_as::<_, (String, String, Option<String>, i64)>(
+                    "SELECT id, path, pack_path, obsoleted_at FROM data_files
                      WHERE state = 'obsolete' AND obsoleted_at <= ?
                      ORDER BY obsoleted_at, id LIMIT ?",
                 )
@@ -1330,10 +1343,11 @@ impl Committer {
         };
         let rows = rows.map_err(|source| GcError::Catalog(CatalogError::db(source)))?;
         let mut files = Vec::with_capacity(rows.len());
-        for (id, path, obsoleted_at) in rows {
+        for (id, path, pack_path, obsoleted_at) in rows {
             files.push(ObsoleteFile {
                 id: parse_file_id(&id).map_err(GcError::Catalog)?,
                 path,
+                pack_path,
                 obsoleted_at,
             });
         }
@@ -1418,6 +1432,8 @@ pub(crate) struct ObsoleteFile {
     pub(crate) id: FileId,
     /// Object key relative to the store root.
     pub(crate) path: String,
+    /// Optional sibling `.stpk` pack object key relative to the store root.
+    pub(crate) pack_path: Option<String>,
     /// When the commit that replaced the file marked it obsolete, ns.
     pub(crate) obsoleted_at: i64,
 }
@@ -1790,6 +1806,20 @@ async fn write_edit(
         if staged.is_none() {
             return Err(CommitError::conflict("path is not staged"));
         }
+        if let Some(pack) = &file.pack {
+            if pack.path.is_empty() || pack.size == 0 || pack.toc_size == 0 {
+                return Err(CommitError::conflict("invalid pack metadata"));
+            }
+            let pack_staged: Option<i64> =
+                sqlx::query_scalar("SELECT 1 FROM staged_objects WHERE path = ?")
+                    .bind(&pack.path)
+                    .fetch_optional(&mut *connection)
+                    .await
+                    .map_err(CommitError::db)?;
+            if pack_staged.is_none() {
+                return Err(CommitError::conflict("pack path is not staged"));
+            }
+        }
     }
     // An added file may not be of a dropped project (spec 03 §7): a flush or
     // compaction prepared before the drop fails here and retries.
@@ -1999,6 +2029,20 @@ async fn write_edit(
             .execute(&mut *connection)
             .await
             .map_err(CommitError::db)?;
+        if let Some(pack) = &file.pack {
+            sqlx::query("DELETE FROM staged_objects WHERE path = ?")
+                .bind(&pack.path)
+                .execute(&mut *connection)
+                .await
+                .map_err(CommitError::db)?;
+        }
+    }
+    for path in &edit.unstage {
+        sqlx::query("DELETE FROM staged_objects WHERE path = ?")
+            .bind(path)
+            .execute(&mut *connection)
+            .await
+            .map_err(CommitError::db)?;
     }
     for (traces, spans) in &edit.sources {
         sqlx::query("INSERT INTO file_sources (traces_file_id, spans_file_id) VALUES (?, ?)")
@@ -2047,12 +2091,22 @@ async fn insert_file(
     if file.level > 1 {
         return Err(CommitError::conflict("invalid level"));
     }
+    let (pack_id, pack_path, pack_size_bytes, pack_toc_size) = match &file.pack {
+        Some(pack) => (
+            Some(pack.id.as_slice()),
+            Some(pack.path.as_str()),
+            Some(fit_i64(pack.size)?),
+            Some(fit_i64(pack.toc_size)?),
+        ),
+        None => (None, None, None, None),
+    };
     sqlx::query(
         "INSERT INTO data_files (
             id, table_name, project_id, day, level, path, size_bytes, footer_size,
             row_count, min_time, max_time, min_ingest_time, max_ingest_time,
-            fully_merged, deletions_applied_seq, state, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+            fully_merged, deletions_applied_seq, state, created_at,
+            pack_id, pack_path, pack_size_bytes, pack_toc_size
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
     )
     .bind(file.id.to_string())
     .bind(file.table.as_str())
@@ -2070,6 +2124,10 @@ async fn insert_file(
     .bind(i64::from(file.fully_merged))
     .bind(fit_i64(file.deletions_applied_seq)?)
     .bind(created_at)
+    .bind(pack_id)
+    .bind(pack_path)
+    .bind(pack_size_bytes)
+    .bind(pack_toc_size)
     .execute(&mut *connection)
     .await
     .map_err(CommitError::db)?;
@@ -2123,6 +2181,7 @@ mod tests {
             max_ingest_time: min_time + 11,
             fully_merged: table == FileTable::Scores,
             deletions_applied_seq: 0,
+            pack: None,
         }
     }
 
@@ -2202,7 +2261,7 @@ mod tests {
             .fetch_one(&mut again)
             .await
             .unwrap();
-        assert_eq!(migrations, 7);
+        assert_eq!(migrations, 8);
         let indexes: Vec<String> = sqlx::query_scalar(
             "SELECT name FROM sqlite_master
              WHERE type = 'index' AND name LIKE 'data_files_%'
@@ -2213,7 +2272,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             indexes,
-            vec!["data_files_gc".to_owned(), "data_files_lookup".to_owned()]
+            vec![
+                "data_files_gc".to_owned(),
+                "data_files_lookup".to_owned(),
+                "data_files_pack_path".to_owned(),
+            ]
         );
         let deletions_applied: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM pragma_table_info('data_files')
@@ -2241,6 +2304,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         committer
             .stage(
@@ -2288,6 +2352,7 @@ mod tests {
                 sources: Vec::new(),
                 raise: Vec::new(),
                 quarantine: Vec::new(),
+                unstage: Vec::new(),
             },
             CatalogEdit {
                 add: vec![second],
@@ -2296,6 +2361,7 @@ mod tests {
                 sources: Vec::new(),
                 raise: Vec::new(),
                 quarantine: Vec::new(),
+                unstage: Vec::new(),
             },
         ] {
             committer.stage(&[edit.add[0].path.clone()]).await.unwrap();
@@ -2311,6 +2377,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         committer.stage(&["right-again".to_owned()]).await.unwrap();
         let after = committer.commit(&edit, |_| {}).await.unwrap();
@@ -2330,6 +2397,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         committer.stage(&["doomed".to_owned()]).await.unwrap();
         committer.commit(&edit, |_| {}).await.unwrap();
@@ -2340,6 +2408,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         let published = committer.commit(&remove, |_| {}).await.unwrap();
         assert!(
@@ -2377,6 +2446,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         committer.commit(&added, |_| {}).await.unwrap();
         let before = committer.catalog().await;
@@ -2388,6 +2458,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         let error = committer.commit(&missing, |_| {}).await.unwrap_err();
         assert!(matches!(
@@ -2404,6 +2475,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         let error = committer.commit(&wrong, |_| {}).await.unwrap_err();
         assert!(matches!(
@@ -2421,6 +2493,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         let error = committer.commit(&behind, |_| {}).await.unwrap_err();
         assert!(matches!(
@@ -2477,6 +2550,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         let error = committer.commit(&edit, |_| {}).await.unwrap_err();
         assert!(matches!(error, CommitError::Db { .. }), "{error}");
@@ -2689,6 +2763,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         let before = committer.catalog().await;
         let error = committer.commit(&edit, |_| {}).await.unwrap_err();
@@ -2786,6 +2861,7 @@ mod tests {
                     sources: Vec::new(),
                     raise: Vec::new(),
                     quarantine: Vec::new(),
+                    unstage: Vec::new(),
                 };
                 committer
                     .commit(&edit, {
@@ -2849,6 +2925,7 @@ mod tests {
             sources: vec![(traces_id, spans_id)],
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         committer
             .stage(&["spans/sourced".to_owned(), "traces/sourced".to_owned()])
@@ -2876,6 +2953,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         committer.stage(&["spans/active".to_owned()]).await.unwrap();
         committer.commit(&first, |_| {}).await.unwrap();
@@ -2889,6 +2967,7 @@ mod tests {
             sources: vec![(traces_id, spans_id)],
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         committer
             .stage(&["traces/derived".to_owned()])
@@ -2945,6 +3024,7 @@ mod tests {
                     sources,
                     raise: Vec::new(),
                     quarantine: Vec::new(),
+                    unstage: Vec::new(),
                 },
                 |_| {},
             )
@@ -2972,6 +3052,7 @@ mod tests {
             sources: vec![(traces_id, spans_id)],
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         committer.commit(&edit, |_| {}).await.unwrap();
 
@@ -3014,6 +3095,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         let error = committer.commit(&edit, |_| {}).await.unwrap_err();
         assert!(
@@ -3052,6 +3134,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         let error = committer.commit(&edit, |_| {}).await.unwrap_err();
         assert!(
@@ -3087,6 +3170,7 @@ mod tests {
                 sources: vec![(traces_id, unknown)],
                 raise: Vec::new(),
                 quarantine: Vec::new(),
+                unstage: Vec::new(),
             };
             committer
                 .stage(&["traces/orphan".to_owned()])
@@ -3155,6 +3239,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         committer.commit(&edit, |_| {}).await.unwrap();
 
@@ -3180,6 +3265,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         committer
             .stage(&["spans/raised".to_owned(), "spans/other".to_owned()])
@@ -3197,6 +3283,7 @@ mod tests {
             sources: Vec::new(),
             raise: vec![(raised_id, 3)],
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         let published = committer.commit(&raise, |_| {}).await.unwrap();
         let raised_after = file_arc(&published, raised_id);
@@ -3233,6 +3320,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         committer.commit(&add, |_| {}).await.unwrap();
         let before = committer.catalog().await;
@@ -3244,6 +3332,7 @@ mod tests {
             sources: Vec::new(),
             raise: vec![(raised_id, 3)],
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         committer.commit(&raise, |_| {}).await.unwrap();
         assert_eq!(
@@ -3267,6 +3356,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         committer.commit(&other, |_| {}).await.unwrap();
         assert!(
@@ -3290,6 +3380,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         committer
             .stage(&["spans/raised".to_owned(), "spans/doomed".to_owned()])
@@ -3303,6 +3394,7 @@ mod tests {
             sources: Vec::new(),
             raise: Vec::new(),
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         committer.commit(&remove, |_| {}).await.unwrap();
         let before = committer.catalog().await;
@@ -3315,6 +3407,7 @@ mod tests {
             sources: Vec::new(),
             raise: vec![(raised_id, 0)],
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         let error = committer.commit(&not_greater, |_| {}).await.unwrap_err();
         assert!(
@@ -3334,6 +3427,7 @@ mod tests {
             sources: Vec::new(),
             raise: vec![(doomed_id, 5)],
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         let error = committer.commit(&obsolete, |_| {}).await.unwrap_err();
         assert!(
@@ -3353,6 +3447,7 @@ mod tests {
             sources: Vec::new(),
             raise: vec![(raised_id, 5)],
             quarantine: Vec::new(),
+            unstage: Vec::new(),
         };
         let error = committer.commit(&also_removed, |_| {}).await.unwrap_err();
         assert!(
@@ -3709,5 +3804,88 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(created_at, 1_000, "the staged row was removed or aged");
+    }
+
+    #[tokio::test]
+    async fn pack_meta_commits_unstages_protects_and_counts_in_retention() {
+        let (dir, committer) = opened().await;
+        let p = project("018f6b4e-7c1a-7c1a-8c1a-000000000090");
+        let pack_uuid = Uuid::now_v7();
+        let pack_path = Objects::pack_file_path(p, day(1), 1, pack_uuid);
+        let unused_pack = Objects::pack_file_path(p, day(1), 1, Uuid::now_v7());
+        let mut spans = file(FileTable::Spans, p, day(1), 10, "spans/packed");
+        spans.level = 1;
+        spans.size = 200;
+        spans.pack = Some(super::super::PackMeta {
+            id: *pack_uuid.as_bytes(),
+            path: pack_path.clone(),
+            size: 500,
+            toc_size: 112,
+        });
+        let traces = file(FileTable::Traces, p, day(1), 10, "traces/packed");
+        let spans_id = spans.id;
+        let traces_id = traces.id;
+
+        // Staging only table paths (without pack_path) must conflict.
+        committer
+            .stage(&[spans.path.clone(), traces.path.clone(), unused_pack.clone()])
+            .await
+            .unwrap();
+        let edit = CatalogEdit {
+            add: vec![spans.clone(), traces.clone()],
+            sources: vec![(traces_id, spans_id)],
+            unstage: vec![unused_pack.clone()],
+            ..CatalogEdit::default()
+        };
+        let err = committer.commit(&edit, |_| {}).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CommitError::Conflict {
+                    reason: "pack path is not staged"
+                }
+            ),
+            "{err:?}"
+        );
+
+        // Stage the pack path and commit; all 3 staged rows + unused_pack unstage atomically.
+        committer
+            .stage(std::slice::from_ref(&pack_path))
+            .await
+            .unwrap();
+        let published = committer.commit(&edit, |_| {}).await.unwrap();
+        assert!(committer.staged_paths().await.unwrap().is_empty());
+
+        let mut connection = open_catalog_db(dir.path()).await.unwrap();
+        let (reloaded, _) = load(&mut connection).await.unwrap();
+        assert_eq!(reloaded, *published);
+        let reloaded_spans = reloaded.test_files(FileTable::Spans);
+        assert_eq!(reloaded_spans[0].pack, spans.pack);
+        assert_eq!(reloaded_spans[0].total_bytes(), 700);
+        drop(connection);
+
+        // collect_staged_path must protect a published pack_path from deletion.
+        committer
+            .stage_at(std::slice::from_ref(&pack_path), 10)
+            .await
+            .unwrap();
+        let mut deleted = 0_u32;
+        let removal = committer
+            .collect_staged_path(&pack_path, &Hooks::default(), 1_000, || {
+                deleted += 1;
+                async { Ok(0_u64) }
+            })
+            .await
+            .unwrap();
+        assert_eq!(removal, StagedRemoval::Published);
+        assert_eq!(deleted, 0);
+
+        // apply_retention must include pack.size in RetentionReport.bytes.
+        let report = committer
+            .apply_retention(p, day(2), |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(report.files, 2);
+        assert_eq!(report.bytes, 200 + 500 + traces.size);
     }
 }

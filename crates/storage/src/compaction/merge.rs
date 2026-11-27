@@ -769,7 +769,7 @@ fn batch_rows(ctx: &MergeContext, inputs: &[&Arc<FileMeta>]) -> usize {
     let stored_per_row = inputs
         .iter()
         .filter(|file| file.rows > 0)
-        .map(|file| file.size.div_ceil(file.rows))
+        .map(|file| file.total_bytes().div_ceil(file.rows))
         .max()
         .unwrap_or(1)
         .max(1);
@@ -1255,6 +1255,7 @@ mod tests {
             max_ingest_time: written.max_ingest_time,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         })
     }
 
@@ -1431,6 +1432,7 @@ mod tests {
             max_ingest_time: 0,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         })
     }
 

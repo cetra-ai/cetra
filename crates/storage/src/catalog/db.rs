@@ -15,7 +15,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::{AssertSqlSafe, ConnectOptions, Connection, Row, SqliteConnection};
 use uuid::Uuid;
 
-use super::{Catalog, FileId, FileMeta, FileTable, insert_sorted};
+use super::{Catalog, FileId, FileMeta, FileTable, PackMeta, insert_sorted};
 use crate::deletion::{PendingDeletion, Tombstones};
 use crate::error::CatalogError;
 use crate::format::FORMAT_VERSION;
@@ -309,7 +309,7 @@ pub(crate) async fn load(
     let rows = sqlx::query(
         "SELECT id, table_name, project_id, day, level, path, size_bytes, footer_size,
                 row_count, min_time, max_time, min_ingest_time, max_ingest_time, fully_merged,
-                deletions_applied_seq
+                deletions_applied_seq, pack_id, pack_path, pack_size_bytes, pack_toc_size
          FROM data_files
          WHERE state = 'active'",
     )
@@ -570,6 +570,11 @@ fn file_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<FileMeta, CatalogError
     let id: String = decode(row.try_get("id"))?;
     let project: String = decode(row.try_get("project_id"))?;
     let table: String = decode(row.try_get("table_name"))?;
+    let pack_id: Option<Vec<u8>> = decode(row.try_get("pack_id"))?;
+    let pack_path: Option<String> = decode(row.try_get("pack_path"))?;
+    let pack_size: Option<i64> = decode(row.try_get("pack_size_bytes"))?;
+    let pack_toc_size: Option<i64> = decode(row.try_get("pack_toc_size"))?;
+    let pack = parse_pack(pack_id, pack_path, pack_size, pack_toc_size)?;
     Ok(FileMeta {
         id: parse_file_id(&id)?,
         table: parse_file_table(&table)?,
@@ -589,7 +594,45 @@ fn file_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<FileMeta, CatalogError
             decode(row.try_get("deletions_applied_seq"))?,
             "deletions_applied_seq",
         )?,
+        pack,
     })
+}
+
+fn parse_pack(
+    pack_id: Option<Vec<u8>>,
+    pack_path: Option<String>,
+    pack_size: Option<i64>,
+    pack_toc_size: Option<i64>,
+) -> Result<Option<PackMeta>, CatalogError> {
+    match (pack_id, pack_path, pack_size, pack_toc_size) {
+        (None, None, None, None) => Ok(None),
+        (Some(id), Some(path), Some(size), Some(toc_size)) => {
+            let id: [u8; 16] = id
+                .as_slice()
+                .try_into()
+                .map_err(|_| CatalogError::corrupt("invalid pack_id"))?;
+            if path.is_empty() {
+                return Err(CatalogError::corrupt("empty pack_path"));
+            }
+            if size <= 0 {
+                return Err(CatalogError::corrupt("invalid pack_size_bytes"));
+            }
+            if toc_size <= 0 {
+                return Err(CatalogError::corrupt("invalid pack_toc_size"));
+            }
+            let size = u64::try_from(size)
+                .map_err(|_| CatalogError::corrupt("invalid pack_size_bytes"))?;
+            let toc_size = u64::try_from(toc_size)
+                .map_err(|_| CatalogError::corrupt("invalid pack_toc_size"))?;
+            Ok(Some(PackMeta {
+                id,
+                path,
+                size,
+                toc_size,
+            }))
+        }
+        _ => Err(CatalogError::corrupt("incomplete pack metadata")),
+    }
 }
 
 fn decode<T>(result: Result<T, sqlx::Error>) -> Result<T, CatalogError> {
@@ -825,7 +868,7 @@ mod tests {
             .fetch_one(&mut connection)
             .await
             .unwrap();
-        assert_eq!(versions, 7);
+        assert_eq!(versions, 8);
     }
 
     #[tokio::test]
@@ -837,6 +880,11 @@ mod tests {
         // migration from 0003 on, newest first, then let open_catalog_db
         // re-apply them.
         for statement in [
+            "DROP INDEX data_files_pack_path",
+            "ALTER TABLE data_files DROP COLUMN pack_toc_size",
+            "ALTER TABLE data_files DROP COLUMN pack_size_bytes",
+            "ALTER TABLE data_files DROP COLUMN pack_path",
+            "ALTER TABLE data_files DROP COLUMN pack_id",
             "DROP TABLE projects",
             "DROP TABLE media",
             "DROP TABLE retention_watermarks",
@@ -932,6 +980,157 @@ mod tests {
         insert_file(&mut connection, file_id(1), "unknown", DAY).await;
         let error = load(&mut connection).await.unwrap_err();
         assert!(matches!(error, CatalogError::Corrupt { what } if what == "unknown table_name"));
+    }
+
+    #[tokio::test]
+    async fn pack_metadata_round_trips_and_rejects_corrupt_rows() {
+        let valid_pack_id = vec![0xab_u8; 16];
+        let valid_path = "tables/spans/project=p/day=2024-06-01/1-pack.stpk";
+
+        // Valid populated pack loads cleanly.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let mut connection = open_catalog_db(dir.path()).await.unwrap();
+            insert_file(&mut connection, file_id(1), "spans", DAY).await;
+            sqlx::query(
+                "UPDATE data_files
+                 SET pack_id = ?, pack_path = ?, pack_size_bytes = ?, pack_toc_size = ?
+                 WHERE id = ?",
+            )
+            .bind(&valid_pack_id)
+            .bind(valid_path)
+            .bind(4096_i64)
+            .bind(256_i64)
+            .bind(file_id(1).to_string())
+            .execute(&mut connection)
+            .await
+            .unwrap();
+            let (catalog, _) = load(&mut connection).await.unwrap();
+            let files = catalog.test_files(FileTable::Spans);
+            assert_eq!(files.len(), 1);
+            assert_eq!(
+                files[0].pack,
+                Some(PackMeta {
+                    id: [0xab_u8; 16],
+                    path: valid_path.to_owned(),
+                    size: 4096,
+                    toc_size: 256,
+                })
+            );
+            assert_eq!(files[0].total_bytes(), 1 + 4096);
+        }
+
+        // Partial NULLs, bad pack_id length, empty pack_path, and non-positive sizes fail load.
+        struct BadPackCase<'a> {
+            what: &'static str,
+            id: Option<&'a [u8]>,
+            path: Option<&'a str>,
+            size: Option<i64>,
+            toc_size: Option<i64>,
+        }
+        let bad_cases = [
+            BadPackCase {
+                what: "incomplete pack metadata",
+                id: Some(&valid_pack_id),
+                path: None,
+                size: Some(10),
+                toc_size: Some(10),
+            },
+            BadPackCase {
+                what: "incomplete pack metadata",
+                id: None,
+                path: Some(valid_path),
+                size: Some(10),
+                toc_size: Some(10),
+            },
+            BadPackCase {
+                what: "incomplete pack metadata",
+                id: Some(&valid_pack_id),
+                path: Some(valid_path),
+                size: None,
+                toc_size: Some(10),
+            },
+            BadPackCase {
+                what: "incomplete pack metadata",
+                id: Some(&valid_pack_id),
+                path: Some(valid_path),
+                size: Some(10),
+                toc_size: None,
+            },
+            BadPackCase {
+                what: "invalid pack_id",
+                id: Some(&[1_u8; 15]),
+                path: Some(valid_path),
+                size: Some(10),
+                toc_size: Some(10),
+            },
+            BadPackCase {
+                what: "invalid pack_id",
+                id: Some(&[1_u8; 17]),
+                path: Some(valid_path),
+                size: Some(10),
+                toc_size: Some(10),
+            },
+            BadPackCase {
+                what: "empty pack_path",
+                id: Some(&valid_pack_id),
+                path: Some(""),
+                size: Some(10),
+                toc_size: Some(10),
+            },
+            BadPackCase {
+                what: "invalid pack_size_bytes",
+                id: Some(&valid_pack_id),
+                path: Some(valid_path),
+                size: Some(0),
+                toc_size: Some(10),
+            },
+            BadPackCase {
+                what: "invalid pack_size_bytes",
+                id: Some(&valid_pack_id),
+                path: Some(valid_path),
+                size: Some(-5),
+                toc_size: Some(10),
+            },
+            BadPackCase {
+                what: "invalid pack_toc_size",
+                id: Some(&valid_pack_id),
+                path: Some(valid_path),
+                size: Some(10),
+                toc_size: Some(0),
+            },
+            BadPackCase {
+                what: "invalid pack_toc_size",
+                id: Some(&valid_pack_id),
+                path: Some(valid_path),
+                size: Some(10),
+                toc_size: Some(-1),
+            },
+        ];
+        for case in bad_cases {
+            let dir = tempfile::tempdir().unwrap();
+            let mut connection = open_catalog_db(dir.path()).await.unwrap();
+            insert_file(&mut connection, file_id(1), "spans", DAY).await;
+            sqlx::query(
+                "UPDATE data_files
+                 SET pack_id = ?, pack_path = ?, pack_size_bytes = ?, pack_toc_size = ?
+                 WHERE id = ?",
+            )
+            .bind(case.id)
+            .bind(case.path)
+            .bind(case.size)
+            .bind(case.toc_size)
+            .bind(file_id(1).to_string())
+            .execute(&mut connection)
+            .await
+            .unwrap();
+            let err = load(&mut connection).await.unwrap_err();
+            assert!(
+                matches!(err, CatalogError::Corrupt { what } if what == case.what),
+                "expected {}, got {err:?}",
+                case.what
+            );
+        }
     }
 
     #[tokio::test]
@@ -1261,6 +1460,18 @@ mod tests {
                 'image/png', 42, 1, 2)",
             read: "SELECT sha256 || '|' || size_bytes || '|' || newest_span_start FROM media",
             expected: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef|42|0",
+        },
+        AlteringCase {
+            version: 8,
+            seed: "INSERT INTO data_files (id, table_name, project_id, day, level, path,
+                size_bytes, footer_size, row_count, min_time, max_time, min_ingest_time,
+                max_ingest_time, fully_merged, created_at, deletions_applied_seq)
+                VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000f8', 'spans',
+                '018f6b4e-7c1a-7c1a-8c1a-000000000001', '2024-06-01', 0, 'objects/kept-v8',
+                42, 1, 1, 0, 0, 0, 0, 0, 1, 0)",
+            read: "SELECT id || '|' || path || '|' || COALESCE(pack_path, 'null') || '|' || COALESCE(pack_size_bytes, -1) || '|' || COALESCE(pack_toc_size, -1)
+                FROM data_files",
+            expected: "018f6b4e-7c1a-7c1a-8c1a-0000000000f8|objects/kept-v8|null|-1|-1",
         },
     ];
 

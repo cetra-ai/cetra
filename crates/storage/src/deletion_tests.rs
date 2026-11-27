@@ -330,12 +330,8 @@ async fn a_raised_file_escapes_the_tombstone_filter() {
     let file = spans_file(&storage).await.id;
     storage
         .commit_test_edit(&crate::catalog::CatalogEdit {
-            add: Vec::new(),
-            remove: Vec::new(),
-            flushed_seq: None,
-            sources: Vec::new(),
             raise: vec![(file, 1)],
-            quarantine: Vec::new(),
+            ..crate::catalog::CatalogEdit::default()
         })
         .await
         .unwrap();
@@ -387,12 +383,8 @@ async fn a_limit_over_clean_and_gated_sides_sits_above_the_union() {
         .expect("one file holds no covered row");
     storage
         .commit_test_edit(&crate::catalog::CatalogEdit {
-            add: Vec::new(),
-            remove: Vec::new(),
-            flushed_seq: None,
-            sources: Vec::new(),
             raise: vec![(clean.id, 1)],
-            quarantine: Vec::new(),
+            ..crate::catalog::CatalogEdit::default()
         })
         .await
         .unwrap();
