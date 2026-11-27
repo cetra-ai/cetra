@@ -182,7 +182,7 @@ base64 = "0.23.1"
 # SAML 2.0 SP (track SA, D-SA-8): XML parser, exc-c14n and XML-DSig. Exact pin: a young crate.
 bergshamra = { version = "=0.12.0", default-features = false, features = ["rustcrypto"] }
 # Certificate validity dates for SAML IdP certificates (D-SA-11). Already in the graph via bergshamra.
-x509-cert = { version = "0.2.5", default-features = false }
+x509-cert = { version = "0.3.0", default-features = false }
 # Password hashing (D143). Defaults include `alloc`, `getrandom`, and `password-hash`.
 argon2 = "0.6.0"
 # OS CSPRNG for keys and salts (`SysRng`). Already resolved in `Cargo.lock`.
