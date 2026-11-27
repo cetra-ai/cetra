@@ -700,4 +700,38 @@ Driven by post-Pass-15 `perf` profiles on `wide-1000` (`11.38% unpack_u64`, `4.0
 - **Tests, Security & Cross-Arch:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (0 warnings), `just check-ee`, `just deny-policy` (bans/licenses/sources ok); **219 unit + 2 `fuzz_replay` tests passing** on local `x86_64` and Apple Silicon M4 `macbook-m4-vm` (`aarch64` NEON, `1.11 s` release).
 - **ASan libFuzzer (`statam_file`, 90s × 4 workers):** **`367,751` total runs**, **0 crashes, 0 OOMs, 0 ASan errors**.
 
+---
+
+## 21. Pass 17: 2-Byte Prefix FSST Hash Buckets, 4× Unrolled Safe FSST Decode, Direct `shred_map` / `SubColView`, & Sparse Word-Level Zone Maps
+
+Driven by post-Pass-16 `perf` profiles across `clickbench`, `jsonbench`, `random-access`, `wide-1000`, `nested`, and `tpch-bi`, Pass 17 ships four zero-wire-format-change, zero-`unsafe` optimizations:
+
+1. **Pass 17A — 2-Byte Prefix Hash Table & Open-Addressed `FlatPairCounter` in `FsstTable` (`codec/fsst.rs`):**
+   - Replaced 1-byte `bucket_offsets: [u16; 257]` with a 2,048-bucket (`FSST_BUCKET2_BITS = 11`) 2-byte prefix CSR hash table (`bucket2_offsets: Vec<u16>`, 4 KiB L1-resident), skipping 8-byte `in_word` loads and linear bucket scans on ~88% of input positions while preserving 100% bit-identical longest-match and descending-length / ascending-code tie-breaking.
+   - Replaced `count2: HashMap<u32, u32>` in `FsstTable::train` with a reusable power-of-two open-addressed `FlatPairCounter` (`16,384` initial slots, O(touched) `clear()`, 75% load-factor `grow()`).
+2. **Pass 17B — 4× Unrolled Safe Fast Path in `FsstDecodeTable::decode_row_fast` (`codec/fsst.rs`):**
+   - Added a zero-`unsafe` 4-symbol unrolled loop with `FSST_DECODE_SLACK = 32` (every caller verified to truncate to `pos` or slice `&scratch[..pos]`), collapsing 4 symbols' bounds checks and escape checks into 1 check per 4 coded bytes.
+3. **Pass 17C — Contiguous `SubColView`, Inlined `UnshredOut`, & Direct-Buffer `shred_map` (`codec/nested.rs`):**
+   - Consolidated per-subcolumn state into a contiguous `SubColView<'a>` slice (hoisting `in_map_all_ones` and `rle_cursor`), added `#[inline(always)] UnshredOut::push_valid_entry` and a specialized empty-residual non-null loop in `unshred_map`.
+   - Replaced `shred_map`'s intermediate `Vec<Vec<Option<&str>>>` and `res_keys`/`res_vals` slice vectors with direct `(offsets, bytes)` buffers and lazy `res_val_valid` allocation.
+4. **Pass 17D — Dense & Sparse Word-Level `iter_ones()` Fast Paths in `zone_map_from_flat_masked` (`codec/zonemap.rs`):**
+   - Added zero-branch dense loops (`active.is_none() && nulls.is_none()`, plus word-level `all_ones()`/`all_zeros()` for `Bool`) and sparse `nbm.iter_ones()` scans (`null_count * 2 >= n`) across all 9 scalar/varlen types.
+
+### 21.1 Pass 17 Results & Verification
+- **File Sizes:** **Bit-identical (`+0.00%`) across all 17 workloads** (Gate 1 PASS).
+- **Write Speedups (`precision-5770-vm`, `statam_l1`, zero regressions):**
+  - **`tpch_lineitem_500k`:** `463.6 → 402.5 ms` 1C (**`1.15×`**) / `308.9 → 289.4 ms` 8W (**`1.07×`**)
+  - **`fineweb_40k`:** `2305.7 → 2017.7 ms` 1C (**`1.14×`**) / `832.7 → 716.4 ms` 8W (**`1.16×`**)
+  - **`dataloader_100k`:** `148.7 → 134.8 ms` 1C (**`1.10×`**) / `70.5 → 67.5 ms` 8W (**`1.04×`**)
+  - **`random_access_250k` (1C):** `362.2 → 333.0 ms` (**`1.09×`**); **`blobs_2k`:** `674.2 → 621.1 ms` 1C (**`1.09×`**) / `562.2 → 543.4 ms` 8W (**`1.03×`**)
+  - **`jsonbench_100k` (1C):** `788.6 → 731.7 ms` (**`1.08×`**); **`nested_100k` (1C):** `100.6 → 94.3 ms` (**`1.07×`**); **`W4_adversarial` (1C):** `116.7 → 110.5 ms` (**`1.06×`**); **`clickbench_100k` (1C):** `602.9 → 577.0 ms` (**`1.04×`**, **`1.46×`** cumulative since Pass 15; `statam_l0` `310.2 → 219.2 ms` = **`1.42×`**); **`hermes_fc` (1C):** `95.7 → 92.2 ms` (**`1.04×`**).
+- **Read Speedups (`precision-5770-vm`, `statam_l1`):**
+  - **`NS_scan_full` (1C):** `28.32 → 26.12 ms` (**`1.08×`**; **`1.46×`** cumulative since Pass 13's `38.10 ms`)
+  - **`BL_take_10` (1C):** `1.359 → 1.194 ms` (**`1.14×`**); **`BL_take_50` (1C):** `5.966 → 5.857 ms`
+  - **`CB_Q24` (1C):** `13.41 → 13.32 ms`; **`CB_Q10`:** `0.431 → 0.428 ms` (`statam_l0` `0.438 → 0.193 ms`); **`CB_wide_point`:** `1.531 → 1.517 ms` (`statam_l0` `1.356 → 1.149 ms`)
+  - **`JB_Q2_did_pt` (1C):** `7.33 → 7.06 ms` (**`1.04×`**); **`RF_pt_0_001pct`:** `0.072 → 0.068 ms` (**`1.06×`**); **`RF_unsel_90pct`/`99pct`:** `2.61 → 2.46 ms` / `2.80 → 2.65 ms` (**`1.06×`**)
+- **Cold Code Review:** **APPROVED** on first pass (0 Blockers, 0 Majors).
+- **Tests, Security & Cross-Arch:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (0 warnings), `just check-ee`, `just deny-policy` (bans/licenses/sources ok); **223 unit + 2 `fuzz_replay` tests passing** on local `x86_64` and Apple Silicon M4 `macbook-m4-vm` (`aarch64` NEON, `1.10 s` release).
+- **ASan libFuzzer (`statam_file`, 90s × 4 workers):** **`337,786` total runs**, **0 crashes, 0 OOMs, 0 ASan errors**.
+
 **Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Awaiting explicit user go-ahead for Stage 3 (`cetra-storage` integration).

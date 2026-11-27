@@ -45,6 +45,20 @@ const FSST_SUBCHUNK_ENTRY_LEN: usize = 9;
 /// Maximum sample bytes consumed during FSST training.
 const FSST_SAMPLE_BYTES: usize = 64 * 1024;
 
+/// Log2 of 2-byte prefix hash bucket count in [`FsstTable`].
+const FSST_BUCKET2_BITS: u32 = 11;
+
+/// Number of 2-byte prefix hash buckets (`2048`, 4 KiB CSR offset table).
+const FSST_BUCKET2_LEN: usize = 1 << FSST_BUCKET2_BITS;
+
+/// Trailing scratch slack reserved for 4-symbol unrolled 8-byte decode stores.
+const FSST_DECODE_SLACK: usize = 4 * FSST_MAX_SYM_LEN;
+
+#[inline]
+fn hash_first2(first2: u16) -> usize {
+    ((u32::from(first2).wrapping_mul(0x9e37_79b1)) >> (32 - FSST_BUCKET2_BITS)) as usize
+}
+
 /// Flat L1-resident multi-byte symbol lookup entry inside [`FsstTable`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct BucketEntry {
@@ -61,7 +75,7 @@ pub struct FsstTable {
     sym_bytes: Vec<u8>,
     sym_offsets: Vec<u16>,
     len1_code: [u8; 256],
-    bucket_offsets: [u16; 257],
+    bucket2_offsets: Vec<u16>,
     bucket_entries: Vec<BucketEntry>,
 }
 
@@ -88,7 +102,7 @@ impl FsstTable {
             sym_bytes: Vec::new(),
             sym_offsets: vec![0],
             len1_code: [FSST_ESCAPE; 256],
-            bucket_offsets: [0u16; 257],
+            bucket2_offsets: vec![0u16; FSST_BUCKET2_LEN + 1],
             bucket_entries: Vec::new(),
         }
     }
@@ -99,7 +113,7 @@ impl FsstTable {
         let mut sym_offsets = Vec::with_capacity(count + 1);
         let mut sym_bytes = Vec::with_capacity(count * 4);
         let mut len1_code = [FSST_ESCAPE; 256];
-        let mut counts = [0u16; 256];
+        let mut counts = [0u16; FSST_BUCKET2_LEN];
 
         sym_offsets.push(0);
         for (code, entry) in entries[..count].iter().enumerate() {
@@ -114,17 +128,18 @@ impl FsstTable {
             if len == 1 {
                 len1_code[usize::from(entry.bytes[0])] = code_u8;
             } else {
-                counts[usize::from(entry.bytes[0])] += 1;
+                let first2 = u16::from_le_bytes([entry.bytes[0], entry.bytes[1]]);
+                counts[hash_first2(first2)] += 1;
             }
         }
 
-        let mut bucket_offsets = [0u16; 257];
+        let mut bucket2_offsets = vec![0u16; FSST_BUCKET2_LEN + 1];
         let mut off = 0u16;
-        for b in 0..256 {
-            bucket_offsets[b] = off;
-            off += counts[b];
+        for h in 0..FSST_BUCKET2_LEN {
+            bucket2_offsets[h] = off;
+            off += counts[h];
         }
-        bucket_offsets[256] = off;
+        bucket2_offsets[FSST_BUCKET2_LEN] = off;
 
         let mut bucket_entries = vec![
             BucketEntry {
@@ -135,7 +150,8 @@ impl FsstTable {
             };
             usize::from(off)
         ];
-        let mut write_pos = bucket_offsets;
+        // Reuse `counts` as per-bucket write cursors.
+        counts.copy_from_slice(&bucket2_offsets[..FSST_BUCKET2_LEN]);
         for (code, entry) in entries[..count].iter().enumerate() {
             let len = entry.len;
             if len < 2 {
@@ -150,9 +166,10 @@ impl FsstTable {
             } else {
                 (1u64 << (len_usize * 8)) - 1
             };
-            let b = usize::from(entry.bytes[0]);
-            let idx = usize::from(write_pos[b]);
-            write_pos[b] += 1;
+            let first2 = u16::from_le_bytes([entry.bytes[0], entry.bytes[1]]);
+            let h = hash_first2(first2);
+            let idx = usize::from(counts[h]);
+            counts[h] += 1;
             bucket_entries[idx] = BucketEntry {
                 word,
                 mask,
@@ -161,11 +178,11 @@ impl FsstTable {
             };
         }
 
-        // Stable-sort each bucket by descending symbol length so first match is longest
-        // while preserving exact ascending-code tie-breaking.
-        for b in 0..256 {
-            let start = usize::from(bucket_offsets[b]);
-            let end = usize::from(bucket_offsets[b + 1]);
+        // Stable-sort each non-trivial bucket by descending symbol length so first match is
+        // longest while preserving exact ascending-code tie-breaking.
+        for h in 0..FSST_BUCKET2_LEN {
+            let start = usize::from(bucket2_offsets[h]);
+            let end = usize::from(bucket2_offsets[h + 1]);
             if end - start > 1 {
                 bucket_entries[start..end].sort_by_key(|a| std::cmp::Reverse(a.len));
             }
@@ -176,7 +193,7 @@ impl FsstTable {
             sym_bytes,
             sym_offsets,
             len1_code,
-            bucket_offsets,
+            bucket2_offsets,
             bucket_entries,
         }
     }
@@ -193,36 +210,70 @@ impl FsstTable {
         &self.sym_bytes[start..end]
     }
 
+    /// Fast lookup when the caller has already verified `pos + 8 <= input.len()`.
+    #[inline(always)]
+    fn find_longest_match_ge8(&self, input: &[u8], pos: usize) -> Option<(u8, usize)> {
+        let first = input[pos];
+        let h = hash_first2(u16::from_le_bytes([first, input[pos + 1]]));
+        let start = usize::from(self.bucket2_offsets[h]);
+        let end = usize::from(self.bucket2_offsets[h + 1]);
+        if start < end {
+            let in_word = u64::from_le_bytes([
+                first,
+                input[pos + 1],
+                input[pos + 2],
+                input[pos + 3],
+                input[pos + 4],
+                input[pos + 5],
+                input[pos + 6],
+                input[pos + 7],
+            ]);
+            for entry in &self.bucket_entries[start..end] {
+                if (in_word & entry.mask) == entry.word {
+                    return Some((entry.code, usize::from(entry.len)));
+                }
+            }
+        }
+        let c1 = self.len1_code[usize::from(first)];
+        if c1 != FSST_ESCAPE {
+            Some((c1, 1))
+        } else {
+            None
+        }
+    }
+
     #[inline]
     fn find_longest_match(&self, input: &[u8]) -> Option<(u8, usize)> {
         let first = *input.first()?;
-        let first_idx = usize::from(first);
-        let start = usize::from(self.bucket_offsets[first_idx]);
-        let end = usize::from(self.bucket_offsets[first_idx + 1]);
-        if start < end && input.len() >= 2 {
-            let bucket = &self.bucket_entries[start..end];
-            if input.len() >= 8 {
-                let in_word = u64::from_le_bytes([
-                    input[0], input[1], input[2], input[3], input[4], input[5], input[6], input[7],
-                ]);
-                for entry in bucket {
-                    if (in_word & entry.mask) == entry.word {
-                        return Some((entry.code, usize::from(entry.len)));
+        if input.len() >= 2 {
+            let h = hash_first2(u16::from_le_bytes([first, input[1]]));
+            let start = usize::from(self.bucket2_offsets[h]);
+            let end = usize::from(self.bucket2_offsets[h + 1]);
+            if start < end {
+                let bucket = &self.bucket_entries[start..end];
+                if input.len() >= 8 {
+                    let in_word = u64::from_le_bytes([
+                        first, input[1], input[2], input[3], input[4], input[5], input[6], input[7],
+                    ]);
+                    for entry in bucket {
+                        if (in_word & entry.mask) == entry.word {
+                            return Some((entry.code, usize::from(entry.len)));
+                        }
                     }
-                }
-            } else {
-                let mut buf = [0u8; FSST_MAX_SYM_LEN];
-                buf[..input.len()].copy_from_slice(input);
-                let in_word = u64::from_le_bytes(buf);
-                for entry in bucket {
-                    let slen = usize::from(entry.len);
-                    if slen <= input.len() && (in_word & entry.mask) == entry.word {
-                        return Some((entry.code, slen));
+                } else {
+                    let mut buf = [0u8; FSST_MAX_SYM_LEN];
+                    buf[..input.len()].copy_from_slice(input);
+                    let in_word = u64::from_le_bytes(buf);
+                    for entry in bucket {
+                        let slen = usize::from(entry.len);
+                        if slen <= input.len() && (in_word & entry.mask) == entry.word {
+                            return Some((entry.code, slen));
+                        }
                     }
                 }
             }
         }
-        let c1 = self.len1_code[first_idx];
+        let c1 = self.len1_code[usize::from(first)];
         if c1 != FSST_ESCAPE {
             Some((c1, 1))
         } else {
@@ -258,8 +309,7 @@ impl FsstTable {
         }
         let round0_samples = &samples[..round0_end.max(1)];
 
-        let mut count2: HashMap<u32, u32, BuildHasherDefault<FastU32Hasher>> =
-            HashMap::with_capacity_and_hasher(4096, BuildHasherDefault::default());
+        let mut count2 = FlatPairCounter::with_capacity(16_384);
         let mut candidates: HashMap<(u8, u64), u64, BuildHasherDefault<FastSymKeyHasher>> =
             HashMap::with_capacity_and_hasher(4096, BuildHasherDefault::default());
 
@@ -294,39 +344,12 @@ impl FsstTable {
         let mut pos = 0usize;
         let len = input.len();
         while pos + 8 <= len {
-            let first = input[pos];
-            let first_idx = usize::from(first);
-            let start = usize::from(self.bucket_offsets[first_idx]);
-            let end = usize::from(self.bucket_offsets[first_idx + 1]);
-            let mut matched = false;
-            if start < end {
-                let in_word = u64::from_le_bytes([
-                    input[pos],
-                    input[pos + 1],
-                    input[pos + 2],
-                    input[pos + 3],
-                    input[pos + 4],
-                    input[pos + 5],
-                    input[pos + 6],
-                    input[pos + 7],
-                ]);
-                for entry in &self.bucket_entries[start..end] {
-                    if (in_word & entry.mask) == entry.word {
-                        out.push(entry.code);
-                        pos += usize::from(entry.len);
-                        matched = true;
-                        break;
-                    }
-                }
-            }
-            if !matched {
-                let c1 = self.len1_code[first_idx];
-                if c1 != FSST_ESCAPE {
-                    out.push(c1);
-                } else {
-                    out.push(FSST_ESCAPE);
-                    out.push(first);
-                }
+            if let Some((code, mlen)) = self.find_longest_match_ge8(input, pos) {
+                out.push(code);
+                pos += mlen;
+            } else {
+                out.push(FSST_ESCAPE);
+                out.push(input[pos]);
                 pos += 1;
             }
         }
@@ -349,27 +372,80 @@ impl FsstTable {
     }
 }
 
-#[derive(Default)]
-struct FastU32Hasher(u64);
+/// Reusable open-addressed pair-frequency counter for FSST training rounds.
+struct FlatPairCounter {
+    /// `(key_plus_one, count)`; `0` means empty slot.
+    slots: Vec<(u32, u32)>,
+    touched: Vec<usize>,
+    shift: u32,
+}
 
-impl std::hash::Hasher for FastU32Hasher {
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        let mut v = 0u64;
-        for &b in bytes {
-            v = v.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ u64::from(b);
+impl FlatPairCounter {
+    fn with_capacity(cap: usize) -> Self {
+        let cap = cap.next_power_of_two().max(16);
+        Self {
+            slots: vec![(0, 0); cap],
+            touched: Vec::with_capacity(cap / 2),
+            shift: 64 - cap.trailing_zeros(),
         }
-        self.0 = v;
+    }
+
+    fn clear(&mut self) {
+        for &idx in &self.touched {
+            self.slots[idx] = (0, 0);
+        }
+        self.touched.clear();
     }
 
     #[inline]
-    fn write_u32(&mut self, i: u32) {
-        self.0 = u64::from(i).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    fn hash_slot(pair_key: u32, shift: u32, mask: usize) -> usize {
+        ((u64::from(pair_key).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> shift) as usize) & mask
+    }
+
+    #[cold]
+    fn grow(&mut self) {
+        let new_cap = self.slots.len().saturating_mul(2);
+        let new_mask = new_cap - 1;
+        let new_shift = 64 - new_cap.trailing_zeros();
+        let mut new_slots = vec![(0u32, 0u32); new_cap];
+        let mut new_touched = Vec::with_capacity(self.touched.len().saturating_mul(2));
+        for &old_idx in &self.touched {
+            let (k1, cnt) = self.slots[old_idx];
+            let pair_key = k1 - 1;
+            let mut idx = Self::hash_slot(pair_key, new_shift, new_mask);
+            while new_slots[idx].0 != 0 {
+                idx = (idx + 1) & new_mask;
+            }
+            new_slots[idx] = (k1, cnt);
+            new_touched.push(idx);
+        }
+        self.slots = new_slots;
+        self.touched = new_touched;
+        self.shift = new_shift;
     }
 
     #[inline]
-    fn finish(&self) -> u64 {
-        self.0 ^ (self.0 >> 32)
+    fn increment(&mut self, pair_key: u32) {
+        if self.touched.len().saturating_mul(4) >= self.slots.len().saturating_mul(3) {
+            self.grow();
+        }
+        let k1 = pair_key.wrapping_add(1);
+        debug_assert_ne!(k1, 0);
+        let mask = self.slots.len() - 1;
+        let mut idx = Self::hash_slot(pair_key, self.shift, mask);
+        loop {
+            let slot = &mut self.slots[idx];
+            if slot.0 == k1 {
+                slot.1 = slot.1.saturating_add(1);
+                return;
+            }
+            if slot.0 == 0 {
+                *slot = (k1, 1);
+                self.touched.push(idx);
+                return;
+            }
+            idx = (idx + 1) & mask;
+        }
     }
 }
 
@@ -405,7 +481,7 @@ impl std::hash::Hasher for FastSymKeyHasher {
 fn train_round(
     table: &FsstTable,
     samples: &[&[u8]],
-    count2: &mut HashMap<u32, u32, BuildHasherDefault<FastU32Hasher>>,
+    count2: &mut FlatPairCounter,
     candidates: &mut HashMap<(u8, u64), u64, BuildHasherDefault<FastSymKeyHasher>>,
 ) -> FsstTable {
     let mut count1 = [0u32; 512];
@@ -421,17 +497,34 @@ fn train_round(
                 *slot = slot.saturating_add(1);
                 if let Some(pt) = prev_token {
                     let key = (u32::from(pt) << 10) | u32::from(token);
-                    let e = count2.entry(key).or_insert(0);
-                    *e = e.saturating_add(1);
+                    count2.increment(key);
                 }
                 prev_token = Some(token);
             }
         }
     } else {
         for &sample in samples {
+            let slen = sample.len();
             let mut pos = 0usize;
             let mut prev_token: Option<(u16, u8)> = None;
-            while pos < sample.len() {
+            while pos + 8 <= slen {
+                let (token, len) =
+                    if let Some((code, mlen)) = table.find_longest_match_ge8(sample, pos) {
+                        (u16::from(code), mlen as u8)
+                    } else {
+                        (256 + u16::from(sample[pos]), 1u8)
+                    };
+                count1[usize::from(token)] = count1[usize::from(token)].saturating_add(1);
+                if let Some((pt, plen)) = prev_token
+                    && usize::from(plen) + usize::from(len) <= FSST_MAX_SYM_LEN
+                {
+                    let key = (u32::from(pt) << 10) | u32::from(token);
+                    count2.increment(key);
+                }
+                prev_token = Some((token, len));
+                pos += usize::from(len);
+            }
+            while pos < slen {
                 let (token, len) =
                     if let Some((code, mlen)) = table.find_longest_match(&sample[pos..]) {
                         (u16::from(code), mlen as u8)
@@ -443,8 +536,7 @@ fn train_round(
                     && usize::from(plen) + usize::from(len) <= FSST_MAX_SYM_LEN
                 {
                     let key = (u32::from(pt) << 10) | u32::from(token);
-                    let e = count2.entry(key).or_insert(0);
-                    *e = e.saturating_add(1);
+                    count2.increment(key);
                 }
                 prev_token = Some((token, len));
                 pos += usize::from(len);
@@ -481,10 +573,12 @@ fn train_round(
         }
     }
 
-    for (&pair_key, &cnt) in count2.iter() {
+    for &idx in &count2.touched {
+        let (k1, cnt) = count2.slots[idx];
         if cnt < 2 {
             continue;
         }
+        let pair_key = k1 - 1;
         let pt = (pair_key >> 10) as usize;
         let ct = (pair_key & 0x3FF) as usize;
         let plen = tok_len[pt];
@@ -528,8 +622,19 @@ fn finalize_table(table: &FsstTable, samples: &[&[u8]]) -> FsstTable {
     let mut lit_hits = [0u32; 256];
 
     for &sample in samples {
+        let slen = sample.len();
         let mut pos = 0usize;
-        while pos < sample.len() {
+        while pos + 8 <= slen {
+            if let Some((code, len)) = table.find_longest_match_ge8(sample, pos) {
+                sym_hits[usize::from(code)] = sym_hits[usize::from(code)].saturating_add(1);
+                pos += len;
+            } else {
+                lit_hits[usize::from(sample[pos])] =
+                    lit_hits[usize::from(sample[pos])].saturating_add(1);
+                pos += 1;
+            }
+        }
+        while pos < slen {
             if let Some((code, len)) = table.find_longest_match(&sample[pos..]) {
                 sym_hits[usize::from(code)] = sym_hits[usize::from(code)].saturating_add(1);
                 pos += len;
@@ -1009,22 +1114,70 @@ impl FsstDecodeTable {
     ) -> Result<(), StatamError> {
         let max_row = coded_row.len().saturating_mul(FSST_MAX_SYM_LEN);
         if pos.saturating_add(max_row) <= max_total_bytes {
-            let needed = pos.saturating_add(max_row).saturating_add(FSST_MAX_SYM_LEN);
+            let needed = pos
+                .saturating_add(max_row)
+                .saturating_add(FSST_DECODE_SLACK);
             if needed > out_bytes.len() {
                 let grown = if grow_exponential {
                     out_bytes
                         .len()
                         .saturating_mul(2)
                         .max(needed)
-                        .min(max_total_bytes.saturating_add(FSST_MAX_SYM_LEN))
+                        .min(max_total_bytes.saturating_add(FSST_DECODE_SLACK))
                 } else {
                     needed
                 };
                 out_bytes.resize(grown, 0);
             }
             let out_slice = &mut out_bytes[..needed];
+            let sc = self.sym_count;
             let mut p = *pos;
             let mut i = 0usize;
+            while i + 4 <= coded_row.len() {
+                let b0 = coded_row[i];
+                let b1 = coded_row[i + 1];
+                let b2 = coded_row[i + 2];
+                let b3 = coded_row[i + 3];
+                if (b0 < sc) & (b1 < sc) & (b2 < sc) & (b3 < sc)
+                    && let Some(dst) = out_slice.get_mut(p..p + FSST_DECODE_SLACK)
+                {
+                    let l0 = usize::from(self.lens[usize::from(b0)]).min(FSST_MAX_SYM_LEN);
+                    let l1 = usize::from(self.lens[usize::from(b1)]).min(FSST_MAX_SYM_LEN);
+                    let l2 = usize::from(self.lens[usize::from(b2)]).min(FSST_MAX_SYM_LEN);
+                    let l3 = usize::from(self.lens[usize::from(b3)]).min(FSST_MAX_SYM_LEN);
+                    dst[0..8].copy_from_slice(&self.words[usize::from(b0)]);
+                    let p1 = l0;
+                    dst[p1..p1 + 8].copy_from_slice(&self.words[usize::from(b1)]);
+                    let p2 = p1 + l1;
+                    dst[p2..p2 + 8].copy_from_slice(&self.words[usize::from(b2)]);
+                    let p3 = p2 + l2;
+                    dst[p3..p3 + 8].copy_from_slice(&self.words[usize::from(b3)]);
+                    p += p3 + l3;
+                    i += 4;
+                    continue;
+                }
+                // Handle single byte (escape or invalid symbol) and resume 4x loop.
+                let b = b0;
+                if b == FSST_ESCAPE {
+                    if i + 1 >= coded_row.len() {
+                        return Err(StatamError::Corrupt {
+                            reason: "truncated fsst literal escape",
+                        });
+                    }
+                    out_slice[p] = coded_row[i + 1];
+                    p += 1;
+                    i += 2;
+                } else if b < sc {
+                    let slen = usize::from(self.lens[usize::from(b)]).min(FSST_MAX_SYM_LEN);
+                    out_slice[p..p + FSST_MAX_SYM_LEN].copy_from_slice(&self.words[usize::from(b)]);
+                    p += slen;
+                    i += 1;
+                } else {
+                    return Err(StatamError::Corrupt {
+                        reason: "fsst symbol code out of bounds",
+                    });
+                }
+            }
             while i < coded_row.len() {
                 let b = coded_row[i];
                 if b == FSST_ESCAPE {
@@ -1036,16 +1189,15 @@ impl FsstDecodeTable {
                     out_slice[p] = coded_row[i + 1];
                     p += 1;
                     i += 2;
-                } else {
-                    let slen = self.lens[usize::from(b)];
-                    if slen == FSST_ESCAPE {
-                        return Err(StatamError::Corrupt {
-                            reason: "fsst symbol code out of bounds",
-                        });
-                    }
+                } else if b < sc {
+                    let slen = usize::from(self.lens[usize::from(b)]).min(FSST_MAX_SYM_LEN);
                     out_slice[p..p + FSST_MAX_SYM_LEN].copy_from_slice(&self.words[usize::from(b)]);
-                    p += usize::from(slen);
+                    p += slen;
                     i += 1;
+                } else {
+                    return Err(StatamError::Corrupt {
+                        reason: "fsst symbol code out of bounds",
+                    });
                 }
             }
             *pos = p;
@@ -1248,7 +1400,7 @@ impl<'a> FsstBlockView<'a> {
         let mut out_offsets = Vec::with_capacity(row_count + 1);
         out_offsets.push(0);
         let initial_cap =
-            (self.coded.len().saturating_mul(2) + 64).min(MAX_BLOCK_RAW_BYTES) + FSST_MAX_SYM_LEN;
+            (self.coded.len().saturating_mul(2) + 64).min(MAX_BLOCK_RAW_BYTES) + FSST_DECODE_SLACK;
         let mut out_bytes = vec![0u8; initial_cap];
         let mut pos = 0usize;
 
@@ -1312,7 +1464,7 @@ impl<'a> FsstBlockView<'a> {
             .saturating_mul(selected_count)
             .saturating_mul(2)
             .saturating_add(64);
-        let initial_cap = est_decoded.min(MAX_BLOCK_RAW_BYTES) + FSST_MAX_SYM_LEN;
+        let initial_cap = est_decoded.min(MAX_BLOCK_RAW_BYTES) + FSST_DECODE_SLACK;
 
         let mut out_offsets = Vec::with_capacity(row_count + 1);
         out_offsets.push(0u32);
@@ -1400,7 +1552,7 @@ impl<'a> FsstBlockView<'a> {
             .saturating_mul(indices.len())
             .saturating_mul(2)
             .saturating_add(64);
-        let initial_cap = est_decoded.min(MAX_BLOCK_RAW_BYTES) + FSST_MAX_SYM_LEN;
+        let initial_cap = est_decoded.min(MAX_BLOCK_RAW_BYTES) + FSST_DECODE_SLACK;
 
         let mut out_offsets = Vec::with_capacity(indices.len() + 1);
         out_offsets.push(0u32);
@@ -1751,7 +1903,7 @@ impl<'a> FsstSubchunkedView<'a> {
         let mut out_offsets = Vec::with_capacity(self.row_count + 1);
         out_offsets.push(0u32);
         let sum_raw: usize = self.chunks.iter().map(|c| c.raw_len as usize).sum();
-        let initial_cap = (sum_raw.saturating_mul(2) + 64).min(max_bytes) + FSST_MAX_SYM_LEN;
+        let initial_cap = (sum_raw.saturating_mul(2) + 64).min(max_bytes) + FSST_DECODE_SLACK;
         let mut out_bytes = vec![0u8; initial_cap];
         let mut pos = 0usize;
 
@@ -1828,7 +1980,7 @@ impl<'a> FsstSubchunkedView<'a> {
             .saturating_mul(selected_count)
             .saturating_mul(2)
             .saturating_add(64);
-        let initial_cap = est_decoded.min(max_bytes) + FSST_MAX_SYM_LEN;
+        let initial_cap = est_decoded.min(max_bytes) + FSST_DECODE_SLACK;
 
         let mut out_offsets = Vec::with_capacity(row_count + 1);
         out_offsets.push(0u32);
@@ -1956,7 +2108,7 @@ impl<'a> FsstSubchunkedView<'a> {
             .saturating_mul(indices.len())
             .saturating_mul(2)
             .saturating_add(64);
-        let initial_cap = est_decoded.min(MAX_BLOCK_RAW_BYTES) + FSST_MAX_SYM_LEN;
+        let initial_cap = est_decoded.min(MAX_BLOCK_RAW_BYTES) + FSST_DECODE_SLACK;
 
         let mut out_nulls = if nulls.is_some() {
             Some(Bitmap::new_ones(indices.len()))
@@ -2153,7 +2305,7 @@ impl<'a> FsstSubchunkedView<'a> {
             .saturating_mul(total_active)
             .saturating_mul(2)
             .saturating_add(64);
-        let initial_cap = est_decoded.min(max_bytes) + FSST_MAX_SYM_LEN;
+        let initial_cap = est_decoded.min(max_bytes) + FSST_DECODE_SLACK;
         let mut out_bytes = vec![0u8; initial_cap];
         let mut pos = 0usize;
         let mut out_nulls: Option<Bitmap> = None;
@@ -3225,5 +3377,434 @@ mod tests {
             .collect();
         let rand_refs: Vec<&[u8]> = random_rows.iter().map(Vec::as_slice).collect();
         assert!(encode_fsst_body(&rand_refs).unwrap().is_none());
+    }
+
+    #[test]
+    fn pass17a_fsst_bucket2_collisions_flat_pair_counter_grow_and_scalar_reference_parity() {
+        // 1. FlatPairCounter growth past 75% load factor (> 12,288 distinct pairs) + clear/reuse.
+        let mut counter = FlatPairCounter::with_capacity(16_384);
+        assert_eq!(counter.slots.len(), 16_384);
+        let distinct = 20_000u32;
+        let mut ref_map: HashMap<u32, u32> = HashMap::with_capacity(distinct as usize);
+        for i in 0..distinct {
+            let pt = (i / 100) & 0x1FF;
+            let ct = (i % 100 + 256) & 0x1FF;
+            let key = (pt << 10) | ct;
+            let reps = (i % 5) + 1;
+            for _ in 0..reps {
+                counter.increment(key);
+                *ref_map.entry(key).or_insert(0) += 1;
+            }
+        }
+        assert!(
+            counter.slots.len() >= 32_768,
+            "FlatPairCounter must grow past 75% load factor"
+        );
+        assert_eq!(counter.touched.len(), ref_map.len());
+        let mut got_map: HashMap<u32, u32> = HashMap::with_capacity(counter.touched.len());
+        for &idx in &counter.touched {
+            let (k1, cnt) = counter.slots[idx];
+            assert_ne!(k1, 0);
+            got_map.insert(k1 - 1, cnt);
+        }
+        assert_eq!(got_map, ref_map);
+
+        // Clear and verify O(touched) reset leaves every slot empty and re-insert works.
+        counter.clear();
+        assert!(counter.touched.is_empty());
+        assert!(counter.slots.iter().all(|&(k, c)| k == 0 && c == 0));
+        counter.increment(42);
+        counter.increment(42);
+        assert_eq!(counter.touched.len(), 1);
+        assert_eq!(counter.slots[counter.touched[0]], (43, 2));
+
+        // 2. Deliberate 2-byte prefix hash collisions + symbols of len 1..=8 + ascending-code tie-break.
+        let p0 = u16::from_le_bytes(*b"ab");
+        let target_h = hash_first2(p0);
+        let mut colliding_prefixes = vec![*b"ab"];
+        for v in 0..=u16::MAX {
+            let bytes = v.to_le_bytes();
+            if bytes != *b"ab" && hash_first2(v) == target_h {
+                colliding_prefixes.push(bytes);
+                if colliding_prefixes.len() == 4 {
+                    break;
+                }
+            }
+        }
+        assert!(
+            colliding_prefixes.len() >= 2,
+            "2048-bucket hash over 65536 keys must have collisions"
+        );
+
+        let make_sym = |s: &[u8]| -> SymEntry {
+            let mut bytes = [0u8; FSST_MAX_SYM_LEN];
+            bytes[..s.len()].copy_from_slice(s);
+            SymEntry {
+                len: s.len() as u8,
+                bytes,
+            }
+        };
+        let mut entries = vec![
+            // Len 1 symbols
+            make_sym(b"a"),
+            make_sym(&[colliding_prefixes[1][0]]),
+            // Same 2-byte prefix across lengths 2..=8 plus duplicate len=4 to test ascending-code tie-break.
+            make_sym(b"ab"),
+            make_sym(b"abc"),
+            make_sym(b"abcd"), // earlier code
+            make_sym(b"abcd"), // duplicate len=4 later code
+            make_sym(b"abcde"),
+            make_sym(b"abcdef"),
+            make_sym(b"abcdefg"),
+            make_sym(b"abcdefgh"),
+        ];
+        // Colliding different 2-byte prefixes across lengths 2..=8
+        for cp in &colliding_prefixes[1..] {
+            entries.push(make_sym(cp));
+            entries.push(make_sym(&[cp[0], cp[1], b'X', b'Y', b'Z']));
+            entries.push(make_sym(&[
+                cp[0], cp[1], b'0', b'1', b'2', b'3', b'4', b'5',
+            ]));
+        }
+        let table = FsstTable::from_entries(&entries);
+
+        // Naive linear scan reference for longest-match with ascending-code tie-break.
+        let naive_longest = |input: &[u8]| -> Option<(u8, usize)> {
+            let mut best: Option<(u8, usize)> = None;
+            for (code, e) in entries.iter().enumerate() {
+                let elen = usize::from(e.len);
+                if elen <= input.len() && input[..elen] == e.bytes[..elen] {
+                    match best {
+                        None => best = Some((code as u8, elen)),
+                        Some((_, blen)) if elen > blen => best = Some((code as u8, elen)),
+                        _ => {}
+                    }
+                }
+            }
+            best
+        };
+
+        let mut test_blob = Vec::new();
+        test_blob.extend_from_slice(b"abcdefgh_abcdef_abcd_ab_a_");
+        for cp in &colliding_prefixes[1..] {
+            test_blob.extend_from_slice(&[cp[0], cp[1], b'0', b'1', b'2', b'3', b'4', b'5']);
+            test_blob.extend_from_slice(&[cp[0], cp[1], b'X', b'Y', b'Z']);
+            test_blob.extend_from_slice(&[cp[0], cp[1], b'!']);
+            test_blob.push(cp[0]);
+            test_blob.push(b'?');
+        }
+
+        for len in 0..=test_blob.len().min(32) {
+            let sub = &test_blob[..len];
+            let mut got = Vec::new();
+            table.encode_row(sub, &mut got);
+
+            let mut expected = Vec::new();
+            let mut pos = 0usize;
+            while pos < sub.len() {
+                assert_eq!(
+                    table.find_longest_match(&sub[pos..]),
+                    naive_longest(&sub[pos..]),
+                    "find_longest_match mismatch at len={len}, pos={pos}"
+                );
+                if let Some((code, mlen)) = naive_longest(&sub[pos..]) {
+                    expected.push(code);
+                    pos += mlen;
+                } else {
+                    expected.push(FSST_ESCAPE);
+                    expected.push(sub[pos]);
+                    pos += 1;
+                }
+            }
+            assert_eq!(got, expected, "encode_row mismatch at len={len}");
+        }
+
+        // 3. Bit-identical train + encode_row parity against naive HashMap/linear-scan trainer.
+        let naive_train_round = |tbl_entries: &[SymEntry], samples: &[&[u8]]| -> Vec<SymEntry> {
+            let match_naive = |inp: &[u8]| -> Option<(u8, usize)> {
+                let mut best: Option<(u8, usize)> = None;
+                for (code, e) in tbl_entries.iter().enumerate() {
+                    let elen = usize::from(e.len);
+                    if elen <= inp.len()
+                        && inp[..elen] == e.bytes[..elen]
+                        && best.is_none_or(|(_, blen)| elen > blen)
+                    {
+                        best = Some((code as u8, elen));
+                    }
+                }
+                best
+            };
+            let mut count1 = [0u32; 512];
+            let mut count2: HashMap<u32, u32> = HashMap::new();
+            for &sample in samples {
+                let mut pos = 0usize;
+                let mut prev: Option<(u16, u8)> = None;
+                while pos < sample.len() {
+                    let (tok, len) = if let Some((c, l)) = match_naive(&sample[pos..]) {
+                        (u16::from(c), l as u8)
+                    } else {
+                        (256 + u16::from(sample[pos]), 1u8)
+                    };
+                    count1[usize::from(tok)] = count1[usize::from(tok)].saturating_add(1);
+                    if let Some((pt, plen)) = prev
+                        && usize::from(plen) + usize::from(len) <= FSST_MAX_SYM_LEN
+                    {
+                        let key = (u32::from(pt) << 10) | u32::from(tok);
+                        let e = count2.entry(key).or_insert(0);
+                        *e = e.saturating_add(1);
+                    }
+                    prev = Some((tok, len));
+                    pos += usize::from(len);
+                }
+            }
+            let mut tok_word = [0u64; 512];
+            let mut tok_len = [0u8; 512];
+            for (c, e) in tbl_entries.iter().enumerate() {
+                let mut buf = [0u8; 8];
+                let l = usize::from(e.len);
+                buf[..l].copy_from_slice(&e.bytes[..l]);
+                tok_word[c] = u64::from_le_bytes(buf);
+                tok_len[c] = e.len;
+            }
+            for b in 0..256usize {
+                tok_word[256 + b] = b as u64;
+                tok_len[256 + b] = 1;
+            }
+            let mut cands: HashMap<(u8, u64), u64> = HashMap::new();
+            for (tok, &cnt) in count1.iter().enumerate() {
+                if cnt == 0 {
+                    continue;
+                }
+                let gain = u64::from(cnt) * u64::from(tok_len[tok]);
+                let e = cands.entry((tok_len[tok], tok_word[tok])).or_insert(0);
+                if gain > *e {
+                    *e = gain;
+                }
+            }
+            for (&pair_key, &cnt) in &count2 {
+                if cnt < 2 {
+                    continue;
+                }
+                let pt = (pair_key >> 10) as usize;
+                let ct = (pair_key & 0x3FF) as usize;
+                let clen = tok_len[pt] + tok_len[ct];
+                if usize::from(clen) > FSST_MAX_SYM_LEN {
+                    continue;
+                }
+                let cword = tok_word[pt] | (tok_word[ct] << (u32::from(tok_len[pt]) * 8));
+                let gain = u64::from(cnt) * u64::from(clen);
+                let e = cands.entry((clen, cword)).or_insert(0);
+                if gain > *e {
+                    *e = gain;
+                }
+            }
+            let mut ranked: Vec<((u8, u64), u64)> = cands.into_iter().collect();
+            ranked.sort_unstable_by(|a, b| {
+                b.1.cmp(&a.1)
+                    .then_with(|| b.0.0.cmp(&a.0.0))
+                    .then_with(|| a.0.1.swap_bytes().cmp(&b.0.1.swap_bytes()))
+            });
+            ranked.truncate(FSST_MAX_SYMBOLS);
+            ranked
+                .into_iter()
+                .map(|((len, word), _)| SymEntry {
+                    len,
+                    bytes: word.to_le_bytes(),
+                })
+                .collect()
+        };
+
+        let corpus: Vec<String> = (0..180usize)
+            .map(|i| {
+                format!(
+                    "https://cdn.cetra.sh/api/v2/traces/{i:04}/spans?env=prod&svc=billing&ok={}",
+                    i % 2
+                )
+            })
+            .collect();
+        let refs: Vec<&[u8]> = corpus.iter().map(String::as_bytes).collect();
+        let trained = FsstTable::train(&refs);
+
+        // Run the same 3 rounds via naive trainer and finalize_table to confirm bit-identical symbols.
+        let mut r0_end = 0usize;
+        let mut r0_bytes = 0usize;
+        while r0_end < refs.len() && r0_bytes < 16 * 1024 {
+            r0_bytes += refs[r0_end].len();
+            r0_end += 1;
+        }
+        let mut naive_entries = Vec::new();
+        for round in 0..3 {
+            let s = if round == 0 {
+                &refs[..r0_end.max(1)]
+            } else {
+                &refs
+            };
+            naive_entries = naive_train_round(&naive_entries, s);
+        }
+        let naive_final = finalize_table(&FsstTable::from_entries(&naive_entries), &refs);
+        assert_eq!(trained.sym_lens, naive_final.sym_lens);
+        assert_eq!(trained.sym_bytes, naive_final.sym_bytes);
+        for &row in &refs {
+            let mut a = Vec::new();
+            let mut b = Vec::new();
+            trained.encode_row(row, &mut a);
+            naive_final.encode_row(row, &mut b);
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn pass17b_decode_row_fast_unrolled_4x_escapes_errors_and_boundary_exactness() {
+        // Build a 10-symbol table covering all lengths 1..=8 (so codes 10..254 are OOB).
+        let syms: [&[u8]; 10] = [
+            b"a",
+            b"bc",
+            b"def",
+            b"ghij",
+            b"klmno",
+            b"pqrstu",
+            b"vwxyz01",
+            b"23456789",
+            b"__MID__",
+            b"END!",
+        ];
+        let mut hdr = vec![syms.len() as u8];
+        for s in syms {
+            hdr.push(s.len() as u8);
+        }
+        for s in syms {
+            hdr.extend_from_slice(s);
+        }
+        let (tbl, _) = FsstDecodeTable::parse_header(&hdr).unwrap();
+
+        let ref_decode = |coded: &[u8]| -> Vec<u8> {
+            let mut out = Vec::new();
+            tbl.decode_row_checked(coded, &mut out, MAX_BLOCK_RAW_BYTES)
+                .unwrap();
+            out
+        };
+
+        // 1. All-symbol rows of every length 0..=40 (multiples of 4 and non-multiples).
+        let mut scratch = Vec::new();
+        for len in 0..=40usize {
+            let coded: Vec<u8> = (0..len).map(|i| (i % syms.len()) as u8).collect();
+            let expected = ref_decode(&coded);
+            let mut pos = 0usize;
+            tbl.decode_row_fast(&coded, &mut scratch, &mut pos, MAX_BLOCK_RAW_BYTES, true)
+                .unwrap();
+            assert_eq!(pos, expected.len(), "len={len}");
+            assert_eq!(&scratch[..pos], expected.as_slice(), "len={len}");
+        }
+
+        // 2. Escape byte at positions i % 4 == 0, 1, 2, 3 (including literal 0xFF and consecutive escapes).
+        for esc_pos in 0..=7usize {
+            let mut coded = vec![7u8; 12]; // 8-byte symbols
+            coded[esc_pos] = FSST_ESCAPE;
+            coded[esc_pos + 1] = if esc_pos % 2 == 0 { 0xFF } else { b'Q' };
+            let expected = ref_decode(&coded);
+            let mut buf = Vec::new();
+            let mut pos = 0usize;
+            tbl.decode_row_fast(&coded, &mut buf, &mut pos, MAX_BLOCK_RAW_BYTES, false)
+                .unwrap();
+            buf.truncate(pos);
+            assert_eq!(buf, expected, "escape at pos {esc_pos}");
+        }
+        // Multiple escapes within one 4-byte window.
+        let multi_esc = [
+            FSST_ESCAPE,
+            b'X',
+            FSST_ESCAPE,
+            0xFF,
+            0,
+            1,
+            2,
+            3,
+            FSST_ESCAPE,
+            b'Y',
+        ];
+        let mut buf = Vec::new();
+        let mut pos = 0usize;
+        tbl.decode_row_fast(&multi_esc, &mut buf, &mut pos, MAX_BLOCK_RAW_BYTES, true)
+            .unwrap();
+        buf.truncate(pos);
+        assert_eq!(buf, ref_decode(&multi_esc));
+
+        // 3. Truncated escape at end of 4-byte chunks (len 4, 8, 12) and tails (len 1, 5, 6, 7).
+        for total_len in [1usize, 4, 5, 6, 7, 8, 12] {
+            let mut coded = vec![0u8; total_len];
+            coded[total_len - 1] = FSST_ESCAPE;
+            let mut err_buf = Vec::new();
+            let mut err_pos = 0usize;
+            assert!(
+                matches!(
+                    tbl.decode_row_fast(
+                        &coded,
+                        &mut err_buf,
+                        &mut err_pos,
+                        MAX_BLOCK_RAW_BYTES,
+                        true
+                    ),
+                    Err(StatamError::Corrupt {
+                        reason: "truncated fsst literal escape",
+                    })
+                ),
+                "expected truncated escape error at total_len={total_len}"
+            );
+        }
+
+        // 4. Out-of-bounds symbol code (10 and 254) at positions 0, 1, 2, 3 in 4-byte chunk & tail.
+        for bad_code in [10u8, 254u8] {
+            for bad_pos in 0..8usize {
+                let mut coded = vec![3u8; 9];
+                coded[bad_pos] = bad_code;
+                let mut err_buf = Vec::new();
+                let mut err_pos = 0usize;
+                assert!(
+                    matches!(
+                        tbl.decode_row_fast(
+                            &coded,
+                            &mut err_buf,
+                            &mut err_pos,
+                            MAX_BLOCK_RAW_BYTES,
+                            true
+                        ),
+                        Err(StatamError::Corrupt {
+                            reason: "fsst symbol code out of bounds",
+                        })
+                    ),
+                    "expected OOB error for bad_code={bad_code} at pos={bad_pos}"
+                );
+            }
+        }
+
+        // 5. max_total_bytes boundary exactness & zero slack leak through FsstBlockView.
+        let coded_4_syms = [7u8, 7u8, 7u8, 7u8]; // 4 * 8 = 32 bytes decoded, max_row = 32
+        let mut exact_buf = Vec::new();
+        let mut exact_pos = 0usize;
+        tbl.decode_row_fast(&coded_4_syms, &mut exact_buf, &mut exact_pos, 32, true)
+            .unwrap();
+        assert_eq!(exact_pos, 32);
+        exact_buf.truncate(exact_pos);
+        assert_eq!(exact_buf.len(), 32);
+        assert_eq!(exact_buf, b"23456789".repeat(4));
+
+        // 1 byte tighter limit -> falls back to decode_row_checked and rejects with BoundsExceeded.
+        let mut tight_buf = Vec::new();
+        let mut tight_pos = 0usize;
+        assert!(matches!(
+            tbl.decode_row_fast(&coded_4_syms, &mut tight_buf, &mut tight_pos, 31, true),
+            Err(StatamError::BoundsExceeded {
+                reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+            })
+        ));
+
+        // Falls back to decode_row_checked (`max_row = 40 > 32`) when actual decoded (5*1 = 5 <= 32) fits.
+        let short_syms = [0u8, 0u8, 0u8, 0u8, 0u8];
+        let mut fb_buf = Vec::new();
+        let mut fb_pos = 0usize;
+        tbl.decode_row_fast(&short_syms, &mut fb_buf, &mut fb_pos, 32, false)
+            .unwrap();
+        assert_eq!(fb_pos, 5);
+        assert_eq!(fb_buf, b"aaaaa");
     }
 }

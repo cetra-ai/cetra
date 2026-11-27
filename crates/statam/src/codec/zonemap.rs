@@ -356,6 +356,51 @@ fn zone_map_from_scalar(value: &ScalarValue, null_count: u16, base_flags: u8) ->
     s
 }
 
+#[inline]
+fn for_each_included_row(
+    n: usize,
+    null_count: u16,
+    nulls: Option<&Bitmap>,
+    active: Option<&Bitmap>,
+    mut f: impl FnMut(usize),
+) {
+    match (active, nulls) {
+        (None, None) => {
+            for i in 0..n {
+                f(i);
+            }
+        }
+        (None, Some(nbm)) if usize::from(null_count).saturating_mul(2) >= n => {
+            for i in nbm.iter_ones() {
+                if i < n {
+                    f(i);
+                }
+            }
+        }
+        (None, Some(nbm)) => {
+            for i in 0..n {
+                if nbm.get(i) {
+                    f(i);
+                }
+            }
+        }
+        (Some(abm), None) => {
+            for i in abm.iter_ones() {
+                if i < n {
+                    f(i);
+                }
+            }
+        }
+        (Some(abm), Some(nbm)) => {
+            for i in abm.iter_ones() {
+                if i < n && nbm.get(i) {
+                    f(i);
+                }
+            }
+        }
+    }
+}
+
 fn zone_map_from_flat_masked(
     flat: &FlatColumn,
     null_count: u16,
@@ -367,8 +412,7 @@ fn zone_map_from_flat_masked(
     s.block_flags = base_flags;
     let nulls = flat.nulls();
     let n = flat.len();
-    let is_included =
-        |i: usize| active.is_none_or(|a| a.get(i)) && nulls.is_none_or(|nbm| nbm.get(i));
+    let unmasked = active.is_none() && nulls.is_none();
 
     match flat.data() {
         FlatData::Null(_) => {
@@ -378,13 +422,19 @@ fn zone_map_from_flat_masked(
             let mut min_v = true;
             let mut max_v = false;
             let mut any = false;
-            for i in 0..n {
-                if is_included(i) {
+            if unmasked {
+                if n > 0 {
+                    any = true;
+                    min_v = bm.all_ones();
+                    max_v = !bm.all_zeros();
+                }
+            } else {
+                for_each_included_row(n, null_count, nulls, active, |i| {
                     let b = bm.get(i);
                     any = true;
                     min_v &= b;
                     max_v |= b;
-                }
+                });
             }
             if any {
                 s.block_flags |= BLOCK_FLAG_MIN_MAX_VALID;
@@ -398,12 +448,23 @@ fn zone_map_from_flat_masked(
             let mut min_v = i64::MAX;
             let mut max_v = i64::MIN;
             let mut any = false;
-            for (i, &v) in vals.iter().enumerate() {
-                if is_included(i) {
+            if unmasked {
+                if let Some((&first, rest)) = vals.split_first() {
+                    any = true;
+                    min_v = first;
+                    max_v = first;
+                    for &v in rest {
+                        min_v = min_v.min(v);
+                        max_v = max_v.max(v);
+                    }
+                }
+            } else {
+                for_each_included_row(vals.len(), null_count, nulls, active, |i| {
+                    let v = vals[i];
                     any = true;
                     min_v = min_v.min(v);
                     max_v = max_v.max(v);
-                }
+                });
             }
             if any {
                 s.block_flags |= BLOCK_FLAG_MIN_MAX_VALID;
@@ -418,10 +479,7 @@ fn zone_map_from_flat_masked(
             let mut min_v = f64::INFINITY;
             let mut max_v = f64::NEG_INFINITY;
             let mut any_non_nan = false;
-            for (i, &v) in vals.iter().enumerate() {
-                if !is_included(i) {
-                    continue;
-                }
+            let mut visit = |v: f64| {
                 if v.is_nan() {
                     has_nan = true;
                 } else {
@@ -439,6 +497,15 @@ fn zone_map_from_flat_masked(
                         }
                     }
                 }
+            };
+            if unmasked {
+                for &v in vals {
+                    visit(v);
+                }
+            } else {
+                for_each_included_row(vals.len(), null_count, nulls, active, |i| {
+                    visit(vals[i]);
+                });
             }
             if has_nan {
                 s.block_flags |= BLOCK_FLAG_HAS_NAN;
@@ -455,12 +522,23 @@ fn zone_map_from_flat_masked(
             let mut min_v = i128::MAX;
             let mut max_v = i128::MIN;
             let mut any = false;
-            for (i, &v) in values.iter().enumerate() {
-                if is_included(i) {
+            if unmasked {
+                if let Some((&first, rest)) = values.split_first() {
+                    any = true;
+                    min_v = first;
+                    max_v = first;
+                    for &v in rest {
+                        min_v = min_v.min(v);
+                        max_v = max_v.max(v);
+                    }
+                }
+            } else {
+                for_each_included_row(values.len(), null_count, nulls, active, |i| {
+                    let v = values[i];
                     any = true;
                     min_v = min_v.min(v);
                     max_v = max_v.max(v);
-                }
+                });
             }
             if any {
                 s.block_flags |= BLOCK_FLAG_MIN_MAX_VALID;
@@ -474,12 +552,23 @@ fn zone_map_from_flat_masked(
             let mut min_v = i32::MAX;
             let mut max_v = i32::MIN;
             let mut any = false;
-            for (i, &v) in vals.iter().enumerate() {
-                if is_included(i) {
+            if unmasked {
+                if let Some((&first, rest)) = vals.split_first() {
+                    any = true;
+                    min_v = first;
+                    max_v = first;
+                    for &v in rest {
+                        min_v = min_v.min(v);
+                        max_v = max_v.max(v);
+                    }
+                }
+            } else {
+                for_each_included_row(vals.len(), null_count, nulls, active, |i| {
+                    let v = vals[i];
                     any = true;
                     min_v = min_v.min(v);
                     max_v = max_v.max(v);
-                }
+                });
             }
             if any {
                 s.block_flags |= BLOCK_FLAG_MIN_MAX_VALID;
@@ -493,21 +582,36 @@ fn zone_map_from_flat_masked(
             let mut min_v = [0xFFu8; 8];
             let mut max_v = [0x00u8; 8];
             let mut any = false;
-            for (i, v) in vals.iter().enumerate() {
-                if is_included(i) {
-                    if !any {
-                        min_v = *v;
-                        max_v = *v;
-                        any = true;
-                    } else {
-                        if *v < min_v {
-                            min_v = *v;
+            if unmasked {
+                if let Some((&first, rest)) = vals.split_first() {
+                    any = true;
+                    min_v = first;
+                    max_v = first;
+                    for &v in rest {
+                        if v < min_v {
+                            min_v = v;
                         }
-                        if *v > max_v {
-                            max_v = *v;
+                        if v > max_v {
+                            max_v = v;
                         }
                     }
                 }
+            } else {
+                for_each_included_row(vals.len(), null_count, nulls, active, |i| {
+                    let v = vals[i];
+                    if !any {
+                        min_v = v;
+                        max_v = v;
+                        any = true;
+                    } else {
+                        if v < min_v {
+                            min_v = v;
+                        }
+                        if v > max_v {
+                            max_v = v;
+                        }
+                    }
+                });
             }
             if any {
                 s.block_flags |= BLOCK_FLAG_MIN_MAX_VALID;
@@ -521,21 +625,36 @@ fn zone_map_from_flat_masked(
             let mut min_v = [0xFFu8; 16];
             let mut max_v = [0x00u8; 16];
             let mut any = false;
-            for (i, v) in vals.iter().enumerate() {
-                if is_included(i) {
-                    if !any {
-                        min_v = *v;
-                        max_v = *v;
-                        any = true;
-                    } else {
-                        if *v < min_v {
-                            min_v = *v;
+            if unmasked {
+                if let Some((&first, rest)) = vals.split_first() {
+                    any = true;
+                    min_v = first;
+                    max_v = first;
+                    for &v in rest {
+                        if v < min_v {
+                            min_v = v;
                         }
-                        if *v > max_v {
-                            max_v = *v;
+                        if v > max_v {
+                            max_v = v;
                         }
                     }
                 }
+            } else {
+                for_each_included_row(vals.len(), null_count, nulls, active, |i| {
+                    let v = vals[i];
+                    if !any {
+                        min_v = v;
+                        max_v = v;
+                        any = true;
+                    } else {
+                        if v < min_v {
+                            min_v = v;
+                        }
+                        if v > max_v {
+                            max_v = v;
+                        }
+                    }
+                });
             }
             if any {
                 s.block_flags |= BLOCK_FLAG_MIN_MAX_VALID;
@@ -548,10 +667,8 @@ fn zone_map_from_flat_masked(
         FlatData::Utf8(u) => {
             let mut min_s: Option<&[u8]> = None;
             let mut max_s: Option<&[u8]> = None;
-            for i in 0..n {
-                if is_included(i)
-                    && let Some(b) = crate::codec::utf8_bytes_at(u, i)
-                {
+            for_each_included_row(n, null_count, nulls, active, |i| {
+                if let Some(b) = crate::codec::utf8_bytes_at(u, i) {
                     min_s = Some(match min_s {
                         Some(m) if m <= b => m,
                         _ => b,
@@ -561,7 +678,7 @@ fn zone_map_from_flat_masked(
                         _ => b,
                     });
                 }
-            }
+            });
             if let (Some(mn), Some(mx)) = (min_s, max_s) {
                 set_varbytes_bounds(mn, mx, &mut s);
             }
@@ -569,10 +686,8 @@ fn zone_map_from_flat_masked(
         FlatData::Binary(bdata) => {
             let mut min_s: Option<&[u8]> = None;
             let mut max_s: Option<&[u8]> = None;
-            for i in 0..n {
-                if is_included(i)
-                    && let Some(b) = bdata.get(i)
-                {
+            for_each_included_row(n, null_count, nulls, active, |i| {
+                if let Some(b) = bdata.get(i) {
                     min_s = Some(match min_s {
                         Some(m) if m <= b => m,
                         _ => b,
@@ -582,7 +697,7 @@ fn zone_map_from_flat_masked(
                         _ => b,
                     });
                 }
-            }
+            });
             if let (Some(mn), Some(mx)) = (min_s, max_s) {
                 set_varbytes_bounds(mn, mx, &mut s);
             }
@@ -1426,5 +1541,364 @@ mod tests {
                 &ZonePred::Eq(ZoneValue::Bytes(b"abc".to_vec())),
             ));
         }
+    }
+
+    #[test]
+    fn pass17d_zone_map_from_flat_masked_dense_sparse_mixed_and_active_parity() {
+        use cetra_column::BinaryData;
+
+        // Simple scalar reference matching pre-Pass-17 behavior line-for-line.
+        let ref_zone_map = |flat: &FlatColumn,
+                            null_count: u16,
+                            base_flags: u8,
+                            active: Option<&Bitmap>|
+         -> ZoneMapSummary {
+            let mut s = ZoneMapSummary::empty();
+            s.null_count = null_count;
+            s.block_flags = base_flags;
+            let nulls = flat.nulls();
+            let n = flat.len();
+            let is_inc =
+                |i: usize| active.is_none_or(|a| a.get(i)) && nulls.is_none_or(|nbm| nbm.get(i));
+            match flat.data() {
+                FlatData::Null(_) => s.block_flags |= BLOCK_FLAG_ALL_NULL,
+                FlatData::Bool(bm) => {
+                    let (mut mn, mut mx, mut any) = (true, false, false);
+                    for i in 0..n {
+                        if is_inc(i) {
+                            let b = bm.get(i);
+                            any = true;
+                            mn &= b;
+                            mx |= b;
+                        }
+                    }
+                    if any {
+                        s.block_flags |= BLOCK_FLAG_MIN_MAX_VALID;
+                        s.min_inline_len = 1;
+                        s.max_inline_len = 1;
+                        s.min_inline[0] = u8::from(mn);
+                        s.max_inline[0] = u8::from(mx);
+                    }
+                }
+                FlatData::I64(vals) | FlatData::TimestampNs { values: vals, .. } => {
+                    let (mut mn, mut mx, mut any) = (i64::MAX, i64::MIN, false);
+                    for (i, &v) in vals.iter().enumerate() {
+                        if is_inc(i) {
+                            any = true;
+                            mn = mn.min(v);
+                            mx = mx.max(v);
+                        }
+                    }
+                    if any {
+                        s.block_flags |= BLOCK_FLAG_MIN_MAX_VALID;
+                        s.min_inline_len = 8;
+                        s.max_inline_len = 8;
+                        s.min_inline[0..8].copy_from_slice(&mn.to_le_bytes());
+                        s.max_inline[0..8].copy_from_slice(&mx.to_le_bytes());
+                    }
+                }
+                FlatData::F64(vals) => {
+                    let (mut has_nan, mut mn, mut mx, mut any) =
+                        (false, f64::INFINITY, f64::NEG_INFINITY, false);
+                    for (i, &v) in vals.iter().enumerate() {
+                        if !is_inc(i) {
+                            continue;
+                        }
+                        if v.is_nan() {
+                            has_nan = true;
+                        } else {
+                            let c = canonicalize_f64(v);
+                            if !any {
+                                mn = c;
+                                mx = c;
+                                any = true;
+                            } else {
+                                if c < mn {
+                                    mn = c;
+                                }
+                                if c > mx {
+                                    mx = c;
+                                }
+                            }
+                        }
+                    }
+                    if has_nan {
+                        s.block_flags |= BLOCK_FLAG_HAS_NAN;
+                    }
+                    if any {
+                        s.block_flags |= BLOCK_FLAG_MIN_MAX_VALID;
+                        s.min_inline_len = 8;
+                        s.max_inline_len = 8;
+                        s.min_inline[0..8].copy_from_slice(&mn.to_bits().to_le_bytes());
+                        s.max_inline[0..8].copy_from_slice(&mx.to_bits().to_le_bytes());
+                    }
+                }
+                FlatData::Decimal128 { values, .. } => {
+                    let (mut mn, mut mx, mut any) = (i128::MAX, i128::MIN, false);
+                    for (i, &v) in values.iter().enumerate() {
+                        if is_inc(i) {
+                            any = true;
+                            mn = mn.min(v);
+                            mx = mx.max(v);
+                        }
+                    }
+                    if any {
+                        s.block_flags |= BLOCK_FLAG_MIN_MAX_VALID;
+                        s.min_inline_len = 16;
+                        s.max_inline_len = 16;
+                        s.min_inline.copy_from_slice(&mn.to_le_bytes());
+                        s.max_inline.copy_from_slice(&mx.to_le_bytes());
+                    }
+                }
+                FlatData::Date(vals) => {
+                    let (mut mn, mut mx, mut any) = (i32::MAX, i32::MIN, false);
+                    for (i, &v) in vals.iter().enumerate() {
+                        if is_inc(i) {
+                            any = true;
+                            mn = mn.min(v);
+                            mx = mx.max(v);
+                        }
+                    }
+                    if any {
+                        s.block_flags |= BLOCK_FLAG_MIN_MAX_VALID;
+                        s.min_inline_len = 4;
+                        s.max_inline_len = 4;
+                        s.min_inline[0..4].copy_from_slice(&mn.to_le_bytes());
+                        s.max_inline[0..4].copy_from_slice(&mx.to_le_bytes());
+                    }
+                }
+                FlatData::FixedBytes8(vals) => {
+                    let (mut mn, mut mx, mut any) = ([0xFFu8; 8], [0x00u8; 8], false);
+                    for (i, v) in vals.iter().enumerate() {
+                        if is_inc(i) {
+                            if !any {
+                                mn = *v;
+                                mx = *v;
+                                any = true;
+                            } else {
+                                if *v < mn {
+                                    mn = *v;
+                                }
+                                if *v > mx {
+                                    mx = *v;
+                                }
+                            }
+                        }
+                    }
+                    if any {
+                        s.block_flags |= BLOCK_FLAG_MIN_MAX_VALID;
+                        s.min_inline_len = 8;
+                        s.max_inline_len = 8;
+                        s.min_inline[0..8].copy_from_slice(&mn);
+                        s.max_inline[0..8].copy_from_slice(&mx);
+                    }
+                }
+                FlatData::FixedBytes16(vals) => {
+                    let (mut mn, mut mx, mut any) = ([0xFFu8; 16], [0x00u8; 16], false);
+                    for (i, v) in vals.iter().enumerate() {
+                        if is_inc(i) {
+                            if !any {
+                                mn = *v;
+                                mx = *v;
+                                any = true;
+                            } else {
+                                if *v < mn {
+                                    mn = *v;
+                                }
+                                if *v > mx {
+                                    mx = *v;
+                                }
+                            }
+                        }
+                    }
+                    if any {
+                        s.block_flags |= BLOCK_FLAG_MIN_MAX_VALID;
+                        s.min_inline_len = 16;
+                        s.max_inline_len = 16;
+                        s.min_inline.copy_from_slice(&mn);
+                        s.max_inline.copy_from_slice(&mx);
+                    }
+                }
+                FlatData::Utf8(u) => {
+                    let (mut mn, mut mx): (Option<&[u8]>, Option<&[u8]>) = (None, None);
+                    for i in 0..n {
+                        if is_inc(i)
+                            && let Some(b) = crate::codec::utf8_bytes_at(u, i)
+                        {
+                            mn = Some(match mn {
+                                Some(m) if m <= b => m,
+                                _ => b,
+                            });
+                            mx = Some(match mx {
+                                Some(m) if m >= b => m,
+                                _ => b,
+                            });
+                        }
+                    }
+                    if let (Some(a), Some(b)) = (mn, mx) {
+                        set_varbytes_bounds(a, b, &mut s);
+                    }
+                }
+                FlatData::Binary(bd) => {
+                    let (mut mn, mut mx): (Option<&[u8]>, Option<&[u8]>) = (None, None);
+                    for i in 0..n {
+                        if is_inc(i)
+                            && let Some(b) = bd.get(i)
+                        {
+                            mn = Some(match mn {
+                                Some(m) if m <= b => m,
+                                _ => b,
+                            });
+                            mx = Some(match mx {
+                                Some(m) if m >= b => m,
+                                _ => b,
+                            });
+                        }
+                    }
+                    if let (Some(a), Some(b)) = (mn, mx) {
+                        set_varbytes_bounds(a, b, &mut s);
+                    }
+                }
+                _ => {}
+            }
+            s
+        };
+
+        let n = 135usize; // > 2 u64 bitmap words (non-multiple of 64)
+        // Build 4 mask regimes:
+        // 0: dense (nulls=None, active=None)
+        // 1: sparse >= 50% null (95% NULL -> iter_ones path)
+        // 2: mixed < 50% null (20% NULL -> dense nbm.get path)
+        // 3: active=Some + nulls=None
+        // 4: active=Some + nulls=Some
+        let mut sparse_nulls = Bitmap::new_zeroed(n);
+        for idx in [0usize, 13, 64, 65, 134] {
+            let _ = sparse_nulls.set(idx, true);
+        }
+        let mut mixed_nulls = Bitmap::new_ones(n);
+        for idx in (0..n).step_by(5) {
+            let _ = mixed_nulls.set(idx, false);
+        }
+        let mut active_bm = Bitmap::new_zeroed(n);
+        for idx in [1usize, 13, 42, 64, 100, 134] {
+            let _ = active_bm.set(idx, true);
+        }
+
+        let check_all_modes = |name: &str, data: FlatData| {
+            let configs: [(&str, Option<Bitmap>, Option<&Bitmap>); 5] = [
+                ("dense", None, None),
+                ("sparse_nulls", Some(sparse_nulls.clone()), None),
+                ("mixed_nulls", Some(mixed_nulls.clone()), None),
+                ("active_only", None, Some(&active_bm)),
+                (
+                    "active_and_nulls",
+                    Some(mixed_nulls.clone()),
+                    Some(&active_bm),
+                ),
+            ];
+            for (mode, nulls, active) in configs {
+                let nc = nulls.as_ref().map_or(0u16, |bm| bm.count_zeros() as u16);
+                let flags = if nc > 0 { BLOCK_FLAG_HAS_NULLS } else { 0 };
+                let flat = FlatColumn::try_new(data.clone(), nulls).unwrap();
+                let got = zone_map_from_flat_masked(&flat, nc, flags, active);
+                let exp = ref_zone_map(&flat, nc, flags, active);
+                assert_eq!(got, exp, "zonemap mismatch for {name} in mode {mode}");
+            }
+        };
+
+        // Bool: all-true, all-false, mixed
+        check_all_modes("bool_all_true", FlatData::Bool(Bitmap::new_ones(n)));
+        check_all_modes("bool_all_false", FlatData::Bool(Bitmap::new_zeroed(n)));
+        check_all_modes(
+            "bool_mixed",
+            FlatData::Bool(Bitmap::from_bools(
+                &(0..n).map(|i| i % 7 == 0).collect::<Vec<_>>(),
+            )),
+        );
+
+        // I64 & TimestampNs
+        let i64_vals: Vec<i64> = (0..n)
+            .map(|i| ((i as i64) * 37 - 2000) * if i % 3 == 0 { -1 } else { 1 })
+            .collect();
+        check_all_modes("i64", FlatData::I64(i64_vals.clone()));
+        check_all_modes(
+            "timestamp_ns",
+            FlatData::TimestampNs {
+                values: i64_vals,
+                utc: true,
+            },
+        );
+
+        // F64: normal + -0.0/+0.0, with NaN, all-NaN, and -inf/+inf
+        let mut f64_mix: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 - 20.0).collect();
+        f64_mix[0] = -0.0;
+        f64_mix[13] = 0.0;
+        f64_mix[64] = f64::NAN;
+        f64_mix[134] = f64::INFINITY;
+        check_all_modes("f64_mixed_nan_negzero", FlatData::F64(f64_mix));
+        check_all_modes("f64_only_negzero", FlatData::F64(vec![-0.0; n]));
+        check_all_modes("f64_all_nan", FlatData::F64(vec![f64::NAN; n]));
+
+        // Decimal128 & Date
+        let dec_vals: Vec<i128> = (0..n)
+            .map(|i| (i as i128 - 50) * 1_000_000_000_000_000_000i128)
+            .collect();
+        check_all_modes(
+            "decimal128",
+            FlatData::Decimal128 {
+                values: dec_vals,
+                precision: 38,
+                scale: 6,
+            },
+        );
+        let date_vals: Vec<i32> = (0..n).map(|i| (i as i32) * 11 - 500).collect();
+        check_all_modes("date", FlatData::Date(date_vals));
+
+        // FixedBytes8 & FixedBytes16
+        let fb8: Vec<[u8; 8]> = (0..n)
+            .map(|i| [((i * 19) & 0xFF) as u8, (i & 0xFF) as u8, 1, 2, 3, 4, 5, 6])
+            .collect();
+        check_all_modes("fixed_bytes8", FlatData::FixedBytes8(fb8));
+        let fb16: Vec<[u8; 16]> = (0..n).map(|i| [((i * 23) & 0xFF) as u8; 16]).collect();
+        check_all_modes("fixed_bytes16", FlatData::FixedBytes16(fb16));
+
+        // Utf8 (short <= 16B and long > 16B)
+        let utf8_strs: Vec<String> = (0..n)
+            .map(|i| {
+                if i % 13 == 0 {
+                    format!("https://long.example.com/path/segment_{i:04}/trailing")
+                } else {
+                    format!("k_{i:03}")
+                }
+            })
+            .collect();
+        check_all_modes(
+            "utf8",
+            FlatData::Utf8(
+                Utf8Data::try_from_slices(utf8_strs.iter().map(String::as_str)).unwrap(),
+            ),
+        );
+
+        // Binary (including > 16B all-0xFF prefix overflow case)
+        let bin_rows: Vec<Vec<u8>> = (0..n)
+            .map(|i| {
+                if i == 134 {
+                    vec![0xFFu8; 20]
+                } else {
+                    vec![
+                        (i & 0xFF) as u8,
+                        0x10,
+                        0x20,
+                        (i.wrapping_mul(7) & 0xFF) as u8,
+                    ]
+                }
+            })
+            .collect();
+        check_all_modes(
+            "binary",
+            FlatData::Binary(
+                BinaryData::try_from_slices(bin_rows.iter().map(Vec::as_slice)).unwrap(),
+            ),
+        );
     }
 }
