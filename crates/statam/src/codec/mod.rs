@@ -55,6 +55,54 @@ pub use zonemap::{
     zone_map_always_matches, zone_map_may_match,
 };
 
+/// Returns the raw UTF-8 bytes for `row` in `u` in `O(1)` without re-running `std::str::from_utf8`.
+#[inline]
+pub(crate) fn utf8_bytes_at(u: &Utf8Data, row: usize) -> Option<&[u8]> {
+    let offs = u.offsets();
+    let start = *offs.get(row)? as usize;
+    let end = *offs.get(row + 1)? as usize;
+    u.bytes().get(start..end)
+}
+
+/// Returns the byte length of `row` in `u` in `O(1)` without UTF-8 re-validation.
+#[inline]
+pub(crate) fn utf8_len_at(u: &Utf8Data, row: usize) -> usize {
+    let offs = u.offsets();
+    let Some(&start) = offs.get(row) else {
+        return 0;
+    };
+    let Some(&end) = row.checked_add(1).and_then(|next| offs.get(next)) else {
+        return 0;
+    };
+    end.saturating_sub(start) as usize
+}
+
+/// Whole-buffer validated `&str` view over a [`Utf8Data`], enabling `O(1)` per-row `&str`
+/// slicing without repeated per-row `std::str::from_utf8` scans.
+#[derive(Clone, Copy)]
+pub(crate) struct FastUtf8Ref<'a> {
+    s: &'a str,
+    offsets: &'a [u32],
+}
+
+impl<'a> FastUtf8Ref<'a> {
+    pub(crate) fn new(u: &'a Utf8Data) -> Result<Self, StatamError> {
+        let s = std::str::from_utf8(u.bytes())
+            .map_err(|_| StatamError::Column(cetra_column::ColumnError::InvalidUtf8))?;
+        Ok(Self {
+            s,
+            offsets: u.offsets(),
+        })
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, row: usize) -> Option<&'a str> {
+        let start = *self.offsets.get(row)? as usize;
+        let end = *self.offsets.get(row + 1)? as usize;
+        self.s.get(start..end)
+    }
+}
+
 /// Encoding and compression profile controlling speed vs. density trade-offs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WriteProfile {

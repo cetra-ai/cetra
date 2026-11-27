@@ -1487,8 +1487,8 @@ impl StatamReader {
                 let mut bm = Bitmap::new_zeroed(dict.len());
                 if let FlatData::Utf8(u) = dict.values().data() {
                     for i in 0..u.len() {
-                        if let Some(s) = u.get(i)
-                            && matcher.matches(s.as_bytes())
+                        if let Some(b) = crate::codec::utf8_bytes_at(u, i)
+                            && matcher.matches(b)
                         {
                             let _ = bm.set(i, true);
                         }

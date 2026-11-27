@@ -550,9 +550,8 @@ fn zone_map_from_flat_masked(
             let mut max_s: Option<&[u8]> = None;
             for i in 0..n {
                 if is_included(i)
-                    && let Some(val) = u.get(i)
+                    && let Some(b) = crate::codec::utf8_bytes_at(u, i)
                 {
-                    let b = val.as_bytes();
                     min_s = Some(match min_s {
                         Some(m) if m <= b => m,
                         _ => b,

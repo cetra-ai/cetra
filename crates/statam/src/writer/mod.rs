@@ -766,9 +766,7 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                         let end = (offset + len).min(codes.len());
                         let mut acc = 0usize;
                         for &code in &codes[offset.min(end)..end] {
-                            if let Some(s) = u.get(code as usize) {
-                                acc = acc.saturating_add(s.len());
-                            }
+                            acc = acc.saturating_add(crate::codec::utf8_len_at(u, code as usize));
                         }
                         acc
                     }
@@ -794,10 +792,10 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                             let run_end = run_end_u32 as usize;
                             let lo = run_start.max(offset);
                             let hi = run_end.min(slice_end);
-                            if hi > lo
-                                && let Some(s) = u.get(run_idx)
-                            {
-                                acc = acc.saturating_add(s.len().saturating_mul(hi - lo));
+                            if hi > lo {
+                                acc = acc.saturating_add(
+                                    crate::codec::utf8_len_at(u, run_idx).saturating_mul(hi - lo),
+                                );
                             }
                             run_start = run_end;
                             if run_start >= slice_end {

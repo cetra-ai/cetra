@@ -1884,6 +1884,13 @@ type PreparedFrameGroups = (
     Vec<(u32, Vec<u32>)>,
     Vec<Range<u64>>,
     Option<Arc<PackDecoderDict>>,
+    bool,
+);
+
+type FetchedFrameGroups = (
+    Vec<(u32, Vec<u32>)>,
+    Vec<Bytes>,
+    Option<Arc<PackDecoderDict>>,
 );
 
 /// Range-based reader for an immutable `.stpk` chunk pack.
@@ -2144,6 +2151,103 @@ impl ChunkPackReader {
         })
     }
 
+    fn validated_dict_range(&self) -> Result<Option<Range<u64>>, StatamError> {
+        let ps = &self.toc.postscript;
+        if (ps.flags & PACK_FLAG_HAS_DICT) == 0 || ps.dict_len == 0 {
+            return Ok(None);
+        }
+        let start = ps.dict_off;
+        let end = start
+            .checked_add(u64::from(ps.dict_len))
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "pack dict range overflow",
+            })?;
+        let file_bound = self.data_end.min(self.reader.file_len());
+        if start < PACK_HEADER_LEN as u64 || end > file_bound {
+            return Err(StatamError::Corrupt {
+                reason: "pack dict section out of bounds",
+            });
+        }
+        Ok(Some(start..end))
+    }
+
+    fn install_decoder_dict_from_framed(
+        &self,
+        framed: &[u8],
+    ) -> Result<Arc<PackDecoderDict>, StatamError> {
+        let ps = &self.toc.postscript;
+        if framed.len() != ps.dict_len as usize {
+            return Err(StatamError::Corrupt {
+                reason: "short read on pack dict section",
+            });
+        }
+        if let Some(Some(cached)) = self.dict_cache.get() {
+            return Ok(Arc::clone(cached));
+        }
+        let _guard = self.dict_init.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(Some(cached)) = self.dict_cache.get() {
+            return Ok(Arc::clone(cached));
+        }
+        let (_, flags, dict_bytes) = read_framed_pack_frame(framed, MAX_PACK_DICT_BYTES)?;
+        if flags != 0 {
+            return Err(StatamError::Corrupt {
+                reason: "pack dict section frame has unexpected flags",
+            });
+        }
+        let decoder_dict = Arc::new(PackDecoderDict::new(&dict_bytes)?);
+        let _ = self.dict_cache.set(Some(Arc::clone(&decoder_dict)));
+        Ok(decoder_dict)
+    }
+
+    fn resolve_or_append_dict_range(
+        &self,
+        needs_dict: bool,
+        ranges: &mut Vec<Range<u64>>,
+    ) -> Result<(Option<Arc<PackDecoderDict>>, bool), StatamError> {
+        if !needs_dict {
+            return Ok((None, false));
+        }
+        if let Some(cached) = self.dict_cache.get() {
+            return Ok((cached.clone(), false));
+        }
+        if self.inline_dict_framed.is_some() {
+            return Ok((self.load_decoder_dict()?, false));
+        }
+        if let Some(dict_range) = self.validated_dict_range()? {
+            ranges.push(dict_range);
+            Ok((None, true))
+        } else {
+            Ok((None, false))
+        }
+    }
+
+    fn fetch_frames_and_dict(
+        &self,
+        ranges: &[Range<u64>],
+        expected_frames: usize,
+        dict: Option<Arc<PackDecoderDict>>,
+        has_trailing_dict: bool,
+    ) -> Result<(Vec<Bytes>, Option<Arc<PackDecoderDict>>), StatamError> {
+        let mut fetched = self.reader.read_ranges(ranges)?;
+        let expected_total = expected_frames + usize::from(has_trailing_dict);
+        if fetched.len() != expected_total {
+            return Err(StatamError::Corrupt {
+                reason: "read_ranges returned wrong frame count",
+            });
+        }
+        let dict = if has_trailing_dict {
+            let Some(dict_framed) = fetched.pop() else {
+                return Err(StatamError::Corrupt {
+                    reason: "read_ranges missing trailing pack dict range",
+                });
+            };
+            Some(self.install_decoder_dict_from_framed(&dict_framed)?)
+        } else {
+            dict
+        };
+        Ok((fetched, dict))
+    }
+
     fn load_decoder_dict(&self) -> Result<Option<Arc<PackDecoderDict>>, StatamError> {
         let ps = &self.toc.postscript;
         if (ps.flags & PACK_FLAG_HAS_DICT) == 0 || ps.dict_len == 0 {
@@ -2152,43 +2256,14 @@ impl ChunkPackReader {
         if let Some(cached) = self.dict_cache.get() {
             return Ok(cached.clone());
         }
-        let _guard = self.dict_init.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(cached) = self.dict_cache.get() {
-            return Ok(cached.clone());
+        if let Some(ref inline) = self.inline_dict_framed {
+            return Ok(Some(self.install_decoder_dict_from_framed(inline)?));
         }
-        let framed = if let Some(ref inline) = self.inline_dict_framed {
-            inline.clone()
-        } else {
-            let start = ps.dict_off;
-            let end =
-                start
-                    .checked_add(u64::from(ps.dict_len))
-                    .ok_or(StatamError::BoundsExceeded {
-                        reason: "pack dict range overflow",
-                    })?;
-            let file_bound = self.data_end.min(self.reader.file_len());
-            if start < PACK_HEADER_LEN as u64 || end > file_bound {
-                return Err(StatamError::Corrupt {
-                    reason: "pack dict section out of bounds",
-                });
-            }
-            let bytes = self.reader.read_range(start..end)?;
-            if bytes.len() != ps.dict_len as usize {
-                return Err(StatamError::Corrupt {
-                    reason: "short read on pack dict section",
-                });
-            }
-            bytes
+        let Some(range) = self.validated_dict_range()? else {
+            return Ok(None);
         };
-        let (_, flags, dict_bytes) = read_framed_pack_frame(&framed, MAX_PACK_DICT_BYTES)?;
-        if flags != 0 {
-            return Err(StatamError::Corrupt {
-                reason: "pack dict section frame has unexpected flags",
-            });
-        }
-        let decoder_dict = Arc::new(PackDecoderDict::new(&dict_bytes)?);
-        let _ = self.dict_cache.set(Some(Arc::clone(&decoder_dict)));
-        Ok(Some(decoder_dict))
+        let bytes = self.reader.read_range(range)?;
+        Ok(Some(self.install_decoder_dict_from_framed(&bytes)?))
     }
 
     /// Returns the decoded [`PackToc`].
@@ -2339,7 +2414,7 @@ impl ChunkPackReader {
         }
 
         let frame_ids: Vec<u32> = needed_frames.into_iter().collect();
-        let mut ranges = Vec::with_capacity(frame_ids.len());
+        let mut ranges = Vec::with_capacity(frame_ids.len() + 1);
         let mut needs_dict = false;
         for &fid in &frame_ids {
             let entry = &self.toc.frames[fid as usize];
@@ -2349,18 +2424,10 @@ impl ChunkPackReader {
             ranges.push(frame_byte_range(entry)?);
         }
 
-        let dict = if needs_dict {
-            self.load_decoder_dict()?
-        } else {
-            None
-        };
-
-        let frame_bytes_list = self.reader.read_ranges(&ranges)?;
-        if frame_bytes_list.len() != frame_ids.len() {
-            return Err(StatamError::Corrupt {
-                reason: "read_ranges returned wrong frame count",
-            });
-        }
+        let (dict, has_trailing_dict) =
+            self.resolve_or_append_dict_range(needs_dict, &mut ranges)?;
+        let (frame_bytes_list, dict) =
+            self.fetch_frames_and_dict(&ranges, frame_ids.len(), dict, has_trailing_dict)?;
 
         let mut decoded_frames: HashMap<u32, Vec<u8>> = HashMap::with_capacity(frame_ids.len());
         for (&fid, raw) in frame_ids.iter().zip(frame_bytes_list.iter()) {
@@ -2412,7 +2479,7 @@ impl ChunkPackReader {
         }
 
         let mut frame_groups = Vec::with_capacity(by_frame.len());
-        let mut ranges = Vec::with_capacity(by_frame.len());
+        let mut ranges = Vec::with_capacity(by_frame.len() + 1);
         let mut needs_dict = false;
         for (fid, mut cids) in by_frame {
             cids.sort_unstable();
@@ -2425,13 +2492,21 @@ impl ChunkPackReader {
             frame_groups.push((fid, cids));
         }
 
-        let dict = if needs_dict {
-            self.load_decoder_dict()?
-        } else {
-            None
-        };
+        let (dict, has_trailing_dict) =
+            self.resolve_or_append_dict_range(needs_dict, &mut ranges)?;
 
-        Ok((frame_groups, ranges, dict))
+        Ok((frame_groups, ranges, dict, has_trailing_dict))
+    }
+
+    fn fetch_frame_chunk_groups(
+        &self,
+        chunk_ids: &[u32],
+    ) -> Result<FetchedFrameGroups, StatamError> {
+        let (frame_groups, ranges, dict, has_trailing_dict) =
+            self.prepare_frame_chunk_groups(chunk_ids)?;
+        let (frame_bytes_list, dict) =
+            self.fetch_frames_and_dict(&ranges, frame_groups.len(), dict, has_trailing_dict)?;
+        Ok((frame_groups, frame_bytes_list, dict))
     }
 
     fn decompress_and_visit_frame<F>(
@@ -2479,13 +2554,7 @@ impl ChunkPackReader {
             return Ok(());
         }
 
-        let (frame_groups, ranges, dict) = self.prepare_frame_chunk_groups(chunk_ids)?;
-        let frame_bytes_list = self.reader.read_ranges(&ranges)?;
-        if frame_bytes_list.len() != frame_groups.len() {
-            return Err(StatamError::Corrupt {
-                reason: "read_ranges returned wrong frame count",
-            });
-        }
+        let (frame_groups, frame_bytes_list, dict) = self.fetch_frame_chunk_groups(chunk_ids)?;
 
         for ((fid, cids), raw) in frame_groups.iter().zip(frame_bytes_list.iter()) {
             self.decompress_and_visit_frame(*fid, raw, cids, dict.as_deref(), &mut visit)?;
@@ -2513,13 +2582,7 @@ impl ChunkPackReader {
             return Ok(Vec::new());
         }
 
-        let (frame_groups, ranges, dict) = self.prepare_frame_chunk_groups(chunk_ids)?;
-        let frame_bytes_list = self.reader.read_ranges(&ranges)?;
-        if frame_bytes_list.len() != frame_groups.len() {
-            return Err(StatamError::Corrupt {
-                reason: "read_ranges returned wrong frame count",
-            });
-        }
+        let (frame_groups, frame_bytes_list, dict) = self.fetch_frame_chunk_groups(chunk_ids)?;
 
         let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
         let mut compressed_frames = 0usize;
@@ -2602,13 +2665,7 @@ impl ChunkPackReader {
             return Ok(Vec::new());
         }
 
-        let (frame_groups, ranges, dict) = self.prepare_frame_chunk_groups(chunk_ids)?;
-        let frame_bytes_list = self.reader.read_ranges(&ranges)?;
-        if frame_bytes_list.len() != frame_groups.len() {
-            return Err(StatamError::Corrupt {
-                reason: "read_ranges returned wrong frame count",
-            });
-        }
+        let (frame_groups, frame_bytes_list, dict) = self.fetch_frame_chunk_groups(chunk_ids)?;
 
         let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
         let mut compressed_frames = 0usize;
@@ -5094,5 +5151,171 @@ mod tests {
         let cold = ChunkPackReader::open_with_tail_hint(s3_small, Some(256)).unwrap();
         assert_eq!(cold.read_trigram_section().unwrap().len(), blooms.len());
         assert_eq!(cold.read_edge_table_flat().unwrap().len(), edges.len());
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn pass14c_cold_zstd_dict_and_frames_coalesced_into_single_wave() {
+        let mut pb = ChunkPackBuilder::new_with_dict(
+            [0xC4u8; 16],
+            PackWriteOptions {
+                codec: Codec::Zstd,
+                zstd_level: 1,
+                target_frame_raw_bytes: 128 * 1024,
+                enable_trigram_skip: true,
+                compress_toc_lz4: true,
+                write_threads: 1,
+                emit_hash_table: false,
+            },
+        );
+        let mut expected = Vec::new();
+        let mut cids = Vec::new();
+        for i in 0..1_200u32 {
+            let chunk = format!(
+                "{{\"role\":\"assistant\",\"model\":\"claude-3-7-sonnet\",\"span\":\"{i:06}\",\"payload\":\"alpha beta gamma delta epsilon {}\"}}",
+                "structured_observability_json_segment_".repeat(52)
+            )
+            .into_bytes();
+            let cid = pb.intern_chunk(&chunk).unwrap();
+            cids.push(cid);
+            expected.push(chunk);
+        }
+        let mut pack_bytes = Vec::new();
+        pb.finish(&mut pack_bytes).unwrap();
+
+        let probe_reader =
+            ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes.clone()))).unwrap();
+        assert_ne!(probe_reader.postscript().flags & PACK_FLAG_HAS_DICT, 0);
+        assert!(probe_reader.postscript().dict_len > 0);
+        assert!(
+            probe_reader
+                .toc()
+                .frames
+                .iter()
+                .any(|f| (f.flags & PACK_FRAME_FLAG_USES_DICT) != 0),
+            "expected at least one Zstd dict-compressed frame"
+        );
+
+        let dict_cids: Vec<u32> = probe_reader
+            .toc()
+            .frames
+            .iter()
+            .filter(|f| (f.flags & PACK_FRAME_FLAG_USES_DICT) != 0)
+            .take(3)
+            .map(|f| f.first_chunk_id)
+            .collect();
+        assert!(!dict_cids.is_empty());
+
+        let open_cold = || {
+            let s3 = Arc::new(SimulatedS3Reader::from_bytes(
+                pack_bytes.clone(),
+                SimulatedS3Config {
+                    cache_capacity_blocks: 0,
+                    ..SimulatedS3Config::default()
+                },
+            ));
+            // Small tail hint forces Zstd dict to sit OUTSIDE the inline tail window.
+            let reader = ChunkPackReader::open_with_tail_hint(s3.clone(), Some(256)).unwrap();
+            assert!(
+                reader.inline_dict_framed.is_none(),
+                "Zstd dict must NOT be inline under 256 B tail hint"
+            );
+            assert!(reader.dict_cache.get().is_none());
+            (s3, reader)
+        };
+
+        // 1. scan_chunks_in_frames: 1 wave for cold dict + data frames.
+        {
+            let (s3, reader) = open_cold();
+            let waves_before = s3.counters().waves;
+            let mut got = HashMap::new();
+            reader
+                .scan_chunks_in_frames(&dict_cids, |cid, slice| {
+                    got.insert(cid, slice.to_vec());
+                })
+                .unwrap();
+            assert_eq!(
+                s3.counters().waves - waves_before,
+                1,
+                "cold scan_chunks_in_frames must fetch Zstd dict + frames in 1 wave"
+            );
+            assert!(reader.dict_cache.get().is_some());
+            for &cid in &dict_cids {
+                assert_eq!(got.get(&cid).unwrap(), &expected[cid as usize]);
+            }
+        }
+
+        // 2. scan_chunks_in_frames_parallel: 1 wave for cold dict + data frames.
+        {
+            let (s3, reader) = open_cold();
+            let waves_before = s3.counters().waves;
+            let items = reader
+                .scan_chunks_in_frames_parallel(
+                    &dict_cids,
+                    2,
+                    || Ok(()),
+                    |_, cid, slice| Some((cid, slice.to_vec())),
+                )
+                .unwrap();
+            assert_eq!(
+                s3.counters().waves - waves_before,
+                1,
+                "cold scan_chunks_in_frames_parallel must fetch Zstd dict + frames in 1 wave"
+            );
+            assert!(reader.dict_cache.get().is_some());
+            let got: HashMap<u32, Vec<u8>> = items.into_iter().collect();
+            for &cid in &dict_cids {
+                assert_eq!(got.get(&cid).unwrap(), &expected[cid as usize]);
+            }
+        }
+
+        // 3. scan_frames_parallel: 1 wave for cold dict + data frames.
+        {
+            let (s3, reader) = open_cold();
+            let waves_before = s3.counters().waves;
+            let per_frame = reader
+                .scan_frames_parallel(
+                    &dict_cids,
+                    2,
+                    || Ok(()),
+                    |_, _fid, decoded, frame_cids| {
+                        let mut out = Vec::with_capacity(frame_cids.len());
+                        for &cid in frame_cids {
+                            let loc = &reader.toc().chunks[cid as usize];
+                            let s = loc.offset_in_frame as usize;
+                            let e = s + loc.raw_len as usize;
+                            out.push((cid, decoded[s..e].to_vec()));
+                        }
+                        Ok(Some(out))
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                s3.counters().waves - waves_before,
+                1,
+                "cold scan_frames_parallel must fetch Zstd dict + frames in 1 wave"
+            );
+            assert!(reader.dict_cache.get().is_some());
+            let got: HashMap<u32, Vec<u8>> = per_frame.into_iter().flatten().collect();
+            for &cid in &dict_cids {
+                assert_eq!(got.get(&cid).unwrap(), &expected[cid as usize]);
+            }
+        }
+
+        // 4. read_chunks: 1 wave for cold dict + data frames.
+        {
+            let (s3, reader) = open_cold();
+            let waves_before = s3.counters().waves;
+            let got = reader.read_chunks(&dict_cids).unwrap();
+            assert_eq!(
+                s3.counters().waves - waves_before,
+                1,
+                "cold read_chunks must fetch Zstd dict + frames in 1 wave"
+            );
+            assert!(reader.dict_cache.get().is_some());
+            for &cid in &dict_cids {
+                assert_eq!(got.get(&cid).unwrap(), &expected[cid as usize]);
+            }
+        }
     }
 }

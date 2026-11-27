@@ -611,4 +611,36 @@ Selected live Garage S3 highlights (`ms (GETs)`):
 - **Tests, Security & Cross-Arch:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (0 warnings), `just check-ee`, `just deny-policy` (bans/licenses/sources ok); **203 unit + 2 `fuzz_replay` tests passing** on local `x86_64`, `precision-5770-vm` (`1.66 s` release), and Apple M4 `macbook-m4-vm` (`aarch64` NEON, `1.73 s` release).
 - **ASan libFuzzer (`statam_file`, 90s × 4 workers):** `~208k` total runs (`52,028` runs/worker), **`20,736` cov edges**, **`59,613` features**, **`600 MiB` peak RSS**, **0 crashes, 0 OOMs, 0 ASan errors**.
 
+---
+
+## 18. Pass 14: Fast Unicode `ILIKE`, Zero-Redundant-`from_utf8` String Access, & Cold `.stpk` Dict+Frame Coalescing
+
+Driven by `perf` profiling on `precision-5770-vm` (`WildChat`, `Nested`, `RandomAccess`, `DataLoader`) and live Garage S3 RTT traces, Pass 14 ships three strictly zero-wire-format-change, zero-size-regression optimizations across `crates/statam/src/`:
+
+1. **Pass 14A — Fast Unicode `ILIKE` (`simd/trigram.rs`, `payload/search.rs`, `reader/eval.rs`):**
+   - Added AVX2/NEON/scalar `ascii_lowercase_append` in `simd/trigram.rs` and SWAR `ascii_prefix_len` + `unicode_lowercase_context_free_into_bytes` in `payload/search.rs`, folding contiguous ASCII runs via SIMD without invoking `char::to_lowercase` / Unicode lookup tables while preserving 100% bit-exact parity (`'ς' -> 'σ'`, `'İ'`, `'K'`, `'ſ'`, multi-char expansions, lossy invalid-UTF-8 fallback).
+   - Added exact pure-ASCII fast-reject (`!needle_uni_lower.is_ascii() && haystack.is_ascii() -> false`) in both `NeedleMatcher::UnicodeIlike` and `Utf8Matcher::UnicodeIlike`.
+2. **Pass 14B — Eliminate Redundant Per-Row `Utf8Data::get` (`from_utf8`) + Bounded `unshred_map` Pre-Sizing (`codec/{mod,dict,nested,numeric,zonemap}.rs`, `writer/{mod,rg_encode}.rs`, `reader/{eval,mod}.rs`):**
+   - Because `cetra_column::Utf8Data::get(row)` re-validates UTF-8 on every call (`14.0%` of `nested_100k`, `4.6%` of `random_access_250k`), added zero-`unsafe` `utf8_bytes_at`, `utf8_len_at` (with `checked_add` overflow protection), and `FastUtf8Ref<'a>` (validating `u.bytes()` once per buffer for O(1) `&str` slicing) and replaced hot-path `Utf8Data::get` sites across codecs, writer, and evaluator.
+   - Pre-sized `unshred_map` and `decode_single_map_key` buffers bounded by `valid_rows` and capped at `1 << 20` entries (safe against all-null / crafted amplification).
+3. **Pass 14C — Coalesce Cold `.stpk` Zstd Dict + Data Frames in 1 `read_ranges` Wave (`payload/pack.rs`):**
+   - Unified `scan_chunks_in_frames`, `scan_chunks_in_frames_parallel`, `scan_frames_parallel`, and `read_chunks` onto `fetch_frames_and_dict`: when a `.stpk` Zstd dict is neither cached nor inline in the tail, its byte range is appended to the frame `read_ranges` batch and installed under single-flight `dict_init`, saving 1 full S3 RTT (~55 ms) on cold `.stpk` reads.
+
+### 18.1 Pass 14 Results (`precision-5770-vm` & Live Garage S3)
+- **File Sizes:** **Bit-identical (`+0.00%`) across all 17 workloads** (`clickbench_100k = 8,411.2 KiB`, Gate 1 PASS).
+- **Write Speedups (`precision-5770-vm`):** `W1_agents` `399.8 → 286.8 ms` (**`1.39×`**), `W4_adversarial` `79.9 → 64.7 ms` (**`1.23×`**), `wildchat_15k` `523.5 → 433.0 ms` (**`1.21×`**), `nested_100k` `118.0 → 100.9 ms` 1T (**`1.17×`**) / `86.9 → 71.9 ms` 8T (**`1.21×`**), `row_filter_100k` `35.4 → 29.6 ms` (**`1.20×`**), `W2_chat_4files` `280.3 → 238.8 ms` (**`1.17×`**), `tpch_lineitem_500k` `565.3 → 506.8 ms` 1T (**`1.12×`**) / `389.6 → 354.7 ms` 8T (**`1.10×`**), `W3_spans` `237.5 → 214.5 ms` (**`1.11×`**), `dataloader_100k` `169.4 → 153.2 ms` (**`1.11×`**), `random_access_250k` `413.4 → 374.6 ms` (**`1.10×`**).
+- **Read Speedups (`precision-5770-vm`):**
+  - `NS_scan_full`: `38.10 → 29.45 ms` 1T (**`1.29×`**) / `6.39 → 5.26 ms` 8T (**`1.21×`**)
+  - `NS_filter_map` (8T): `0.603 → 0.494 ms` (**`1.22×`**); `NS_take_100`: `8.40 → 7.68 ms` 1T / `1.26 → 1.17 ms` 8T
+  - `WC_Q4_unicode_ilike` (1T): `108.37 → 84.40 ms` (**`1.28×`** — now `1.39×` faster than Parquet `117 ms`, `1.43×` faster than Vortex `121 ms`, `2.31×` faster than Lance `195 ms` on 1 core)
+  - `CB_Q23_like` (1T): `2.13 → 1.78 ms` (**`1.20×`**); `CB_Q12` (1T): `0.787 → 0.694 ms` (**`1.13×`**)
+  - `JB_Q4_text_like` (1T): `3.98 → 3.41 ms` (**`1.17×`**); `JB_Q5_did_full` (1T): `18.27 → 16.98 ms` (**`1.08×`**)
+  - `W1`/`W2`/`W3`/`W4` `map_key_lookup`: **`1.09×–1.14×`** faster across all 4 Cetra workloads
+- **Live Garage S3 (`https://s3.chapu.is:8443`):** Zero GET regressions across all 87 queries × both modes (`W14` ReadCache vs Lance **`37/38`**, `EXT` Direct Rank #1 **`16/30`** with `CB_Q1` `117 ms`, `WD_take_20_1000` ReadCache `355 ms`, `NS_scan_full` ReadCache `152 ms`, `FW_substr_absent` ReadCache `434 ms`).
+
+### 18.2 Pass 14 Verification & Security
+- **Cold Code Review (2 rounds):** Caught 1 Major (uncapped upfront `with_capacity` in `unshred_map` / `decode_single_map_key` ignoring `row_nulls`) and 1 Minor (`utf8_len_at` `row + 1` overflow on `usize::MAX`) — both fixed and **APPROVED** (0 Blockers, 0 Majors, 0 Minors).
+- **Tests, Security & Cross-Arch:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (0 warnings), `just check-ee`, `just deny-policy` (bans/licenses/sources ok); **209 unit + 2 `fuzz_replay` tests passing** on local `x86_64` and Apple Silicon M4 `macbook-m4-vm` (`aarch64` NEON, `1.18 s` release, verifying unaligned NEON `ascii_lowercase_append`).
+- **ASan libFuzzer (`statam_file`, 90s × 4 workers):** **`352,786` total runs** (`~969` exec/s/worker — `1.7×` faster fuzz throughput), **`21,224` cov edges**, **`61,069` features**, **`606 MiB` peak RSS**, **0 crashes, 0 OOMs, 0 ASan errors**.
+
 **Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Awaiting explicit user go-ahead for Stage 3 (`cetra-storage` integration).

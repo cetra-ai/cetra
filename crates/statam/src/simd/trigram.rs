@@ -11,24 +11,25 @@ pub const MIN_TRIGRAM_BLOOM_BYTES: usize = 256;
 /// Maximum allowed byte length for a [`TrigramBloom`] bitset.
 pub const MAX_TRIGRAM_BLOOM_BYTES: usize = 16_384;
 
-/// Writes ASCII-lowercased `src` into `dst` (clearing `dst` first).
+/// Appends ASCII-lowercased `src` onto `dst` without clearing `dst`.
 ///
 /// Only ASCII uppercase bytes (`'A'..='Z'`) are mapped to `'a'..='z'`; all
 /// other bytes including non-ASCII UTF-8 bytes (`>= 0x80`) are preserved verbatim.
-pub fn ascii_lowercase_into(src: &[u8], dst: &mut Vec<u8>) {
-    dst.clear();
+pub fn ascii_lowercase_append(src: &[u8], dst: &mut Vec<u8>) {
     if src.is_empty() {
         return;
     }
-    dst.resize(src.len(), 0);
+    let old_len = dst.len();
+    dst.resize(old_len + src.len(), 0);
+    let out = &mut dst[old_len..];
 
     #[cfg(all(target_arch = "x86_64", not(miri)))]
     {
         if std::arch::is_x86_feature_detected!("avx2") {
             // SAFETY: `is_x86_feature_detected!("avx2")` verified above and
-            // `dst.len() == src.len()`.
+            // `out.len() == src.len()`.
             unsafe {
-                ascii_lowercase_avx2(src, dst);
+                ascii_lowercase_avx2(src, out);
             }
             return;
         }
@@ -42,12 +43,21 @@ pub fn ascii_lowercase_into(src: &[u8], dst: &mut Vec<u8>) {
     {
         // SAFETY: `cfg(target_feature = "neon")` guarantees NEON at compile time.
         unsafe {
-            ascii_lowercase_neon(src, dst);
+            ascii_lowercase_neon(src, out);
         }
         return;
     }
     #[allow(unreachable_code)]
-    ascii_lowercase_scalar(src, dst);
+    ascii_lowercase_scalar(src, out);
+}
+
+/// Writes ASCII-lowercased `src` into `dst` (clearing `dst` first).
+///
+/// Only ASCII uppercase bytes (`'A'..='Z'`) are mapped to `'a'..='z'`; all
+/// other bytes including non-ASCII UTF-8 bytes (`>= 0x80`) are preserved verbatim.
+pub fn ascii_lowercase_into(src: &[u8], dst: &mut Vec<u8>) {
+    dst.clear();
+    ascii_lowercase_append(src, dst);
 }
 
 /// Computes a deterministic 32-bit hash for a 3-byte trigram.
@@ -769,6 +779,21 @@ mod tests {
             simd.insert_bytes(&bytes);
             scalar.insert_bytes_scalar(&bytes);
             prop_assert_eq!(simd.as_bytes(), scalar.as_bytes());
+        }
+    }
+
+    #[test]
+    fn pass14a_ascii_lowercase_append_unaligned_prefixes_and_empty_src() {
+        let src: Vec<u8> = (0u8..=255).collect();
+        let expected_src: Vec<u8> = src.iter().map(u8::to_ascii_lowercase).collect();
+        for prefix_len in 0usize..=33 {
+            let prefix: Vec<u8> = (0..prefix_len).map(|i| b'A' + (i as u8 % 26)).collect();
+            let mut dst = prefix.clone();
+            ascii_lowercase_append(&[], &mut dst);
+            assert_eq!(dst, prefix);
+            ascii_lowercase_append(&src, &mut dst);
+            assert_eq!(&dst[..prefix_len], prefix.as_slice());
+            assert_eq!(&dst[prefix_len..], expected_src.as_slice());
         }
     }
 }

@@ -13,7 +13,9 @@ use crate::codec::nested::{
     ShreddedSubCol, decode_shredded_residual_block, decode_shredded_subcol, decode_single_map_key,
 };
 use crate::codec::numeric::read_optional_nulls;
-use crate::codec::{ZonePred, ZoneValue, decode_mini_block, zone_map_always_matches};
+use crate::codec::{
+    FastUtf8Ref, ZonePred, ZoneValue, decode_mini_block, utf8_bytes_at, zone_map_always_matches,
+};
 use crate::format::{
     BLOCK_FLAG_CONST_EMPTY_COLLECTION, BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_HAS_NAN, BlockEntry,
     COL_FLAG_IS_SHREDDED_SUBCOL, Encoding, LocalityGroup, MAX_BATCH_DECODED_BYTES,
@@ -21,7 +23,7 @@ use crate::format::{
 };
 use crate::parallel::{MAX_PARALLEL_THREADS, parallel_map_in_order};
 use crate::payload::search::{
-    RetainedPackChunks, pack_short_circuits_all, unicode_lowercase_context_free_into,
+    RetainedPackChunks, pack_short_circuits_all, unicode_lowercase_context_free_into_bytes,
 };
 use crate::payload::{
     FLAT_REF_NULL, FlatPayloadRefs, decode_payload_refs_flat, scan_payload_refs_inline_substring,
@@ -937,7 +939,7 @@ fn eval_flat_pred(
             }
             out
         }
-        FlatData::Utf8(u) => eval_bytes_rows(n, |r| u.get(r).map(str::as_bytes), pred),
+        FlatData::Utf8(u) => eval_bytes_rows(n, |r| utf8_bytes_at(u, r), pred),
         FlatData::Binary(b) => eval_bytes_rows(n, |r| b.get(r), pred),
         FlatData::FixedBytes8(v) => eval_bytes_rows(n, |r| Some(v[r].as_slice()), pred),
         FlatData::FixedBytes16(v) => eval_bytes_rows(n, |r| Some(v[r].as_slice()), pred),
@@ -1137,6 +1139,7 @@ fn eval_map_key_pred(
     let vals = map.values();
     let val_nulls = map.value_nulls();
     let row_nulls = map_col.nulls();
+    let key_bytes = key.as_bytes();
 
     for r in 0..n {
         if row_nulls.is_some_and(|bm| !bm.get(r)) {
@@ -1149,11 +1152,11 @@ fn eval_map_key_pred(
         let e = offsets[r + 1] as usize;
         let mut found: Option<Option<&[u8]>> = None;
         for idx in s..e {
-            if keys.get(idx) == Some(key) {
+            if utf8_bytes_at(keys, idx) == Some(key_bytes) {
                 if val_nulls.is_some_and(|bm| !bm.get(idx)) {
                     found = Some(None);
                 } else {
-                    found = Some(vals.get(idx).map(str::as_bytes));
+                    found = Some(utf8_bytes_at(vals, idx));
                 }
             }
         }
@@ -1190,8 +1193,8 @@ pub(super) fn filter_residual_to_keys(
     let mut out_val_valid = Vec::new();
 
     let offsets = map.offsets();
-    let mkeys = map.keys();
-    let mvals = map.values();
+    let mkeys = FastUtf8Ref::new(map.keys())?;
+    let mvals = FastUtf8Ref::new(map.values())?;
     let mval_nulls = map.value_nulls();
     let row_nulls = map_col.nulls();
 
@@ -1654,8 +1657,8 @@ pub(super) fn eval_utf8_substring(
                 let mut vm = Bitmap::new_zeroed(d.values().len());
                 if let FlatData::Utf8(u) = d.values().data() {
                     for i in 0..u.len() {
-                        if let Some(s) = u.get(i)
-                            && matcher.matches(s.as_bytes())
+                        if let Some(b) = utf8_bytes_at(u, i)
+                            && matcher.matches(b)
                         {
                             let _ = vm.set(i, true);
                         }
@@ -1687,8 +1690,8 @@ pub(super) fn eval_utf8_substring(
             if let FlatData::Utf8(u) = r.values().data() {
                 for i in 0..u.len() {
                     if !r.values().is_null(i)
-                        && let Some(s) = u.get(i)
-                        && matcher.matches(s.as_bytes())
+                        && let Some(b) = utf8_bytes_at(u, i)
+                        && matcher.matches(b)
                     {
                         let _ = run_match.set(i, true);
                     }
@@ -1713,8 +1716,8 @@ pub(super) fn eval_utf8_substring(
                 let nulls = f.nulls();
                 for r in 0..n {
                     if nulls.is_none_or(|bm| bm.get(r))
-                        && let Some(s) = u.get(r)
-                        && matcher.matches(s.as_bytes())
+                        && let Some(b) = utf8_bytes_at(u, r)
+                        && matcher.matches(b)
                     {
                         let _ = out.set(r, true);
                     }
@@ -1748,9 +1751,10 @@ pub(super) enum Utf8Matcher {
     },
     UnicodeIlike {
         finder: memmem::Finder<'static>,
+        needle_has_non_ascii: bool,
         needle_raw_lower: Vec<u8>,
         scratch: Vec<u8>,
-        uni_scratch: String,
+        uni_scratch: Vec<u8>,
     },
 }
 
@@ -1771,13 +1775,15 @@ impl Utf8Matcher {
         ascii_lowercase_into(needle, &mut ascii_lowered);
         match std::str::from_utf8(needle) {
             Ok(s) => {
-                let mut uni_lower = String::new();
-                unicode_lowercase_context_free_into(s, &mut uni_lower);
+                let mut uni_lower = Vec::new();
+                unicode_lowercase_context_free_into_bytes(s, &mut uni_lower);
+                let needle_has_non_ascii = !uni_lower.is_ascii();
                 Self::UnicodeIlike {
-                    finder: memmem::Finder::new(uni_lower.as_bytes()).into_owned(),
+                    finder: memmem::Finder::new(&uni_lower).into_owned(),
+                    needle_has_non_ascii,
                     needle_raw_lower: ascii_lowered,
                     scratch: Vec::new(),
-                    uni_scratch: String::new(),
+                    uni_scratch: Vec::new(),
                 }
             }
             Err(_) => Self::AsciiIlike {
@@ -1796,17 +1802,21 @@ impl Utf8Matcher {
             }
             Self::UnicodeIlike {
                 finder,
+                needle_has_non_ascii,
                 needle_raw_lower,
                 scratch,
                 uni_scratch,
             } => {
+                if *needle_has_non_ascii && haystack.is_ascii() {
+                    return false;
+                }
                 if let Ok(s) = std::str::from_utf8(haystack) {
-                    unicode_lowercase_context_free_into(s, uni_scratch);
-                    finder.find(uni_scratch.as_bytes()).is_some()
+                    unicode_lowercase_context_free_into_bytes(s, uni_scratch);
+                    finder.find(uni_scratch).is_some()
                 } else {
                     let lossy = String::from_utf8_lossy(haystack);
-                    unicode_lowercase_context_free_into(&lossy, uni_scratch);
-                    if finder.find(uni_scratch.as_bytes()).is_some() {
+                    unicode_lowercase_context_free_into_bytes(&lossy, uni_scratch);
+                    if finder.find(uni_scratch).is_some() {
                         return true;
                     }
                     ascii_lowercase_into(haystack, scratch);
@@ -1814,5 +1824,43 @@ impl Utf8Matcher {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Utf8Matcher;
+
+    #[test]
+    fn pass14a_utf8_matcher_unicode_ilike_special_foldings_and_ascii_fast_reject() {
+        let mut kelvin = Utf8Matcher::new("\u{212A}".as_bytes(), true);
+        assert!(kelvin.matches(b"k"));
+        assert!(kelvin.matches(b"K"));
+        assert!(kelvin.matches("300 \u{212A}".as_bytes()));
+        assert!(!kelvin.matches(b"hello world"));
+
+        // Long s U+017F stays U+017F under `char::to_lowercase()` (non-ASCII), matching "ſong"
+        // and rejecting ASCII "s"/"S" consistently with `unicode_lowercase_context_free_into`.
+        let mut long_s = Utf8Matcher::new("\u{017F}".as_bytes(), true);
+        assert!(long_s.matches("\u{017F}ong".as_bytes()));
+        assert!(!long_s.matches(b"s"));
+        assert!(!long_s.matches(b"S"));
+        assert!(!long_s.matches(b"hello world"));
+
+        // Turkish dotted I (U+0130 -> "i\u{0307}") matches decomposed lowercase and uppercase, rejects ASCII.
+        let mut dotted_i = Utf8Matcher::new("\u{0130}".as_bytes(), true);
+        assert!(dotted_i.matches("i\u{0307}stanbul".as_bytes()));
+        assert!(dotted_i.matches("\u{0130}STANBUL".as_bytes()));
+        assert!(!dotted_i.matches(b"istanbul"));
+
+        let mut sigma = Utf8Matcher::new("ς".as_bytes(), true);
+        assert!(sigma.matches("ΟΔΥΣΣΕΥΣ".as_bytes()));
+        assert!(!sigma.matches(b"pure ascii text without greek"));
+
+        let mut alien = Utf8Matcher::new("Alienación".as_bytes(), true);
+        assert!(!alien.matches(b"Alienacion without accent"));
+        assert!(!alien.matches("PURE ASCII ".repeat(20).as_bytes()));
+        assert!(alien.matches("la ALIENACIÓN moderna".as_bytes()));
+        assert!(alien.matches("alienación".as_bytes()));
     }
 }

@@ -179,7 +179,7 @@ impl FileDict {
     pub fn entry_bytes(&self, code: u32) -> Option<&[u8]> {
         let idx = code as usize;
         match self.values.data() {
-            FlatData::Utf8(u) => u.get(idx).map(str::as_bytes),
+            FlatData::Utf8(u) => crate::codec::utf8_bytes_at(u, idx),
             FlatData::Binary(b) => b.get(idx),
             FlatData::FixedBytes8(v) => v.get(idx).map(|a| a.as_slice()),
             FlatData::FixedBytes16(v) => v.get(idx).map(|a| a.as_slice()),
@@ -602,7 +602,7 @@ impl DictBuilder {
 
 fn flat_row_bytes(col: &FlatColumn, row: usize) -> Option<&[u8]> {
     match col.data() {
-        FlatData::Utf8(u) => u.get(row).map(str::as_bytes),
+        FlatData::Utf8(u) => crate::codec::utf8_bytes_at(u, row),
         FlatData::Binary(b) => b.get(row),
         FlatData::FixedBytes8(v) => v.get(row).map(|a| a.as_slice()),
         FlatData::FixedBytes16(v) => v.get(row).map(|a| a.as_slice()),

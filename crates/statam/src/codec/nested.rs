@@ -28,7 +28,9 @@ use crate::codec::numeric::{
     validate_plain_offsets_raw, write_optional_nulls,
 };
 use crate::codec::zonemap::{ZoneMapSummary, compute_zone_map, count_col_nulls};
-use crate::codec::{EncodedMiniBlock, WriteProfile, preferred_block_codec};
+use crate::codec::{
+    EncodedMiniBlock, FastUtf8Ref, WriteProfile, preferred_block_codec, utf8_bytes_at, utf8_len_at,
+};
 use crate::format::{
     BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_HAS_NULLS, BlockEntry, Codec, Encoding,
     KNOWN_BLOCK_FLAGS, MAX_SHREDDED_KEYS,
@@ -95,7 +97,7 @@ pub fn select_shredded_keys(map: &MapData) -> Vec<String> {
         return Vec::new();
     }
 
-    let mut counts: HashMap<&str, (usize, usize), BuildHasherDefault<FastSliceHasher>> =
+    let mut counts: HashMap<&[u8], (usize, usize), BuildHasherDefault<FastSliceHasher>> =
         HashMap::default();
     let offsets = map.offsets();
     let keys = map.keys();
@@ -111,7 +113,7 @@ pub fn select_shredded_keys(map: &MapData) -> Vec<String> {
         let start = offsets[row] as usize;
         let end = offsets[row + 1] as usize;
         for idx in start..end {
-            if let Some(k) = keys.get(idx) {
+            if let Some(k) = utf8_bytes_at(keys, idx) {
                 match counts.get_mut(k) {
                     Some((cnt, last_row)) => {
                         if *last_row != row {
@@ -127,7 +129,7 @@ pub fn select_shredded_keys(map: &MapData) -> Vec<String> {
         }
     }
 
-    let mut hot: Vec<(&str, usize)> = counts
+    let mut hot: Vec<(&[u8], usize)> = counts
         .into_iter()
         .filter_map(|(k, (cnt, _))| {
             (cnt.saturating_mul(SHRED_MIN_PCT_DENOM) >= sampled_rows).then_some((k, cnt))
@@ -137,7 +139,10 @@ pub fn select_shredded_keys(map: &MapData) -> Vec<String> {
     hot.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
     hot.truncate(MAX_SHREDDED_KEYS);
 
-    let mut selected: Vec<String> = hot.into_iter().map(|(k, _)| k.to_owned()).collect();
+    let mut selected: Vec<String> = hot
+        .into_iter()
+        .filter_map(|(k, _)| std::str::from_utf8(k).ok().map(str::to_owned))
+        .collect();
     selected.sort_unstable();
     selected
 }
@@ -198,8 +203,8 @@ pub fn shred_map(
     let mut res_val_valid: Vec<bool> = Vec::new();
 
     let map_offsets = map.offsets();
-    let map_keys = map.keys();
-    let map_vals = map.values();
+    let map_keys = FastUtf8Ref::new(map.keys())?;
+    let map_vals = FastUtf8Ref::new(map.values())?;
     let map_val_nulls = map.value_nulls();
     let row_nulls = col.nulls();
 
@@ -320,15 +325,15 @@ pub fn shred_map(
 /// Zero-materialization borrowed view over a `Utf8` [`Column`] for `O(1)` per-row indexing
 /// across `Flat`, `Dict`, `Rle`, and `Const` sub-columns.
 enum SubColUtf8Ref<'a> {
-    Flat(&'a Utf8Data, Option<&'a Bitmap>),
+    Flat(FastUtf8Ref<'a>, Option<&'a Bitmap>),
     Dict {
-        dict_vals: &'a Utf8Data,
+        dict_vals: FastUtf8Ref<'a>,
         dict_nulls: Option<&'a Bitmap>,
         codes: &'a [u32],
         code_nulls: Option<&'a Bitmap>,
     },
     Rle {
-        run_vals: &'a Utf8Data,
+        run_vals: FastUtf8Ref<'a>,
         run_nulls: Option<&'a Bitmap>,
         run_ends: &'a [u32],
     },
@@ -344,7 +349,7 @@ impl<'a> SubColUtf8Ref<'a> {
                         reason: "shredded sub-column values must be Utf8",
                     });
                 };
-                Ok(Self::Flat(u, fc.nulls()))
+                Ok(Self::Flat(FastUtf8Ref::new(u)?, fc.nulls()))
             }
             Column::Dict(dc) => {
                 let FlatData::Utf8(u) = dc.values().data() else {
@@ -353,7 +358,7 @@ impl<'a> SubColUtf8Ref<'a> {
                     });
                 };
                 Ok(Self::Dict {
-                    dict_vals: u,
+                    dict_vals: FastUtf8Ref::new(u)?,
                     dict_nulls: dc.values().nulls(),
                     codes: dc.codes(),
                     code_nulls: dc.nulls(),
@@ -366,7 +371,7 @@ impl<'a> SubColUtf8Ref<'a> {
                     });
                 };
                 Ok(Self::Rle {
-                    run_vals: u,
+                    run_vals: FastUtf8Ref::new(u)?,
                     run_nulls: rc.values().nulls(),
                     run_ends: rc.run_ends(),
                 })
@@ -424,7 +429,16 @@ impl<'a> SubColUtf8Ref<'a> {
     }
 }
 
-type ResidualMapRef<'a> = (&'a MapData, Option<&'a Bitmap>);
+#[derive(Clone, Copy)]
+struct ResidualMapRef<'a> {
+    offsets: &'a [u32],
+    keys: FastUtf8Ref<'a>,
+    vals: FastUtf8Ref<'a>,
+    val_nulls: Option<&'a Bitmap>,
+    row_nulls: Option<&'a Bitmap>,
+    entry_count: usize,
+}
+
 type UnshredInputs<'a> = (Option<ResidualMapRef<'a>>, Vec<SubColUtf8Ref<'a>>);
 type SelectedVarlenResult = (Vec<u32>, Vec<u8>, Option<Bitmap>);
 
@@ -464,7 +478,14 @@ fn validate_unshred_inputs<'a>(
                     reason: "shredded residual is not MapUtf8",
                 });
             };
-            Some((m.as_ref(), fc.nulls()))
+            Some(ResidualMapRef {
+                offsets: m.offsets(),
+                keys: FastUtf8Ref::new(m.keys())?,
+                vals: FastUtf8Ref::new(m.values())?,
+                val_nulls: m.value_nulls(),
+                row_nulls: fc.nulls(),
+                entry_count: m.entry_count(),
+            })
         }
         None => None,
     };
@@ -482,13 +503,13 @@ fn merge_unshred_row<'a>(
     row: usize,
     subcols: &[(&'a str, &ShreddedSubCol)],
     sub_refs: &[SubColUtf8Ref<'a>],
-    res_map: Option<(&'a MapData, Option<&Bitmap>)>,
+    res_map: Option<ResidualMapRef<'a>>,
     out_keys: &mut Vec<&'a str>,
     out_vals: &mut Vec<&'a str>,
     out_val_valid: &mut Vec<bool>,
 ) {
-    let (res_range_start, res_range_end) = if let Some((rm, _)) = res_map {
-        (rm.offsets()[row] as usize, rm.offsets()[row + 1] as usize)
+    let (res_range_start, res_range_end) = if let Some(rm) = res_map {
+        (rm.offsets[row] as usize, rm.offsets[row + 1] as usize)
     } else {
         (0, 0)
     };
@@ -503,9 +524,7 @@ fn merge_unshred_row<'a>(
             continue;
         }
         let pk = subcols[p_idx].0;
-        let rk = res_map
-            .and_then(|(rm, _)| rm.keys().get(r_idx))
-            .unwrap_or("");
+        let rk = res_map.and_then(|rm| rm.keys.get(r_idx)).unwrap_or("");
         if pk <= rk {
             let valid = subcols[p_idx].1.value_null.get(row);
             let v = if valid { sub_refs[p_idx].get(row) } else { "" };
@@ -513,10 +532,10 @@ fn merge_unshred_row<'a>(
             out_vals.push(v);
             out_val_valid.push(valid);
             p_idx += 1;
-        } else if let Some((rm, _)) = res_map {
-            let valid = rm.value_nulls().is_none_or(|bm| bm.get(r_idx));
+        } else if let Some(rm) = res_map {
+            let valid = rm.val_nulls.is_none_or(|bm| bm.get(r_idx));
             let v = if valid {
-                rm.values().get(r_idx).unwrap_or("")
+                rm.vals.get(r_idx).unwrap_or("")
             } else {
                 ""
             };
@@ -537,12 +556,12 @@ fn merge_unshred_row<'a>(
         }
         p_idx += 1;
     }
-    if let Some((rm, _)) = res_map {
+    if let Some(rm) = res_map {
         while r_idx < res_range_end {
-            let rk = rm.keys().get(r_idx).unwrap_or("");
-            let valid = rm.value_nulls().is_none_or(|bm| bm.get(r_idx));
+            let rk = rm.keys.get(r_idx).unwrap_or("");
+            let valid = rm.val_nulls.is_none_or(|bm| bm.get(r_idx));
             let v = if valid {
-                rm.values().get(r_idx).unwrap_or("")
+                rm.vals.get(r_idx).unwrap_or("")
             } else {
                 ""
             };
@@ -569,16 +588,36 @@ pub fn unshred_map(
 ) -> Result<FlatColumn, StatamError> {
     let (res_map, sub_refs) = validate_unshred_inputs(row_count, row_nulls, residual, subcols)?;
 
+    let valid_rows = row_count
+        .min(row_nulls.map_or(row_count, Bitmap::count_ones))
+        .min(
+            res_map
+                .and_then(|rm| rm.row_nulls)
+                .map_or(row_count, Bitmap::count_ones),
+        );
+    const MAX_UNSHRED_PREALLOC_ENTRIES: usize = 1 << 20; // 1M entries (~33 MiB max hint)
+    let est_entries = if valid_rows == 0 {
+        0
+    } else {
+        let residual_entries = res_map.map_or(0, |rm| rm.entry_count);
+        let promoted_present: usize = subcols.iter().fold(0usize, |acc, (_, sub)| {
+            acc.saturating_add(sub.in_map.count_ones().min(valid_rows))
+        });
+        residual_entries
+            .saturating_add(promoted_present)
+            .min(MAX_UNSHRED_PREALLOC_ENTRIES)
+    };
+
     let mut out_offsets = Vec::with_capacity(row_count + 1);
     out_offsets.push(0u32);
-    let mut out_keys: Vec<&str> = Vec::new();
-    let mut out_vals: Vec<&str> = Vec::new();
-    let mut out_val_valid: Vec<bool> = Vec::new();
+    let mut out_keys: Vec<&str> = Vec::with_capacity(est_entries);
+    let mut out_vals: Vec<&str> = Vec::with_capacity(est_entries);
+    let mut out_val_valid: Vec<bool> = Vec::with_capacity(est_entries);
     let mut out_row_valid = vec![true; row_count];
 
     for (row, valid_slot) in out_row_valid.iter_mut().enumerate().take(row_count) {
         let is_row_null = row_nulls.is_some_and(|bm| !bm.get(row))
-            || res_map.is_some_and(|(_, rn)| rn.is_some_and(|bm| !bm.get(row)));
+            || res_map.is_some_and(|rm| rm.row_nulls.is_some_and(|bm| !bm.get(row)));
         if is_row_null {
             *valid_slot = false;
             out_offsets.push(out_keys.len() as u32);
@@ -660,7 +699,7 @@ pub fn unshred_map_selected(
         }
 
         let is_row_null = row_nulls.is_some_and(|bm| !bm.get(row))
-            || res_map.is_some_and(|(_, rn)| rn.is_some_and(|bm| !bm.get(row)));
+            || res_map.is_some_and(|rm| rm.row_nulls.is_some_and(|bm| !bm.get(row)));
         if is_row_null {
             let bm = out_nulls.get_or_insert_with(|| Bitmap::new_ones(row_count));
             let _ = bm.set(row, false);
@@ -744,23 +783,47 @@ pub fn decode_single_map_key(
                 reason: "shredded residual is not MapUtf8",
             });
         };
-        Some((m.as_ref(), fc.nulls()))
+        Some(ResidualMapRef {
+            offsets: m.offsets(),
+            keys: FastUtf8Ref::new(m.keys())?,
+            vals: FastUtf8Ref::new(m.values())?,
+            val_nulls: m.value_nulls(),
+            row_nulls: fc.nulls(),
+            entry_count: m.entry_count(),
+        })
     } else {
         None
     };
 
     let sub_ref = SubColUtf8Ref::from_column(&subcol.values)?;
+    let valid_rows = row_count
+        .min(row_nulls.map_or(row_count, Bitmap::count_ones))
+        .min(
+            res_map
+                .and_then(|rm| rm.row_nulls)
+                .map_or(row_count, Bitmap::count_ones),
+        );
+    const MAX_SINGLE_KEY_PREALLOC_ENTRIES: usize = 1 << 20;
+    let est_entries = if valid_rows == 0 {
+        0
+    } else {
+        subcol
+            .in_map
+            .count_ones()
+            .min(valid_rows)
+            .min(MAX_SINGLE_KEY_PREALLOC_ENTRIES)
+    };
 
     let mut out_offsets = Vec::with_capacity(row_count + 1);
     out_offsets.push(0u32);
-    let mut out_keys: Vec<&str> = Vec::new();
-    let mut out_vals: Vec<&str> = Vec::new();
-    let mut out_val_valid: Vec<bool> = Vec::new();
+    let mut out_keys: Vec<&str> = Vec::with_capacity(est_entries);
+    let mut out_vals: Vec<&str> = Vec::with_capacity(est_entries);
+    let mut out_val_valid: Vec<bool> = Vec::with_capacity(est_entries);
     let mut out_row_valid = vec![true; row_count];
 
     for (row, valid_slot) in out_row_valid.iter_mut().enumerate().take(row_count) {
         let is_row_null = row_nulls.is_some_and(|bm| !bm.get(row))
-            || res_map.is_some_and(|(_, rn)| rn.is_some_and(|bm| !bm.get(row)));
+            || res_map.is_some_and(|rm| rm.row_nulls.is_some_and(|bm| !bm.get(row)));
         if is_row_null {
             *valid_slot = false;
             out_offsets.push(out_keys.len() as u32);
@@ -773,14 +836,14 @@ pub fn decode_single_map_key(
             out_keys.push(key);
             out_vals.push(v);
             out_val_valid.push(valid);
-        } else if let Some((rm, _)) = res_map {
-            let start = rm.offsets()[row] as usize;
-            let end = rm.offsets()[row + 1] as usize;
+        } else if let Some(rm) = res_map {
+            let start = rm.offsets[row] as usize;
+            let end = rm.offsets[row + 1] as usize;
             for idx in start..end {
-                if rm.keys().get(idx) == Some(key) {
-                    let valid = rm.value_nulls().is_none_or(|bm| bm.get(idx));
+                if rm.keys.get(idx) == Some(key) {
+                    let valid = rm.val_nulls.is_none_or(|bm| bm.get(idx));
                     let v = if valid {
-                        rm.values().get(idx).unwrap_or("")
+                        rm.vals.get(idx).unwrap_or("")
                     } else {
                         ""
                     };
@@ -1181,12 +1244,13 @@ fn encode_shredded_residual_block_with_zm(
     let entry_count = map.entry_count();
     if entry_count > 0 {
         // Build compact key dictionary for this mini-block.
-        let mut key_map: HashMap<&str, u32, BuildHasherDefault<FastSliceHasher>> =
+        let mut key_map: HashMap<&[u8], u32, BuildHasherDefault<FastSliceHasher>> =
             HashMap::default();
-        let mut unique_keys: Vec<&str> = Vec::new();
+        let mut unique_keys: Vec<&[u8]> = Vec::new();
         let mut key_codes = Vec::with_capacity(entry_count);
+        let map_keys = map.keys();
         for idx in 0..entry_count {
-            let k = map.keys().get(idx).unwrap_or("");
+            let k = utf8_bytes_at(map_keys, idx).unwrap_or(&[]);
             if let Some(&code) = key_map.get(k) {
                 key_codes.push(code);
             } else {
@@ -1206,7 +1270,7 @@ fn encode_shredded_residual_block_with_zm(
         let keys_raw_bytes: usize = unique_keys.iter().map(|k| k.len()).sum();
         raw.extend_from_slice(&(keys_raw_bytes as u32).to_le_bytes());
         for k in unique_keys {
-            raw.extend_from_slice(k.as_bytes());
+            raw.extend_from_slice(k);
         }
         raw.push(kcode_bw);
         pack_u32(&key_codes, kcode_bw, &mut raw)?;
@@ -2580,7 +2644,7 @@ fn logical_rle_bytes(rle: &RleColumn, dt: &DataType) -> Option<usize> {
                 let val_len = if run_nulls.is_some_and(|bm| !bm.get(i)) {
                     0usize
                 } else {
-                    u.get(i).map_or(0, str::len)
+                    utf8_len_at(u, i)
                 };
                 let per_row = val_len.checked_add(4)?;
                 sum = sum.checked_add(run_len.checked_mul(per_row)?)?;
@@ -3173,13 +3237,13 @@ fn decode_events_body_selected(
                 let rs = offsets[row] as usize;
                 let re = offsets[row + 1] as usize;
                 for &code in &codes[rs..re] {
-                    let s = dict_u.get(code as usize).unwrap_or("");
-                    if n_bytes.len().saturating_add(s.len()) > MAX_BLOCK_RAW_BYTES {
+                    let b = utf8_bytes_at(dict_u, code as usize).unwrap_or(&[]);
+                    if n_bytes.len().saturating_add(b.len()) > MAX_BLOCK_RAW_BYTES {
                         return Err(StatamError::BoundsExceeded {
                             reason: "EventsStruct active names exceed MAX_BLOCK_RAW_BYTES",
                         });
                     }
-                    n_bytes.extend_from_slice(s.as_bytes());
+                    n_bytes.extend_from_slice(b);
                     n_offs.push(n_bytes.len() as u32);
                 }
             }
@@ -4140,7 +4204,7 @@ fn encode_utf8_fsst_or_plain(
     if profile == WriteProfile::L1Compact && u.bytes().len() <= 16 * 1024 {
         let mut slices = Vec::with_capacity(u.len());
         for i in 0..u.len() {
-            slices.push(u.get(i).map_or(&[][..], str::as_bytes));
+            slices.push(utf8_bytes_at(u, i).unwrap_or(&[]));
         }
         if let Some(fsst) = encode_fsst_body(&slices)? {
             return Ok((Encoding::Fsst, fsst));

@@ -291,9 +291,11 @@ fn flat_all_equal_scalar(flat: &FlatColumn) -> Option<ScalarValue> {
                 .then_some(ScalarValue::FixedBytes16(first))
         }
         FlatData::Utf8(u) => {
-            let first = u.get(0)?;
-            if first.len() <= 16 && (1..n).all(|i| u.get(i) == Some(first)) {
-                Some(ScalarValue::Utf8(first.to_owned()))
+            let first = crate::codec::utf8_bytes_at(u, 0)?;
+            if first.len() <= 16 && (1..n).all(|i| crate::codec::utf8_bytes_at(u, i) == Some(first))
+            {
+                let s = std::str::from_utf8(first).ok()?;
+                Some(ScalarValue::Utf8(s.to_owned()))
             } else {
                 None
             }
@@ -779,7 +781,7 @@ fn extract_varlen_slices(flat: &FlatColumn) -> Result<Vec<&[u8]>, StatamError> {
                 if nulls.is_some_and(|bm| !bm.get(i)) {
                     out.push(&[]);
                 } else {
-                    out.push(u.get(i).map_or(&[][..], str::as_bytes));
+                    out.push(crate::codec::utf8_bytes_at(u, i).unwrap_or(&[]));
                 }
             }
         }
@@ -1008,7 +1010,7 @@ fn flat_rows_equal(flat: &FlatColumn, a: usize, b: usize) -> bool {
         FlatData::Interval(v) => v[a] == v[b],
         FlatData::FixedBytes8(v) => v[a] == v[b],
         FlatData::FixedBytes16(v) => v[a] == v[b],
-        FlatData::Utf8(u) => u.get(a) == u.get(b),
+        FlatData::Utf8(u) => crate::codec::utf8_bytes_at(u, a) == crate::codec::utf8_bytes_at(u, b),
         FlatData::Binary(bd) => bd.get(a) == bd.get(b),
         _ => false,
     }

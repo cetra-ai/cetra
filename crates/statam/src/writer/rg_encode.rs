@@ -1464,8 +1464,7 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                 out.push(PayloadRefRow::Null);
                 continue;
             }
-            let s = u.get(r).unwrap_or("");
-            let bytes = s.as_bytes();
+            let bytes = crate::codec::utf8_bytes_at(u, r).unwrap_or(&[]);
             if bytes.len() > MAX_ROW_PAYLOAD_BYTES {
                 return Err(StatamError::BoundsExceeded {
                     reason: "row payload exceeds MAX_ROW_PAYLOAD_BYTES",
@@ -1543,7 +1542,7 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
 
                     if let Some(slot) = exact_slot
                         && let Some((prev_row, prev_refs)) = &exact_cache[slot]
-                        && u.get(*prev_row).unwrap_or("").as_bytes() == bytes
+                        && crate::codec::utf8_bytes_at(u, *prev_row).unwrap_or(&[]) == bytes
                     {
                         out.push(PayloadRefRow::Chunks(prev_refs.clone()));
                         continue;
@@ -1574,7 +1573,8 @@ impl<'a, W: Write + Seek> StatamWriter<'a, W> {
                         {
                             let prefix_len = *prefix_byte_len;
                             if bytes.len() > prefix_len + 1 && bytes[prefix_len] == b',' {
-                                let prev_bytes = u.get(*prev_row_idx).unwrap_or("").as_bytes();
+                                let prev_bytes =
+                                    crate::codec::utf8_bytes_at(u, *prev_row_idx).unwrap_or(&[]);
                                 if prev_bytes.len() >= prefix_len {
                                     let edge = prefix_len.min(8);
                                     if bytes[..edge] == prev_bytes[..edge]
@@ -2603,7 +2603,7 @@ fn flat_row_bloom_hash(flat: &FlatColumn, row: usize) -> Option<u64> {
     match flat.data() {
         FlatData::FixedBytes16(v) => Some(statam_bloom_hash(&v[row])),
         FlatData::FixedBytes8(v) => Some(statam_bloom_hash(&v[row])),
-        FlatData::Utf8(u) => u.get(row).map(|s| statam_bloom_hash(s.as_bytes())),
+        FlatData::Utf8(u) => crate::codec::utf8_bytes_at(u, row).map(statam_bloom_hash),
         FlatData::Binary(b) => b.get(row).map(statam_bloom_hash),
         FlatData::I64(v) | FlatData::TimestampNs { values: v, .. } => {
             Some(statam_bloom_hash(&v[row].to_le_bytes()))
@@ -2634,11 +2634,11 @@ fn build_narrow_trigram_for_mb(col: &Column, stored_len: usize) -> Option<Vec<u8
     let nulls = flat.nulls();
     for r in 0..flat.len() {
         if nulls.is_none_or(|bm| bm.get(r))
-            && let Some(s) = u.get(r)
-            && s.len() >= 3
+            && let Some(b) = crate::codec::utf8_bytes_at(u, r)
+            && b.len() >= 3
         {
             any_trigram = true;
-            bloom.insert_bytes(s.as_bytes());
+            bloom.insert_bytes(b);
         }
     }
     if !any_trigram {
