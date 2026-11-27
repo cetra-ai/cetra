@@ -6,15 +6,19 @@ use std::sync::Arc;
 use bytes::Bytes;
 use cetra_column::{
     Batch, BinaryData, Bitmap, Column, DataType, FlatColumn, FlatData, ScalarValue, Schema,
-    Utf8Data,
+    Selection, Utf8Data,
 };
 
 use crate::StatamError;
+use crate::codec::dict::FileDict;
+use crate::codec::nested::{ShreddedSubCol, decode_shredded_subcol_selected};
 use crate::format::{
-    ChunkLoc, Encoding, LocalityGroup, MAX_BATCH_DECODED_BYTES, MAX_FRAME_RAW_BYTES,
-    MAX_ROW_PAYLOAD_BYTES, read_framed_pack_frame,
+    ChunkLoc, Codec, Encoding, LocalityGroup, MAX_BATCH_DECODED_BYTES, MAX_FRAME_RAW_BYTES,
+    MAX_ROW_PAYLOAD_BYTES, PackDecoderDict, PackFrameDecompressor, read_framed_pack_frame,
 };
-use crate::parallel::MAX_PARALLEL_THREADS;
+use crate::parallel::{
+    MAX_PARALLEL_THREADS, in_parallel_scope, parallel_map_in_order, parallel_map_in_order_with_init,
+};
 use crate::payload::pack::ChunkPackReader;
 use crate::payload::search::{
     RetainedPackChunks, pack_short_circuits_all, search_pack_rows_flat_multi_masked_with_threads,
@@ -25,12 +29,197 @@ use crate::payload::{
 };
 use crate::writer::{L0_LOCAL_PACK_IDX, L0_PAYLOAD_DIR_MAGIC};
 
-use super::StatamReader;
 use super::eval::Utf8Matcher;
 use super::plan::{ActiveMiniBlock, BlockReader, DecodedPhase1, RgIoPlan};
+use super::{StatamReader, effective_read_threads};
 
 /// Maximum projected `ExternalPayload` bytes resolved in a single Phase-2 wave (`128 MiB`).
 pub(super) const PHASE2_PAYLOAD_WAVE_TARGET_BYTES: usize = MAX_BATCH_DECODED_BYTES / 2;
+
+/// Minimum reconstructed payload column bytes required before parallelizing byte copy (`1 MiB`).
+const PARALLEL_RECONSTRUCT_MIN_BYTES: usize = 1024 * 1024;
+
+enum PackChunkStore {
+    Dense {
+        min_cid: u32,
+        slots: Vec<Option<Bytes>>,
+    },
+    Sparse(Vec<(u32, Bytes)>),
+}
+
+impl std::fmt::Debug for PackChunkStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dense { min_cid, slots } => f
+                .debug_struct("PackChunkStore::Dense")
+                .field("min_cid", min_cid)
+                .field("slot_count", &slots.len())
+                .finish(),
+            Self::Sparse(entries) => f
+                .debug_struct("PackChunkStore::Sparse")
+                .field("entry_count", &entries.len())
+                .finish(),
+        }
+    }
+}
+
+impl PackChunkStore {
+    fn from_entries(mut entries: Vec<(u32, Bytes)>) -> (Self, usize) {
+        if entries.is_empty() {
+            return (Self::Sparse(Vec::new()), 0);
+        }
+        entries.sort_unstable_by_key(|&(cid, _)| cid);
+        entries.dedup_by_key(|(cid, _)| *cid);
+
+        let total_bytes = entries
+            .iter()
+            .map(|(_, b)| b.len())
+            .fold(0usize, usize::saturating_add);
+
+        let min_cid = entries[0].0;
+        let max_cid = entries[entries.len() - 1].0;
+        let span_u64 = u64::from(max_cid - min_cid) + 1;
+        let max_dense = (entries.len() as u64)
+            .saturating_mul(4)
+            .clamp(64, 1_048_576);
+        if span_u64 <= max_dense
+            && let Ok(span) = usize::try_from(span_u64)
+        {
+            let mut slots: Vec<Option<Bytes>> = vec![None; span];
+            for (cid, bytes) in entries {
+                let idx = (cid - min_cid) as usize;
+                slots[idx] = Some(bytes);
+            }
+            (Self::Dense { min_cid, slots }, total_bytes)
+        } else {
+            (Self::Sparse(entries), total_bytes)
+        }
+    }
+
+    #[inline]
+    fn get(&self, cid: u32) -> Option<&Bytes> {
+        match self {
+            Self::Dense { min_cid, slots } => {
+                let idx = usize::try_from(cid.checked_sub(*min_cid)?).ok()?;
+                slots.get(idx)?.as_ref()
+            }
+            Self::Sparse(entries) => {
+                let idx = entries.binary_search_by_key(&cid, |&(id, _)| id).ok()?;
+                Some(&entries[idx].1)
+            }
+        }
+    }
+}
+
+/// Hash-free, overflow-safe resolved chunk lookup table with dedicated per-RG L0 storage.
+pub(super) struct ResolvedChunks {
+    ext_packs: Vec<(u16, PackChunkStore)>,
+    l0: Option<(PackChunkStore, usize)>,
+    ext_chunk_bytes: usize,
+}
+
+impl std::fmt::Debug for ResolvedChunks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedChunks")
+            .field("ext_pack_count", &self.ext_packs.len())
+            .field("has_l0", &self.l0.is_some())
+            .field("total_bytes", &self.total_bytes())
+            .finish()
+    }
+}
+
+impl ResolvedChunks {
+    pub(super) fn empty() -> Self {
+        Self {
+            ext_packs: Vec::new(),
+            l0: None,
+            ext_chunk_bytes: 0,
+        }
+    }
+
+    pub(super) fn from_pack_entries(entries_by_pack: Vec<(u16, Vec<(u32, Bytes)>)>) -> Self {
+        let mut grouped: BTreeMap<u16, Vec<(u32, Bytes)>> = BTreeMap::new();
+        for (pidx, mut entries) in entries_by_pack {
+            if entries.is_empty() {
+                continue;
+            }
+            match grouped.entry(pidx) {
+                std::collections::btree_map::Entry::Vacant(v) => {
+                    v.insert(entries);
+                }
+                std::collections::btree_map::Entry::Occupied(mut o) => {
+                    o.get_mut().append(&mut entries);
+                }
+            }
+        }
+
+        let mut ext_packs = Vec::with_capacity(grouped.len());
+        let mut l0 = None;
+        let mut ext_chunk_bytes = 0usize;
+        for (pidx, entries) in grouped {
+            let (store, bytes) = PackChunkStore::from_entries(entries);
+            if pidx == L0_LOCAL_PACK_IDX {
+                l0 = Some((store, bytes));
+            } else {
+                ext_chunk_bytes = ext_chunk_bytes.saturating_add(bytes);
+                ext_packs.push((pidx, store));
+            }
+        }
+        Self {
+            ext_packs,
+            l0,
+            ext_chunk_bytes,
+        }
+    }
+
+    pub(super) fn set_l0(&mut self, entries: Vec<(u32, Bytes)>) {
+        if entries.is_empty() {
+            self.l0 = None;
+        } else {
+            self.l0 = Some(PackChunkStore::from_entries(entries));
+        }
+    }
+
+    pub(super) fn clear_l0(&mut self) {
+        self.l0 = None;
+    }
+
+    #[inline]
+    pub(super) fn get(&self, pack_idx: u16, cid: u32) -> Option<&Bytes> {
+        if pack_idx == L0_LOCAL_PACK_IDX {
+            return self.l0.as_ref()?.0.get(cid);
+        }
+        match self.ext_packs.len() {
+            0 => None,
+            1 => {
+                let (pidx, store) = &self.ext_packs[0];
+                if *pidx == pack_idx {
+                    store.get(cid)
+                } else {
+                    None
+                }
+            }
+            2..=4 => self
+                .ext_packs
+                .iter()
+                .find(|(pidx, _)| *pidx == pack_idx)
+                .and_then(|(_, store)| store.get(cid)),
+            _ => {
+                let idx = self
+                    .ext_packs
+                    .binary_search_by_key(&pack_idx, |&(pidx, _)| pidx)
+                    .ok()?;
+                self.ext_packs[idx].1.get(cid)
+            }
+        }
+    }
+
+    #[inline]
+    pub(super) fn total_bytes(&self) -> usize {
+        self.ext_chunk_bytes
+            .saturating_add(self.l0.as_ref().map_or(0, |(_, b)| *b))
+    }
+}
 
 impl StatamReader {
     #[allow(clippy::too_many_arguments)]
@@ -62,7 +251,7 @@ impl StatamReader {
                 proj_indices,
                 proj_schema,
                 map_keys_by_col,
-                &HashMap::new(),
+                &ResolvedChunks::empty(),
                 read_block,
                 read_threads,
             );
@@ -82,7 +271,33 @@ impl StatamReader {
         // 1-RG large-blob tables (e.g. `blobs_2k` 368 MiB) scan safely within `MAX_BATCH_DECODED_BYTES`
         // while still rejecting any single row exceeding `MAX_ROW_PAYLOAD_BYTES` or `MAX_BATCH_DECODED_BYTES`.
         let waves = self.partition_payload_waves(&active_mbs, &proj_payload_cols, l0_local)?;
+        let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
         if waves.len() <= 1 {
+            if active_mbs.len() == 1
+                && threads > 1
+                && !in_parallel_scope()
+                && !proj_indices.is_empty()
+            {
+                let (mb_idx, mask, decoded_p1) = active_mbs.pop().ok_or(StatamError::Corrupt {
+                    reason: "missing single active mini-block",
+                })?;
+                let batch = self.resolve_and_materialize_single_mb_fused(
+                    rg_idx,
+                    mb_idx,
+                    &mask,
+                    decoded_p1,
+                    plan,
+                    proj_indices,
+                    &proj_payload_cols,
+                    proj_schema,
+                    map_keys_by_col,
+                    l0_local,
+                    pre_resolved,
+                    read_block,
+                    threads,
+                )?;
+                return Ok(vec![batch]);
+            }
             let resolved = self.resolve_rg_payload_chunks(
                 rg_idx,
                 &mut active_mbs,
@@ -443,6 +658,449 @@ impl StatamReader {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn resolve_and_materialize_single_mb_fused<'a>(
+        &self,
+        rg_idx: usize,
+        mb_idx: usize,
+        mask: &Bitmap,
+        mut decoded_p1: HashMap<usize, DecodedPhase1>,
+        plan: &RgIoPlan,
+        proj_indices: &[usize],
+        proj_payload_cols: &[usize],
+        proj_schema: &Arc<Schema>,
+        map_keys_by_col: &HashMap<usize, Vec<String>>,
+        l0_local: Option<&ParsedL0Payload<'_>>,
+        pre_resolved: &HashMap<([u8; 16], u32), Bytes>,
+        read_block: &BlockReader<'a>,
+        threads: usize,
+    ) -> Result<Batch, StatamError> {
+        struct PreparedExternalPack {
+            pack_idx: u16,
+            pack: Arc<ChunkPackReader>,
+            dict: Option<Arc<PackDecoderDict>>,
+        }
+
+        enum Stage1Task {
+            PackFrame {
+                pack_slot: usize,
+                fid: u32,
+                raw: Bytes,
+                cids: Vec<u32>,
+            },
+            L0Chunks {
+                cids: Vec<u32>,
+            },
+            ShreddedSub {
+                sub_pidx: usize,
+            },
+            IndepCol {
+                cidx: usize,
+                dict: Option<Arc<FileDict>>,
+            },
+        }
+
+        enum Stage1Out {
+            PackChunks(u16, Vec<(u32, Bytes)>),
+            L0Chunks(Vec<(u32, Bytes)>),
+            ShreddedSub(usize, ShreddedSubCol),
+            IndepCol(usize, Column),
+        }
+
+        // 1. Collect all referenced payload chunks deterministically by pack_idx.
+        let mut by_pack: BTreeMap<u16, BTreeSet<u32>> = BTreeMap::new();
+        for &cidx in proj_payload_cols {
+            match decoded_p1.get(&cidx) {
+                Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
+                    for r in mask.iter_ones() {
+                        if refs.row_kind(r) == FLAT_REF_CHUNKS {
+                            let (ps, cs) = refs.chunk_refs(r);
+                            for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                                by_pack.entry(pidx).or_default().insert(cid);
+                            }
+                        }
+                    }
+                }
+                Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
+                    for (r, row) in selected {
+                        if !mask.get(*r) {
+                            continue;
+                        }
+                        if let PayloadRefRow::Chunks(chunks) = row {
+                            for &(pidx, cid) in chunks {
+                                by_pack.entry(pidx).or_default().insert(cid);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut prepared_packs: Vec<PreparedExternalPack> = Vec::new();
+        let mut pre_resolved_by_pack: Vec<(u16, Vec<(u32, Bytes)>)> = Vec::new();
+        let mut pending_ext_fetches: Vec<(u16, Arc<ChunkPackReader>, Vec<u32>)> = Vec::new();
+        let mut stage1_tasks: Vec<Stage1Task> = Vec::new();
+        let mut stage1_work_bytes = 0usize;
+        let mut total_chunk_bytes = 0usize;
+        let mut total_frame_bytes = 0usize;
+
+        // First validate cumulative chunk/frame budgets across all packs (L0 + external) before
+        // issuing any external pack frame I/O.
+        for (pidx, cids_set) in by_pack {
+            let cids: Vec<u32> = cids_set.into_iter().collect();
+            if pidx == L0_LOCAL_PACK_IDX {
+                let l0 = l0_local.ok_or(StatamError::Corrupt {
+                    reason: "missing L0 local payload region",
+                })?;
+                l0.check_chunks_budget(&cids, &mut total_chunk_bytes, &mut total_frame_bytes)?;
+                stage1_work_bytes =
+                    stage1_work_bytes.saturating_add(l0.compressed_frame_bytes_for_chunks(&cids));
+                stage1_tasks.push(Stage1Task::L0Chunks { cids });
+            } else {
+                let pack_id = *self.meta.schema_meta.pack_ids.get(pidx as usize).ok_or(
+                    StatamError::Corrupt {
+                        reason: "payload ref pack_idx out of bounds",
+                    },
+                )?;
+                let pack = self.resolve_pack(pack_id)?;
+                pack.check_chunks_budget(&cids, &mut total_chunk_bytes, &mut total_frame_bytes)?;
+
+                let missing_cids = if pre_resolved.is_empty() {
+                    cids
+                } else {
+                    let mut hits = Vec::new();
+                    let mut missing = Vec::new();
+                    for cid in cids {
+                        if let Some(cached) = pre_resolved.get(&(pack_id, cid)) {
+                            hits.push((cid, cached.clone()));
+                        } else {
+                            missing.push(cid);
+                        }
+                    }
+                    if !hits.is_empty() {
+                        pre_resolved_by_pack.push((pidx, hits));
+                    }
+                    missing
+                };
+
+                if !missing_cids.is_empty() {
+                    pending_ext_fetches.push((pidx, pack, missing_cids));
+                }
+            }
+        }
+
+        for (pidx, pack, missing_cids) in pending_ext_fetches {
+            let (frame_groups, frame_bytes_list, dict) =
+                pack.prepare_and_fetch_frames(&missing_cids)?;
+            let pack_slot = prepared_packs.len();
+            for ((fid, fcids), raw) in frame_groups.into_iter().zip(frame_bytes_list) {
+                let entry = &pack.toc().frames[fid as usize];
+                if entry.codec != Codec::None {
+                    stage1_work_bytes = stage1_work_bytes.saturating_add(entry.raw_len as usize);
+                }
+                stage1_tasks.push(Stage1Task::PackFrame {
+                    pack_slot,
+                    fid,
+                    raw,
+                    cids: fcids,
+                });
+            }
+            prepared_packs.push(PreparedExternalPack {
+                pack_idx: pidx,
+                pack,
+                dict,
+            });
+        }
+
+        // 2. Extract P1-cached shredded sub-columns first, then enqueue uncached sub-columns.
+        let fields = self.meta.schema_meta.schema.fields();
+        let mb_row_count = self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
+        let mut decoded_subs: HashMap<usize, ShreddedSubCol> = HashMap::new();
+        let mut uncached_subs: Vec<usize> = Vec::new();
+        for &cidx in proj_indices {
+            if fields[cidx].data_type == DataType::MapUtf8
+                && let Some(sm) = self
+                    .meta
+                    .schema_meta
+                    .shredded_maps
+                    .iter()
+                    .find(|s| s.logical_col_idx as usize == cidx)
+            {
+                let keys_needed: Vec<&str> = match map_keys_by_col.get(&cidx) {
+                    Some(req_keys) => req_keys.iter().map(String::as_str).collect(),
+                    None => sm.keys.iter().map(|k| k.key.as_str()).collect(),
+                };
+                for ke in &sm.keys {
+                    if !keys_needed.contains(&ke.key.as_str()) {
+                        continue;
+                    }
+                    let sub_pidx = ke.sub_col_idx as usize;
+                    if decoded_subs.contains_key(&sub_pidx) || uncached_subs.contains(&sub_pidx) {
+                        continue;
+                    }
+                    if let Some(DecodedPhase1::ShreddedSub(sub)) = decoded_p1.remove(&sub_pidx) {
+                        decoded_subs.insert(sub_pidx, sub);
+                    } else {
+                        uncached_subs.push(sub_pidx);
+                    }
+                }
+            }
+        }
+        for sub_pidx in uncached_subs {
+            stage1_work_bytes = stage1_work_bytes
+                .saturating_add(self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx].raw_len as usize);
+            stage1_tasks.push(Stage1Task::ShreddedSub { sub_pidx });
+        }
+
+        // 3. Pre-populate cached FileDicts on main thread and enqueue deduplicated independent
+        //    non-payload columns (including unshredded MapUtf8; shredded MapUtf8 waits for Stage 2).
+        let mut seen_indep: HashSet<usize> = HashSet::new();
+        for &cidx in proj_indices {
+            let cd = &self.meta.col_dir[cidx];
+            if cd.locality_group == LocalityGroup::ExternalPayload || decoded_p1.contains_key(&cidx)
+            {
+                continue;
+            }
+            let is_shredded_map = fields[cidx].data_type == DataType::MapUtf8
+                && self
+                    .meta
+                    .schema_meta
+                    .shredded_maps
+                    .iter()
+                    .any(|s| s.logical_col_idx as usize == cidx);
+            if is_shredded_map || !seen_indep.insert(cidx) {
+                continue;
+            }
+            let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+            let dict = if blk.encoding == Encoding::Dict {
+                self.get_cached_dict(cidx)
+            } else {
+                None
+            };
+            stage1_work_bytes = stage1_work_bytes.saturating_add(blk.raw_len as usize);
+            stage1_tasks.push(Stage1Task::IndepCol { cidx, dict });
+        }
+
+        // 4. Execute Stage 1 in ONE bounded scope with a single reusable PackFrameDecompressor per worker.
+        stage1_work_bytes = stage1_work_bytes.saturating_add(total_chunk_bytes / 4);
+        let stage1_workers = if stage1_tasks.len() >= 16 {
+            threads
+        } else {
+            effective_read_threads(stage1_work_bytes, threads)
+        };
+        let empty_subs: HashMap<usize, ShreddedSubCol> = HashMap::new();
+        let stage1_outputs = parallel_map_in_order_with_init(
+            stage1_tasks,
+            stage1_workers,
+            || Ok(PackFrameDecompressor::new()),
+            |dict_decomp, task| match task {
+                Stage1Task::PackFrame {
+                    pack_slot,
+                    fid,
+                    raw,
+                    cids,
+                } => {
+                    let prep = &prepared_packs[pack_slot];
+                    let pairs = prep.pack.decompress_frame_chunks_as_bytes(
+                        fid,
+                        &raw,
+                        &cids,
+                        prep.dict.as_deref(),
+                        dict_decomp,
+                    )?;
+                    Ok(Stage1Out::PackChunks(prep.pack_idx, pairs))
+                }
+                Stage1Task::L0Chunks { cids } => {
+                    let l0 = l0_local.ok_or(StatamError::Corrupt {
+                        reason: "missing L0 local payload region",
+                    })?;
+                    let pairs = l0.read_chunks_vec(&cids)?;
+                    Ok(Stage1Out::L0Chunks(pairs))
+                }
+                Stage1Task::ShreddedSub { sub_pidx } => {
+                    let blk = &self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
+                    let raw = read_block(blk)?;
+                    let sub = decode_shredded_subcol_selected(&raw, mb_row_count, mask)?;
+                    Ok(Stage1Out::ShreddedSub(sub_pidx, sub))
+                }
+                Stage1Task::IndepCol { cidx, dict } => {
+                    let col = self.decode_uncached_p2_non_payload_col(
+                        rg_idx,
+                        mb_idx,
+                        mb_row_count,
+                        cidx,
+                        mask,
+                        plan,
+                        map_keys_by_col,
+                        &empty_subs,
+                        dict.as_deref(),
+                        read_block,
+                    )?;
+                    Ok(Stage1Out::IndepCol(cidx, col))
+                }
+            },
+        )?;
+
+        let mut chunk_groups = pre_resolved_by_pack;
+        let mut stage1_cols: HashMap<usize, Column> = HashMap::new();
+        for out in stage1_outputs {
+            match out {
+                Stage1Out::PackChunks(pidx, pairs) => chunk_groups.push((pidx, pairs)),
+                Stage1Out::L0Chunks(pairs) => chunk_groups.push((L0_LOCAL_PACK_IDX, pairs)),
+                Stage1Out::ShreddedSub(sub_pidx, sub) => {
+                    decoded_subs.insert(sub_pidx, sub);
+                }
+                Stage1Out::IndepCol(cidx, col) => {
+                    stage1_cols.insert(cidx, col);
+                }
+            }
+        }
+        let resolved_chunks = ResolvedChunks::from_pack_entries(chunk_groups);
+
+        // 5. Stage 2: Assemble projected columns in order (including shredded maps and parallel
+        //    payload reconstruction using full `threads`, handling duplicate `proj_indices`).
+        let mut remaining_uses: HashMap<usize, usize> = HashMap::with_capacity(proj_indices.len());
+        for &cidx in proj_indices {
+            *remaining_uses.entry(cidx).or_insert(0) += 1;
+        }
+
+        let mut out_cols = Vec::with_capacity(proj_indices.len());
+        let mut stage2_cached_cols: HashMap<usize, Column> = HashMap::new();
+        for &cidx in proj_indices {
+            let is_last = match remaining_uses.get_mut(&cidx) {
+                Some(cnt) => {
+                    *cnt = cnt.saturating_sub(1);
+                    *cnt == 0
+                }
+                None => true,
+            };
+            let dt = &fields[cidx].data_type;
+            let cd = &self.meta.col_dir[cidx];
+            if cd.locality_group == LocalityGroup::ExternalPayload {
+                if let Some(col) = stage2_cached_cols.get(&cidx) {
+                    if is_last {
+                        let owned =
+                            stage2_cached_cols
+                                .remove(&cidx)
+                                .ok_or(StatamError::Corrupt {
+                                    reason: "missing cached payload column",
+                                })?;
+                        out_cols.push(owned);
+                    } else {
+                        out_cols.push(col.clone());
+                    }
+                    continue;
+                }
+                let col = match decoded_p1.get(&cidx) {
+                    Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
+                        reconstruct_payload_column_selected(
+                            mb_row_count,
+                            selected,
+                            mask,
+                            &resolved_chunks,
+                            dt,
+                            threads,
+                        )?
+                    }
+                    Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
+                        reconstruct_payload_column_from_flat(
+                            refs,
+                            mask,
+                            &resolved_chunks,
+                            dt,
+                            threads,
+                        )?
+                    }
+                    _ => {
+                        return Err(StatamError::Corrupt {
+                            reason: "missing pre-decoded payload refs in fused Phase 2",
+                        });
+                    }
+                };
+                if !is_last {
+                    stage2_cached_cols.insert(cidx, col.clone());
+                }
+                out_cols.push(col);
+                continue;
+            }
+
+            if let Some(col) = stage1_cols.get(&cidx) {
+                if is_last {
+                    let owned = stage1_cols.remove(&cidx).ok_or(StatamError::Corrupt {
+                        reason: "missing Stage 1 column",
+                    })?;
+                    out_cols.push(owned);
+                } else {
+                    out_cols.push(col.clone());
+                }
+                continue;
+            }
+
+            if let Some(col) = stage2_cached_cols.get(&cidx) {
+                if is_last {
+                    let owned = stage2_cached_cols
+                        .remove(&cidx)
+                        .ok_or(StatamError::Corrupt {
+                            reason: "missing Stage 2 cached column",
+                        })?;
+                    out_cols.push(owned);
+                } else {
+                    out_cols.push(col.clone());
+                }
+                continue;
+            }
+
+            if let Some(cached) = decoded_p1.remove(&cidx) {
+                let col = self.materialize_cached_p1_col(
+                    mb_row_count,
+                    cidx,
+                    dt,
+                    mask,
+                    cached,
+                    plan,
+                    mb_idx,
+                    map_keys_by_col,
+                    &decoded_subs,
+                )?;
+                if !is_last {
+                    stage2_cached_cols.insert(cidx, col.clone());
+                }
+                out_cols.push(col);
+                continue;
+            }
+
+            let col = self.decode_uncached_p2_non_payload_col(
+                rg_idx,
+                mb_idx,
+                mb_row_count,
+                cidx,
+                mask,
+                plan,
+                map_keys_by_col,
+                &decoded_subs,
+                None,
+                read_block,
+            )?;
+            if !is_last {
+                stage2_cached_cols.insert(cidx, col.clone());
+            }
+            out_cols.push(col);
+        }
+
+        let sel = if mask.all_ones() {
+            Selection::All
+        } else {
+            Selection::Mask(mask.clone())
+        };
+        Ok(Batch::try_new(
+            Arc::clone(proj_schema),
+            out_cols,
+            mb_row_count,
+            sel,
+        )?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn resolve_rg_payload_chunks<'a>(
         &self,
         rg_idx: usize,
@@ -452,7 +1110,7 @@ impl StatamReader {
         pre_resolved: &HashMap<([u8; 16], u32), Bytes>,
         read_block: &BlockReader<'a>,
         read_threads: usize,
-    ) -> Result<HashMap<(u16, u32), Bytes>, StatamError> {
+    ) -> Result<ResolvedChunks, StatamError> {
         let mut proj_payload_cols: Vec<usize> = proj_indices
             .iter()
             .copied()
@@ -461,14 +1119,14 @@ impl StatamReader {
             })
             .collect();
         if proj_payload_cols.is_empty() {
-            return Ok(HashMap::new());
+            return Ok(ResolvedChunks::empty());
         }
         proj_payload_cols.sort_unstable();
         proj_payload_cols.dedup();
 
         self.ensure_rg_payload_refs_decoded(rg_idx, active_mbs, &proj_payload_cols, read_block)?;
 
-        let mut by_pack: HashMap<u16, BTreeSet<u32>> = HashMap::new();
+        let mut by_pack: BTreeMap<u16, BTreeSet<u32>> = BTreeMap::new();
         for (_, mask, decoded_p1) in active_mbs.iter() {
             for &cidx in &proj_payload_cols {
                 match decoded_p1.get(&cidx) {
@@ -508,7 +1166,7 @@ impl StatamReader {
         let mut work_items = Vec::with_capacity(by_pack.len());
         let mut total_chunk_bytes = 0usize;
         let mut total_frame_bytes = 0usize;
-        let mut resolved_chunks: HashMap<(u16, u32), Bytes> = HashMap::new();
+        let mut entries_by_pack: Vec<(u16, Vec<(u32, Bytes)>)> = Vec::new();
         for (pidx, cids_set) in by_pack {
             let cids: Vec<u32> = cids_set.into_iter().collect();
             if pidx == L0_LOCAL_PACK_IDX {
@@ -528,13 +1186,17 @@ impl StatamReader {
                 if pre_resolved.is_empty() {
                     work_items.push(PackWork::External(pidx, pack, cids));
                 } else {
+                    let mut hits = Vec::new();
                     let mut missing_cids = Vec::new();
                     for cid in cids {
                         if let Some(cached) = pre_resolved.get(&(pack_id, cid)) {
-                            resolved_chunks.insert((pidx, cid), cached.clone());
+                            hits.push((cid, cached.clone()));
                         } else {
                             missing_cids.push(cid);
                         }
+                    }
+                    if !hits.is_empty() {
+                        entries_by_pack.push((pidx, hits));
                     }
                     if !missing_cids.is_empty() {
                         work_items.push(PackWork::External(pidx, pack, missing_cids));
@@ -550,31 +1212,16 @@ impl StatamReader {
                     let l0 = l0_local.ok_or(StatamError::Corrupt {
                         reason: "missing L0 local payload region",
                     })?;
-                    let map = l0.read_chunks(&cids)?;
-                    for (cid, bytes) in map {
-                        resolved_chunks.insert((L0_LOCAL_PACK_IDX, cid), bytes);
-                    }
+                    let pairs = l0.read_chunks_vec(&cids)?;
+                    entries_by_pack.push((L0_LOCAL_PACK_IDX, pairs));
                 }
                 PackWork::External(pidx, pack, cids) => {
-                    if threads > 1 {
-                        let pairs = pack.scan_chunks_in_frames_parallel(
-                            &cids,
-                            threads,
-                            || Ok(()),
-                            |(), cid, bytes| Some((cid, Bytes::copy_from_slice(bytes))),
-                        )?;
-                        for (cid, bytes) in pairs {
-                            resolved_chunks.insert((pidx, cid), bytes);
-                        }
-                    } else {
-                        pack.scan_chunks_in_frames(&cids, |cid, bytes| {
-                            resolved_chunks.insert((pidx, cid), Bytes::copy_from_slice(bytes));
-                        })?;
-                    }
+                    let pairs = pack.scan_chunks_as_bytes_parallel(&cids, threads)?;
+                    entries_by_pack.push((pidx, pairs));
                 }
             }
         }
-        Ok(resolved_chunks)
+        Ok(ResolvedChunks::from_pack_entries(entries_by_pack))
     }
 
     /// Collects all unique `(pack_idx, chunk_id)` references for `active_mbs` across
@@ -582,8 +1229,8 @@ impl StatamReader {
     pub(super) fn collect_chunk_refs_for_mbs(
         active_mbs: &[ActiveMiniBlock],
         proj_payload_cols: &[usize],
-    ) -> (HashMap<u16, BTreeSet<u32>>, BTreeSet<u32>) {
-        let mut ext_by_pack: HashMap<u16, BTreeSet<u32>> = HashMap::new();
+    ) -> (BTreeMap<u16, BTreeSet<u32>>, BTreeSet<u32>) {
+        let mut ext_by_pack: BTreeMap<u16, BTreeSet<u32>> = BTreeMap::new();
         let mut l0_cids: BTreeSet<u32> = BTreeSet::new();
         for (_, mask, decoded_p1) in active_mbs {
             for &cidx in proj_payload_cols {
@@ -629,7 +1276,7 @@ impl StatamReader {
     /// every pack index and chunk ID against pack TOC bounds.
     pub(super) fn measure_external_pack_bytes(
         &self,
-        ext_by_pack: &HashMap<u16, BTreeSet<u32>>,
+        ext_by_pack: &BTreeMap<u16, BTreeSet<u32>>,
     ) -> Result<(usize, usize), StatamError> {
         let mut total_chunk_bytes = 0usize;
         let mut total_frame_bytes = 0usize;
@@ -761,11 +1408,11 @@ impl StatamReader {
     /// pack (preserving `read_threads` parallelism and enforcing `MAX_BATCH_DECODED_BYTES`).
     pub(super) fn resolve_external_pack_chunks(
         &self,
-        ext_by_pack: HashMap<u16, BTreeSet<u32>>,
+        ext_by_pack: BTreeMap<u16, BTreeSet<u32>>,
         read_threads: usize,
-    ) -> Result<HashMap<(u16, u32), Bytes>, StatamError> {
+    ) -> Result<ResolvedChunks, StatamError> {
         if ext_by_pack.is_empty() {
-            return Ok(HashMap::new());
+            return Ok(ResolvedChunks::empty());
         }
         let mut work_items: Vec<(u16, Arc<ChunkPackReader>, Vec<u32>)> =
             Vec::with_capacity(ext_by_pack.len());
@@ -787,25 +1434,12 @@ impl StatamReader {
             work_items.push((pidx, pack, cids));
         }
         let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
-        let mut resolved_chunks: HashMap<(u16, u32), Bytes> = HashMap::new();
+        let mut entries_by_pack = Vec::with_capacity(work_items.len());
         for (pidx, pack, cids) in work_items {
-            if threads > 1 {
-                let pairs = pack.scan_chunks_in_frames_parallel(
-                    &cids,
-                    threads,
-                    || Ok(()),
-                    |(), cid, bytes| Some((cid, Bytes::copy_from_slice(bytes))),
-                )?;
-                for (cid, bytes) in pairs {
-                    resolved_chunks.insert((pidx, cid), bytes);
-                }
-            } else {
-                pack.scan_chunks_in_frames(&cids, |cid, bytes| {
-                    resolved_chunks.insert((pidx, cid), Bytes::copy_from_slice(bytes));
-                })?;
-            }
+            let pairs = pack.scan_chunks_as_bytes_parallel(&cids, threads)?;
+            entries_by_pack.push((pidx, pairs));
         }
-        Ok(resolved_chunks)
+        Ok(ResolvedChunks::from_pack_entries(entries_by_pack))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1114,21 +1748,60 @@ fn finish_payload_column(
     Ok(Column::Flat(FlatColumn::try_new(flat_data, nulls_opt)?))
 }
 
-fn append_payload_row_to_bytes(
+fn build_reconstruct_shards<'a>(
+    row_count: usize,
+    offsets: &[u32],
+    data_bytes: &'a mut [u8],
+    read_threads: usize,
+) -> Vec<(usize, usize, &'a mut [u8])> {
+    let target_shards = read_threads.clamp(1, MAX_PARALLEL_THREADS).min(row_count);
+    let total_bytes = data_bytes.len();
+    let target_bytes = total_bytes.div_ceil(target_shards).max(1);
+
+    let mut shards = Vec::with_capacity(target_shards);
+    let mut rem = data_bytes;
+    let mut r_lo = 0usize;
+    let mut shard_idx = 0usize;
+
+    while r_lo < row_count {
+        let base_off = offsets[r_lo] as usize;
+        let r_hi = if shard_idx + 1 >= target_shards {
+            row_count
+        } else {
+            let want_off = base_off.saturating_add(target_bytes);
+            let mut hi = r_lo + 1;
+            while hi < row_count && (offsets[hi] as usize) < want_off {
+                hi += 1;
+            }
+            hi
+        };
+        let shard_len = (offsets[r_hi] as usize) - base_off;
+        let (dst, rest) = rem.split_at_mut(shard_len);
+        rem = rest;
+        if shard_len > 0 {
+            shards.push((r_lo, r_hi, dst));
+        }
+        r_lo = r_hi;
+        shard_idx += 1;
+    }
+    debug_assert!(rem.is_empty());
+    shards
+}
+
+fn measure_payload_row(
     row: &PayloadRefRow,
     row_idx: usize,
     nulls: &mut Bitmap,
     offsets: &mut Vec<u32>,
-    data_bytes: &mut Vec<u8>,
     total_decoded: &mut usize,
-    resolved_chunks: &HashMap<(u16, u32), Bytes>,
+    active_non_null_rows: &mut usize,
+    resolved_chunks: &ResolvedChunks,
 ) -> Result<(), StatamError> {
     match row {
         PayloadRefRow::Null => {
-            offsets.push(data_bytes.len() as u32);
+            offsets.push(*total_decoded as u32);
         }
         PayloadRefRow::Inline(bytes) => {
-            let _ = nulls.set(row_idx, true);
             *total_decoded =
                 total_decoded
                     .checked_add(bytes.len())
@@ -1140,24 +1813,20 @@ fn append_payload_row_to_bytes(
                     reason: "decoded payload column exceeds MAX_BATCH_DECODED_BYTES",
                 });
             }
-            let next_off = u32::try_from(data_bytes.len() + bytes.len()).map_err(|_| {
-                StatamError::BoundsExceeded {
+            let next_off =
+                u32::try_from(*total_decoded).map_err(|_| StatamError::BoundsExceeded {
                     reason: "payload column exceeds u32::MAX",
-                }
-            })?;
-            data_bytes.extend_from_slice(bytes);
+                })?;
+            let _ = nulls.set(row_idx, true);
+            *active_non_null_rows += 1;
             offsets.push(next_off);
         }
         PayloadRefRow::Chunks(chunks) => {
-            let _ = nulls.set(row_idx, true);
             let mut row_len = 0usize;
-            let start_pos = data_bytes.len();
             for &(pidx, cid) in chunks {
-                let chunk = resolved_chunks
-                    .get(&(pidx, cid))
-                    .ok_or(StatamError::Corrupt {
-                        reason: "missing resolved payload chunk",
-                    })?;
+                let chunk = resolved_chunks.get(pidx, cid).ok_or(StatamError::Corrupt {
+                    reason: "missing resolved payload chunk",
+                })?;
                 row_len = row_len
                     .checked_add(chunk.len())
                     .ok_or(StatamError::BoundsExceeded {
@@ -1179,13 +1848,142 @@ fn append_payload_row_to_bytes(
                         reason: "decoded payload column exceeds MAX_BATCH_DECODED_BYTES",
                     });
                 }
-                data_bytes.extend_from_slice(chunk);
             }
             let next_off =
-                u32::try_from(start_pos + row_len).map_err(|_| StatamError::BoundsExceeded {
+                u32::try_from(*total_decoded).map_err(|_| StatamError::BoundsExceeded {
                     reason: "payload column exceeds u32::MAX",
                 })?;
+            let _ = nulls.set(row_idx, true);
+            *active_non_null_rows += 1;
             offsets.push(next_off);
+        }
+    }
+    Ok(())
+}
+
+fn copy_payload_row_into_slice(
+    row: &PayloadRefRow,
+    resolved_chunks: &ResolvedChunks,
+    dst: &mut [u8],
+    pos: &mut usize,
+) -> Result<(), StatamError> {
+    match row {
+        PayloadRefRow::Null => {}
+        PayloadRefRow::Inline(bytes) => {
+            let end = *pos + bytes.len();
+            dst[*pos..end].copy_from_slice(bytes);
+            *pos = end;
+        }
+        PayloadRefRow::Chunks(chunks) => {
+            for &(pidx, cid) in chunks {
+                let chunk = resolved_chunks.get(pidx, cid).ok_or(StatamError::Corrupt {
+                    reason: "missing resolved payload chunk",
+                })?;
+                let end = *pos + chunk.len();
+                dst[*pos..end].copy_from_slice(chunk);
+                *pos = end;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn extend_payload_row_into_vec(
+    row: &PayloadRefRow,
+    resolved_chunks: &ResolvedChunks,
+    out: &mut Vec<u8>,
+) -> Result<(), StatamError> {
+    match row {
+        PayloadRefRow::Null => {}
+        PayloadRefRow::Inline(bytes) => {
+            out.extend_from_slice(bytes);
+        }
+        PayloadRefRow::Chunks(chunks) => {
+            for &(pidx, cid) in chunks {
+                let chunk = resolved_chunks.get(pidx, cid).ok_or(StatamError::Corrupt {
+                    reason: "missing resolved payload chunk",
+                })?;
+                out.extend_from_slice(chunk);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_flat_row(
+    refs: &FlatPayloadRefs,
+    src_row: usize,
+    dst_row: usize,
+    nulls: &mut Bitmap,
+    offsets: &mut Vec<u32>,
+    total_decoded: &mut usize,
+    active_non_null_rows: &mut usize,
+    resolved_chunks: &ResolvedChunks,
+) -> Result<(), StatamError> {
+    match refs.row_kind(src_row) {
+        FLAT_REF_NULL => {
+            offsets.push(*total_decoded as u32);
+        }
+        FLAT_REF_INLINE => {
+            let len = refs.inline_bytes(src_row).len();
+            *total_decoded = total_decoded
+                .checked_add(len)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "decoded payload column overflows usize",
+                })?;
+            if *total_decoded > MAX_BATCH_DECODED_BYTES {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "decoded payload column exceeds MAX_BATCH_DECODED_BYTES",
+                });
+            }
+            let next_off =
+                u32::try_from(*total_decoded).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "payload column exceeds u32::MAX",
+                })?;
+            let _ = nulls.set(dst_row, true);
+            *active_non_null_rows += 1;
+            offsets.push(next_off);
+        }
+        FLAT_REF_CHUNKS => {
+            let mut row_len = 0usize;
+            let (ps, cs) = refs.chunk_refs(src_row);
+            for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                let chunk = resolved_chunks.get(pidx, cid).ok_or(StatamError::Corrupt {
+                    reason: "missing resolved payload chunk during column reconstruction",
+                })?;
+                row_len = row_len
+                    .checked_add(chunk.len())
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "row payload byte size overflow",
+                    })?;
+                if row_len > MAX_ROW_PAYLOAD_BYTES {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "reconstructed row payload exceeds MAX_ROW_PAYLOAD_BYTES",
+                    });
+                }
+                *total_decoded =
+                    total_decoded
+                        .checked_add(chunk.len())
+                        .ok_or(StatamError::BoundsExceeded {
+                            reason: "decoded payload column overflows usize",
+                        })?;
+                if *total_decoded > MAX_BATCH_DECODED_BYTES {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "decoded payload column exceeds MAX_BATCH_DECODED_BYTES",
+                    });
+                }
+            }
+            let next_off =
+                u32::try_from(*total_decoded).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "payload column exceeds u32::MAX",
+                })?;
+            let _ = nulls.set(dst_row, true);
+            *active_non_null_rows += 1;
+            offsets.push(next_off);
+        }
+        _ => {
+            offsets.push(*total_decoded as u32);
         }
     }
     Ok(())
@@ -1194,102 +1992,107 @@ fn append_payload_row_to_bytes(
 pub(super) fn reconstruct_payload_column_from_flat(
     refs: &FlatPayloadRefs,
     active_mask: &Bitmap,
-    resolved_chunks: &HashMap<(u16, u32), Bytes>,
+    resolved_chunks: &ResolvedChunks,
     dt: &DataType,
+    read_threads: usize,
 ) -> Result<Column, StatamError> {
     let row_count = refs.len();
-    let all_active_null = active_mask
-        .iter_ones()
-        .all(|r| refs.row_kind(r) == FLAT_REF_NULL);
-    if all_active_null {
+    let mut offsets = Vec::with_capacity(row_count + 1);
+    offsets.push(0u32);
+    let mut nulls = Bitmap::new_zeroed(row_count);
+    let mut total_decoded = 0usize;
+    let mut active_non_null_rows = 0usize;
+
+    for r in 0..row_count {
+        if !active_mask.get(r) {
+            offsets.push(total_decoded as u32);
+            continue;
+        }
+        measure_flat_row(
+            refs,
+            r,
+            r,
+            &mut nulls,
+            &mut offsets,
+            &mut total_decoded,
+            &mut active_non_null_rows,
+            resolved_chunks,
+        )?;
+    }
+
+    if active_non_null_rows == 0 {
         return Ok(Column::try_new_const(
             ScalarValue::Null(dt.clone()),
             row_count,
         )?);
     }
 
-    let mut offsets = Vec::with_capacity(row_count + 1);
-    offsets.push(0u32);
-    let mut data_bytes = Vec::new();
-    let mut nulls = Bitmap::new_zeroed(row_count);
-    let mut total_decoded = 0usize;
-
-    for r in 0..row_count {
-        if !active_mask.get(r) {
-            offsets.push(data_bytes.len() as u32);
-            continue;
-        }
-        match refs.row_kind(r) {
-            FLAT_REF_NULL => {
-                offsets.push(data_bytes.len() as u32);
-            }
-            FLAT_REF_INLINE => {
-                let bytes = refs.inline_bytes(r);
-                total_decoded =
-                    total_decoded
-                        .checked_add(bytes.len())
-                        .ok_or(StatamError::BoundsExceeded {
-                            reason: "decoded payload column overflows usize",
-                        })?;
-                if total_decoded > MAX_BATCH_DECODED_BYTES {
-                    return Err(StatamError::BoundsExceeded {
-                        reason: "decoded payload column exceeds MAX_BATCH_DECODED_BYTES",
-                    });
+    let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
+    let data_bytes = if threads > 1
+        && total_decoded >= PARALLEL_RECONSTRUCT_MIN_BYTES
+        && active_non_null_rows >= 4
+        && !in_parallel_scope()
+    {
+        let mut buf = vec![0u8; total_decoded];
+        let shards = build_reconstruct_shards(row_count, &offsets, &mut buf, threads);
+        let _ = parallel_map_in_order(shards, threads, |(r_lo, r_hi, dst)| {
+            let mut pos = 0usize;
+            for r in r_lo..r_hi {
+                if !active_mask.get(r) {
+                    continue;
                 }
-                let _ = nulls.set(r, true);
-                data_bytes.extend_from_slice(bytes);
-                let next_off =
-                    u32::try_from(data_bytes.len()).map_err(|_| StatamError::BoundsExceeded {
-                        reason: "payload column exceeds u32::MAX",
-                    })?;
-                offsets.push(next_off);
+                match refs.row_kind(r) {
+                    FLAT_REF_INLINE => {
+                        let bytes = refs.inline_bytes(r);
+                        let end = pos + bytes.len();
+                        dst[pos..end].copy_from_slice(bytes);
+                        pos = end;
+                    }
+                    FLAT_REF_CHUNKS => {
+                        let (ps, cs) = refs.chunk_refs(r);
+                        for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                            let chunk =
+                                resolved_chunks.get(pidx, cid).ok_or(StatamError::Corrupt {
+                                    reason: "missing resolved payload chunk during column reconstruction",
+                                })?;
+                            let end = pos + chunk.len();
+                            dst[pos..end].copy_from_slice(chunk);
+                            pos = end;
+                        }
+                    }
+                    _ => {}
+                }
             }
-            FLAT_REF_CHUNKS => {
-                let _ = nulls.set(r, true);
-                let start_pos = data_bytes.len();
-                let mut row_len = 0usize;
-                let (ps, cs) = refs.chunk_refs(r);
-                for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
-                    let chunk = resolved_chunks
-                        .get(&(pidx, cid))
-                        .ok_or(StatamError::Corrupt {
+            if pos != dst.len() {
+                return Err(StatamError::Corrupt {
+                    reason: "payload reconstruction shard length mismatch",
+                });
+            }
+            Ok(())
+        })?;
+        buf
+    } else {
+        let mut buf = Vec::with_capacity(total_decoded);
+        for r in 0..row_count {
+            if !active_mask.get(r) {
+                continue;
+            }
+            match refs.row_kind(r) {
+                FLAT_REF_INLINE => buf.extend_from_slice(refs.inline_bytes(r)),
+                FLAT_REF_CHUNKS => {
+                    let (ps, cs) = refs.chunk_refs(r);
+                    for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                        let chunk = resolved_chunks.get(pidx, cid).ok_or(StatamError::Corrupt {
                             reason: "missing resolved payload chunk during column reconstruction",
                         })?;
-                    row_len =
-                        row_len
-                            .checked_add(chunk.len())
-                            .ok_or(StatamError::BoundsExceeded {
-                                reason: "row payload byte size overflow",
-                            })?;
-                    if row_len > MAX_ROW_PAYLOAD_BYTES {
-                        return Err(StatamError::BoundsExceeded {
-                            reason: "reconstructed row payload exceeds MAX_ROW_PAYLOAD_BYTES",
-                        });
+                        buf.extend_from_slice(chunk);
                     }
-                    total_decoded = total_decoded.checked_add(chunk.len()).ok_or(
-                        StatamError::BoundsExceeded {
-                            reason: "decoded payload column overflows usize",
-                        },
-                    )?;
-                    if total_decoded > MAX_BATCH_DECODED_BYTES {
-                        return Err(StatamError::BoundsExceeded {
-                            reason: "decoded payload column exceeds MAX_BATCH_DECODED_BYTES",
-                        });
-                    }
-                    data_bytes.extend_from_slice(chunk);
                 }
-                let next_off = u32::try_from(start_pos + row_len).map_err(|_| {
-                    StatamError::BoundsExceeded {
-                        reason: "payload column exceeds u32::MAX",
-                    }
-                })?;
-                offsets.push(next_off);
-            }
-            _ => {
-                offsets.push(data_bytes.len() as u32);
+                _ => {}
             }
         }
-    }
+        buf
+    };
 
     finish_payload_column(dt, offsets, data_bytes, nulls)
 }
@@ -1298,47 +2101,311 @@ pub(super) fn reconstruct_payload_column_selected(
     row_count: usize,
     selected: &[(usize, PayloadRefRow)],
     active_mask: &Bitmap,
-    resolved_chunks: &HashMap<(u16, u32), Bytes>,
+    resolved_chunks: &ResolvedChunks,
     dt: &DataType,
+    read_threads: usize,
 ) -> Result<Column, StatamError> {
-    let all_active_null = selected
-        .iter()
-        .all(|(r, row)| !active_mask.get(*r) || matches!(row, PayloadRefRow::Null));
-    if all_active_null {
+    let mut offsets = Vec::with_capacity(row_count + 1);
+    offsets.push(0u32);
+    let mut nulls = Bitmap::new_zeroed(row_count);
+    let mut total_decoded = 0usize;
+    let mut active_non_null_rows = 0usize;
+    let mut sel_idx = 0usize;
+
+    for r in 0..row_count {
+        while sel_idx < selected.len() && selected[sel_idx].0 < r {
+            sel_idx += 1;
+        }
+        if sel_idx < selected.len() && selected[sel_idx].0 == r {
+            let row = &selected[sel_idx].1;
+            sel_idx += 1;
+            if !active_mask.get(r) {
+                offsets.push(total_decoded as u32);
+                continue;
+            }
+            measure_payload_row(
+                row,
+                r,
+                &mut nulls,
+                &mut offsets,
+                &mut total_decoded,
+                &mut active_non_null_rows,
+                resolved_chunks,
+            )?;
+        } else {
+            offsets.push(total_decoded as u32);
+        }
+    }
+
+    if active_non_null_rows == 0 {
         return Ok(Column::try_new_const(
             ScalarValue::Null(dt.clone()),
             row_count,
         )?);
     }
 
-    let mut offsets = Vec::with_capacity(row_count + 1);
-    offsets.push(0u32);
-    let mut data_bytes = Vec::new();
-    let mut nulls = Bitmap::new_zeroed(row_count);
-    let mut total_decoded = 0usize;
-    let mut sel_idx = 0usize;
-
-    for r in 0..row_count {
-        if sel_idx < selected.len() && selected[sel_idx].0 == r {
-            let row = &selected[sel_idx].1;
-            sel_idx += 1;
-            if !active_mask.get(r) {
-                offsets.push(data_bytes.len() as u32);
+    let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
+    let data_bytes = if threads > 1
+        && total_decoded >= PARALLEL_RECONSTRUCT_MIN_BYTES
+        && active_non_null_rows >= 4
+        && !in_parallel_scope()
+    {
+        let mut buf = vec![0u8; total_decoded];
+        let shards = build_reconstruct_shards(row_count, &offsets, &mut buf, threads);
+        let _ = parallel_map_in_order(shards, threads, |(r_lo, r_hi, dst)| {
+            let mut s_idx = selected.partition_point(|&(r, _)| r < r_lo);
+            let mut pos = 0usize;
+            let mut prev_r: Option<usize> = None;
+            while s_idx < selected.len() && selected[s_idx].0 < r_hi {
+                let (r, ref row) = selected[s_idx];
+                s_idx += 1;
+                if prev_r == Some(r) || !active_mask.get(r) {
+                    continue;
+                }
+                prev_r = Some(r);
+                copy_payload_row_into_slice(row, resolved_chunks, dst, &mut pos)?;
+            }
+            if pos != dst.len() {
+                return Err(StatamError::Corrupt {
+                    reason: "payload reconstruction shard length mismatch",
+                });
+            }
+            Ok(())
+        })?;
+        buf
+    } else {
+        let mut buf = Vec::with_capacity(total_decoded);
+        let mut s_idx = 0usize;
+        let mut prev_r: Option<usize> = None;
+        while s_idx < selected.len() && selected[s_idx].0 < row_count {
+            let (r, ref row) = selected[s_idx];
+            s_idx += 1;
+            if prev_r == Some(r) || !active_mask.get(r) {
                 continue;
             }
-            append_payload_row_to_bytes(
+            prev_r = Some(r);
+            extend_payload_row_into_vec(row, resolved_chunks, &mut buf)?;
+        }
+        buf
+    };
+
+    finish_payload_column(dt, offsets, data_bytes, nulls)
+}
+
+pub(super) fn reconstruct_payload_column_take_from_flat(
+    refs: &FlatPayloadRefs,
+    local_indices: &[usize],
+    resolved_chunks: &ResolvedChunks,
+    dt: &DataType,
+    read_threads: usize,
+) -> Result<Column, StatamError> {
+    if local_indices.is_empty() {
+        return Ok(Column::Flat(FlatColumn::empty(dt)));
+    }
+    let mb_row_count = refs.len();
+    for &r in local_indices {
+        if r >= mb_row_count {
+            return Err(StatamError::Corrupt {
+                reason: "take_rows local index out of bounds",
+            });
+        }
+    }
+
+    let out_len = local_indices.len();
+    let mut offsets = Vec::with_capacity(out_len + 1);
+    offsets.push(0u32);
+    let mut nulls = Bitmap::new_zeroed(out_len);
+    let mut total_decoded = 0usize;
+    let mut active_non_null_rows = 0usize;
+
+    for (out_idx, &r) in local_indices.iter().enumerate() {
+        measure_flat_row(
+            refs,
+            r,
+            out_idx,
+            &mut nulls,
+            &mut offsets,
+            &mut total_decoded,
+            &mut active_non_null_rows,
+            resolved_chunks,
+        )?;
+    }
+
+    if active_non_null_rows == 0 {
+        return Ok(Column::try_new_const(
+            ScalarValue::Null(dt.clone()),
+            out_len,
+        )?);
+    }
+
+    let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
+    let data_bytes = if threads > 1
+        && total_decoded >= PARALLEL_RECONSTRUCT_MIN_BYTES
+        && active_non_null_rows >= 4
+        && !in_parallel_scope()
+    {
+        let mut buf = vec![0u8; total_decoded];
+        let shards = build_reconstruct_shards(out_len, &offsets, &mut buf, threads);
+        let _ = parallel_map_in_order(shards, threads, |(r_lo, r_hi, dst)| {
+            let mut pos = 0usize;
+            for &r in &local_indices[r_lo..r_hi] {
+                match refs.row_kind(r) {
+                    FLAT_REF_INLINE => {
+                        let bytes = refs.inline_bytes(r);
+                        let end = pos + bytes.len();
+                        dst[pos..end].copy_from_slice(bytes);
+                        pos = end;
+                    }
+                    FLAT_REF_CHUNKS => {
+                        let (ps, cs) = refs.chunk_refs(r);
+                        for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                            let chunk =
+                                resolved_chunks.get(pidx, cid).ok_or(StatamError::Corrupt {
+                                    reason: "missing resolved payload chunk during column reconstruction",
+                                })?;
+                            let end = pos + chunk.len();
+                            dst[pos..end].copy_from_slice(chunk);
+                            pos = end;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if pos != dst.len() {
+                return Err(StatamError::Corrupt {
+                    reason: "payload reconstruction shard length mismatch",
+                });
+            }
+            Ok(())
+        })?;
+        buf
+    } else {
+        let mut buf = Vec::with_capacity(total_decoded);
+        for &r in local_indices {
+            match refs.row_kind(r) {
+                FLAT_REF_INLINE => buf.extend_from_slice(refs.inline_bytes(r)),
+                FLAT_REF_CHUNKS => {
+                    let (ps, cs) = refs.chunk_refs(r);
+                    for (&pidx, &cid) in ps.iter().zip(cs.iter()) {
+                        let chunk = resolved_chunks.get(pidx, cid).ok_or(StatamError::Corrupt {
+                            reason: "missing resolved payload chunk during column reconstruction",
+                        })?;
+                        buf.extend_from_slice(chunk);
+                    }
+                }
+                _ => {}
+            }
+        }
+        buf
+    };
+
+    finish_payload_column(dt, offsets, data_bytes, nulls)
+}
+
+pub(super) fn reconstruct_payload_column_take_selected(
+    mb_row_count: usize,
+    selected: &[(usize, PayloadRefRow)],
+    local_indices: &[usize],
+    resolved_chunks: &ResolvedChunks,
+    dt: &DataType,
+    read_threads: usize,
+) -> Result<Column, StatamError> {
+    if local_indices.is_empty() {
+        return Ok(Column::Flat(FlatColumn::empty(dt)));
+    }
+    for &r in local_indices {
+        if r >= mb_row_count {
+            return Err(StatamError::Corrupt {
+                reason: "take_rows local index out of bounds",
+            });
+        }
+    }
+
+    let lookup_selected =
+        |r: usize, sel_idx: &mut usize, prev_r: &mut usize| -> Option<&PayloadRefRow> {
+            if r < *prev_r {
+                *sel_idx = selected.partition_point(|&(sr, _)| sr < r);
+            } else {
+                while *sel_idx < selected.len() && selected[*sel_idx].0 < r {
+                    *sel_idx += 1;
+                }
+            }
+            *prev_r = r;
+            if *sel_idx < selected.len() && selected[*sel_idx].0 == r {
+                Some(&selected[*sel_idx].1)
+            } else {
+                None
+            }
+        };
+
+    let out_len = local_indices.len();
+    let mut offsets = Vec::with_capacity(out_len + 1);
+    offsets.push(0u32);
+    let mut nulls = Bitmap::new_zeroed(out_len);
+    let mut total_decoded = 0usize;
+    let mut active_non_null_rows = 0usize;
+    let mut sel_idx = 0usize;
+    let mut prev_r = 0usize;
+
+    for (out_idx, &r) in local_indices.iter().enumerate() {
+        if let Some(row) = lookup_selected(r, &mut sel_idx, &mut prev_r) {
+            measure_payload_row(
                 row,
-                r,
+                out_idx,
                 &mut nulls,
                 &mut offsets,
-                &mut data_bytes,
                 &mut total_decoded,
+                &mut active_non_null_rows,
                 resolved_chunks,
             )?;
         } else {
-            offsets.push(data_bytes.len() as u32);
+            offsets.push(total_decoded as u32);
         }
     }
+
+    if active_non_null_rows == 0 {
+        return Ok(Column::try_new_const(
+            ScalarValue::Null(dt.clone()),
+            out_len,
+        )?);
+    }
+
+    let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
+    let data_bytes = if threads > 1
+        && total_decoded >= PARALLEL_RECONSTRUCT_MIN_BYTES
+        && active_non_null_rows >= 4
+        && !in_parallel_scope()
+    {
+        let mut buf = vec![0u8; total_decoded];
+        let shards = build_reconstruct_shards(out_len, &offsets, &mut buf, threads);
+        let _ = parallel_map_in_order(shards, threads, |(r_lo, r_hi, dst)| {
+            let mut s_idx = 0usize;
+            let mut p_r = usize::MAX;
+            let mut pos = 0usize;
+            for &r in &local_indices[r_lo..r_hi] {
+                if let Some(row) = lookup_selected(r, &mut s_idx, &mut p_r) {
+                    copy_payload_row_into_slice(row, resolved_chunks, dst, &mut pos)?;
+                }
+            }
+            if pos != dst.len() {
+                return Err(StatamError::Corrupt {
+                    reason: "payload reconstruction shard length mismatch",
+                });
+            }
+            Ok(())
+        })?;
+        buf
+    } else {
+        let mut buf = Vec::with_capacity(total_decoded);
+        let mut s_idx = 0usize;
+        let mut p_r = 0usize;
+        for &r in local_indices {
+            if let Some(row) = lookup_selected(r, &mut s_idx, &mut p_r) {
+                extend_payload_row_into_vec(row, resolved_chunks, &mut buf)?;
+            }
+        }
+        buf
+    };
 
     finish_payload_column(dt, offsets, data_bytes, nulls)
 }
@@ -1528,9 +2595,28 @@ impl<'a> ParsedL0Payload<'a> {
         Ok(())
     }
 
-    pub(super) fn read_chunks(&self, cids: &[u32]) -> Result<HashMap<u32, Bytes>, StatamError> {
+    pub(super) fn compressed_frame_bytes_for_chunks(&self, cids: &[u32]) -> usize {
+        let mut seen_frames = BTreeSet::new();
+        let mut total = 0usize;
+        for &cid in cids {
+            if let Some(loc) = self.chunks.get(cid as usize)
+                && seen_frames.insert(loc.frame_id)
+                && let Some(&(rel_off, _, raw_len)) = self.frames.get(loc.frame_id as usize)
+                && (rel_off as usize)
+                    .checked_add(2)
+                    .and_then(|idx| self.buf.get(idx))
+                    .copied()
+                    != Some(Codec::None as u8)
+            {
+                total = total.saturating_add(raw_len as usize);
+            }
+        }
+        total
+    }
+
+    pub(super) fn read_chunks_vec(&self, cids: &[u32]) -> Result<Vec<(u32, Bytes)>, StatamError> {
         if cids.is_empty() {
-            return Ok(HashMap::new());
+            return Ok(Vec::new());
         }
         let mut unique_cids = BTreeSet::new();
         let mut needed_frames = BTreeSet::new();
@@ -1573,7 +2659,7 @@ impl<'a> ParsedL0Payload<'a> {
             decoded_frames.insert(fid, Bytes::from(decoded));
         }
 
-        let mut out = HashMap::with_capacity(unique_cids.len());
+        let mut out = Vec::with_capacity(unique_cids.len());
         for cid in unique_cids {
             let loc = self.chunks[cid as usize];
             let frame_buf = &decoded_frames[&loc.frame_id];
@@ -1584,7 +2670,7 @@ impl<'a> ParsedL0Payload<'a> {
                     reason: "L0 chunk slice out of frame bounds",
                 });
             }
-            out.insert(cid, frame_buf.slice(s..e));
+            out.push((cid, frame_buf.slice(s..e)));
         }
         Ok(out)
     }

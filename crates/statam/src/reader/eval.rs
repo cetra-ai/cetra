@@ -35,9 +35,7 @@ use crate::simd::trigram::ascii_lowercase_into;
 
 use super::payload::ParsedL0Payload;
 use super::plan::{ActiveMiniBlock, BlockReader, DecodedPhase1, RgIoPlan};
-use super::{
-    IdLookup, MIN_PARALLEL_WORK_BYTES, Predicate, StatamReader, SubstringQuery, TimeRange,
-};
+use super::{IdLookup, Predicate, StatamReader, SubstringQuery, TimeRange, effective_read_threads};
 
 impl StatamReader {
     #[allow(clippy::too_many_arguments)]
@@ -64,10 +62,6 @@ impl StatamReader {
             return Ok(Vec::new());
         }
         let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
-        let touches_payload = plan
-            .phase1_phys_cols
-            .iter()
-            .any(|&pidx| self.meta.col_dir[pidx].locality_group == LocalityGroup::ExternalPayload);
         let has_payload_sub = subs.iter().any(|&(cidx, _)| {
             self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload
         });
@@ -93,29 +87,25 @@ impl StatamReader {
                 retained,
             );
         }
-        let work_bytes = if touches_payload {
-            MIN_PARALLEL_WORK_BYTES
+        let mb_workers = if has_payload_sub {
+            threads
         } else {
-            let mut total = 0usize;
+            let mut work_bytes = 0usize;
             for &mb_idx in surviving_mbs {
                 for &pidx in &plan.phase1_phys_cols {
-                    total = total
+                    work_bytes = work_bytes
                         .saturating_add(self.meta.rg_blocks(pidx, rg_idx)[mb_idx].raw_len as usize);
                 }
             }
-            total
+            effective_read_threads(work_bytes, threads)
         };
-        if threads > 1
-            && surviving_mbs.len() >= 2
-            && limit_remaining.is_none()
-            && (touches_payload || work_bytes >= MIN_PARALLEL_WORK_BYTES)
-        {
-            let inner_threads = if surviving_mbs.len() >= threads {
+        if mb_workers > 1 && surviving_mbs.len() >= 2 && limit_remaining.is_none() {
+            let inner_threads = if surviving_mbs.len() >= mb_workers {
                 1
             } else {
-                (threads / surviving_mbs.len()).max(1)
+                (mb_workers / surviving_mbs.len()).max(1)
             };
-            let per_mb = parallel_map_in_order(surviving_mbs.to_vec(), threads, |mb_idx| {
+            let per_mb = parallel_map_in_order(surviving_mbs.to_vec(), mb_workers, |mb_idx| {
                 let (mask, decoded_p1) = self.eval_phase1_mb(
                     rg_idx,
                     mb_idx,
@@ -207,8 +197,18 @@ impl StatamReader {
     ) -> Result<Vec<ActiveMiniBlock>, StatamError> {
         // Stage 1: Evaluate narrow predicates + non-payload substring filters across surviving MBs
         // so masks are as selective as possible before touching `.stpk`.
-        let mut active: Vec<ActiveMiniBlock> = if threads > 1 && surviving_mbs.len() >= 2 {
-            let per_mb = parallel_map_in_order(surviving_mbs.to_vec(), threads, |mb_idx| {
+        let mut narrow_work_bytes = 0usize;
+        for &mb_idx in surviving_mbs {
+            for &pidx in &plan.phase1_phys_cols {
+                if self.meta.col_dir[pidx].locality_group != LocalityGroup::ExternalPayload {
+                    narrow_work_bytes = narrow_work_bytes
+                        .saturating_add(self.meta.rg_blocks(pidx, rg_idx)[mb_idx].raw_len as usize);
+                }
+            }
+        }
+        let narrow_workers = effective_read_threads(narrow_work_bytes, threads);
+        let mut active: Vec<ActiveMiniBlock> = if narrow_workers > 1 && surviving_mbs.len() >= 2 {
+            let per_mb = parallel_map_in_order(surviving_mbs.to_vec(), narrow_workers, |mb_idx| {
                 let (mask, decoded_p1) = self.eval_phase1_mb_narrow(
                     rg_idx,
                     mb_idx,

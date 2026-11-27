@@ -13,6 +13,12 @@ thread_local! {
     static IN_PARALLEL_SCOPE: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Returns `true` if the calling thread is already inside a [`parallel_map_in_order`] scope.
+#[inline]
+pub(crate) fn in_parallel_scope() -> bool {
+    IN_PARALLEL_SCOPE.with(Cell::get)
+}
+
 struct ParallelScopeGuard(bool);
 
 impl ParallelScopeGuard {
@@ -57,7 +63,7 @@ where
     Init: Fn() -> Result<S, StatamError> + Sync,
     F: Fn(&mut S, T) -> Result<R, StatamError> + Sync,
 {
-    let nested = IN_PARALLEL_SCOPE.with(Cell::get);
+    let nested = in_parallel_scope();
     let threads = if nested {
         1
     } else {

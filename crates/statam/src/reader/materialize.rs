@@ -4,7 +4,6 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use cetra_column::{Batch, Bitmap, Column, DataType, FlatColumn, ScalarValue, Schema, Selection};
 
 use crate::StatamError;
@@ -19,9 +18,12 @@ use crate::parallel::{MAX_PARALLEL_THREADS, parallel_map_in_order};
 use crate::payload::{decode_payload_refs_flat, decode_payload_refs_selected};
 
 use super::eval::filter_residual_to_keys;
-use super::payload::{reconstruct_payload_column_from_flat, reconstruct_payload_column_selected};
+use super::payload::{
+    ResolvedChunks, reconstruct_payload_column_from_flat, reconstruct_payload_column_selected,
+    reconstruct_payload_column_take_from_flat, reconstruct_payload_column_take_selected,
+};
 use super::plan::{BlockReader, DecodedPhase1, RgIoPlan, TakeMiniBlock};
-use super::{MIN_PARALLEL_WORK_BYTES, StatamReader};
+use super::{StatamReader, effective_read_threads};
 
 impl StatamReader {
     #[allow(clippy::too_many_arguments)]
@@ -33,46 +35,33 @@ impl StatamReader {
         proj_indices: &[usize],
         proj_schema: &Arc<Schema>,
         map_keys_by_col: &HashMap<usize, Vec<String>>,
-        resolved_chunks: &HashMap<(u16, u32), Bytes>,
+        resolved_chunks: &ResolvedChunks,
         read_block: &BlockReader<'a>,
         read_threads: usize,
     ) -> Result<Vec<Batch>, StatamError> {
         let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
-        let touches_payload = proj_indices
-            .iter()
-            .any(|&cidx| self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload);
-        let work_bytes = if touches_payload {
-            MIN_PARALLEL_WORK_BYTES
-        } else {
-            let mut total = 0usize;
-            for (mb_idx, _, decoded_p1) in &active_mbs {
-                for &pidx in &plan.phase2_only_phys_cols {
-                    total = total.saturating_add(
-                        self.meta.rg_blocks(pidx, rg_idx)[*mb_idx].raw_len as usize,
+        let mut work_bytes = resolved_chunks.total_bytes() / 4;
+        for (mb_idx, _, decoded_p1) in &active_mbs {
+            for &pidx in &plan.phase2_only_phys_cols {
+                work_bytes = work_bytes
+                    .saturating_add(self.meta.rg_blocks(pidx, rg_idx)[*mb_idx].raw_len as usize);
+            }
+            for &cidx in proj_indices {
+                if !decoded_p1.contains_key(&cidx) && !plan.phase2_only_phys_cols.contains(&cidx) {
+                    work_bytes = work_bytes.saturating_add(
+                        self.meta.rg_blocks(cidx, rg_idx)[*mb_idx].raw_len as usize,
                     );
                 }
-                for &cidx in proj_indices {
-                    if !decoded_p1.contains_key(&cidx)
-                        && !plan.phase2_only_phys_cols.contains(&cidx)
-                    {
-                        total = total.saturating_add(
-                            self.meta.rg_blocks(cidx, rg_idx)[*mb_idx].raw_len as usize,
-                        );
-                    }
-                }
             }
-            total
-        };
-        if threads > 1
-            && active_mbs.len() >= 2
-            && (touches_payload || work_bytes >= MIN_PARALLEL_WORK_BYTES)
-        {
-            let inner_threads = if active_mbs.len() >= threads {
+        }
+        let mb_workers = effective_read_threads(work_bytes, threads);
+        if mb_workers > 1 && active_mbs.len() >= 2 {
+            let inner_threads = if active_mbs.len() >= mb_workers {
                 1
             } else {
-                (threads / active_mbs.len()).max(1)
+                (mb_workers / active_mbs.len()).max(1)
             };
-            return parallel_map_in_order(active_mbs, threads, |(mb_idx, mask, decoded_p1)| {
+            return parallel_map_in_order(active_mbs, mb_workers, |(mb_idx, mask, decoded_p1)| {
                 self.materialize_phase2_mb(
                     rg_idx,
                     mb_idx,
@@ -120,7 +109,7 @@ impl StatamReader {
         proj_indices: &[usize],
         proj_schema: &Arc<Schema>,
         map_keys_by_col: &HashMap<usize, Vec<String>>,
-        resolved_chunks: &HashMap<(u16, u32), Bytes>,
+        resolved_chunks: &ResolvedChunks,
         read_block: &BlockReader<'a>,
         read_threads: usize,
     ) -> Result<Batch, StatamError> {
@@ -174,29 +163,25 @@ impl StatamReader {
                 }
             }
         }
-        let touches_payload = proj_indices
-            .iter()
-            .any(|&cidx| self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload);
 
         if !uncached_subs.is_empty() {
-            let sub_work_bytes: usize = if touches_payload {
-                MIN_PARALLEL_WORK_BYTES
+            let sub_work_bytes: usize = uncached_subs
+                .iter()
+                .map(|&sub_pidx| self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx].raw_len as usize)
+                .fold(0usize, usize::saturating_add);
+            let sub_workers = if uncached_subs.len() >= 8 {
+                threads
             } else {
-                uncached_subs
-                    .iter()
-                    .map(|&sub_pidx| self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx].raw_len as usize)
-                    .fold(0usize, usize::saturating_add)
+                effective_read_threads(sub_work_bytes, threads)
             };
-            if threads > 1
-                && uncached_subs.len() >= 4
-                && (touches_payload || sub_work_bytes >= MIN_PARALLEL_WORK_BYTES)
-            {
-                let decoded_pairs = parallel_map_in_order(uncached_subs, threads, |sub_pidx| {
-                    let blk = &self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
-                    let raw = read_block(blk)?;
-                    let sub = decode_shredded_subcol_selected(&raw, mb_row_count, mask)?;
-                    Ok((sub_pidx, sub))
-                })?;
+            if sub_workers > 1 && uncached_subs.len() >= 4 {
+                let decoded_pairs =
+                    parallel_map_in_order(uncached_subs, sub_workers, |sub_pidx| {
+                        let blk = &self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
+                        let raw = read_block(blk)?;
+                        let sub = decode_shredded_subcol_selected(&raw, mb_row_count, mask)?;
+                        Ok((sub_pidx, sub))
+                    })?;
                 for (sub_pidx, sub) in decoded_pairs {
                     decoded_subs.insert(sub_pidx, sub);
                 }
@@ -225,10 +210,11 @@ impl StatamReader {
                         mask,
                         resolved_chunks,
                         dt,
+                        threads,
                     )
                 }
                 Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
-                    reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks, dt)
+                    reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks, dt, threads)
                 }
                 _ => {
                     let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
@@ -252,11 +238,18 @@ impl StatamReader {
                             mask,
                             resolved_chunks,
                             dt,
+                            threads,
                         )
                     } else {
                         let refs =
                             decode_payload_refs_flat(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
-                        reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks, dt)
+                        reconstruct_payload_column_from_flat(
+                            &refs,
+                            mask,
+                            resolved_chunks,
+                            dt,
+                            threads,
+                        )
                     }
                 }
             }
@@ -352,9 +345,14 @@ impl StatamReader {
                 .iter()
                 .map(|&(_, cidx, _)| self.meta.rg_blocks(cidx, rg_idx)[mb_idx].raw_len as usize)
                 .fold(0usize, usize::saturating_add);
-            if parallel_tasks.len() >= 4 && task_work_bytes >= MIN_PARALLEL_WORK_BYTES {
+            let task_workers = if parallel_tasks.len() >= 16 {
+                threads
+            } else {
+                effective_read_threads(task_work_bytes, threads)
+            };
+            if parallel_tasks.len() >= 4 && task_workers > 1 {
                 let decoded_cols =
-                    parallel_map_in_order(parallel_tasks, threads, |(pos, cidx, dict)| {
+                    parallel_map_in_order(parallel_tasks, task_workers, |(pos, cidx, dict)| {
                         let col = self.decode_uncached_p2_non_payload_col(
                             rg_idx,
                             mb_idx,
@@ -413,7 +411,7 @@ impl StatamReader {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn materialize_cached_p1_col(
+    pub(super) fn materialize_cached_p1_col(
         &self,
         mb_row_count: usize,
         cidx: usize,
@@ -465,7 +463,7 @@ impl StatamReader {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn decode_uncached_p2_non_payload_col<'a>(
+    pub(super) fn decode_uncached_p2_non_payload_col<'a>(
         &self,
         rg_idx: usize,
         mb_idx: usize,
@@ -536,39 +534,32 @@ impl StatamReader {
         proj_indices: &[usize],
         proj_schema: &Arc<Schema>,
         empty_map_keys: &HashMap<usize, Vec<String>>,
-        resolved_chunks: &HashMap<(u16, u32), Bytes>,
+        resolved_chunks: &ResolvedChunks,
         read_block: &BlockReader<'a>,
         read_threads: usize,
     ) -> Result<Vec<Batch>, StatamError> {
         let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
-        let touches_payload = proj_indices
-            .iter()
-            .any(|&cidx| self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload);
-        let work_bytes = if touches_payload {
-            MIN_PARALLEL_WORK_BYTES
-        } else {
-            let mut total = 0usize;
-            for (mb_idx, _, _, _) in &take_mbs {
-                for &pidx in plan.all_phys_cols() {
-                    total = total.saturating_add(
-                        self.meta.rg_blocks(pidx, rg_idx)[*mb_idx].raw_len as usize,
-                    );
-                }
+        let mut work_bytes = resolved_chunks.total_bytes() / 4;
+        for (mb_idx, _, _, _) in &take_mbs {
+            for &pidx in plan.all_phys_cols() {
+                work_bytes = work_bytes
+                    .saturating_add(self.meta.rg_blocks(pidx, rg_idx)[*mb_idx].raw_len as usize);
             }
-            total
+        }
+        let mb_workers = if proj_indices.len() >= 16 {
+            threads
+        } else {
+            effective_read_threads(work_bytes, threads)
         };
-        if threads > 1
-            && take_mbs.len() >= 2
-            && (touches_payload || work_bytes >= MIN_PARALLEL_WORK_BYTES)
-        {
-            let inner_threads = if take_mbs.len() >= threads {
+        if mb_workers > 1 && take_mbs.len() >= 2 {
+            let inner_threads = if take_mbs.len() >= mb_workers {
                 1
             } else {
-                (threads / take_mbs.len()).max(1)
+                (mb_workers / take_mbs.len()).max(1)
             };
             return parallel_map_in_order(
                 take_mbs,
-                threads,
+                mb_workers,
                 |(mb_idx, local_indices, mask_opt, payload_p1)| {
                     self.materialize_take_mb(
                         rg_idx,
@@ -621,7 +612,7 @@ impl StatamReader {
         proj_indices: &[usize],
         proj_schema: &Arc<Schema>,
         empty_map_keys: &HashMap<usize, Vec<String>>,
-        resolved_chunks: &HashMap<(u16, u32), Bytes>,
+        resolved_chunks: &ResolvedChunks,
         read_block: &BlockReader<'a>,
         read_threads: usize,
     ) -> Result<Batch, StatamError> {
@@ -638,12 +629,11 @@ impl StatamReader {
         let mb_row_count = self.meta.rg_blocks(0, rg_idx)[mb_idx].row_count as usize;
         let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
 
-        let mut needs_mask = false;
+        let mut needs_shredded_map = false;
         let mut uncached_subs: Vec<usize> = Vec::new();
         for &cidx in proj_indices {
-            if self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload {
-                needs_mask = true;
-            } else if fields[cidx].data_type == DataType::MapUtf8
+            if self.meta.col_dir[cidx].locality_group != LocalityGroup::ExternalPayload
+                && fields[cidx].data_type == DataType::MapUtf8
                 && let Some(sm) = self
                     .meta
                     .schema_meta
@@ -651,7 +641,7 @@ impl StatamReader {
                     .iter()
                     .find(|s| s.logical_col_idx as usize == cidx)
             {
-                needs_mask = true;
+                needs_shredded_map = true;
                 for ke in &sm.keys {
                     let sub_pidx = ke.sub_col_idx as usize;
                     if !uncached_subs.contains(&sub_pidx) {
@@ -661,12 +651,12 @@ impl StatamReader {
             }
         }
 
-        let mask_ref: Option<&Bitmap> = if needs_mask {
+        let mask_ref: Option<&Bitmap> = if needs_shredded_map {
             Some(&*mask_opt.get_or_insert_with(|| mask_from_indices(mb_row_count, local_indices)))
         } else {
-            None
+            mask_opt.as_ref()
         };
-        let u32_indices = if needs_mask {
+        let u32_indices = if needs_shredded_map {
             let mut out = Vec::with_capacity(local_indices.len());
             for &r in local_indices {
                 out.push(u32::try_from(r).map_err(|_| StatamError::BoundsExceeded {
@@ -678,32 +668,27 @@ impl StatamReader {
             None
         };
 
-        let touches_payload = proj_indices
-            .iter()
-            .any(|&cidx| self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload);
-
         let mut decoded_subs: HashMap<usize, ShreddedSubCol> = HashMap::new();
         if let Some(mask) = mask_ref
             && !uncached_subs.is_empty()
         {
-            let sub_work_bytes: usize = if touches_payload {
-                MIN_PARALLEL_WORK_BYTES
+            let sub_work_bytes: usize = uncached_subs
+                .iter()
+                .map(|&sub_pidx| self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx].raw_len as usize)
+                .fold(0usize, usize::saturating_add);
+            let sub_workers = if uncached_subs.len() >= 8 {
+                threads
             } else {
-                uncached_subs
-                    .iter()
-                    .map(|&sub_pidx| self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx].raw_len as usize)
-                    .fold(0usize, usize::saturating_add)
+                effective_read_threads(sub_work_bytes, threads)
             };
-            if threads > 1
-                && uncached_subs.len() >= 4
-                && (touches_payload || sub_work_bytes >= MIN_PARALLEL_WORK_BYTES)
-            {
-                let decoded_pairs = parallel_map_in_order(uncached_subs, threads, |sub_pidx| {
-                    let blk = &self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
-                    let raw = read_block(blk)?;
-                    let sub = decode_shredded_subcol_selected(&raw, mb_row_count, mask)?;
-                    Ok((sub_pidx, sub))
-                })?;
+            if sub_workers > 1 && uncached_subs.len() >= 4 {
+                let decoded_pairs =
+                    parallel_map_in_order(uncached_subs, sub_workers, |sub_pidx| {
+                        let blk = &self.meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
+                        let raw = read_block(blk)?;
+                        let sub = decode_shredded_subcol_selected(&raw, mb_row_count, mask)?;
+                        Ok((sub_pidx, sub))
+                    })?;
                 for (sub_pidx, sub) in decoded_pairs {
                     decoded_subs.insert(sub_pidx, sub);
                 }
@@ -719,56 +704,78 @@ impl StatamReader {
 
         let decode_payload_take_col = |cidx: usize,
                                        cached: Option<DecodedPhase1>,
-                                       mask: &Bitmap,
-                                       u32_idx: &[u32]|
+                                       mask: Option<&Bitmap>|
          -> Result<Column, StatamError> {
             let dt = &fields[cidx].data_type;
-            let is_sparse_payload =
-                !mask.all_ones() && mask.count_ones().saturating_mul(8) < mb_row_count;
-            let full_col = match cached {
+            if local_indices.is_empty() {
+                return Ok(Column::Flat(FlatColumn::empty(dt)));
+            }
+            match cached {
                 Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
-                    reconstruct_payload_column_selected(
+                    reconstruct_payload_column_take_selected(
                         mb_row_count,
                         &selected,
-                        mask,
+                        local_indices,
                         resolved_chunks,
                         dt,
-                    )?
+                        threads,
+                    )
                 }
                 Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
-                    reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks, dt)?
+                    reconstruct_payload_column_take_from_flat(
+                        &refs,
+                        local_indices,
+                        resolved_chunks,
+                        dt,
+                        threads,
+                    )
                 }
                 _ => {
                     let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
                     if blk.encoding == Encoding::ConstNull {
-                        return Ok(Column::Const {
-                            value: ScalarValue::Null(dt.clone()),
-                            len: local_indices.len(),
-                        });
+                        return Ok(Column::try_new_const(
+                            ScalarValue::Null(dt.clone()),
+                            local_indices.len(),
+                        )?);
                     }
                     let raw = read_block(blk)?;
+                    let is_sparse_payload = local_indices.len().saturating_mul(8) < mb_row_count;
                     if is_sparse_payload {
+                        let owned_mask;
+                        let m = match mask {
+                            Some(m) => m,
+                            None => {
+                                owned_mask = mask_from_indices(mb_row_count, local_indices);
+                                &owned_mask
+                            }
+                        };
                         let selected = decode_payload_refs_selected(
                             &raw,
                             mb_row_count,
-                            mask,
+                            m,
                             MAX_BATCH_DECODED_BYTES,
                         )?;
-                        reconstruct_payload_column_selected(
+                        reconstruct_payload_column_take_selected(
                             mb_row_count,
                             &selected,
-                            mask,
+                            local_indices,
                             resolved_chunks,
                             dt,
-                        )?
+                            threads,
+                        )
                     } else {
                         let refs =
                             decode_payload_refs_flat(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
-                        reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks, dt)?
+                        reconstruct_payload_column_take_from_flat(
+                            &refs,
+                            local_indices,
+                            resolved_chunks,
+                            dt,
+                            threads,
+                        )
                     }
                 }
-            };
-            Ok(Column::Flat(full_col.take(u32_idx, None)?))
+            }
         };
 
         let decode_non_payload_take =
@@ -826,14 +833,8 @@ impl StatamReader {
             for &cidx in proj_indices {
                 let cd = &self.meta.col_dir[cidx];
                 if cd.locality_group == LocalityGroup::ExternalPayload {
-                    let mask = mask_ref.ok_or(StatamError::Corrupt {
-                        reason: "missing take_rows payload mask",
-                    })?;
-                    let u32_idx = u32_indices.as_deref().ok_or(StatamError::Corrupt {
-                        reason: "missing take_rows payload u32 indices",
-                    })?;
                     let cached = payload_p1.remove(&cidx);
-                    out_cols.push(decode_payload_take_col(cidx, cached, mask, u32_idx)?);
+                    out_cols.push(decode_payload_take_col(cidx, cached, mask_ref)?);
                 } else {
                     let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
                     let dict = if blk.encoding == Encoding::Dict {
@@ -866,14 +867,8 @@ impl StatamReader {
             for (pos, &cidx) in proj_indices.iter().enumerate() {
                 let cd = &self.meta.col_dir[cidx];
                 if cd.locality_group == LocalityGroup::ExternalPayload {
-                    let mask = mask_ref.ok_or(StatamError::Corrupt {
-                        reason: "missing take_rows payload mask",
-                    })?;
-                    let u32_idx = u32_indices.as_deref().ok_or(StatamError::Corrupt {
-                        reason: "missing take_rows payload u32 indices",
-                    })?;
                     let cached = payload_p1.remove(&cidx);
-                    slots[pos] = Some(decode_payload_take_col(cidx, cached, mask, u32_idx)?);
+                    slots[pos] = Some(decode_payload_take_col(cidx, cached, mask_ref)?);
                 } else {
                     parallel_tasks.push((pos, cidx, pre_dicts.get(&cidx).map(Arc::clone)));
                 }
@@ -883,9 +878,14 @@ impl StatamReader {
                 .iter()
                 .map(|&(_, cidx, _)| self.meta.rg_blocks(cidx, rg_idx)[mb_idx].raw_len as usize)
                 .fold(0usize, usize::saturating_add);
-            if parallel_tasks.len() >= 4 && task_work_bytes >= MIN_PARALLEL_WORK_BYTES {
+            let task_workers = if parallel_tasks.len() >= 16 {
+                threads
+            } else {
+                effective_read_threads(task_work_bytes, threads)
+            };
+            if parallel_tasks.len() >= 4 && task_workers > 1 {
                 let decoded_cols =
-                    parallel_map_in_order(parallel_tasks, threads, |(pos, cidx, dict)| {
+                    parallel_map_in_order(parallel_tasks, task_workers, |(pos, cidx, dict)| {
                         let col = decode_non_payload_take(cidx, dict.as_deref())?;
                         Ok((pos, col))
                     })?;

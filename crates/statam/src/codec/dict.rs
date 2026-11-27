@@ -106,6 +106,7 @@ impl DictValueKind {
 pub struct FileDict {
     values: FlatColumn,
     sorted: bool,
+    max_entry_len: usize,
 }
 
 impl fmt::Debug for FileDict {
@@ -114,6 +115,7 @@ impl fmt::Debug for FileDict {
             .field("entry_count", &self.values.len())
             .field("data_type", &self.values.data_type())
             .field("sorted", &self.sorted)
+            .field("max_entry_len", &self.max_entry_len)
             .field("memory_bytes", &self.values.memory_bytes())
             .finish()
     }
@@ -136,7 +138,18 @@ impl FileDict {
             });
         }
         validate_dict_entries(&values, sorted)?;
-        Ok(Self { values, sorted })
+        let max_entry_len = compute_dict_max_entry_len(&values);
+        Ok(Self {
+            values,
+            sorted,
+            max_entry_len,
+        })
+    }
+
+    /// Maximum raw byte length across all entries in this dictionary (`0` if empty).
+    #[inline]
+    pub(crate) fn max_entry_len(&self) -> usize {
+        self.max_entry_len
     }
 
     /// Underlying `FlatColumn` holding the dictionary entries (`nulls == None`).
@@ -427,6 +440,40 @@ impl FileDict {
 
         let flat = FlatColumn::try_new(data, None)?;
         Self::from_flat(flat, sorted)
+    }
+}
+
+fn compute_dict_max_entry_len(values: &FlatColumn) -> usize {
+    let n = values.len();
+    if n == 0 {
+        return 0;
+    }
+    match values.data() {
+        FlatData::Utf8(u) => {
+            let offs = u.offsets();
+            let mut max_len = 0usize;
+            for i in 0..n {
+                let len = (offs[i + 1] - offs[i]) as usize;
+                if len > max_len {
+                    max_len = len;
+                }
+            }
+            max_len
+        }
+        FlatData::Binary(b) => {
+            let offs = b.offsets();
+            let mut max_len = 0usize;
+            for i in 0..n {
+                let len = (offs[i + 1] - offs[i]) as usize;
+                if len > max_len {
+                    max_len = len;
+                }
+            }
+            max_len
+        }
+        FlatData::FixedBytes8(_) => 8,
+        FlatData::FixedBytes16(_) => 16,
+        _ => 0,
     }
 }
 
@@ -1107,6 +1154,46 @@ pub(crate) fn dict_logical_materialized_bytes(
     Ok(total)
 }
 
+/// Fast-path O(1) upper-bound check for logical materialized dictionary bytes, falling back to
+/// exact [`dict_logical_materialized_bytes`] when the upper bound exceeds `limit` or overflows.
+///
+/// Assumes `codes` have already been bounds-checked against `dict_values.len()` (as guaranteed
+/// by [`decode_dict_codes_body`] and [`decode_dict_selected`]). Returns an **upper bound**
+/// `<= limit` rather than the exact byte count; callers that debit a cumulative budget (such as
+/// `codec/nested.rs`) must call exact [`dict_logical_materialized_bytes`] instead.
+pub(crate) fn dict_logical_materialized_bytes_with_max(
+    dict_values: &FlatColumn,
+    max_entry_len: usize,
+    codes: &[u32],
+    nulls: Option<&Bitmap>,
+    limit: usize,
+) -> Result<usize, StatamError> {
+    match dict_values.data() {
+        FlatData::Utf8(_) | FlatData::Binary(_) => {
+            let nulls_bytes = if nulls.is_some() {
+                codes.len().div_ceil(8)
+            } else {
+                0
+            };
+            let offsets_bytes = codes.len().checked_add(1).and_then(|n| n.checked_mul(4));
+            if let Some(upper) = offsets_bytes
+                .and_then(|o| {
+                    codes
+                        .len()
+                        .checked_mul(max_entry_len)
+                        .and_then(|p| o.checked_add(p))
+                })
+                .and_then(|v| v.checked_add(nulls_bytes))
+                && upper <= limit
+            {
+                return Ok(upper);
+            }
+            dict_logical_materialized_bytes(dict_values, codes, nulls, limit)
+        }
+        _ => dict_logical_materialized_bytes(dict_values, codes, nulls, limit),
+    }
+}
+
 /// Decodes a `Dict` mini-block body into either `Column::Dict` (zero-expansion pass-through
 /// when `dict.memory_bytes() <= DICT_PASSTHROUGH_MAX_BYTES`) or a materialized `Column::Flat`.
 pub fn decode_dict_column(
@@ -1125,8 +1212,9 @@ pub fn decode_dict_column(
     }
 
     if dict.memory_bytes() <= DICT_PASSTHROUGH_MAX_BYTES {
-        let _ = dict_logical_materialized_bytes(
+        let _ = dict_logical_materialized_bytes_with_max(
             dict.values(),
+            dict.max_entry_len(),
             &codes,
             nulls.as_ref(),
             MAX_BLOCK_RAW_BYTES,
@@ -1245,8 +1333,9 @@ pub fn decode_dict_selected(
         } else {
             Some(out_nulls)
         };
-        let _ = dict_logical_materialized_bytes(
+        let _ = dict_logical_materialized_bytes_with_max(
             dict.values(),
+            dict.max_entry_len(),
             &codes,
             nulls_opt.as_ref(),
             MAX_BLOCK_RAW_BYTES,
@@ -1407,8 +1496,9 @@ pub fn decode_dict_selected(
         } else {
             Some(out_nulls)
         };
-        let _ = dict_logical_materialized_bytes(
+        let _ = dict_logical_materialized_bytes_with_max(
             dict.values(),
+            dict.max_entry_len(),
             &codes,
             nulls_opt.as_ref(),
             MAX_BLOCK_RAW_BYTES,
@@ -2238,6 +2328,180 @@ mod tests {
             Err(StatamError::Corrupt {
                 reason: "dict code out of bounds",
             })
+        ));
+    }
+
+    #[test]
+    fn pass22_dict_max_entry_len_fast_path_and_exact_fallback() {
+        // 1. Empty dicts -> max_entry_len == 0 across all 4 DictValueKinds.
+        let empty_utf8 = FileDict::from_flat(
+            FlatColumn::try_new(FlatData::Utf8(Utf8Data::try_from_slices([]).unwrap()), None)
+                .unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(empty_utf8.max_entry_len(), 0);
+
+        let empty_bin = FileDict::from_flat(
+            FlatColumn::try_new(
+                FlatData::Binary(BinaryData::try_from_slices([]).unwrap()),
+                None,
+            )
+            .unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(empty_bin.max_entry_len(), 0);
+
+        let empty_f8 = FileDict::from_flat(
+            FlatColumn::try_new(FlatData::FixedBytes8(Vec::new()), None).unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(empty_f8.max_entry_len(), 0);
+
+        let empty_f16 = FileDict::from_flat(
+            FlatColumn::try_new(FlatData::FixedBytes16(Vec::new()), None).unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(empty_f16.max_entry_len(), 0);
+
+        // 2. 1-entry large string (1 MiB, guarding B4!): must compute max_entry_len == 1 MiB
+        //    and reject 8,192 repetitions (8 GiB logical) with BoundsExceeded.
+        let one_mib = "A".repeat(1024 * 1024);
+        let single_huge_dict = FileDict::from_flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices([one_mib.as_str()]).unwrap()),
+                None,
+            )
+            .unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(single_huge_dict.max_entry_len(), 1024 * 1024);
+
+        let codes_8k = vec![0u32; 8_192];
+        assert!(matches!(
+            dict_logical_materialized_bytes_with_max(
+                single_huge_dict.values(),
+                single_huge_dict.max_entry_len(),
+                &codes_8k,
+                None,
+                MAX_BLOCK_RAW_BYTES,
+            ),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+        let body_8k = encode_dict_codes_body(&codes_8k, None).unwrap();
+        assert!(matches!(
+            decode_dict_column(&body_8k, 8_192, None, &single_huge_dict),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+
+        // 3. Multi-entry Utf8/Binary and Fixed8/Fixed16 max_entry_len values.
+        let multi_utf8 = FileDict::from_flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(["a", "medium", "longest-entry"]).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(multi_utf8.max_entry_len(), "longest-entry".len());
+
+        let multi_bin = FileDict::from_flat(
+            FlatColumn::try_new(
+                FlatData::Binary(
+                    BinaryData::try_from_slices([&b"x"[..], &b"0123456789"[..], &b"yz"[..]])
+                        .unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(multi_bin.max_entry_len(), 10);
+
+        let f8 = FileDict::from_flat(
+            FlatColumn::try_new(FlatData::FixedBytes8(vec![[1u8; 8], [2u8; 8]]), None).unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(f8.max_entry_len(), 8);
+
+        let f16 = FileDict::from_flat(
+            FlatColumn::try_new(FlatData::FixedBytes16(vec![[3u8; 16]]), None).unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(f16.max_entry_len(), 16);
+
+        // 4. O(1) fast path when upper <= limit, exact fallback when upper > limit or overflows.
+        let huge_entry = "Z".repeat(64 * 1024);
+        let mixed_dict = FileDict::from_flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(["tiny", huge_entry.as_str()]).unwrap()),
+                None,
+            )
+            .unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(mixed_dict.max_entry_len(), 64 * 1024);
+        assert!(mixed_dict.memory_bytes() <= DICT_PASSTHROUGH_MAX_BYTES);
+
+        // Fast path: 2 rows * 64 KiB + offsets <= 256 KiB.
+        let fast_codes = vec![0u32, 1u32];
+        let fast_est = dict_logical_materialized_bytes_with_max(
+            mixed_dict.values(),
+            mixed_dict.max_entry_len(),
+            &fast_codes,
+            None,
+            256 * 1024,
+        )
+        .unwrap();
+        assert!(fast_est <= 256 * 1024);
+
+        // Exact fallback: 100 rows referencing only code 0 ("tiny", 4 B each -> ~804 B total),
+        // even though upper bound (100 * 64 KiB = 6.4 MiB) exceeds limit (8 KiB).
+        let short_codes = vec![0u32; 100];
+        let exact_ok = dict_logical_materialized_bytes_with_max(
+            mixed_dict.values(),
+            mixed_dict.max_entry_len(),
+            &short_codes,
+            None,
+            8 * 1024,
+        )
+        .unwrap();
+        assert_eq!(exact_ok, (100 + 1) * 4 + 100 * 4);
+
+        // Overflow of upper-bound estimate (max_entry_len = usize::MAX) must still fall back
+        // cleanly to exact check and accept short rows!
+        let overflow_fallback = dict_logical_materialized_bytes_with_max(
+            mixed_dict.values(),
+            usize::MAX,
+            &short_codes,
+            None,
+            8 * 1024,
+        )
+        .unwrap();
+        assert_eq!(overflow_fallback, exact_ok);
+
+        // Genuine limit exceedance on selected rows is still rejected with BoundsExceeded.
+        let mixed_codes_exceed = vec![1u32; 2]; // 128 KiB > 64 KiB limit
+        assert!(matches!(
+            dict_logical_materialized_bytes_with_max(
+                mixed_dict.values(),
+                mixed_dict.max_entry_len(),
+                &mixed_codes_exceed,
+                None,
+                64 * 1024,
+            ),
+            Err(StatamError::BoundsExceeded { .. })
         ));
     }
 }

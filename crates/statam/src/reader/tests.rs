@@ -3902,7 +3902,7 @@ fn b7_l0_aliased_chunks_budget_and_streaming_l0_substring_scan() {
     let parsed = ParsedL0Payload::parse(&l0_buf).unwrap();
     let all_cids: Vec<u32> = (0..chunk_count).collect();
     assert!(matches!(
-        parsed.read_chunks(&all_cids),
+        parsed.read_chunks_vec(&all_cids),
         Err(StatamError::BoundsExceeded { .. })
     ));
 
@@ -9285,4 +9285,684 @@ fn pass20_remote_bounded_block_coalescing_and_single_wave_1536kib() {
         1,
         "1.25 MiB Phase-2 candidate must fold into 1 wave under 1.5 MiB remote budget"
     );
+}
+
+#[test]
+fn pass22_resolved_chunks_dense_and_sparse_and_parallel_reconstruct() {
+    use super::payload::{
+        ResolvedChunks, reconstruct_payload_column_from_flat, reconstruct_payload_column_selected,
+        reconstruct_payload_column_take_from_flat, reconstruct_payload_column_take_selected,
+    };
+    use crate::payload::{PayloadRefRow, encode_payload_refs};
+    use crate::writer::L0_LOCAL_PACK_IDX;
+
+    // 1. Empty ResolvedChunks.
+    let empty = ResolvedChunks::empty();
+    assert_eq!(empty.total_bytes(), 0);
+    assert!(empty.get(0, 0).is_none());
+    assert!(empty.get(L0_LOCAL_PACK_IDX, 0).is_none());
+
+    // 2. Dense pack (min_cid = 10), underflow guard (cid < min_cid), merged duplicate pack_idx,
+    //    and sparse pack with cid == u32::MAX (span overflow guard!).
+    let mut rc = ResolvedChunks::from_pack_entries(vec![
+        (
+            0,
+            vec![
+                (10, Bytes::from_static(b"p0-c10")),
+                (12, Bytes::from_static(b"p0-c12")),
+            ],
+        ),
+        (
+            0,
+            vec![
+                (11, Bytes::from_static(b"p0-c11")),
+                (12, Bytes::from_static(b"p0-c12-dup")),
+            ],
+        ),
+        (
+            1,
+            vec![
+                (0, Bytes::from_static(b"p1-c0")),
+                (u32::MAX, Bytes::from_static(b"p1-cmax")),
+            ],
+        ),
+        (
+            2,
+            vec![
+                (u32::MAX - 2, Bytes::from_static(b"p2-near-max")),
+                (u32::MAX, Bytes::from_static(b"p2-max")),
+            ],
+        ),
+        (3, vec![(5, Bytes::from_static(b"p3-c5"))]),
+        (4, vec![(7, Bytes::from_static(b"p4-c7"))]),
+        (5, vec![(9, Bytes::from_static(b"p5-c9"))]),
+    ]);
+    assert!(rc.get(0, 9).is_none()); // cid < min_cid underflow guard
+    assert_eq!(rc.get(0, 10), Some(&Bytes::from_static(b"p0-c10")));
+    assert_eq!(rc.get(0, 11), Some(&Bytes::from_static(b"p0-c11")));
+    assert!(rc.get(0, 12).is_some());
+    assert!(rc.get(0, 13).is_none());
+    assert_eq!(rc.get(1, 0), Some(&Bytes::from_static(b"p1-c0")));
+    assert_eq!(rc.get(1, u32::MAX), Some(&Bytes::from_static(b"p1-cmax")));
+    assert!(rc.get(1, 1).is_none());
+    assert_eq!(
+        rc.get(2, u32::MAX - 2),
+        Some(&Bytes::from_static(b"p2-near-max"))
+    );
+    assert_eq!(rc.get(2, u32::MAX), Some(&Bytes::from_static(b"p2-max")));
+    assert!(rc.get(2, 0).is_none());
+    assert_eq!(rc.get(5, 9), Some(&Bytes::from_static(b"p5-c9"))); // >4 packs binary-search path
+    assert!(rc.get(6, 0).is_none());
+
+    // 3. Dedicated set_l0 / clear_l0 isolation without mutating external packs.
+    let ext_total = rc.total_bytes();
+    assert!(rc.get(L0_LOCAL_PACK_IDX, 0).is_none());
+    rc.set_l0(vec![(0, Bytes::from_static(b"rg0-l0-chunk"))]);
+    assert_eq!(
+        rc.get(L0_LOCAL_PACK_IDX, 0),
+        Some(&Bytes::from_static(b"rg0-l0-chunk"))
+    );
+    assert_eq!(rc.total_bytes(), ext_total + b"rg0-l0-chunk".len());
+    rc.set_l0(vec![(0, Bytes::from_static(b"rg1-l0"))]);
+    assert_eq!(
+        rc.get(L0_LOCAL_PACK_IDX, 0),
+        Some(&Bytes::from_static(b"rg1-l0"))
+    );
+    assert_eq!(rc.total_bytes(), ext_total + b"rg1-l0".len());
+    rc.clear_l0();
+    assert!(rc.get(L0_LOCAL_PACK_IDX, 0).is_none());
+    assert_eq!(rc.total_bytes(), ext_total);
+    assert_eq!(rc.get(0, 10), Some(&Bytes::from_static(b"p0-c10")));
+
+    // 4. Parallel split_at_mut reconstruction (>= 1 MiB, >= 4 active rows, mixed Null + Inline +
+    //    multi-chunk Chunks) for Utf8 and Binary, Flat & Selected & direct Take (1T == 8T).
+    let chunk_a = Bytes::from(vec![b'a'; 128 * 1024]);
+    let chunk_b = Bytes::from(vec![b'b'; 128 * 1024]);
+    let chunk_c = Bytes::from(vec![b'c'; 64 * 1024]);
+    let recon_chunks = ResolvedChunks::from_pack_entries(vec![(
+        0,
+        vec![(0, chunk_a), (1, chunk_b), (2, chunk_c)],
+    )]);
+
+    let mut rows = Vec::new();
+    for i in 0..16usize {
+        match i % 4 {
+            0 => rows.push(PayloadRefRow::Null),
+            1 => rows.push(PayloadRefRow::Inline(
+                format!("inline-row-{i}").into_bytes(),
+            )),
+            2 => rows.push(PayloadRefRow::Chunks(vec![(0, 0), (0, 2)])), // 192 KiB
+            _ => rows.push(PayloadRefRow::Chunks(vec![(0, 1), (0, 0), (0, 2)])), // 320 KiB
+        }
+    }
+    // Total active bytes across 16 rows: 4 * 192 KiB + 4 * 320 KiB + inline > 2 MiB!
+    let mut encoded_refs = Vec::new();
+    encode_payload_refs(&rows, &mut encoded_refs).unwrap();
+    let flat_refs =
+        decode_payload_refs_flat(&encoded_refs, rows.len(), MAX_BATCH_DECODED_BYTES).unwrap();
+    let selected_refs: Vec<(usize, PayloadRefRow)> = rows.iter().cloned().enumerate().collect();
+    let all_mask = Bitmap::new_ones(rows.len());
+    let partial_mask = Bitmap::from_bools(
+        &(0..rows.len())
+            .map(|i| i != 1 && i != 2)
+            .collect::<Vec<_>>(),
+    );
+
+    for dt in [DataType::Utf8, DataType::Binary] {
+        for mask in [&all_mask, &partial_mask] {
+            let f1 = reconstruct_payload_column_from_flat(&flat_refs, mask, &recon_chunks, &dt, 1)
+                .unwrap()
+                .materialize(None)
+                .unwrap();
+            let f8 = reconstruct_payload_column_from_flat(&flat_refs, mask, &recon_chunks, &dt, 8)
+                .unwrap()
+                .materialize(None)
+                .unwrap();
+            assert_eq!(f1, f8);
+
+            let s1 = reconstruct_payload_column_selected(
+                rows.len(),
+                &selected_refs,
+                mask,
+                &recon_chunks,
+                &dt,
+                1,
+            )
+            .unwrap()
+            .materialize(None)
+            .unwrap();
+            let s8 = reconstruct_payload_column_selected(
+                rows.len(),
+                &selected_refs,
+                mask,
+                &recon_chunks,
+                &dt,
+                8,
+            )
+            .unwrap()
+            .materialize(None)
+            .unwrap();
+            assert_eq!(f1, s1);
+            assert_eq!(s1, s8);
+        }
+
+        // Direct compact take: empty, all-null, sorted, unsorted + duplicate indices (>= 1 MiB).
+        assert_eq!(
+            reconstruct_payload_column_take_from_flat(&flat_refs, &[], &recon_chunks, &dt, 8)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            reconstruct_payload_column_take_selected(
+                rows.len(),
+                &selected_refs,
+                &[],
+                &recon_chunks,
+                &dt,
+                8
+            )
+            .unwrap()
+            .len(),
+            0
+        );
+        let null_only = reconstruct_payload_column_take_selected(
+            rows.len(),
+            &selected_refs,
+            &[0, 4, 8, 12],
+            &recon_chunks,
+            &dt,
+            8,
+        )
+        .unwrap();
+        assert!(matches!(null_only, Column::Const { len: 4, .. }));
+
+        let take_idxs = vec![15, 3, 2, 3, 0, 7, 11, 14, 1, 15, 6, 10];
+        let tf1 = reconstruct_payload_column_take_from_flat(
+            &flat_refs,
+            &take_idxs,
+            &recon_chunks,
+            &dt,
+            1,
+        )
+        .unwrap()
+        .materialize(None)
+        .unwrap();
+        let tf8 = reconstruct_payload_column_take_from_flat(
+            &flat_refs,
+            &take_idxs,
+            &recon_chunks,
+            &dt,
+            8,
+        )
+        .unwrap()
+        .materialize(None)
+        .unwrap();
+        let ts1 = reconstruct_payload_column_take_selected(
+            rows.len(),
+            &selected_refs,
+            &take_idxs,
+            &recon_chunks,
+            &dt,
+            1,
+        )
+        .unwrap()
+        .materialize(None)
+        .unwrap();
+        let ts8 = reconstruct_payload_column_take_selected(
+            rows.len(),
+            &selected_refs,
+            &take_idxs,
+            &recon_chunks,
+            &dt,
+            8,
+        )
+        .unwrap()
+        .materialize(None)
+        .unwrap();
+        assert_eq!(tf1, tf8);
+        assert_eq!(tf1, ts1);
+        assert_eq!(ts1, ts8);
+    }
+
+    // 5. Enforce MAX_ROW_PAYLOAD_BYTES and MAX_BATCH_DECODED_BYTES in Pass 1.
+    let big_chunk = Bytes::from(vec![b'x'; 4 * 1024 * 1024]); // 4 MiB
+    let limit_chunks = ResolvedChunks::from_pack_entries(vec![(0, vec![(0, big_chunk)])]);
+    // 17 * 4 MiB = 68 MiB > MAX_ROW_PAYLOAD_BYTES (64 MiB).
+    let over_row_refs = vec![(0usize, PayloadRefRow::Chunks(vec![(0, 0); 17]))];
+    assert!(matches!(
+        reconstruct_payload_column_selected(
+            1,
+            &over_row_refs,
+            &Bitmap::new_ones(1),
+            &limit_chunks,
+            &DataType::Binary,
+            4,
+        ),
+        Err(StatamError::BoundsExceeded { .. })
+    ));
+    // 5 rows * 60 MiB = 300 MiB > MAX_BATCH_DECODED_BYTES (256 MiB), each row <= 64 MiB.
+    let over_batch_refs: Vec<(usize, PayloadRefRow)> = (0..5)
+        .map(|r| (r, PayloadRefRow::Chunks(vec![(0, 0); 15])))
+        .collect();
+    assert!(matches!(
+        reconstruct_payload_column_selected(
+            5,
+            &over_batch_refs,
+            &Bitmap::new_ones(5),
+            &limit_chunks,
+            &DataType::Binary,
+            4,
+        ),
+        Err(StatamError::BoundsExceeded { .. })
+    ));
+}
+
+#[test]
+fn pass22_fused_phase2_and_direct_take_payload_parity() {
+    // Schema with Core (id, trace_id, model), shredded MapUtf8 (attrs_shred),
+    // unshredded MapUtf8 (attrs_unshred), WideRow (tags), and ExternalPayload (input, blob).
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("trace_id", DataType::FixedBytes16, false),
+        Field::new("model", DataType::Utf8, true),
+        Field::new("attrs_shred", DataType::MapUtf8, true),
+        Field::new("attrs_unshred", DataType::MapUtf8, true),
+        Field::new("tags", DataType::List(Box::new(DataType::Utf8)), true),
+        Field::new("input", DataType::Utf8, true),
+        Field::new("blob", DataType::Binary, true),
+    ])
+    .unwrap();
+
+    let n = 64usize;
+    let mut ids = Vec::with_capacity(n);
+    let mut tids = Vec::with_capacity(n);
+    let mut models = Vec::with_capacity(n);
+    let mut shred_offs = vec![0u32];
+    let mut shred_keys = Vec::new();
+    let mut shred_vals = Vec::new();
+    let mut shred_valid = Vec::new();
+    let mut shred_row_valid = Vec::with_capacity(n);
+
+    let mut unshred_offs = vec![0u32];
+    let mut unshred_keys = Vec::new();
+    let mut unshred_vals = Vec::new();
+    let mut unshred_valid = Vec::new();
+
+    let mut tag_offs = vec![0u32];
+    let mut tag_items = Vec::new();
+
+    let mut inputs = Vec::with_capacity(n);
+    let mut input_valid = Vec::with_capacity(n);
+    let mut blobs = Vec::with_capacity(n);
+    let mut blob_valid = Vec::with_capacity(n);
+
+    for i in 0..n {
+        ids.push(i as i64);
+        let mut tid = [0u8; 16];
+        // Group rows 0..32 under group 0 (large >= 1 MiB point lookup), 32..64 unique per row.
+        let group = if i < 32 { 100u64 } else { 1000 + i as u64 };
+        tid[0..8].copy_from_slice(&group.to_be_bytes());
+        tids.push(tid);
+        models.push(if i % 2 == 0 { "gpt-4o" } else { "claude-3" });
+
+        // Shredded map: "env" appears on 90%+ rows (promoted), plus a rare residual key on row i%7==0,
+        // plus one null map row at i == 63 so residual can be needed when filtering.
+        if i == 63 {
+            shred_row_valid.push(false);
+            shred_offs.push(shred_keys.len() as u32);
+        } else {
+            shred_row_valid.push(true);
+            shred_keys.push("env".to_owned());
+            shred_vals.push(if i % 2 == 0 { "prod" } else { "staging" }.to_owned());
+            shred_valid.push(true);
+            if i % 7 == 0 {
+                shred_keys.push(format!("rare_{i}"));
+                shred_vals.push(format!("val_{i}"));
+                shred_valid.push(true);
+            }
+            shred_offs.push(shred_keys.len() as u32);
+        }
+
+        // Unshredded map: unique key per row (never exceeds shredding frequency threshold).
+        unshred_keys.push(format!("u_key_{i:03}"));
+        unshred_vals.push(format!("u_val_{i:03}"));
+        unshred_valid.push(true);
+        unshred_offs.push(unshred_keys.len() as u32);
+
+        tag_items.push(format!("t-{}", i % 5));
+        tag_offs.push(tag_items.len() as u32);
+
+        // Make rows 0..24 carry ~64 KiB each (~1.5 MiB total for group 100 -> triggers parallel
+        // Stage-2 split_at_mut!), row 32 carry a unique needle, rows 60..64 be null payloads.
+        if i >= 60 {
+            inputs.push(String::new());
+            input_valid.push(false);
+            blobs.push(Vec::new());
+            blob_valid.push(false);
+        } else {
+            let needle_tag = if i == 5 || i == 32 {
+                "UNIQUE_PASS22_NEEDLE"
+            } else {
+                "regular_payload"
+            };
+            let body_len = if i < 24 { 64 * 1024 } else { 4096 };
+            let mut s = format!("row={i:03}|{needle_tag}|");
+            while s.len() < body_len {
+                s.push_str("0123456789abcdef_");
+            }
+            s.truncate(body_len);
+            inputs.push(s);
+            input_valid.push(true);
+
+            let mut b = vec![(i as u8).wrapping_mul(13); if i < 24 { 48 * 1024 } else { 2048 }];
+            b[0..4].copy_from_slice(&(i as u32).to_le_bytes());
+            blobs.push(b);
+            blob_valid.push(true);
+        }
+    }
+
+    let make_map = |offs: Vec<u32>,
+                    keys: Vec<String>,
+                    vals: Vec<String>,
+                    v_valid: Vec<bool>,
+                    row_nulls: Option<Bitmap>| {
+        let map = MapData::try_new(
+            offs,
+            Utf8Data::try_from_slices(keys.iter().map(String::as_str)).unwrap(),
+            Utf8Data::try_from_slices(vals.iter().map(String::as_str)).unwrap(),
+            Some(Bitmap::from_bools(&v_valid)),
+        )
+        .unwrap();
+        Column::Flat(FlatColumn::try_new(FlatData::MapUtf8(Box::new(map)), row_nulls).unwrap())
+    };
+
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            Column::Flat(FlatColumn::try_new(FlatData::FixedBytes16(tids.clone()), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(models).unwrap()),
+                    None,
+                )
+                .unwrap(),
+            ),
+            make_map(
+                shred_offs,
+                shred_keys,
+                shred_vals,
+                shred_valid,
+                Some(Bitmap::from_bools(&shred_row_valid)),
+            ),
+            make_map(
+                unshred_offs,
+                unshred_keys,
+                unshred_vals,
+                unshred_valid,
+                None,
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::List {
+                        item_type: DataType::Utf8,
+                        offsets: tag_offs,
+                        values: Box::new(Column::Flat(
+                            FlatColumn::try_new(
+                                FlatData::Utf8(
+                                    Utf8Data::try_from_slices(tag_items.iter().map(String::as_str))
+                                        .unwrap(),
+                                ),
+                                None,
+                            )
+                            .unwrap(),
+                        )),
+                    },
+                    None,
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(inputs.iter().map(String::as_str)).unwrap(),
+                    ),
+                    Some(Bitmap::from_bools(&input_valid)),
+                )
+                .unwrap(),
+            ),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Binary(
+                        BinaryData::try_from_slices(blobs.iter().map(Vec::as_slice)).unwrap(),
+                    ),
+                    Some(Bitmap::from_bools(&blob_valid)),
+                )
+                .unwrap(),
+            ),
+        ],
+        n,
+    )
+    .unwrap();
+
+    // A. L1Compact file with `.stpk` pack (1 RG, 1 MB so fused single-MB Phase 2 runs!).
+    let pack_id = [0xD2u8; 16];
+    let mut pb = ChunkPackBuilder::new(pack_id, test_pack_opts());
+    let mut l1_opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+    l1_opts.row_group_size = n;
+    l1_opts.mini_block_size = n;
+    l1_opts.payload_cols = vec!["input".to_owned(), "blob".to_owned()];
+    l1_opts.bloom_cols = vec!["trace_id".to_owned()];
+    l1_opts.pack_id = Some(pack_id);
+    let mut l1_bytes = Vec::new();
+    {
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut l1_bytes),
+            Arc::clone(&schema),
+            l1_opts,
+            Some(&mut pb),
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+    }
+    let mut pack_bytes = Vec::new();
+    pb.finish(&mut pack_bytes).unwrap();
+    let mut resolver = InMemoryPackResolver::new();
+    resolver.insert_bytes(pack_id, pack_bytes).unwrap();
+    let r_l1 = StatamReader::open(
+        Arc::new(SliceReader::new(l1_bytes)),
+        Some(Arc::new(resolver)),
+    )
+    .unwrap();
+    assert!(
+        r_l1.meta()
+            .schema_meta
+            .shredded_maps
+            .iter()
+            .any(|s| s.logical_col_idx == 3),
+        "attrs_shred must be shredded"
+    );
+    assert!(
+        !r_l1
+            .meta()
+            .schema_meta
+            .shredded_maps
+            .iter()
+            .any(|s| s.logical_col_idx == 4),
+        "attrs_unshred must be unshredded"
+    );
+
+    let assert_scan_parity = |reader: &StatamReader, req: &ScanRequest, label: &str| {
+        let mut r1 = req.clone();
+        r1.read_threads = 1;
+        let mut r8 = req.clone();
+        r8.read_threads = 8;
+        let b1 = reader.scan(&r1).unwrap();
+        let b8 = reader.scan(&r8).unwrap();
+        let proj_schema = match &req.projection {
+            Some(p) => Arc::new(schema.project(p).unwrap()),
+            None => Arc::clone(&schema),
+        };
+        let c1 = concat_scanned_batches(&proj_schema, &b1);
+        let c8 = concat_scanned_batches(&proj_schema, &b8);
+        assert_eq!(c1.num_rows(), c8.num_rows(), "{label}");
+        for col_idx in 0..proj_schema.len() {
+            assert_eq!(
+                c1.column(col_idx).unwrap().materialize(None).unwrap(),
+                c8.column(col_idx).unwrap().materialize(None).unwrap(),
+                "{label} col {col_idx}"
+            );
+        }
+        c1.num_rows()
+    };
+
+    // 1. >= 1 MiB multi-row Point lookup (Core + shredded + unshredded + WideRow + ExternalPayload).
+    let rows_group = assert_scan_parity(
+        &r_l1,
+        &ScanRequest {
+            id_lookups: vec![IdLookup::eq("trace_id", tids[0])],
+            coalesce_mode: CoalesceMode::Point,
+            ..ScanRequest::default()
+        },
+        "l1_point_1mib",
+    );
+    assert_eq!(rows_group, 32);
+
+    // 2. Sparse 1-row Point lookup.
+    let rows_one = assert_scan_parity(
+        &r_l1,
+        &ScanRequest {
+            id_lookups: vec![IdLookup::eq("trace_id", tids[32])],
+            coalesce_mode: CoalesceMode::Point,
+            ..ScanRequest::default()
+        },
+        "l1_point_1row",
+    );
+    assert_eq!(rows_one, 1);
+
+    // 3. 100%-hit pre_resolved (substring search on `input`, projecting only `input` + metadata).
+    let rows_pre_full = assert_scan_parity(
+        &r_l1,
+        &ScanRequest {
+            projection: Some(vec![0, 3, 4, 6]),
+            substrings: vec![SubstringQuery::like("input", "UNIQUE_PASS22_NEEDLE")],
+            ..ScanRequest::default()
+        },
+        "l1_preresolved_100pct",
+    );
+    assert_eq!(rows_pre_full, 2);
+
+    // 4. Partial-hit pre_resolved (substring search retains `input` chunks, while `blob` still fetches).
+    let rows_pre_partial = assert_scan_parity(
+        &r_l1,
+        &ScanRequest {
+            projection: Some(vec![0, 3, 4, 6, 7]),
+            substrings: vec![SubstringQuery::like("input", "UNIQUE_PASS22_NEEDLE")],
+            ..ScanRequest::default()
+        },
+        "l1_preresolved_partial",
+    );
+    assert_eq!(rows_pre_partial, 2);
+
+    // 5. Duplicate proj_indices + shredded MapUtf8 cached in decoded_p1 (via map_key predicate on
+    //    nullable shredded map with residual).
+    let rows_dup_p1 = assert_scan_parity(
+        &r_l1,
+        &ScanRequest {
+            projection: Some(vec![0, 3, 6, 3, 6, 4, 4, 7]),
+            predicates: vec![Predicate::map_key(
+                "attrs_shred",
+                "env",
+                ZonePred::Eq(ZoneValue::Bytes(b"prod".to_vec())),
+            )],
+            ..ScanRequest::default()
+        },
+        "l1_dup_proj_and_p1_shredded_map",
+    );
+    assert_eq!(rows_dup_p1, 32);
+
+    // 6. Direct take_rows parity on L1Compact: empty, all-null, sparse, multi-row (>= 1 MiB).
+    for (label, idxs) in [
+        ("empty", vec![]),
+        ("oob_only", vec![999u64]),
+        ("all_null", vec![60u64, 61, 62, 63]),
+        ("sparse_1", vec![32u64]),
+        ("large_1mib", (0u64..28).collect::<Vec<_>>()),
+    ] {
+        let t1 = r_l1.take_rows(&idxs, None, 1).unwrap();
+        let t8 = r_l1.take_rows(&idxs, None, 8).unwrap();
+        let c1 = concat_scanned_batches(&schema, &t1);
+        let c8 = concat_scanned_batches(&schema, &t8);
+        assert_eq!(c1.num_rows(), c8.num_rows(), "l1 take {label}");
+        for col_idx in 0..schema.len() {
+            assert_eq!(
+                c1.column(col_idx).unwrap().materialize(None).unwrap(),
+                c8.column(col_idx).unwrap().materialize(None).unwrap(),
+                "l1 take {label} col {col_idx}"
+            );
+        }
+    }
+
+    // B. Multi-RG L0Fast file with distinct per-RG L0 local payloads (verifying set_l0/clear_l0
+    //    isolation in take_rows and L0Chunks in fused Phase 2).
+    let mut l0_opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L0Fast);
+    l0_opts.row_group_size = 16; // 4 RGs of 16 rows each, each with its own L0 payload region!
+    l0_opts.mini_block_size = 16;
+    l0_opts.payload_cols = vec!["input".to_owned(), "blob".to_owned()];
+    let mut l0_bytes = Vec::new();
+    {
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut l0_bytes),
+            Arc::clone(&schema),
+            l0_opts,
+            None,
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+    }
+    let r_l0 = StatamReader::open(Arc::new(SliceReader::new(l0_bytes)), None).unwrap();
+    assert_eq!(r_l0.meta().rg_dir.len(), 4);
+
+    // Cross-RG take_rows hitting all 4 RGs (each RG has chunk_id 0 with DIFFERENT bytes!).
+    let cross_rg_idxs = vec![0u64, 5, 16, 20, 32, 40, 48, 60, 63];
+    let l0_t1 = r_l0.take_rows(&cross_rg_idxs, None, 1).unwrap();
+    let l0_t8 = r_l0.take_rows(&cross_rg_idxs, None, 8).unwrap();
+    let l0_c1 = concat_scanned_batches(&schema, &l0_t1);
+    let l0_c8 = concat_scanned_batches(&schema, &l0_t8);
+    assert_eq!(l0_c1.num_rows(), cross_rg_idxs.len());
+    for col_idx in 0..schema.len() {
+        let m1 = l0_c1.column(col_idx).unwrap().materialize(None).unwrap();
+        let m8 = l0_c8.column(col_idx).unwrap().materialize(None).unwrap();
+        assert_eq!(m1, m8, "l0 cross-rg take col {col_idx}");
+    }
+    // Verify each taken row matches the original input string (no stale RG-0 L0 bleed!).
+    let got_inputs = l0_c8.column(6).unwrap().materialize(None).unwrap();
+    for (out_pos, &orig_row) in cross_rg_idxs.iter().enumerate() {
+        let r = orig_row as usize;
+        if r >= 60 {
+            assert!(got_inputs.is_null(out_pos));
+        } else {
+            assert_eq!(
+                got_inputs.get_scalar(out_pos).unwrap(),
+                ScalarValue::Utf8(inputs[r].clone())
+            );
+        }
+    }
+
+    // Fused Phase 2 on L0 local payloads (1T == 8T).
+    let l0_scan_rows = assert_scan_parity(
+        &r_l0,
+        &ScanRequest {
+            predicates: vec![Predicate::new(
+                "id",
+                ZonePred::Between(ZoneValue::I64(0), ZoneValue::I64(15)),
+            )],
+            ..ScanRequest::default()
+        },
+        "l0_fused_phase2",
+    );
+    assert_eq!(l0_scan_rows, 16);
 }

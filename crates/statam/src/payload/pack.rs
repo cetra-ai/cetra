@@ -17,8 +17,9 @@ use crate::format::{
     MAX_HOT_TAIL_BYTES, MAX_PACK_CHUNKS, MAX_PACK_DICT_BYTES, MAX_PACK_FRAMES,
     MAX_ROW_PAYLOAD_BYTES, PACK_FLAG_HAS_DICT, PACK_FLAG_HAS_TRIGRAM, PACK_FLAG_TOC_LZ4,
     PACK_FLAG_TOC_ZSTD, PACK_FRAME_FLAG_USES_DICT, PACK_FRAME_HEADER_LEN, PACK_FRAME_MAGIC,
-    PACK_HEADER_LEN, PACK_POSTSCRIPT_LEN, PackDecoderDict, PackDictCompressor, PackHeader,
-    PackPostscript, compress_guarded, decompress_checked, pack_frame_crc, read_framed_pack_frame,
+    PACK_HEADER_LEN, PACK_POSTSCRIPT_LEN, PackDecoderDict, PackDictCompressor,
+    PackFrameDecompressor, PackHeader, PackPostscript, compress_guarded, decompress_checked,
+    pack_frame_crc, read_framed_pack_frame, read_framed_pack_frame_with_decompressor,
     read_framed_pack_frame_with_dict, write_framed_pack_frame,
     write_framed_pack_frame_with_compressor_min_savings, write_framed_pack_frame_with_limit,
 };
@@ -1895,7 +1896,7 @@ type PreparedFrameGroups = (
     bool,
 );
 
-type FetchedFrameGroups = (
+pub(crate) type FetchedFrameGroups = (
     Vec<(u32, Vec<u32>)>,
     Vec<Bytes>,
     Option<Arc<PackDecoderDict>>,
@@ -2572,11 +2573,16 @@ impl ChunkPackReader {
             self.fetch_frames_and_dict(&ranges, frame_ids.len(), dict, has_trailing_dict)?;
 
         let mut decoded_frames: HashMap<u32, Vec<u8>> = HashMap::with_capacity(frame_ids.len());
+        let mut dict_decomp = PackFrameDecompressor::new();
         for (&fid, raw) in frame_ids.iter().zip(frame_bytes_list.iter()) {
             let entry = &self.toc.frames[fid as usize];
             verify_raw_frame_matches_entry(raw, entry)?;
-            let (_, _, decoded) =
-                read_framed_pack_frame_with_dict(raw, MAX_FRAME_RAW_BYTES, dict.as_deref())?;
+            let (_, _, decoded) = read_framed_pack_frame_with_decompressor(
+                raw,
+                MAX_FRAME_RAW_BYTES,
+                dict.as_deref(),
+                &mut dict_decomp,
+            )?;
             if decoded.len() != entry.raw_len as usize {
                 return Err(StatamError::Corrupt {
                     reason: "decompressed frame length mismatch",
@@ -2640,6 +2646,14 @@ impl ChunkPackReader {
         Ok((frame_groups, ranges, dict, has_trailing_dict))
     }
 
+    /// Fetches all frames (and any needed dictionary) required for `chunk_ids` in one coalesced wave.
+    pub(crate) fn prepare_and_fetch_frames(
+        &self,
+        chunk_ids: &[u32],
+    ) -> Result<FetchedFrameGroups, StatamError> {
+        self.fetch_frame_chunk_groups(chunk_ids)
+    }
+
     fn fetch_frame_chunk_groups(
         &self,
         chunk_ids: &[u32],
@@ -2651,12 +2665,154 @@ impl ChunkPackReader {
         Ok((frame_groups, frame_bytes_list, dict))
     }
 
-    fn decompress_and_visit_frame<F>(
+    /// Verifies and decompresses a single `PF` frame, returning requested chunk slices as
+    /// zero-copy [`Bytes`] slices when requested bytes cover at least half of the frame (or
+    /// waste `<= 16 KiB`), and tightly copied [`Bytes`] otherwise so unused frame memory is freed.
+    pub(crate) fn decompress_frame_chunks_as_bytes<'a>(
         &self,
         fid: u32,
         raw: &[u8],
         cids: &[u32],
-        dict: Option<&PackDecoderDict>,
+        dict: Option<&'a PackDecoderDict>,
+        dict_decomp: &mut PackFrameDecompressor<'a>,
+    ) -> Result<Vec<(u32, Bytes)>, StatamError> {
+        let entry = &self.toc.frames[fid as usize];
+        verify_raw_frame_matches_entry(raw, entry)?;
+        let (_, _, decoded) =
+            read_framed_pack_frame_with_decompressor(raw, MAX_FRAME_RAW_BYTES, dict, dict_decomp)?;
+        if decoded.len() != entry.raw_len as usize {
+            return Err(StatamError::Corrupt {
+                reason: "decompressed frame length mismatch",
+            });
+        }
+        let mut used_bytes = 0usize;
+        for &cid in cids {
+            let loc = self
+                .toc
+                .chunks
+                .get(cid as usize)
+                .ok_or(StatamError::Corrupt {
+                    reason: "chunk_id out of bounds",
+                })?;
+            let start = loc.offset_in_frame as usize;
+            let end = start
+                .checked_add(loc.raw_len as usize)
+                .ok_or(StatamError::Corrupt {
+                    reason: "chunk slice offset overflow",
+                })?;
+            if end > decoded.len() {
+                return Err(StatamError::Corrupt {
+                    reason: "chunk slice out of decoded frame bounds",
+                });
+            }
+            used_bytes = used_bytes.saturating_add(loc.raw_len as usize);
+        }
+
+        let mut out = Vec::with_capacity(cids.len());
+        if used_bytes.saturating_mul(2) >= decoded.len()
+            || decoded.len().saturating_sub(used_bytes) <= 16 * 1024
+        {
+            let frame_bytes = Bytes::from(decoded);
+            for &cid in cids {
+                let loc = &self.toc.chunks[cid as usize];
+                let start = loc.offset_in_frame as usize;
+                let end = start + loc.raw_len as usize;
+                out.push((cid, frame_bytes.slice(start..end)));
+            }
+        } else {
+            for &cid in cids {
+                let loc = &self.toc.chunks[cid as usize];
+                let start = loc.offset_in_frame as usize;
+                let end = start + loc.raw_len as usize;
+                out.push((cid, Bytes::copy_from_slice(&decoded[start..end])));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Fetches and decompresses all requested unique `chunk_ids` as guarded zero-copy [`Bytes`],
+    /// reusing a per-worker [`PackFrameDecompressor`] and sizing worker threads from compressed work.
+    pub(crate) fn scan_chunks_as_bytes_parallel(
+        &self,
+        chunk_ids: &[u32],
+        read_threads: usize,
+    ) -> Result<Vec<(u32, Bytes)>, StatamError> {
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let (frame_groups, frame_bytes_list, dict) = self.fetch_frame_chunk_groups(chunk_ids)?;
+        let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
+        let mut compressed_frames = 0usize;
+        let mut compressed_raw_bytes = 0usize;
+        for &(fid, _) in &frame_groups {
+            let entry = &self.toc.frames[fid as usize];
+            if entry.codec != Codec::None {
+                compressed_frames += 1;
+                compressed_raw_bytes = compressed_raw_bytes.saturating_add(entry.raw_len as usize);
+            }
+        }
+
+        if threads <= 1
+            || frame_groups.len() <= 1
+            || (compressed_frames < 2 && compressed_raw_bytes < 128 * 1024)
+        {
+            let mut dict_decomp = PackFrameDecompressor::new();
+            let mut out = Vec::with_capacity(chunk_ids.len());
+            for ((fid, cids), raw) in frame_groups.iter().zip(frame_bytes_list.iter()) {
+                let mut pairs = self.decompress_frame_chunks_as_bytes(
+                    *fid,
+                    raw,
+                    cids,
+                    dict.as_deref(),
+                    &mut dict_decomp,
+                )?;
+                out.append(&mut pairs);
+            }
+            return Ok(out);
+        }
+
+        let workers = compressed_frames
+            .max(compressed_raw_bytes / (128 * 1024))
+            .clamp(1, threads)
+            .min(frame_groups.len());
+
+        let frame_tasks: Vec<(u32, Bytes, Vec<u32>)> = frame_groups
+            .into_iter()
+            .zip(frame_bytes_list)
+            .map(|((fid, cids), raw)| (fid, raw, cids))
+            .collect();
+
+        let per_frame = parallel_map_in_order_with_init(
+            frame_tasks,
+            workers,
+            || Ok(PackFrameDecompressor::new()),
+            |dict_decomp, (fid, raw, cids)| {
+                self.decompress_frame_chunks_as_bytes(
+                    fid,
+                    &raw,
+                    &cids,
+                    dict.as_deref(),
+                    dict_decomp,
+                )
+            },
+        )?;
+
+        let total: usize = per_frame.iter().map(Vec::len).sum();
+        let mut out = Vec::with_capacity(total);
+        for mut items in per_frame {
+            out.append(&mut items);
+        }
+        Ok(out)
+    }
+
+    fn decompress_and_visit_frame<'a, F>(
+        &self,
+        fid: u32,
+        raw: &[u8],
+        cids: &[u32],
+        dict: Option<&'a PackDecoderDict>,
+        dict_decomp: &mut PackFrameDecompressor<'a>,
         mut visit: F,
     ) -> Result<(), StatamError>
     where
@@ -2664,7 +2820,8 @@ impl ChunkPackReader {
     {
         let entry = &self.toc.frames[fid as usize];
         verify_raw_frame_matches_entry(raw, entry)?;
-        let (_, _, decoded) = read_framed_pack_frame_with_dict(raw, MAX_FRAME_RAW_BYTES, dict)?;
+        let (_, _, decoded) =
+            read_framed_pack_frame_with_decompressor(raw, MAX_FRAME_RAW_BYTES, dict, dict_decomp)?;
         if decoded.len() != entry.raw_len as usize {
             return Err(StatamError::Corrupt {
                 reason: "decompressed frame length mismatch",
@@ -2697,9 +2854,17 @@ impl ChunkPackReader {
         }
 
         let (frame_groups, frame_bytes_list, dict) = self.fetch_frame_chunk_groups(chunk_ids)?;
+        let mut dict_decomp = PackFrameDecompressor::new();
 
         for ((fid, cids), raw) in frame_groups.iter().zip(frame_bytes_list.iter()) {
-            self.decompress_and_visit_frame(*fid, raw, cids, dict.as_deref(), &mut visit)?;
+            self.decompress_and_visit_frame(
+                *fid,
+                raw,
+                cids,
+                dict.as_deref(),
+                &mut dict_decomp,
+                &mut visit,
+            )?;
         }
 
         Ok(())
@@ -2738,19 +2903,29 @@ impl ChunkPackReader {
         }
         if threads <= 1
             || frame_groups.len() <= 1
-            || (compressed_frames < 4 && total_raw_bytes < 4 * 1024 * 1024)
+            || (compressed_frames < 4 && total_raw_bytes < 2 * 1024 * 1024)
         {
             let mut state = init()?;
+            let mut dict_decomp = PackFrameDecompressor::new();
             let mut out = Vec::new();
             for ((fid, cids), raw) in frame_groups.iter().zip(frame_bytes_list.iter()) {
-                self.decompress_and_visit_frame(*fid, raw, cids, dict.as_deref(), |cid, slice| {
-                    if let Some(item) = f(&mut state, cid, slice) {
-                        out.push(item);
-                    }
-                })?;
+                self.decompress_and_visit_frame(
+                    *fid,
+                    raw,
+                    cids,
+                    dict.as_deref(),
+                    &mut dict_decomp,
+                    |cid, slice| {
+                        if let Some(item) = f(&mut state, cid, slice) {
+                            out.push(item);
+                        }
+                    },
+                )?;
             }
             return Ok(out);
         }
+
+        let workers = threads.min(frame_groups.len());
 
         let frame_tasks: Vec<(u32, Bytes, Vec<u32>)> = frame_groups
             .into_iter()
@@ -2760,15 +2935,16 @@ impl ChunkPackReader {
 
         let per_frame = parallel_map_in_order_with_init(
             frame_tasks,
-            threads,
-            init,
-            |state, (fid, raw, cids)| {
+            workers,
+            || Ok((init()?, PackFrameDecompressor::new())),
+            |(state, dict_decomp), (fid, raw, cids)| {
                 let mut frame_out = Vec::new();
                 self.decompress_and_visit_frame(
                     fid,
                     &raw,
                     &cids,
                     dict.as_deref(),
+                    dict_decomp,
                     |cid, slice| {
                         if let Some(item) = f(state, cid, slice) {
                             frame_out.push(item);
@@ -2785,6 +2961,32 @@ impl ChunkPackReader {
             out.append(&mut items);
         }
         Ok(out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decompress_and_run_frame<'a, S, T, F>(
+        &self,
+        fid: u32,
+        raw: &[u8],
+        cids: &[u32],
+        dict: Option<&'a PackDecoderDict>,
+        dict_decomp: &mut PackFrameDecompressor<'a>,
+        state: &mut S,
+        f: &F,
+    ) -> Result<Option<T>, StatamError>
+    where
+        F: Fn(&mut S, u32, &[u8], &[u32]) -> Result<Option<T>, StatamError>,
+    {
+        let entry = &self.toc.frames[fid as usize];
+        verify_raw_frame_matches_entry(raw, entry)?;
+        let (_, _, decoded) =
+            read_framed_pack_frame_with_decompressor(raw, MAX_FRAME_RAW_BYTES, dict, dict_decomp)?;
+        if decoded.len() != entry.raw_len as usize {
+            return Err(StatamError::Corrupt {
+                reason: "decompressed frame length mismatch",
+            });
+        }
+        f(state, fid, &decoded, cids)
     }
 
     /// Frame-level variant of [`Self::scan_chunks_in_frames_parallel`] that passes the full
@@ -2820,33 +3022,30 @@ impl ChunkPackReader {
             total_raw_bytes = total_raw_bytes.saturating_add(entry.raw_len as usize);
         }
 
-        let run_frame =
-            |state: &mut S, fid: u32, raw: &[u8], cids: &[u32]| -> Result<Option<T>, StatamError> {
-                let entry = &self.toc.frames[fid as usize];
-                verify_raw_frame_matches_entry(raw, entry)?;
-                let (_, _, decoded) =
-                    read_framed_pack_frame_with_dict(raw, MAX_FRAME_RAW_BYTES, dict.as_deref())?;
-                if decoded.len() != entry.raw_len as usize {
-                    return Err(StatamError::Corrupt {
-                        reason: "decompressed frame length mismatch",
-                    });
-                }
-                f(state, fid, &decoded, cids)
-            };
-
         if threads <= 1
             || frame_groups.len() <= 1
-            || (compressed_frames < 4 && total_raw_bytes < 4 * 1024 * 1024)
+            || (compressed_frames < 4 && total_raw_bytes < 2 * 1024 * 1024)
         {
             let mut state = init()?;
+            let mut dict_decomp = PackFrameDecompressor::new();
             let mut out = Vec::new();
             for ((fid, cids), raw) in frame_groups.iter().zip(frame_bytes_list.iter()) {
-                if let Some(item) = run_frame(&mut state, *fid, raw, cids)? {
+                if let Some(item) = self.decompress_and_run_frame(
+                    *fid,
+                    raw,
+                    cids,
+                    dict.as_deref(),
+                    &mut dict_decomp,
+                    &mut state,
+                    &f,
+                )? {
                     out.push(item);
                 }
             }
             return Ok(out);
         }
+
+        let workers = threads.min(frame_groups.len());
 
         let frame_tasks: Vec<(u32, Bytes, Vec<u32>)> = frame_groups
             .into_iter()
@@ -2856,9 +3055,19 @@ impl ChunkPackReader {
 
         let per_frame = parallel_map_in_order_with_init(
             frame_tasks,
-            threads,
-            init,
-            |state, (fid, raw, cids)| run_frame(state, fid, &raw, &cids),
+            workers,
+            || Ok((init()?, PackFrameDecompressor::new())),
+            |(state, dict_decomp), (fid, raw, cids)| {
+                self.decompress_and_run_frame(
+                    fid,
+                    &raw,
+                    &cids,
+                    dict.as_deref(),
+                    dict_decomp,
+                    state,
+                    &f,
+                )
+            },
         )?;
 
         Ok(per_frame.into_iter().flatten().collect())
@@ -5823,6 +6032,320 @@ mod tests {
         assert_eq!(
             p_rem_large.retained_tail_start,
             Some(expected_256_large.start)
+        );
+    }
+
+    #[test]
+    fn pass22_reusable_dict_decompressor_and_zero_copy_chunks() {
+        // 1. PackFrameDecompressor: switch between TWO distinct PackDecoderDicts + plain Zstd + None,
+        //    and verify rejection of corrupt CRC32C / missing dict / wrong dict.
+        #[cfg(not(miri))]
+        {
+            let mut samples_a = Vec::new();
+            let mut samples_b = Vec::new();
+            for i in 0..256usize {
+                samples_a.push(
+                    format!(
+                        "{{\"service\":\"alpha-gateway\",\"trace\":\"{i:06}\",\"payload\":\"alpha_dict_corpus_entry_{i:04}\"}}"
+                    )
+                    .into_bytes(),
+                );
+                samples_b.push(
+                    format!(
+                        "{{\"service\":\"beta-worker\",\"span\":\"{i:06}\",\"payload\":\"beta_dict_corpus_entry_{i:04}\"}}"
+                    )
+                    .into_bytes(),
+                );
+            }
+            let dict_bytes_a = zstd::dict::from_samples(&samples_a, 8 * 1024).unwrap();
+            let dict_bytes_b = zstd::dict::from_samples(&samples_b, 8 * 1024).unwrap();
+            let mut comp_a = PackDictCompressor::new(3, &dict_bytes_a).unwrap();
+            let mut comp_b = PackDictCompressor::new(3, &dict_bytes_b).unwrap();
+            let dec_a = PackDecoderDict::new(&dict_bytes_a).unwrap();
+            let dec_b = PackDecoderDict::new(&dict_bytes_b).unwrap();
+
+            let raw_a1 = samples_a[0..16].concat();
+            let raw_a2 = samples_a[16..32].concat();
+            let raw_b1 = samples_b[0..16].concat();
+            let raw_b2 = samples_b[16..32].concat();
+            let raw_plain = b"plain-zstd-frame-content-repeated-".repeat(64);
+            let raw_none = b"uncompressed-frame-bytes-0123456789".to_vec();
+
+            let mut f_a1 = Vec::new();
+            let info_a1 = write_framed_pack_frame_with_compressor_min_savings(
+                &raw_a1,
+                Codec::Zstd,
+                0,
+                3,
+                0,
+                Some(&mut comp_a),
+                &mut f_a1,
+            )
+            .unwrap();
+            assert_eq!(info_a1.codec, Codec::Zstd);
+            assert_ne!(f_a1[3] & PACK_FRAME_FLAG_USES_DICT, 0);
+
+            let mut f_a2 = Vec::new();
+            write_framed_pack_frame_with_compressor_min_savings(
+                &raw_a2,
+                Codec::Zstd,
+                0,
+                3,
+                0,
+                Some(&mut comp_a),
+                &mut f_a2,
+            )
+            .unwrap();
+            assert_ne!(f_a2[3] & PACK_FRAME_FLAG_USES_DICT, 0);
+
+            let mut f_b1 = Vec::new();
+            write_framed_pack_frame_with_compressor_min_savings(
+                &raw_b1,
+                Codec::Zstd,
+                0,
+                3,
+                0,
+                Some(&mut comp_b),
+                &mut f_b1,
+            )
+            .unwrap();
+            assert_ne!(f_b1[3] & PACK_FRAME_FLAG_USES_DICT, 0);
+
+            let mut f_b2 = Vec::new();
+            write_framed_pack_frame_with_compressor_min_savings(
+                &raw_b2,
+                Codec::Zstd,
+                0,
+                3,
+                0,
+                Some(&mut comp_b),
+                &mut f_b2,
+            )
+            .unwrap();
+            assert_ne!(f_b2[3] & PACK_FRAME_FLAG_USES_DICT, 0);
+
+            let mut f_plain = Vec::new();
+            write_framed_pack_frame(&raw_plain, Codec::Zstd, 0, 3, &mut f_plain).unwrap();
+            assert_eq!(f_plain[3] & PACK_FRAME_FLAG_USES_DICT, 0);
+
+            let mut f_none = Vec::new();
+            write_framed_pack_frame(&raw_none, Codec::None, 0, 0, &mut f_none).unwrap();
+
+            // Interleave dict A -> dict B -> plain -> dict A -> none -> dict B on ONE decompressor.
+            let mut decomp = PackFrameDecompressor::new();
+            assert_eq!(
+                read_framed_pack_frame_with_decompressor(
+                    &f_a1,
+                    MAX_FRAME_RAW_BYTES,
+                    Some(&dec_a),
+                    &mut decomp,
+                )
+                .unwrap()
+                .2,
+                raw_a1
+            );
+            assert_eq!(
+                read_framed_pack_frame_with_decompressor(
+                    &f_b1,
+                    MAX_FRAME_RAW_BYTES,
+                    Some(&dec_b),
+                    &mut decomp,
+                )
+                .unwrap()
+                .2,
+                raw_b1
+            );
+            assert_eq!(
+                read_framed_pack_frame_with_decompressor(
+                    &f_plain,
+                    MAX_FRAME_RAW_BYTES,
+                    None,
+                    &mut decomp,
+                )
+                .unwrap()
+                .2,
+                raw_plain
+            );
+            assert_eq!(
+                read_framed_pack_frame_with_decompressor(
+                    &f_a2,
+                    MAX_FRAME_RAW_BYTES,
+                    Some(&dec_a),
+                    &mut decomp,
+                )
+                .unwrap()
+                .2,
+                raw_a2
+            );
+            assert_eq!(
+                read_framed_pack_frame_with_decompressor(
+                    &f_none,
+                    MAX_FRAME_RAW_BYTES,
+                    Some(&dec_a),
+                    &mut decomp,
+                )
+                .unwrap()
+                .2,
+                raw_none
+            );
+            assert_eq!(
+                read_framed_pack_frame_with_decompressor(
+                    &f_b2,
+                    MAX_FRAME_RAW_BYTES,
+                    Some(&dec_b),
+                    &mut decomp,
+                )
+                .unwrap()
+                .2,
+                raw_b2
+            );
+
+            // Corrupt CRC32C rejected.
+            let mut bad_crc = f_a1.clone();
+            bad_crc[PACK_FRAME_HEADER_LEN] ^= 0xFF;
+            assert!(matches!(
+                read_framed_pack_frame_with_decompressor(
+                    &bad_crc,
+                    MAX_FRAME_RAW_BYTES,
+                    Some(&dec_a),
+                    &mut decomp,
+                ),
+                Err(StatamError::ChecksumMismatch { .. })
+            ));
+            // Missing dict rejected.
+            assert!(matches!(
+                read_framed_pack_frame_with_decompressor(
+                    &f_a1,
+                    MAX_FRAME_RAW_BYTES,
+                    None,
+                    &mut decomp,
+                ),
+                Err(StatamError::Corrupt { .. })
+            ));
+            // Wrong dict rejected.
+            assert!(matches!(
+                read_framed_pack_frame_with_decompressor(
+                    &f_a1,
+                    MAX_FRAME_RAW_BYTES,
+                    Some(&dec_b),
+                    &mut decomp,
+                ),
+                Err(StatamError::Corrupt { .. })
+            ));
+        }
+
+        // 2. Dense (zero-copy Bytes::slice) vs sparse (< 50% copy-out) parity across 1T and 8T.
+        let mut pb = ChunkPackBuilder::new(
+            [0x22u8; 16],
+            PackWriteOptions {
+                codec: test_codec(),
+                zstd_level: 1,
+                target_frame_raw_bytes: 64 * 1024,
+                enable_trigram_skip: false,
+                compress_toc_lz4: true,
+                write_threads: 1,
+                emit_hash_table: false,
+            },
+        );
+        let mut expected = Vec::new();
+        // Create 8 frames of ~64 KiB each (16 chunks of 4 KiB per frame -> 128 chunks).
+        for i in 0..128u32 {
+            let pattern = format!("chunk-{i:04}-payload-");
+            let mut data = Vec::with_capacity(4096);
+            while data.len() < 4096 {
+                data.extend_from_slice(pattern.as_bytes());
+            }
+            data.truncate(4096);
+            let cid = pb.intern_chunk(&data).unwrap();
+            assert_eq!(cid, i);
+            expected.push(data);
+        }
+        let mut pack_bytes = Vec::new();
+        pb.finish(&mut pack_bytes).unwrap();
+        let reader = ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes))).unwrap();
+        assert!(reader.toc().frames.len() >= 8);
+
+        let all_cids: Vec<u32> = (0..128u32).collect();
+        let sparse_cids: Vec<u32> = (0..128u32).step_by(16).collect(); // 1 chunk (4 KiB) per 64 KiB frame (< 50% & > 16 KiB unused)
+
+        let ref_all = reader.read_chunks(&all_cids).unwrap();
+        let ref_sparse = reader.read_chunks(&sparse_cids).unwrap();
+
+        for threads in [1usize, 8] {
+            let dense_got: HashMap<u32, Bytes> = reader
+                .scan_chunks_as_bytes_parallel(&all_cids, threads)
+                .unwrap()
+                .into_iter()
+                .collect();
+            assert_eq!(dense_got.len(), all_cids.len());
+            for &cid in &all_cids {
+                assert_eq!(dense_got[&cid].as_ref(), ref_all[&cid].as_slice());
+            }
+
+            let sparse_got: HashMap<u32, Bytes> = reader
+                .scan_chunks_as_bytes_parallel(&sparse_cids, threads)
+                .unwrap()
+                .into_iter()
+                .collect();
+            assert_eq!(sparse_got.len(), sparse_cids.len());
+            for &cid in &sparse_cids {
+                assert_eq!(sparse_got[&cid].as_ref(), ref_sparse[&cid].as_slice());
+            }
+        }
+
+        // 3. `scan_frames_parallel` on `Codec::None` frames >= 2 MiB still runs in parallel (> 1 worker).
+        let mut pb_none = ChunkPackBuilder::new(
+            [0x23u8; 16],
+            PackWriteOptions {
+                codec: Codec::None,
+                zstd_level: 0,
+                target_frame_raw_bytes: 512 * 1024,
+                enable_trigram_skip: false,
+                compress_toc_lz4: false,
+                write_threads: 1,
+                emit_hash_table: false,
+            },
+        );
+        let mut none_cids = Vec::new();
+        for i in 0..6u32 {
+            let mut chunk = vec![(i as u8).wrapping_add(1); 512 * 1024];
+            chunk[0..4].copy_from_slice(&i.to_le_bytes());
+            none_cids.push(pb_none.intern_chunk(&chunk).unwrap());
+        }
+        let mut none_bytes = Vec::new();
+        pb_none.finish(&mut none_bytes).unwrap();
+        let none_reader = ChunkPackReader::open(Arc::new(SliceReader::new(none_bytes))).unwrap();
+        assert_eq!(none_reader.toc().frames.len(), 6);
+        assert!(
+            none_reader
+                .toc()
+                .frames
+                .iter()
+                .all(|f| f.codec == Codec::None)
+        );
+
+        let barrier = std::sync::Barrier::new(2);
+        let first_two = std::sync::atomic::AtomicUsize::new(0);
+        let tids = none_reader
+            .scan_frames_parallel(
+                &none_cids,
+                4,
+                || Ok(()),
+                |(), fid, buf, _cids| {
+                    assert_eq!(buf.len(), 512 * 1024);
+                    if first_two.fetch_add(1, std::sync::atomic::Ordering::AcqRel) < 2 {
+                        barrier.wait();
+                    }
+                    Ok(Some((fid, std::thread::current().id())))
+                },
+            )
+            .unwrap();
+        assert_eq!(tids.len(), 6);
+        let unique_tids: std::collections::HashSet<_> = tids.iter().map(|&(_, tid)| tid).collect();
+        assert!(
+            unique_tids.len() >= 2,
+            "expected >= 2 worker threads on >= 2 MiB Codec::None frames, got {}",
+            unique_tids.len()
         );
     }
 }

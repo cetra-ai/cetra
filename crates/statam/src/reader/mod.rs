@@ -10,7 +10,7 @@ mod plan;
 mod tests;
 
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -43,7 +43,7 @@ use eval::{eval_utf8_block_substring_raw, eval_utf8_substring};
 use materialize::mask_from_indices;
 pub use meta::StatamFileMeta;
 pub(crate) use payload::StreamingL0Payload;
-use payload::{PHASE2_PAYLOAD_WAVE_TARGET_BYTES, ParsedL0Payload};
+use payload::{PHASE2_PAYLOAD_WAVE_TARGET_BYTES, ParsedL0Payload, ResolvedChunks};
 use plan::{ActiveMiniBlock, DecodedPhase1, RgIoPlan, TouchedMbRows, find_time_column};
 
 /// Maximum gap (64 KiB) between blocks coalesced unconditionally into a single `Scan` range read.
@@ -61,10 +61,19 @@ const P1_WAVE_MAX_RAW_BYTES: u64 = 128 * 1024 * 1024;
 /// dicts) folded into Wave 1 on remote readers (when `!has_payload_sub`) to eliminate the
 /// Phase-2 round-trip (`1.5 MiB`).
 const REMOTE_SINGLE_WAVE_P2_MAX_BYTES: u64 = 1536 * 1024;
-/// Minimum total uncompressed block bytes required before spawning reader worker threads
+/// Minimum total estimated decode work bytes required before spawning reader worker threads
 /// (48 KiB), avoiding OS thread-spawn overhead on sub-millisecond narrow queries.
-/// Tasks touching `LocalityGroup::ExternalPayload` are exempt from this threshold.
 const MIN_PARALLEL_WORK_BYTES: usize = 48 * 1024;
+
+/// Computes the bounded worker count for reader parallel scopes based on `work_bytes`.
+#[inline]
+pub(super) fn effective_read_threads(work_bytes: usize, max_threads: usize) -> usize {
+    let cap = max_threads.clamp(1, crate::parallel::MAX_PARALLEL_THREADS);
+    if cap <= 1 || work_bytes < MIN_PARALLEL_WORK_BYTES {
+        return 1;
+    }
+    cap
+}
 
 /// Resolves external `.stpk` pack IDs to opened [`ChunkPackReader`] instances.
 pub trait PackResolver: Send + Sync {
@@ -1266,7 +1275,7 @@ impl StatamReader {
             };
 
             if !has_payload_proj {
-                let empty_chunks = HashMap::new();
+                let empty_chunks = ResolvedChunks::empty();
                 for item in wave {
                     let take_mbs = item
                         .mb_rows
@@ -1298,7 +1307,7 @@ impl StatamReader {
                 plan: RgIoPlan,
                 l0_parsed: Option<ParsedL0Payload<'a>>,
                 active_mbs: Vec<(usize, Bitmap, HashMap<usize, DecodedPhase1>)>,
-                ext_by_pack: HashMap<u16, BTreeSet<u32>>,
+                ext_by_pack: BTreeMap<u16, BTreeSet<u32>>,
                 l0_cids: BTreeSet<u32>,
                 l0_chunk_bytes: usize,
                 l0_frame_bytes: usize,
@@ -1306,7 +1315,7 @@ impl StatamReader {
             }
 
             let mut prepared: Vec<PreparedTakeRg<'_>> = Vec::with_capacity(wave.len());
-            let mut merged_ext_by_pack: HashMap<u16, BTreeSet<u32>> = HashMap::new();
+            let mut merged_ext_by_pack: BTreeMap<u16, BTreeSet<u32>> = BTreeMap::new();
             let mut total_l0_chunk_bytes = 0usize;
             let mut total_l0_frame_bytes = 0usize;
             let mut max_wave_col_decoded_bytes = 0usize;
@@ -1373,10 +1382,11 @@ impl StatamReader {
             }
 
             let materialize_prepared_rg = |prep: PreparedTakeRg<'_>,
-                                           ext_map: &HashMap<(u16, u32), Bytes>,
+                                           ext_chunks: &mut ResolvedChunks,
                                            ext_chunk_bytes: usize,
                                            ext_frame_bytes: usize|
              -> Result<Vec<Batch>, StatamError> {
+                ext_chunks.clear_l0();
                 let take_mbs = prep
                     .mb_rows
                     .into_iter()
@@ -1385,19 +1395,7 @@ impl StatamReader {
                         (mb_idx, local_indices, Some(mask), p1)
                     })
                     .collect();
-                if prep.l0_cids.is_empty() {
-                    self.materialize_take_mbs(
-                        prep.rg_idx,
-                        take_mbs,
-                        &prep.plan,
-                        &proj_indices,
-                        &proj_schema,
-                        &empty_map_keys,
-                        ext_map,
-                        &read_block,
-                        read_threads,
-                    )
-                } else {
+                if !prep.l0_cids.is_empty() {
                     let l0 = prep.l0_parsed.as_ref().ok_or(StatamError::Corrupt {
                         reason: "missing L0 local payload region",
                     })?;
@@ -1409,32 +1407,22 @@ impl StatamReader {
                         &mut combined_chunk_bytes,
                         &mut combined_frame_bytes,
                     )?;
-                    let l0_map = l0.read_chunks(&l0_vec)?;
-                    let mut combined = HashMap::with_capacity(
-                        l0_map.len() + prep.ext_by_pack.values().map(BTreeSet::len).sum::<usize>(),
-                    );
-                    for (cid, bytes) in l0_map {
-                        combined.insert((crate::writer::L0_LOCAL_PACK_IDX, cid), bytes);
-                    }
-                    for (pidx, cids) in prep.ext_by_pack {
-                        for cid in cids {
-                            if let Some(b) = ext_map.get(&(pidx, cid)) {
-                                combined.insert((pidx, cid), b.clone());
-                            }
-                        }
-                    }
-                    self.materialize_take_mbs(
-                        prep.rg_idx,
-                        take_mbs,
-                        &prep.plan,
-                        &proj_indices,
-                        &proj_schema,
-                        &empty_map_keys,
-                        &combined,
-                        &read_block,
-                        read_threads,
-                    )
+                    let l0_entries = l0.read_chunks_vec(&l0_vec)?;
+                    ext_chunks.set_l0(l0_entries);
                 }
+                let res = self.materialize_take_mbs(
+                    prep.rg_idx,
+                    take_mbs,
+                    &prep.plan,
+                    &proj_indices,
+                    &proj_schema,
+                    &empty_map_keys,
+                    ext_chunks,
+                    &read_block,
+                    read_threads,
+                );
+                ext_chunks.clear_l0();
+                res
             };
 
             // Fast path: all external `.stpk` + L0 local chunks across every RG in this wave fit
@@ -1447,12 +1435,12 @@ impl StatamReader {
                 && total_frame_bytes <= PHASE2_PAYLOAD_WAVE_TARGET_BYTES
                 && max_wave_col_decoded_bytes <= PHASE2_PAYLOAD_WAVE_TARGET_BYTES
             {
-                let wave_ext_chunks =
+                let mut wave_ext_chunks =
                     self.resolve_external_pack_chunks(merged_ext_by_pack, read_threads)?;
                 for prep in prepared {
                     let mut rg_batches = materialize_prepared_rg(
                         prep,
-                        &wave_ext_chunks,
+                        &mut wave_ext_chunks,
                         total_ext_chunk_bytes,
                         total_ext_frame_bytes,
                     )?;
@@ -1464,12 +1452,12 @@ impl StatamReader {
                 // `partition_payload_waves`.
                 let empty_pre = HashMap::new();
                 let mut sub_rgs: Vec<PreparedTakeRg<'_>> = Vec::new();
-                let mut sub_ext: HashMap<u16, BTreeSet<u32>> = HashMap::new();
+                let mut sub_ext: BTreeMap<u16, BTreeSet<u32>> = BTreeMap::new();
                 let mut sub_l0_c = 0usize;
                 let mut sub_l0_f = 0usize;
 
                 let flush_sub_rgs = |rgs: &mut Vec<PreparedTakeRg<'_>>,
-                                     ext: &mut HashMap<u16, BTreeSet<u32>>,
+                                     ext: &mut BTreeMap<u16, BTreeSet<u32>>,
                                      l0_c: &mut usize,
                                      l0_f: &mut usize,
                                      out: &mut Vec<Batch>|
@@ -1479,11 +1467,13 @@ impl StatamReader {
                     }
                     let taken_ext = std::mem::take(ext);
                     let (ext_c, ext_f) = self.measure_external_pack_bytes(&taken_ext)?;
-                    let ext_map = self.resolve_external_pack_chunks(taken_ext, read_threads)?;
+                    let mut ext_chunks =
+                        self.resolve_external_pack_chunks(taken_ext, read_threads)?;
                     *l0_c = 0;
                     *l0_f = 0;
                     for prep in rgs.drain(..) {
-                        let mut rg_batches = materialize_prepared_rg(prep, &ext_map, ext_c, ext_f)?;
+                        let mut rg_batches =
+                            materialize_prepared_rg(prep, &mut ext_chunks, ext_c, ext_f)?;
                         out.append(&mut rg_batches);
                     }
                     Ok(())

@@ -2441,32 +2441,90 @@ impl PackDecoderDict {
     }
 }
 
-#[cfg(not(miri))]
-fn decompress_zstd_with_dict(
-    stored: &[u8],
-    raw_len: usize,
-    dict: &PackDecoderDict,
-) -> Result<Vec<u8>, StatamError> {
-    let mut decomp =
-        zstd::bulk::Decompressor::with_prepared_dictionary(&dict.inner).map_err(|_| {
-            StatamError::Corrupt {
-                reason: "zstd dict decompressor init failed",
-            }
-        })?;
-    decomp
-        .decompress(stored, raw_len)
-        .map_err(|_| StatamError::Corrupt {
-            reason: "zstd dict decompression failed",
-        })
+/// Reusable per-worker Zstd dictionary decompressor for `.stpk` pack frames.
+///
+/// Reuses the underlying `ZSTD_DCtx` across frames and switches prepared dictionaries in O(1)
+/// via `set_prepared_dictionary` whenever the borrowed [`PackDecoderDict`] pointer changes.
+pub(crate) struct PackFrameDecompressor<'a> {
+    #[cfg(not(miri))]
+    inner: Option<(&'a PackDecoderDict, zstd::bulk::Decompressor<'a>)>,
+    #[cfg(miri)]
+    _marker: std::marker::PhantomData<&'a PackDecoderDict>,
 }
 
-#[cfg(miri)]
-fn decompress_zstd_with_dict(
-    _stored: &[u8],
-    _raw_len: usize,
-    _dict: &PackDecoderDict,
-) -> Result<Vec<u8>, StatamError> {
-    Err(StatamError::UnsupportedFeature { mask: 0x02 })
+impl fmt::Debug for PackFrameDecompressor<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        #[cfg(not(miri))]
+        let has_dict = self.inner.is_some();
+        #[cfg(miri)]
+        let has_dict = false;
+        f.debug_struct("PackFrameDecompressor")
+            .field("has_dict", &has_dict)
+            .finish()
+    }
+}
+
+impl<'a> PackFrameDecompressor<'a> {
+    /// Creates an empty reusable dictionary decompressor.
+    #[inline]
+    pub(crate) fn new() -> Self {
+        Self {
+            #[cfg(not(miri))]
+            inner: None,
+            #[cfg(miri)]
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Decompresses a Zstd dictionary-compressed frame payload using `dict`, reusing or
+    /// switching the prepared dictionary on the underlying `ZSTD_DCtx` in O(1).
+    #[cfg(not(miri))]
+    pub(crate) fn decompress_with_dict(
+        &mut self,
+        stored: &[u8],
+        raw_len: usize,
+        dict: &'a PackDecoderDict,
+    ) -> Result<Vec<u8>, StatamError> {
+        if let Some((prev, decomp)) = &mut self.inner {
+            if !std::ptr::eq(*prev, dict) {
+                decomp
+                    .set_prepared_dictionary(&dict.inner)
+                    .map_err(|_| StatamError::Corrupt {
+                        reason: "zstd dict decompressor switch failed",
+                    })?;
+                *prev = dict;
+            }
+            return decomp
+                .decompress(stored, raw_len)
+                .map_err(|_| StatamError::Corrupt {
+                    reason: "zstd dict decompression failed",
+                });
+        }
+        let mut decomp =
+            zstd::bulk::Decompressor::with_prepared_dictionary(&dict.inner).map_err(|_| {
+                StatamError::Corrupt {
+                    reason: "zstd dict decompressor init failed",
+                }
+            })?;
+        let out = decomp
+            .decompress(stored, raw_len)
+            .map_err(|_| StatamError::Corrupt {
+                reason: "zstd dict decompression failed",
+            })?;
+        self.inner = Some((dict, decomp));
+        Ok(out)
+    }
+
+    /// Returns `StatamError::UnsupportedFeature` under Miri where Zstd C FFI is disabled.
+    #[cfg(miri)]
+    pub(crate) fn decompress_with_dict(
+        &mut self,
+        _stored: &[u8],
+        _raw_len: usize,
+        _dict: &'a PackDecoderDict,
+    ) -> Result<Vec<u8>, StatamError> {
+        Err(StatamError::UnsupportedFeature { mask: 0x02 })
+    }
 }
 
 /// Metadata returned when writing a framed block or pack frame.
@@ -2887,11 +2945,12 @@ pub fn read_framed_pack_frame(
 }
 
 /// Reads, checksum-verifies, and decompresses a framed `.stpk` `PF` pack frame,
-/// using `dict` when `PACK_FRAME_FLAG_USES_DICT` is set.
-pub fn read_framed_pack_frame_with_dict(
+/// using `dict` and a reusable [`PackFrameDecompressor`] when `PACK_FRAME_FLAG_USES_DICT` is set.
+pub(crate) fn read_framed_pack_frame_with_decompressor<'a>(
     frame: &[u8],
     max_raw: usize,
-    dict: Option<&PackDecoderDict>,
+    dict: Option<&'a PackDecoderDict>,
+    dict_decomp: &mut PackFrameDecompressor<'a>,
 ) -> Result<(Codec, u8, Vec<u8>), StatamError> {
     let (codec, flags, raw_len, stored) = parse_verified_pack_frame(frame)?;
     check_decompress_bounds(raw_len, stored.len(), max_raw)?;
@@ -2904,7 +2963,7 @@ pub fn read_framed_pack_frame_with_dict(
         let dict = dict.ok_or(StatamError::Corrupt {
             reason: "pack frame requires dictionary but none provided",
         })?;
-        let decoded = decompress_zstd_with_dict(stored, raw_len, dict)?;
+        let decoded = dict_decomp.decompress_with_dict(stored, raw_len, dict)?;
         if decoded.len() != raw_len {
             return Err(StatamError::Corrupt {
                 reason: "zstd dict decompressed length mismatch",
@@ -2915,6 +2974,17 @@ pub fn read_framed_pack_frame_with_dict(
         let decompressed = decompress_checked(stored, codec, raw_len, max_raw)?;
         Ok((codec, flags, decompressed))
     }
+}
+
+/// Reads, checksum-verifies, and decompresses a framed `.stpk` `PF` pack frame,
+/// using `dict` when `PACK_FRAME_FLAG_USES_DICT` is set.
+pub fn read_framed_pack_frame_with_dict(
+    frame: &[u8],
+    max_raw: usize,
+    dict: Option<&PackDecoderDict>,
+) -> Result<(Codec, u8, Vec<u8>), StatamError> {
+    let mut dict_decomp = PackFrameDecompressor::new();
+    read_framed_pack_frame_with_decompressor(frame, max_raw, dict, &mut dict_decomp)
 }
 
 fn check_slice_range(off: u32, len: u32, limit: usize) -> Result<(), StatamError> {
