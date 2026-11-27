@@ -56,8 +56,8 @@ function testLabel(test: {
             <Card title={item.title} href={item.href}>
               <p>{item.description}</p>
               <div class="badges">
-                {item.python && <span class="badge">Python</span>}
-                {item.typescript && <span class="badge">TypeScript</span>}
+                {item.languages.includes("python") && <span class="badge">Python</span>}
+                {item.languages.includes("typescript") && <span class="badge">TypeScript</span>}
                 {item.tests.map((test) => (
                   <span class="badge">{testLabel(test)}</span>
                 ))}
