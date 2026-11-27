@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cetra_column::{
-    Batch, Bitmap, CancelToken, ColumnError, DataType, Reservation, Schema, Selection,
+    Batch, Bitmap, CancelToken, ColumnError, DataType, Reservation, ScalarValue, Schema, Selection,
 };
 use cetra_core::ids::ProjectId;
 use cetra_core::schema::{scores, scores_schema};
@@ -17,11 +17,10 @@ use cetra_query::exec::{
     run_pipeline,
 };
 use cetra_query::{BinaryOp, EvalContext, Expr, QueryError, UnaryOp, eval_filter};
-use chrono::NaiveDate;
 use object_store::ObjectStore;
 
 use crate::catalog::{FileMeta, FileTable};
-use crate::deletion::PendingDeletion;
+use crate::deletion::{PendingDeletion, ProjectMemSnapshot};
 use crate::file_format::{FileMetadataCache, open_table_source};
 use crate::verify::Suspects;
 use crate::wal::Table;
@@ -29,7 +28,7 @@ use crate::wal::Table;
 use super::mem_source::MemtableSource;
 use super::{
     HashPartitionedSortSink, TimeBounds, cap_partitions, claim_shared_limit, extract_time_bounds,
-    read_bool_at, read_str_at, reconcile_res, rollback_res,
+    handoff_res, read_bool_at, read_str_at, reconcile_res, rollback_res,
 };
 
 /// Native [`ScanSource`] for the `scores` table with LWW deduplication per `score_id`.
@@ -39,18 +38,19 @@ pub(crate) struct ScoresSource {
     project: ProjectId,
     schema: Arc<Schema>,
     files: Vec<Arc<FileMeta>>,
-    scores_mem: Arc<crate::memtable::MemSnapshot>,
-    keep_from: Option<NaiveDate>,
+    scores_mem: ProjectMemSnapshot,
     deletions: Arc<[Arc<PendingDeletion>]>,
     metadata_cache: Arc<FileMetadataCache>,
     suspects: Suspects,
     runtime: tokio::runtime::Handle,
+    visible_from: Option<i64>,
 }
 
 impl std::fmt::Debug for ScoresSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mem_batches: usize = self
             .scores_mem
+            .as_snapshot()
             .partitions
             .iter()
             .filter(|(key, _)| key.project == self.project)
@@ -59,7 +59,7 @@ impl std::fmt::Debug for ScoresSource {
         f.debug_struct("ScoresSource")
             .field("files", &self.files.len())
             .field("mem_batches", &mem_batches)
-            .field("keep_from", &self.keep_from)
+            .field("visible_from", &self.visible_from)
             .field("deletions", &self.deletions.len())
             .field("schema_len", &self.schema.len())
             .finish_non_exhaustive()
@@ -67,14 +67,16 @@ impl std::fmt::Debug for ScoresSource {
 }
 
 impl ScoresSource {
-    /// Creates a [`ScoresSource`] over `files` and `scores_mem` for `project`.
+    /// Creates a [`ScoresSource`] over `files` and pre-filtered `scores_mem` for `project`.
+    ///
+    /// `scores_mem` is enforced at compile time via [`ProjectMemSnapshot`] to have been projected
+    /// by `deletion::project_snapshot(Table::Scores, ...)`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         store: Arc<dyn ObjectStore>,
         project: ProjectId,
         files: Vec<Arc<FileMeta>>,
-        scores_mem: Arc<crate::memtable::MemSnapshot>,
-        keep_from: Option<NaiveDate>,
+        scores_mem: ProjectMemSnapshot,
         deletions: Arc<[Arc<PendingDeletion>]>,
         metadata_cache: Arc<FileMetadataCache>,
         suspects: Suspects,
@@ -87,12 +89,18 @@ impl ScoresSource {
             schema,
             files,
             scores_mem,
-            keep_from,
             deletions,
             metadata_cache,
             suspects,
             runtime,
+            visible_from: None,
         })
+    }
+
+    /// Sets an inclusive `created_at >= visible_from` visibility floor enforced on every scan.
+    pub(crate) fn with_visible_from(mut self, visible_from: Option<i64>) -> Self {
+        self.visible_from = visible_from;
+        self
     }
 }
 
@@ -131,7 +139,7 @@ impl ScanSource for ScoresSource {
         // (`created_at`, `score_id`) and their infallible `IdLookupHint`s are pushed below
         // LWW dedup (explicit `score_id` upserts may change `target`/`trace_id`, so `trace_id`
         // must remain post-LWW; still keeping `around_ns: None`).
-        let pushed_immutable =
+        let mut pushed_immutable =
             immutable_pushdown_conjuncts(&spec.filters, &[created_at_idx, score_id_idx]);
         let pushed_id_lookups: Vec<IdLookupHint> = spec
             .id_lookups
@@ -146,10 +154,26 @@ impl ScanSource for ScoresSource {
             })
             .cloned()
             .collect();
-        let hint_bounds = TimeBounds {
+        let mut hint_bounds = TimeBounds {
             min: spec.time_range.min_ns,
             max: spec.time_range.max_ns,
         };
+        if let Some(vf) = self.visible_from {
+            hint_bounds.min = Some(hint_bounds.min.map_or(vf, |cur| cur.max(vf)));
+            pushed_immutable.push(Expr::Binary {
+                left: Box::new(Expr::Column {
+                    index: created_at_idx,
+                    name: scores::CREATED_AT.to_owned(),
+                    data_type: DataType::timestamp_utc(),
+                }),
+                op: BinaryOp::GtEq,
+                right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
+                    value: vf,
+                    utc: true,
+                })),
+                data_type: DataType::Bool,
+            });
+        }
         let filter_bounds = extract_time_bounds(&pushed_immutable, scores::CREATED_AT);
         let effective_bounds = hint_bounds.intersect_with(&filter_bounds);
         if effective_bounds.contradicts() {
@@ -254,13 +278,8 @@ impl ScanSource for ScoresSource {
             raw_streams.extend(parquet_src.open_partitions(&inner_spec, ctx)?);
         }
 
-        let mem_src = MemtableSource::new(
-            Table::Scores,
-            self.project,
-            self.keep_from,
-            Arc::clone(&self.scores_mem),
-            Arc::clone(&self.deletions),
-        )?;
+        let mem_src =
+            MemtableSource::from_projected(Table::Scores, self.project, &self.scores_mem)?;
         raw_streams.extend(mem_src.open_partitions(&inner_spec, ctx)?);
 
         if raw_streams.is_empty() {
@@ -670,8 +689,9 @@ impl PartitionStream for ScoresDedupStream {
             }
 
             let out_bytes = filtered.memory_bytes();
+            let handoff = handoff_res(&mut self.scratch_res, res.as_deref_mut(), before, out_bytes);
             self.scratch_res.free();
-            reconcile_res(res.as_deref_mut(), before, out_bytes)?;
+            handoff?;
             return Ok(Some(filtered));
         }
 
@@ -767,6 +787,7 @@ mod tests {
     use cetra_core::ids::TraceId;
     use cetra_query::exec::{CollectSink, ExecMetrics, SpillManager, WorkerPool};
     use cetra_query::{CastMode, ScalarFn};
+    use chrono::NaiveDate;
     use object_store::memory::InMemory;
 
     use super::*;
@@ -912,12 +933,19 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
+        let projected = crate::deletion::project_snapshot(
+            Table::Scores,
+            &mem.snapshot(),
+            test_project(),
+            None,
+            &[],
+        )
+        .unwrap();
         let source = ScoresSource::new(
             Arc::new(InMemory::new()),
             test_project(),
             Vec::new(),
-            mem.snapshot(),
-            None,
+            projected,
             Arc::from([]),
             Arc::new(FileMetadataCache::new(1024 * 1024)),
             Suspects::new(Arc::new(VerifyQueue::default())),
@@ -964,12 +992,19 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
+        let projected = crate::deletion::project_snapshot(
+            Table::Scores,
+            &mem.snapshot(),
+            test_project(),
+            None,
+            &[],
+        )
+        .unwrap();
         let source = ScoresSource::new(
             Arc::new(InMemory::new()),
             test_project(),
             Vec::new(),
-            mem.snapshot(),
-            None,
+            projected,
             Arc::from([]),
             Arc::new(FileMetadataCache::new(1024 * 1024)),
             Suspects::new(Arc::new(VerifyQueue::default())),

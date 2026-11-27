@@ -1,7 +1,7 @@
 //! Filter and SQL schema catalog.
 //!
 //! Spec 05 § Logical views and § Filter DSL. The UI picks operators from [`ColumnType`];
-//! it does not need Arrow types. Binary id columns are [`ColumnType::String`] because the
+//! it does not need storage column types. Binary id columns are [`ColumnType::String`] because the
 //! views expose hex.
 
 use serde::{Deserialize, Serialize};

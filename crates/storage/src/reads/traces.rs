@@ -1286,19 +1286,12 @@ pub(crate) async fn trace_detail_limited(
     let (detail, _) = ctx
         .run_with_ctx(timeout, move |exec_ctx| {
             let traces_raw = traces_raw_schema().map_err(run_err_to_query)?;
-            let mut t_filters = vec![eq_fixed16(&traces_raw, traces::TRACE_ID, trace_bytes)?];
-            if let Some(vf) = ctx_c.visible_from {
-                t_filters.push(cmp_ts(
-                    &col_expr_q(&traces_raw, traces::START_TIME)?,
-                    BinaryOp::GtEq,
-                    vf,
-                ));
-            }
+            let t_filters = vec![eq_fixed16(&traces_raw, traces::TRACE_ID, trace_bytes)?];
             let t_spec = ScanSpec {
                 projection: None,
                 map_projections: Default::default(),
                 time_range: TimeRangeHint {
-                    min_ns: ctx_c.visible_from,
+                    min_ns: None,
                     max_ns: None,
                     around_ns: ctx_c.around,
                 },
@@ -1339,19 +1332,12 @@ pub(crate) async fn trace_detail_limited(
             let spans_raw = spans_raw_schema().map_err(run_err_to_query)?;
             let spans_view = spans_view_schema().map_err(run_err_to_query)?;
             let s_proj = span_list_raw_indices(&spans_raw, false).map_err(run_err_to_query)?;
-            let mut s_filters = vec![eq_fixed16(&spans_raw, spans::TRACE_ID, trace_bytes)?];
-            if let Some(vf) = ctx_c.visible_from {
-                s_filters.push(cmp_ts(
-                    &col_expr_q(&spans_raw, spans::START_TIME)?,
-                    BinaryOp::GtEq,
-                    vf,
-                ));
-            }
+            let s_filters = vec![eq_fixed16(&spans_raw, spans::TRACE_ID, trace_bytes)?];
             let s_spec = ScanSpec {
                 projection: Some(s_proj),
                 map_projections: Default::default(),
                 time_range: TimeRangeHint {
-                    min_ns: ctx_c.visible_from,
+                    min_ns: None,
                     max_ns: None,
                     around_ns: ctx_c.around,
                 },
@@ -1446,22 +1432,15 @@ pub async fn span_detail(
         .run_with_ctx(timeout, move |exec_ctx| {
             let spans_raw = spans_raw_schema().map_err(run_err_to_query)?;
             let spans_view = spans_view_schema().map_err(run_err_to_query)?;
-            let mut filters = vec![
+            let filters = vec![
                 eq_fixed16(&spans_raw, spans::TRACE_ID, trace_bytes)?,
                 eq_fixed8(&spans_raw, spans::SPAN_ID, span_bytes)?,
             ];
-            if let Some(vf) = ctx_c.visible_from {
-                filters.push(cmp_ts(
-                    &col_expr_q(&spans_raw, spans::START_TIME)?,
-                    BinaryOp::GtEq,
-                    vf,
-                ));
-            }
             let spec = ScanSpec {
                 projection: None,
                 map_projections: Default::default(),
                 time_range: TimeRangeHint {
-                    min_ns: ctx_c.visible_from,
+                    min_ns: None,
                     max_ns: None,
                     around_ns: ctx_c.around,
                 },
@@ -1563,22 +1542,15 @@ pub async fn trace_spans(
                 },
                 None => parent_null,
             };
-            let mut req_filters = vec![
+            let req_filters = vec![
                 eq_fixed16(&spans_raw, spans::TRACE_ID, trace_bytes)?,
                 root_or_target,
             ];
-            if let Some(vf) = ctx_c.visible_from {
-                req_filters.push(cmp_ts(
-                    &col_expr_q(&spans_raw, spans::START_TIME)?,
-                    BinaryOp::GtEq,
-                    vf,
-                ));
-            }
             let req_spec = ScanSpec {
                 projection: None,
                 map_projections: Default::default(),
                 time_range: TimeRangeHint {
-                    min_ns: ctx_c.visible_from,
+                    min_ns: None,
                     max_ns: None,
                     around_ns: ctx_c.around,
                 },
@@ -1620,19 +1592,12 @@ pub async fn trace_spans(
             };
 
             // 2. Earliest spans: start_time ASC, span_id ASC, limit max_spans + 1.
-            let mut early_filters = vec![eq_fixed16(&spans_raw, spans::TRACE_ID, trace_bytes)?];
-            if let Some(vf) = ctx_c.visible_from {
-                early_filters.push(cmp_ts(
-                    &col_expr_q(&spans_raw, spans::START_TIME)?,
-                    BinaryOp::GtEq,
-                    vf,
-                ));
-            }
+            let early_filters = vec![eq_fixed16(&spans_raw, spans::TRACE_ID, trace_bytes)?];
             let early_spec = ScanSpec {
                 projection: None,
                 map_projections: Default::default(),
                 time_range: TimeRangeHint {
-                    min_ns: ctx_c.visible_from,
+                    min_ns: None,
                     max_ns: None,
                     around_ns: ctx_c.around,
                 },
@@ -2939,18 +2904,6 @@ fn in_list_fixed16(schema: &Schema, col_name: &str, ids: &[[u8; 16]]) -> Result<
         negated: false,
         redacted: false,
     })
-}
-
-fn cmp_ts(col: &Expr, op: BinaryOp, ns: i64) -> Expr {
-    Expr::Binary {
-        left: Box::new(col.clone()),
-        op,
-        right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
-            value: ns,
-            utc: true,
-        })),
-        data_type: DataType::Bool,
-    }
 }
 
 struct ChainedStream {

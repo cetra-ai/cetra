@@ -143,7 +143,7 @@ pub async fn score_list(
     };
 
     let raw_schema = scores_raw_schema()?;
-    let mut filters = list_filters(&raw_schema, &request, ctx.visible_from)?;
+    let mut filters = list_filters(&raw_schema, &request)?;
     if let Some(cur) = &cursor {
         filters.push(cursor::after_expr(
             cur,
@@ -153,10 +153,10 @@ pub async fn score_list(
         )?);
     }
 
-    let mut min_ns = ctx.visible_from;
+    let mut min_ns = None;
     let mut max_ns = None;
     if let Some(window) = request.window {
-        min_ns = Some(min_ns.map_or(window.from(), |vf| vf.max(window.from())));
+        min_ns = Some(window.from());
         max_ns = window.to().checked_sub(1);
     }
 
@@ -256,7 +256,7 @@ pub async fn latest_scores(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let mut filters = vec![
+    let filters = vec![
         eq_lit_str(&raw_schema, scores::TARGET, prepared.kind.as_str())
             .map_err(query_err_to_run)?,
         in_list_expr(col_expr(&raw_schema, prepared.column)?, prepared.literals),
@@ -269,19 +269,12 @@ pub async fn latest_scores(
             data_type: DataType::Bool,
         },
     ];
-    if let Some(vf) = ctx.visible_from {
-        filters.push(cmp_ts(
-            &col_expr(&raw_schema, scores::CREATED_AT)?,
-            BinaryOp::GtEq,
-            vf,
-        ));
-    }
 
     let spec = ScanSpec {
         projection: Some(proj_indices),
         map_projections: Default::default(),
         time_range: TimeRangeHint {
-            min_ns: ctx.visible_from,
+            min_ns: None,
             max_ns: None,
             around_ns: None,
         },
@@ -439,23 +432,16 @@ pub async fn scores_by_id(
     };
     let raw_schema = scores_raw_schema()?;
     let literals: Vec<ScalarValue> = keys.into_iter().map(ScalarValue::Utf8).collect();
-    let mut filters = vec![in_list_expr(
+    let filters = vec![in_list_expr(
         col_expr(&raw_schema, scores::SCORE_ID)?,
         literals,
     )];
-    if let Some(vf) = ctx.visible_from {
-        filters.push(cmp_ts(
-            &col_expr(&raw_schema, scores::CREATED_AT)?,
-            BinaryOp::GtEq,
-            vf,
-        ));
-    }
 
     let spec = ScanSpec {
         projection: None,
         map_projections: Default::default(),
         time_range: TimeRangeHint {
-            min_ns: ctx.visible_from,
+            min_ns: None,
             max_ns: None,
             around_ns: None,
         },
@@ -526,10 +512,6 @@ pub async fn score_name_counts(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let mut min_ns = request.window.from();
-    if let Some(vf) = ctx.visible_from {
-        min_ns = min_ns.max(vf);
-    }
     let max_ns = request.window.to().checked_sub(1);
 
     let name_lits: Vec<ScalarValue> = request
@@ -538,20 +520,17 @@ pub async fn score_name_counts(
         .map(|n| ScalarValue::Utf8(n.clone()))
         .collect();
     let created_raw = col_expr(&raw_schema, scores::CREATED_AT)?;
-    let mut filters = vec![
+    let filters = vec![
         in_list_expr(col_expr(&raw_schema, scores::NAME)?, name_lits),
         cmp_ts(&created_raw, BinaryOp::GtEq, request.window.from()),
         cmp_ts(&created_raw, BinaryOp::Lt, request.window.to()),
     ];
-    if let Some(vf) = ctx.visible_from {
-        filters.push(cmp_ts(&created_raw, BinaryOp::GtEq, vf));
-    }
 
     let spec = ScanSpec {
         projection: Some(proj_indices),
         map_projections: Default::default(),
         time_range: TimeRangeHint {
-            min_ns: Some(min_ns),
+            min_ns: Some(request.window.from()),
             max_ns,
             around_ns: None,
         },
@@ -750,11 +729,7 @@ fn prepare_keys(targets: ScoreTargets<'_>) -> Result<Option<PreparedKeys>, RunEr
     }))
 }
 
-fn list_filters(
-    schema: &Schema,
-    request: &ScoreListRequest<'_>,
-    visible_from: Option<i64>,
-) -> Result<Vec<Expr>, RunError> {
+fn list_filters(schema: &Schema, request: &ScoreListRequest<'_>) -> Result<Vec<Expr>, RunError> {
     let mut conjuncts = Vec::new();
     if let Some(target) = request.target {
         conjuncts
@@ -804,10 +779,6 @@ fn list_filters(
         let created = col_expr(schema, scores::CREATED_AT)?;
         conjuncts.push(cmp_ts(&created, BinaryOp::GtEq, window.from()));
         conjuncts.push(cmp_ts(&created, BinaryOp::Lt, window.to()));
-    }
-    if let Some(vf) = visible_from {
-        let created = col_expr(schema, scores::CREATED_AT)?;
-        conjuncts.push(cmp_ts(&created, BinaryOp::GtEq, vf));
     }
     Ok(conjuncts)
 }

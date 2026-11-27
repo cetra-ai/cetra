@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use bytes::{Buf, Bytes};
 use cetra_column::{
-    Batch, BinaryData, Bitmap, CancelToken, Column, DataType, DictColumn, EventsData, Field,
-    FlatColumn, FlatData, LinksData, MapData, Reservation, ScalarValue, Schema, ScopedPool,
+    Batch, BinaryData, Bitmap, CancelToken, Column, ColumnError, DataType, DictColumn, EventsData,
+    Field, FlatColumn, FlatData, LinksData, MapData, Reservation, ScalarValue, Schema, ScopedPool,
     Selection, Utf8Data,
 };
 use cetra_core::schema::{event_field, link_field, scores, spans, traces};
@@ -402,7 +402,7 @@ impl ScanPlan {
                 let mut set = BTreeSet::new();
                 for &idx in indices {
                     if idx >= schema.len() {
-                        return Err(cetra_column::ColumnError::InvalidBatch {
+                        return Err(ColumnError::InvalidBatch {
                             reason: "projection index out of bounds",
                         }
                         .into());
@@ -1008,6 +1008,14 @@ fn min_max_satisfies_constraints(
     null_count: Option<u64>,
     constraints: &[ColConstraint],
 ) -> bool {
+    // Defense-in-depth against inverted/legacy min/max statistics (e.g. signed-ordered
+    // unsigned values): ignore value bounds while still allowing null/contradiction pruning.
+    let (min, max) = match (min, max) {
+        (Some(lo), Some(hi)) if cmp_constraint(lo, hi) == Some(std::cmp::Ordering::Greater) => {
+            (None, None)
+        }
+        pair => pair,
+    };
     for c in constraints {
         match c {
             ColConstraint::Contradiction => return false,
@@ -1122,12 +1130,18 @@ fn stats_bounds(
             s.min_opt().copied().map(ConstraintValue::Bool),
             s.max_opt().copied().map(ConstraintValue::Bool),
         ),
-        Statistics::Int32(s) => (
-            s.min_opt()
-                .map(|&v| ConstraintValue::I64(widen_int32(col, v))),
-            s.max_opt()
-                .map(|&v| ConstraintValue::I64(widen_int32(col, v))),
-        ),
+        Statistics::Int32(s) => {
+            if unsigned_int32(col).is_some() && stats.is_min_max_deprecated() {
+                (None, None)
+            } else {
+                (
+                    s.min_opt()
+                        .map(|&v| ConstraintValue::I64(widen_int32(col, v))),
+                    s.max_opt()
+                        .map(|&v| ConstraintValue::I64(widen_int32(col, v))),
+                )
+            }
+        }
         Statistics::Int64(s) => (
             s.min_opt().copied().map(ConstraintValue::I64),
             s.max_opt().copied().map(ConstraintValue::I64),
@@ -5103,10 +5117,10 @@ fn try_fetch_cached_leaf_readers(
     let before_io = io_res.size();
     let reserved = match io_res.try_grow(planned.coalesced_bytes) {
         Ok(()) => true,
-        Err(cetra_column::ColumnError::MemoryLimit { .. }) if prefetch.take().is_some() => {
+        Err(ColumnError::MemoryLimit { .. }) if prefetch.take().is_some() => {
             io_res.try_grow(planned.coalesced_bytes).is_ok()
         }
-        Err(cetra_column::ColumnError::MemoryLimit { .. }) => false,
+        Err(ColumnError::MemoryLimit { .. }) => false,
         Err(err) => return Err(err.into()),
     };
     if !reserved {
@@ -5251,10 +5265,9 @@ fn coalesce_sparse_chunk(
             decode_ranges.push(start..end);
             for rg_row in start..end {
                 let local = seg_base + (rg_row - seg_start);
-                let local_u32 =
-                    u32::try_from(local).map_err(|_| cetra_column::ColumnError::Overflow {
-                        reason: "chunk row index exceeds u32::MAX",
-                    })?;
+                let local_u32 = u32::try_from(local).map_err(|_| ColumnError::Overflow {
+                    reason: "chunk row index exceeds u32::MAX",
+                })?;
                 take_indices.push(local_u32);
                 sel_bools.push(active_set.binary_search(&local_u32).is_ok());
             }
@@ -5630,23 +5643,62 @@ impl PartitionStream for ParquetPartitionStream {
                 let active = sel.active_len(raw_len);
                 if active.saturating_mul(4) < raw_len {
                     let (decode_ranges, take_indices, new_sel) =
-                        coalesce_sparse_chunk(&chunk_ranges, &sel, raw_len)?;
+                        match coalesce_sparse_chunk(&chunk_ranges, &sel, raw_len) {
+                            Ok(parts) => parts,
+                            Err(err) => {
+                                rollback_res(res.as_deref_mut(), before);
+                                return Err(err);
+                            }
+                        };
                     if take_indices.len() < raw_len {
                         let mut compacted_p1 = BTreeMap::new();
-                        for (col_idx, col) in p1_map {
-                            let taken = match col.take(&take_indices, None) {
-                                Ok(fc) => Arc::new(Column::Flat(fc)),
+                        let mut compacted_p1_bytes = 0usize;
+                        for (&col_idx, col) in &p1_map {
+                            let taken = match col.take(&take_indices, res.as_deref_mut()) {
+                                Ok(fc) => fc,
+                                Err(ColumnError::MemoryLimit { .. })
+                                    if self
+                                        .active_file
+                                        .as_mut()
+                                        .and_then(|af| af.prefetch.take())
+                                        .is_some() =>
+                                {
+                                    match col.take(&take_indices, res.as_deref_mut()) {
+                                        Ok(fc) => fc,
+                                        Err(err) => {
+                                            rollback_res(res.as_deref_mut(), before);
+                                            return Err(err.into());
+                                        }
+                                    }
+                                }
                                 Err(err) => {
                                     rollback_res(res.as_deref_mut(), before);
                                     return Err(err.into());
                                 }
                             };
-                            compacted_p1.insert(col_idx, taken);
+                            let col_arc = Arc::new(Column::Flat(taken));
+                            compacted_p1_bytes =
+                                compacted_p1_bytes.saturating_add(col_arc.memory_bytes());
+                            compacted_p1.insert(col_idx, col_arc);
                         }
                         p1_map = compacted_p1;
                         sel = new_sel;
                         out_raw_len = take_indices.len();
                         p2_ranges_buf = Some(decode_ranges);
+                        let target_bytes = compacted_p1_bytes.saturating_add(sel.memory_bytes());
+                        match reconcile_res(res.as_deref_mut(), before, target_bytes) {
+                            Ok(()) => {}
+                            Err(QueryError::TooLarge)
+                                if self
+                                    .active_file
+                                    .as_mut()
+                                    .and_then(|af| af.prefetch.take())
+                                    .is_some() =>
+                            {
+                                reconcile_res(res.as_deref_mut(), before, target_bytes)?;
+                            }
+                            Err(e) => return Err(e),
+                        }
                     }
                 }
             }
@@ -8207,5 +8259,80 @@ pub(crate) mod tests {
             plan.map_projections.get(spans::ATTRIBUTES),
             Some(&MapProjection::Full)
         );
+    }
+
+    #[test]
+    fn stats_bounds_ignores_deprecated_unsigned_int32_and_min_max_handles_inverted_bounds() {
+        use parquet::basic::Type as PhysicalType;
+        use parquet::schema::types::{ColumnDescriptor, ColumnPath};
+
+        let u32_ty = Arc::new(
+            SchemaType::primitive_type_builder("u", PhysicalType::INT32)
+                .with_logical_type(Some(LogicalType::Integer(parquet::basic::IntType {
+                    bit_width: 32,
+                    is_signed: false,
+                })))
+                .build()
+                .unwrap(),
+        );
+        let u32_col: ColumnDescPtr =
+            Arc::new(ColumnDescriptor::new(u32_ty, 0, 0, ColumnPath::from("u")));
+
+        // Deprecated unsigned Int32 stats (signed min=-1, max=5) must yield (None, None).
+        let legacy_u32 = Statistics::int32(Some(-1), Some(5), None, Some(0), true);
+        assert_eq!(stats_bounds(&u32_col, &legacy_u32), (None, None));
+
+        // Modern non-deprecated unsigned Int32 stats still widen accurately.
+        let modern_u32 = Statistics::int32(Some(10), Some(-1), None, Some(0), false);
+        assert_eq!(
+            stats_bounds(&u32_col, &modern_u32),
+            (
+                Some(ConstraintValue::I64(10)),
+                Some(ConstraintValue::I64(i64::from(u32::MAX)))
+            )
+        );
+
+        // Inverted bounds (min > max) disable range/in pruning but STILL allow Contradiction,
+        // IsNotNull (all_null), and IsNull (null_count == 0) to prune!
+        let lo = ConstraintValue::I64(100);
+        let hi = ConstraintValue::I64(10);
+        let range = ColConstraint::Range {
+            min: Some(BoundValue {
+                value: ConstraintValue::I64(50),
+                inclusive: true,
+            }),
+            max: Some(BoundValue {
+                value: ConstraintValue::I64(60),
+                inclusive: true,
+            }),
+        };
+        assert!(min_max_satisfies_constraints(
+            Some(&lo),
+            Some(&hi),
+            false,
+            Some(0),
+            &[range]
+        ));
+        assert!(!min_max_satisfies_constraints(
+            Some(&lo),
+            Some(&hi),
+            false,
+            Some(0),
+            &[ColConstraint::Contradiction]
+        ));
+        assert!(!min_max_satisfies_constraints(
+            Some(&lo),
+            Some(&hi),
+            true,
+            Some(5),
+            &[ColConstraint::IsNotNull]
+        ));
+        assert!(!min_max_satisfies_constraints(
+            Some(&lo),
+            Some(&hi),
+            false,
+            Some(0),
+            &[ColConstraint::IsNull]
+        ));
     }
 }

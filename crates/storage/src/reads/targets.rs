@@ -16,7 +16,7 @@ use cetra_query::exec::{
     ControlFlow, ExecContext, IdLookupHint, PartitionStream, PushSink, ScanSource, ScanSpec,
     TimeRangeHint, run_pipeline as exec_run_pipeline,
 };
-use cetra_query::{BinaryOp, Expr, FilterView, QueryError};
+use cetra_query::{Expr, FilterView, QueryError};
 
 use crate::query_error::RunError;
 use crate::reads::ListScope;
@@ -623,7 +623,7 @@ fn span_scan_sync(
         .index_of(spans::SPAN_ID)
         .ok_or_else(|| internal("span_id missing from spans schema"))?;
 
-    let mut filters = vec![
+    let filters = vec![
         Expr::InList {
             expr: Box::new(col_expr(&spans_raw, spans::TRACE_ID).map_err(query_err_to_run)?),
             list: trace_vec
@@ -643,24 +643,12 @@ fn span_scan_sync(
             redacted: false,
         },
     ];
-    if let Some(vf) = ctx.visible_from {
-        let start_col = col_expr(&spans_raw, spans::START_TIME).map_err(query_err_to_run)?;
-        filters.push(Expr::Binary {
-            left: Box::new(start_col),
-            op: BinaryOp::GtEq,
-            right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
-                value: vf,
-                utc: true,
-            })),
-            data_type: DataType::Bool,
-        });
-    }
 
     let spec = ScanSpec {
         projection: Some(vec![trace_idx, span_idx]),
         map_projections: Default::default(),
         time_range: TimeRangeHint {
-            min_ns: ctx.visible_from,
+            min_ns: None,
             max_ns: None,
             around_ns: ctx.around,
         },

@@ -23,6 +23,7 @@ use chrono::NaiveDate;
 
 use crate::catalog::{FileMeta, FileTable};
 use crate::deletion::{self, PendingDeletion, ProjectMemSnapshot};
+use crate::engine::VisibleFromSource;
 use crate::engine::mem_source::MemtableSource;
 use crate::engine::scores_source::ScoresSource;
 use crate::engine::traces_source::TracesSource;
@@ -181,13 +182,17 @@ impl EngineContext {
     ) -> Result<Self, EngineError> {
         let suspects = Suspects::new(Arc::clone(verify));
         let spans_raw = spans_schema();
+        let visible_from = options.visible_from();
 
         if state.projects.is_dropped(project) {
             let empty_mem = ProjectMemSnapshot::empty();
             let no_deletions: Arc<[Arc<PendingDeletion>]> = Arc::from(Vec::new());
-            let spans: Arc<dyn ScanSource> = Arc::new(
+            let mut spans: Arc<dyn ScanSource> = Arc::new(
                 UnionSource::new(spans_raw, Vec::new()).map_err(|e| EngineError::from_query(&e))?,
             );
+            if let Some(vf) = visible_from {
+                spans = Arc::new(VisibleFromSource::new(spans, spans::START_TIME, vf));
+            }
             let traces = Arc::new(
                 TracesSource::new(
                     Arc::clone(&store),
@@ -200,21 +205,22 @@ impl EngineContext {
                     suspects.clone(),
                     handle.clone(),
                 )
-                .map_err(|e| EngineError::from_query(&e))?,
+                .map_err(|e| EngineError::from_query(&e))?
+                .with_visible_from(visible_from),
             );
             let scores = Arc::new(
                 ScoresSource::new(
                     store,
                     project,
                     Vec::new(),
-                    Arc::clone(empty_mem.as_snapshot()),
-                    None,
+                    empty_mem,
                     no_deletions,
                     Arc::clone(&runtime.metadata_cache),
                     suspects.clone(),
                     handle,
                 )
-                .map_err(|e| EngineError::from_query(&e))?,
+                .map_err(|e| EngineError::from_query(&e))?
+                .with_visible_from(visible_from),
             );
             return Ok(Self {
                 spans,
@@ -222,7 +228,7 @@ impl EngineContext {
                 scores,
                 suspects,
                 runtime,
-                visible_from: options.visible_from(),
+                visible_from,
                 around: options.around(),
                 force_range_mode: false,
                 pool,
@@ -271,18 +277,15 @@ impl EngineContext {
             suspects.clone(),
             handle.clone(),
         );
-        let spans_mem = MemtableSource::new(
-            Table::Spans,
-            project,
-            keep_from,
-            Arc::clone(spans_snapshot.as_snapshot()),
-            Arc::clone(&deletions),
-        )
-        .map_err(|e| EngineError::from_query(&e))?;
-        let spans: Arc<dyn ScanSource> = Arc::new(
+        let spans_mem = MemtableSource::from_projected(Table::Spans, project, &spans_snapshot)
+            .map_err(|e| EngineError::from_query(&e))?;
+        let mut spans: Arc<dyn ScanSource> = Arc::new(
             UnionSource::new(spans_raw, vec![spans_parquet, Arc::new(spans_mem)])
                 .map_err(|e| EngineError::from_query(&e))?,
         );
+        if let Some(vf) = visible_from {
+            spans = Arc::new(VisibleFromSource::new(spans, spans::START_TIME, vf));
+        }
 
         let traces = Arc::new(
             TracesSource::new(
@@ -296,7 +299,8 @@ impl EngineContext {
                 suspects.clone(),
                 handle.clone(),
             )
-            .map_err(|e| EngineError::from_query(&e))?,
+            .map_err(|e| EngineError::from_query(&e))?
+            .with_visible_from(visible_from),
         );
 
         let scores = Arc::new(
@@ -304,14 +308,14 @@ impl EngineContext {
                 store,
                 project,
                 scores_files,
-                Arc::clone(scores_snapshot.as_snapshot()),
-                keep_from,
+                scores_snapshot,
                 deletions,
                 Arc::clone(&runtime.metadata_cache),
                 suspects.clone(),
                 handle,
             )
-            .map_err(|e| EngineError::from_query(&e))?,
+            .map_err(|e| EngineError::from_query(&e))?
+            .with_visible_from(visible_from),
         );
 
         Ok(Self {
@@ -320,12 +324,28 @@ impl EngineContext {
             scores,
             suspects,
             runtime,
-            visible_from: options.visible_from(),
+            visible_from,
             around: options.around(),
             force_range_mode: false,
             pool,
             last_metrics: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Returns a copy with `visible_from` applied to `spans`, `traces`, and `scores`.
+    #[cfg(test)]
+    pub(crate) fn with_visible_from(mut self, visible_from: Option<i64>) -> Self {
+        self.visible_from = visible_from;
+        if let Some(vf) = visible_from {
+            self.spans = Arc::new(VisibleFromSource::new(
+                Arc::clone(&self.spans),
+                spans::START_TIME,
+                vf,
+            ));
+        }
+        self.traces = Arc::new(self.traces.as_ref().clone().with_visible_from(visible_from));
+        self.scores = Arc::new(self.scores.as_ref().clone().with_visible_from(visible_from));
+        self
     }
 
     /// Executes arbitrary synchronous query work on `spawn_blocking` using the attached

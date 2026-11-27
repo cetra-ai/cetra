@@ -479,6 +479,7 @@ impl SqlEngineContext {
                 run_export_producer(&cfg, init_tx, &tx);
                 drop(cfg);
                 let _ = done_tx.send(());
+                drop(tx);
             })
             .map_err(|_| RunError::Internal(EngineError::internal("spawn sql export thread")))?;
 
@@ -559,11 +560,10 @@ impl SqlEngineContext {
                     state.drain_on_abort().await;
                     Some((Err(err), state))
                 }
-                Step::Item(None) => {
-                    state.done = true;
-                    state.drain_on_abort().await;
-                    None
-                }
+                Step::Item(None) => match state.finish_on_eof().await {
+                    Ok(()) => None,
+                    Err(err) => Some((Err(err), state)),
+                },
             }
         })
         .boxed())
@@ -673,6 +673,33 @@ impl ExportStreamState {
             .await;
         }
         let _ = self._pool.take();
+    }
+
+    async fn finish_on_eof(&mut self) -> Result<(), RunError> {
+        self.done = true;
+        self.rx.close();
+        let mut panicked = false;
+        if let Some(done_rx) = self.done_rx.take()
+            && done_rx.await.is_err()
+        {
+            panicked = true;
+        }
+        if let Some(j) = self.join.take() {
+            match tokio::task::spawn_blocking(move || j.join()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => {
+                    panicked = true;
+                }
+            }
+        }
+        let _ = self._pool.take();
+        if panicked {
+            Err(RunError::Internal(EngineError::internal(
+                "sql export thread panicked",
+            )))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -968,7 +995,6 @@ mod tests {
         let cache = Arc::new(FileMetadataCache::new(0));
         let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
         let spans_mt = Memtable::new(Table::Spans).snapshot();
-        let scores_mt = Memtable::new(Table::Scores).snapshot();
 
         let spans = Arc::new(
             crate::engine::mem_source::MemtableSource::new(
@@ -999,8 +1025,7 @@ mod tests {
                 store,
                 project,
                 Vec::new(),
-                scores_mt,
-                None,
+                ProjectMemSnapshot::empty(),
                 Arc::from([]),
                 cache,
                 suspects,
@@ -1239,6 +1264,116 @@ mod tests {
         while ctx.admission.used() > 0 && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        assert_eq!(ctx.admission.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn sql_export_surfaces_producer_thread_panic_as_internal_error() {
+        #[derive(Debug)]
+        struct PanicAfterFirstBatchSource {
+            schema: Arc<Schema>,
+        }
+
+        struct PanicAfterFirstBatchStream {
+            first: Option<Batch>,
+        }
+
+        impl PartitionStream for PanicAfterFirstBatchStream {
+            fn next_batch(
+                &mut self,
+                _cancel: &CancelToken,
+                _res: Option<&mut cetra_column::Reservation>,
+            ) -> Result<Option<Batch>, QueryError> {
+                if let Some(batch) = self.first.take() {
+                    Ok(Some(batch))
+                } else {
+                    panic!("simulated sql export producer panic");
+                }
+            }
+        }
+
+        impl ScanSource for PanicAfterFirstBatchSource {
+            fn schema(&self) -> Arc<Schema> {
+                Arc::clone(&self.schema)
+            }
+
+            fn projected_schema(
+                &self,
+                spec: &cetra_query::exec::ScanSpec,
+            ) -> Result<Arc<Schema>, QueryError> {
+                match &spec.projection {
+                    Some(indices) => Ok(Arc::new(self.schema.project(indices)?)),
+                    None => Ok(Arc::clone(&self.schema)),
+                }
+            }
+
+            fn open_partitions(
+                &self,
+                spec: &cetra_query::exec::ScanSpec,
+                _ctx: &ExecContext,
+            ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+                let proj_schema = self.projected_schema(spec)?;
+                let cols = proj_schema
+                    .fields()
+                    .iter()
+                    .map(|f| match &f.data_type {
+                        DataType::Utf8 => Column::try_new_const(
+                            cetra_column::ScalarValue::Utf8("row".to_owned()),
+                            2,
+                        ),
+                        DataType::TimestampNs { utc } => Column::try_new_const(
+                            cetra_column::ScalarValue::TimestampNs {
+                                value: 1_700_000_000_000_000_000,
+                                utc: *utc,
+                            },
+                            2,
+                        ),
+                        dt => Column::try_new_const(cetra_column::ScalarValue::Null(dt.clone()), 2),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let first = Batch::try_new_all(proj_schema, cols, 2)?;
+                Ok(vec![Box::new(PanicAfterFirstBatchStream {
+                    first: Some(first),
+                })])
+            }
+
+            fn explain_summary(&self, _spec: &cetra_query::exec::ScanSpec) -> String {
+                "PanicAfterFirstBatchSource".to_owned()
+            }
+        }
+
+        let (mut ctx, _dir) = empty_engine_ctx(64 * 1024 * 1024);
+        ctx.spans = Arc::new(PanicAfterFirstBatchSource {
+            schema: cetra_core::schema::spans_schema(),
+        });
+
+        let params = Map::new();
+        let mut stream = ctx
+            .sql_export_csv(SqlRequest {
+                query: "SELECT name FROM spans",
+                params: &params,
+                limit: 100,
+                timeout: Duration::from_secs(5),
+            })
+            .await
+            .unwrap();
+
+        let mut saw_panic_err = false;
+        while let Some(item) = stream.next().await {
+            if let Err(err) = item {
+                assert!(
+                    matches!(err, RunError::Internal(_)),
+                    "unexpected error: {err:?}"
+                );
+                saw_panic_err = true;
+                break;
+            }
+        }
+        assert!(
+            saw_panic_err,
+            "export stream must yield RunError::Internal on producer panic instead of silent EOF"
+        );
+        assert!(stream.next().await.is_none());
         assert_eq!(ctx.admission.used(), 0);
     }
 }

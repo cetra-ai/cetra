@@ -1,10 +1,12 @@
 //! Zero-Arrow streaming Parquet export writer over `cetra_column::Batch`.
 //!
-//! Uses `parquet::file::writer::SerializedFileWriter<Vec<u8>>` directly with
-//! ZSTD level 1 compression and row-group buffering gated by [`Reservation`].
+//! Uses `parquet::file::writer::SerializedFileWriter` over a [`Reservation`]-backed
+//! buffer with ZSTD level 1 compression and row-group buffering gated by [`Reservation`].
 
 use std::fmt;
+use std::io::Write;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use cetra_column::{
@@ -35,15 +37,72 @@ pub(crate) const PARQUET_CHUNK_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum top-level rows buffered in [`LeafBuffer`] before calling `write_batch`.
 const LEAF_CHUNK_ROWS: usize = 4_096;
 
+/// `Vec<u8>` sink whose every [`Write::write`] reserves bytes against a [`Reservation`]
+/// before growing the buffer, setting `oom` on pool exhaustion so callers always map to
+/// [`QueryError::TooLarge`].
+struct ReservedVec {
+    buf: Vec<u8>,
+    reservation: Reservation,
+    oom: Arc<AtomicBool>,
+}
+
+impl ReservedVec {
+    fn new(reservation: Reservation, oom: Arc<AtomicBool>) -> Self {
+        Self {
+            buf: Vec::new(),
+            reservation,
+            oom,
+        }
+    }
+
+    fn take(&mut self) -> Vec<u8> {
+        let buf = std::mem::take(&mut self.buf);
+        self.reservation.free();
+        buf
+    }
+
+    fn clear(&mut self) {
+        self.buf.clear();
+        self.buf.shrink_to_fit();
+        self.reservation.free();
+    }
+
+    fn into_vec(mut self) -> Vec<u8> {
+        self.reservation.free();
+        self.buf
+    }
+
+    fn reserved_bytes(&self) -> usize {
+        self.reservation.size()
+    }
+}
+
+impl Write for ReservedVec {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if !data.is_empty() && self.reservation.try_grow(data.len()).is_err() {
+            self.oom.store(true, Ordering::Release);
+            return Err(std::io::Error::other(
+                "parquet export memory limit exceeded",
+            ));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Streaming low-level Parquet exporter consuming [`Batch`]es and yielding
 /// completed Parquet chunks on row-group flushes.
 pub(crate) struct ParquetBatchExporter {
     schema: Arc<Schema>,
-    writer: SerializedFileWriter<Vec<u8>>,
+    writer: SerializedFileWriter<ReservedVec>,
+    oom: Arc<AtomicBool>,
     buffered_batches: Vec<Batch>,
     buffered_rows: usize,
     buffered_bytes: usize,
-    writer_reserved_bytes: usize,
     max_row_group_rows: usize,
     max_row_group_bytes: usize,
     max_chunk_bytes: usize,
@@ -57,7 +116,10 @@ impl fmt::Debug for ParquetBatchExporter {
             .field("buffered_batches", &self.buffered_batches.len())
             .field("buffered_rows", &self.buffered_rows)
             .field("buffered_bytes", &self.buffered_bytes)
-            .field("writer_reserved_bytes", &self.writer_reserved_bytes)
+            .field(
+                "writer_reserved_bytes",
+                &self.writer.inner().reserved_bytes(),
+            )
             .field("max_row_group_rows", &self.max_row_group_rows)
             .field("max_row_group_bytes", &self.max_row_group_bytes)
             .field("max_chunk_bytes", &self.max_chunk_bytes)
@@ -116,17 +178,23 @@ impl ParquetBatchExporter {
                 .set_compression(Compression::ZSTD(ZstdLevel::default()))
                 .build(),
         );
-        let writer = SerializedFileWriter::new(Vec::new(), parquet_schema, props)
-            .map_err(|e| parquet_err(&e))?;
+        let oom = Arc::new(AtomicBool::new(false));
+        let writer_res = pool.register("parquet_export_writer", false);
+        let writer = SerializedFileWriter::new(
+            ReservedVec::new(writer_res, Arc::clone(&oom)),
+            parquet_schema,
+            props,
+        )
+        .map_err(|e| map_parquet_err(&oom, &e))?;
         let reservation = pool.register("parquet_export", false);
 
         Ok(Self {
             schema,
             writer,
+            oom,
             buffered_batches: Vec::new(),
             buffered_rows: 0,
             buffered_bytes: 0,
-            writer_reserved_bytes: 0,
             max_row_group_rows,
             max_row_group_bytes,
             max_chunk_bytes: EXPORT_MAX_CHUNK_BYTES,
@@ -198,30 +266,23 @@ impl ParquetBatchExporter {
         if !self.buffered_batches.is_empty() {
             self.write_buffered_row_group()?;
         }
-        let prev_len = self.writer.inner_mut().len();
-        let buf = self.writer.into_inner().map_err(|e| parquet_err(&e))?;
-        let delta = buf.len().saturating_sub(prev_len);
-        if delta > 0 {
-            self.reservation.try_grow(delta)?;
-        }
+        let oom = Arc::clone(&self.oom);
+        let reserved_vec = self
+            .writer
+            .into_inner()
+            .map_err(|e| map_parquet_err(&oom, &e))?;
+        let buf = reserved_vec.into_vec();
         self.reservation.free();
-        self.writer_reserved_bytes = 0;
         Ok(split_bytes_chunks(buf, self.max_chunk_bytes))
     }
 
     fn flush_row_group(&mut self) -> Result<Vec<Bytes>, QueryError> {
         self.write_buffered_row_group()?;
-        let prev_len = self.writer.inner_mut().len();
-        self.writer.flush().map_err(|e| io_err(&e))?;
-        let delta = self.writer.inner_mut().len().saturating_sub(prev_len);
-        if delta > 0 {
-            self.reservation.try_grow(delta)?;
-            self.writer_reserved_bytes = self.writer_reserved_bytes.saturating_add(delta);
+        if let Err(err) = self.writer.flush() {
+            self.writer.inner_mut().clear();
+            return Err(map_io_err(&self.oom, &err));
         }
-        let buf = std::mem::take(self.writer.inner_mut());
-        let to_shrink = self.writer_reserved_bytes.min(self.reservation.size());
-        self.reservation.shrink(to_shrink);
-        self.writer_reserved_bytes = 0;
+        let buf = self.writer.inner_mut().take();
         Ok(split_bytes_chunks(buf, self.max_chunk_bytes))
     }
 
@@ -230,7 +291,6 @@ impl ParquetBatchExporter {
             return Ok(());
         }
 
-        let prev_writer_len = self.writer.inner_mut().len();
         let res: Result<(), QueryError> = (|| {
             let mut rg = self.writer.next_row_group().map_err(|e| parquet_err(&e))?;
             write_columns_for_batches(&mut rg, &self.schema, &self.buffered_batches)?;
@@ -243,16 +303,13 @@ impl ParquetBatchExporter {
         let freed_batches = std::mem::take(&mut self.buffered_bytes);
         self.reservation
             .shrink(freed_batches.min(self.reservation.size()));
-        res?;
 
-        let writer_delta = self
-            .writer
-            .inner_mut()
-            .len()
-            .saturating_sub(prev_writer_len);
-        if writer_delta > 0 {
-            self.reservation.try_grow(writer_delta)?;
-            self.writer_reserved_bytes = self.writer_reserved_bytes.saturating_add(writer_delta);
+        if let Err(err) = res {
+            self.writer.inner_mut().clear();
+            if self.oom.load(Ordering::Acquire) {
+                return Err(QueryError::TooLarge);
+            }
+            return Err(err);
         }
         Ok(())
     }
@@ -275,8 +332,24 @@ fn parquet_err(err: &ParquetError) -> QueryError {
     QueryError::internal(format!("parquet export error: {err}"))
 }
 
+fn map_parquet_err(oom: &AtomicBool, err: &ParquetError) -> QueryError {
+    if oom.load(Ordering::Acquire) {
+        QueryError::TooLarge
+    } else {
+        parquet_err(err)
+    }
+}
+
 fn io_err(err: &std::io::Error) -> QueryError {
     QueryError::internal(format!("parquet export io error: {err}"))
+}
+
+fn map_io_err(oom: &AtomicBool, err: &std::io::Error) -> QueryError {
+    if oom.load(Ordering::Acquire) {
+        QueryError::TooLarge
+    } else {
+        io_err(err)
+    }
 }
 
 fn build_parquet_schema(schema: &Schema) -> Result<TypePtr, QueryError> {
@@ -541,8 +614,8 @@ fn leaf_count(data_type: &DataType) -> usize {
     }
 }
 
-fn write_columns_for_batches(
-    rg: &mut SerializedRowGroupWriter<'_, Vec<u8>>,
+fn write_columns_for_batches<W: Write + Send>(
+    rg: &mut SerializedRowGroupWriter<'_, W>,
     schema: &Schema,
     batches: &[Batch],
 ) -> Result<(), QueryError> {
@@ -2663,6 +2736,7 @@ mod tests {
             ParquetBatchExporter::new(Arc::clone(&non_null_schema), &pool).unwrap();
         let bad_batch = mk_batch(&nullable_schema, vec![1, 2, 3]);
         assert!(strict_exporter.push_batch(bad_batch, None).is_err());
+        drop(strict_exporter);
         assert_eq!(pool.reserved(), 0);
     }
 
@@ -2675,11 +2749,12 @@ mod tests {
             Batch::try_new_all(Arc::clone(&schema), vec![col], len).unwrap()
         };
 
-        // Pool fits ONE batch + small writer overhead, NOT 2x batch memory!
+        // Pool fits ONE batch + compressed row-group output (now reserved live via ReservedVec),
+        // NOT 2x batch memory!
         let b1 = mk_batch((0..256).collect());
         let b2 = mk_batch((256..512).collect());
         let b1_bytes = b1.memory_bytes();
-        let cap = b1_bytes + 512;
+        let cap = b1_bytes + 1536;
         assert!(b1_bytes * 2 > cap);
 
         let pool = GlobalPool::standalone(cap);
@@ -2719,7 +2794,10 @@ mod tests {
         let c2 = exporter2.push_batch(b2, Some(&mut pull_res)).unwrap();
         assert!(c2.is_empty());
         assert_eq!(pull_res.size(), 0);
-        assert_eq!(pool.reserved(), b2_bytes);
+        assert_eq!(
+            pool.reserved(),
+            b2_bytes + exporter2.writer.inner().reserved_bytes()
+        );
 
         let tail = exporter2.finish().unwrap();
         assert!(tail.len() > 1, "finish() must also split into <=64B chunks");
@@ -2754,5 +2832,70 @@ mod tests {
         let arrow_batches = read_arrow(&bytes);
         let total_rows: usize = arrow_batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 10_000);
+    }
+
+    #[test]
+    fn writer_oom_during_init_row_group_and_finish_maps_to_too_large_and_releases_pool() {
+        let schema = Schema::try_new_arc(vec![Field::new("s", DataType::Utf8, false)]).unwrap();
+
+        // 1. Pool too small even for the 4-byte Parquet magic header + empty footer -> TooLarge
+        //    (not Internal). `SerializedFileWriter` uses an internal `BufWriter`, so the error
+        //    surfaces on `finish()` when the header/footer flush hits `ReservedVec::write`.
+        let tiny_pool = GlobalPool::standalone(2);
+        let init_err = match ParquetBatchExporter::new(Arc::clone(&schema), &tiny_pool) {
+            Ok(exp) => exp.finish().unwrap_err(),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(init_err, QueryError::TooLarge),
+            "expected TooLarge on header/footer OOM, got {init_err:?}"
+        );
+        assert_eq!(tiny_pool.reserved(), 0);
+
+        // 2. Pool fits the batch (with high-entropy strings) + header, NOT the compressed row group + footer.
+        let mut vals = Vec::with_capacity(64);
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..64 {
+            let mut s = String::with_capacity(64);
+            for _ in 0..16 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let hex_nib = ((state >> 60) & 0xf) as u8;
+                let ch = if hex_nib < 10 {
+                    (b'0' + hex_nib) as char
+                } else {
+                    (b'a' + (hex_nib - 10)) as char
+                };
+                s.push(ch);
+            }
+            vals.push(s);
+        }
+        let refs: Vec<&str> = vals.iter().map(String::as_str).collect();
+        let col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(refs).unwrap()),
+                None,
+            )
+            .unwrap(),
+        );
+        let batch = Batch::try_new_all(Arc::clone(&schema), vec![col], 64).unwrap();
+        let batch_bytes = batch.memory_bytes();
+
+        // Cap fits the buffered batch + 4-byte header + 16 bytes slack, so writing the
+        // compressed row group / footer MUST trip ReservedVec::write OOM -> QueryError::TooLarge.
+        let pool = GlobalPool::standalone(batch_bytes + 20);
+        let mut exporter = ParquetBatchExporter::with_row_group_limits(
+            Arc::clone(&schema),
+            &pool,
+            10_000,
+            10 * 1024 * 1024,
+        )
+        .unwrap();
+        assert!(exporter.push_batch(batch, None).unwrap().is_empty());
+        let finish_err = exporter.finish().unwrap_err();
+        assert!(
+            matches!(finish_err, QueryError::TooLarge),
+            "expected TooLarge on writer OOM, got {finish_err:?}"
+        );
+        assert_eq!(pool.reserved(), 0);
     }
 }

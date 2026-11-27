@@ -810,15 +810,11 @@ fn prepare_widget_streams(
         WidgetSource::Spans => {
             let raw_schema = spans_raw_schema()?;
             let start_col = col_expr(&raw_schema, spans::START_TIME)?;
-            let mut min_ns = window.from();
-            if let Some(vf) = ctx.visible_from {
-                min_ns = min_ns.max(vf);
-            }
             let mut spec = ScanSpec {
                 projection: None,
                 map_projections: BTreeMap::new(),
                 time_range: TimeRangeHint {
-                    min_ns: Some(min_ns),
+                    min_ns: Some(window.from()),
                     max_ns: window.to().checked_sub(1),
                     around_ns: None,
                 },
@@ -831,9 +827,6 @@ fn prepare_widget_streams(
                 sort_hints: Vec::new(),
                 limit: None,
             };
-            if let Some(vf) = ctx.visible_from {
-                spec.filters.push(cmp_ts(&start_col, BinaryOp::GtEq, vf));
-            }
 
             if uses_score_joins {
                 let raw_streams = ctx
@@ -926,15 +919,11 @@ fn prepare_widget_streams(
             let created_col = col_expr(&raw_schema, scores::CREATED_AT)?;
             let target_col = col_expr(&raw_schema, scores::TARGET)?;
             let source_col = col_expr(&raw_schema, scores::SOURCE)?;
-            let mut min_ns = window.from();
-            if let Some(vf) = ctx.visible_from {
-                min_ns = min_ns.max(vf);
-            }
             let mut spec = ScanSpec {
                 projection: None,
                 map_projections: BTreeMap::new(),
                 time_range: TimeRangeHint {
-                    min_ns: Some(min_ns),
+                    min_ns: Some(window.from()),
                     max_ns: window.to().checked_sub(1),
                     around_ns: None,
                 },
@@ -969,9 +958,6 @@ fn prepare_widget_streams(
                 sort_hints: Vec::new(),
                 limit: None,
             };
-            if let Some(vf) = ctx.visible_from {
-                spec.filters.push(cmp_ts(&created_col, BinaryOp::GtEq, vf));
-            }
             if let Some(wf) = &filters.widget {
                 let rewritten = rewrite_view_expr_for_raw(
                     &wf.expr,

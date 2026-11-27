@@ -13,8 +13,8 @@ use cetra_query::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join, jo
 use cetra_query::exec::sort_window::ExternalSort;
 use cetra_query::exec::streaming::{FilterOp, ProjectOp, TopKSink};
 use cetra_query::exec::{
-    AggExpr, AggFunc, BatchSource, CollectSink, ControlFlow, ExecContext, HashAgg, HashAggSpec,
-    IdLookupHint, PartitionStream, PushSink, ScanSource, ScanSpec, SortKey, TimeRangeHint,
+    AggExpr, AggFunc, CollectSink, ControlFlow, ExecContext, HashAgg, HashAggSpec, IdLookupHint,
+    PartitionStream, PushSink, ScanSource, ScanSpec, SortKey, TimeRangeHint,
     run_pipeline as exec_run_pipeline,
 };
 use cetra_query::{
@@ -358,8 +358,17 @@ pub async fn user_detail(
             let Some(user) = single_row(&user_batches, exec_ctx)? else {
                 return Ok(None);
             };
+            if let Some(sc_col) = user.column_by_name(SESSION_COUNT)
+                && matches!(sc_col.get_scalar(0)?, ScalarValue::I64(0))
+            {
+                return Ok(Some(UserDetailData {
+                    user,
+                    sessions: Vec::new(),
+                }));
+            }
 
-            // Collect distinct non-null session_ids of this user's traces in scope.
+            // Stream distinct non-null session_ids of this user's traces directly into the
+            // LeftSemi join right side (spillable under tight memory pools).
             let mut sid_spec = user_spec.clone();
             let sid_idx = traces_raw
                 .index_of(traces::SESSION_ID)
@@ -372,6 +381,12 @@ pub async fn user_detail(
                 data_type: DataType::Bool,
             });
             let sid_streams = ctx_c.traces.open_partitions(&sid_spec, exec_ctx)?;
+            if sid_streams.is_empty() {
+                return Ok(Some(UserDetailData {
+                    user,
+                    sessions: Vec::new(),
+                }));
+            }
             let sid_schema = ctx_c.traces.projected_schema(&sid_spec)?;
             let sid_agg_spec = HashAggSpec {
                 group_by: vec![(
@@ -380,29 +395,12 @@ pub async fn user_detail(
                 )],
                 aggs: Vec::new(),
             };
-            let distinct_sid_stream =
-                execute_hash_agg_streams(sid_streams, sid_schema, sid_agg_spec, exec_ctx)?;
-            let pool_c = Arc::clone(&exec_ctx.pool);
-            let sid_sinks = exec_run_pipeline(
+            let distinct_sid_stream = execute_hash_agg_streams(
+                sid_streams,
+                Arc::clone(&sid_schema),
+                sid_agg_spec,
                 exec_ctx,
-                vec![distinct_sid_stream],
-                |_| Ok(Vec::new()),
-                move |_| Ok(CollectSink::new(&pool_c)),
             )?;
-            let sid_batches: Vec<Batch> = sid_sinks
-                .into_iter()
-                .flat_map(CollectSink::into_batches)
-                .filter(|b| b.num_rows() > 0)
-                .collect();
-            if sid_batches.is_empty() {
-                return Ok(Some(UserDetailData {
-                    user,
-                    sessions: Vec::new(),
-                }));
-            }
-            let sid_only_schema = Arc::clone(sid_batches[0].schema());
-            let sid_src = BatchSource::new(Arc::clone(&sid_only_schema), sid_batches)?;
-            let right_streams = sid_src.open_partitions(&ScanSpec::default(), exec_ctx)?;
 
             // Left semi-join all scoped traces against those session_ids, then sessions_from_traces.
             let mut all_spec = base_spec;
@@ -425,12 +423,12 @@ pub async fn user_detail(
             let joined = execute_hash_join(
                 all_streams,
                 Arc::clone(&all_schema),
-                right_streams,
-                Arc::clone(&sid_only_schema),
+                vec![distinct_sid_stream],
+                Arc::clone(&sid_schema),
                 HashJoinSpec {
                     join_type: JoinType::LeftSemi,
                     left_keys: vec![col_expr(&all_schema, traces::SESSION_ID)?],
-                    right_keys: vec![col_expr(&sid_only_schema, traces::SESSION_ID)?],
+                    right_keys: vec![col_expr(&sid_schema, traces::SESSION_ID)?],
                     null_equals_null: false,
                     residual_filter: None,
                 },
@@ -1109,7 +1107,7 @@ fn compute_user_scores(
         scan_indices.push(idx);
     }
 
-    let mut filters = vec![
+    let filters = vec![
         Expr::InList {
             expr: Box::new(col_expr(&scores_raw, scores::DATA_TYPE)?),
             list: vec![
@@ -1143,23 +1141,12 @@ fn compute_user_scores(
             data_type: DataType::Bool,
         },
     ];
-    if let Some(vf) = ctx.visible_from {
-        filters.push(Expr::Binary {
-            left: Box::new(col_expr(&scores_raw, scores::CREATED_AT)?),
-            op: BinaryOp::GtEq,
-            right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
-                value: vf,
-                utc: true,
-            })),
-            data_type: DataType::Bool,
-        });
-    }
 
     let score_spec = ScanSpec {
         projection: Some(scan_indices),
         map_projections: Default::default(),
         time_range: TimeRangeHint {
-            min_ns: ctx.visible_from,
+            min_ns: None,
             max_ns: None,
             around_ns: None,
         },

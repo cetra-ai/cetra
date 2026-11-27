@@ -238,24 +238,12 @@ fn latest_score_stream(params: &LatestScoreParams<'_>) -> Result<LatestScoreStre
             data_type: DataType::Bool,
         });
     }
-    if let Some(vf) = ctx.visible_from {
-        let created_col = col_by_name(scores_raw, scores::CREATED_AT)?;
-        filters.push(Expr::Binary {
-            left: Box::new(created_col),
-            op: BinaryOp::GtEq,
-            right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
-                value: vf,
-                utc: true,
-            })),
-            data_type: DataType::Bool,
-        });
-    }
 
     let scan_spec = ScanSpec {
         projection: Some(scan_indices),
         map_projections: Default::default(),
         time_range: TimeRangeHint {
-            min_ns: ctx.visible_from,
+            min_ns: None,
             max_ns: None,
             around_ns: None,
         },

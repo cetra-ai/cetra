@@ -13,14 +13,17 @@ pub(crate) mod traces_source;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use cetra_column::{Batch, CancelToken, Column, ColumnError, DataType, Reservation, Schema};
+use cetra_column::{
+    Batch, CancelToken, Column, ColumnError, DataType, Reservation, ScalarValue, Schema,
+};
 use cetra_query::exec::sort_window::ExternalSort;
 use cetra_query::exec::{
-    ControlFlow, ExecContext, MAX_MERGE_WAY, PartitionStream, PushSink, SortKey, SpillAppender,
-    SpillFile,
+    ControlFlow, ExecContext, MAX_MERGE_WAY, PartitionStream, PushSink, ScanSource, ScanSpec,
+    SortKey, SpillAppender, SpillFile,
 };
 use cetra_query::{
-    EvalContext, Expr, QueryError, TombstoneSpec, TombstoneTable, eval_filter, filter_uncovered,
+    BinaryOp, EvalContext, Expr, QueryError, TombstoneSpec, TombstoneTable, eval_filter,
+    filter_uncovered,
 };
 use chrono::{Datelike, NaiveDate};
 
@@ -359,7 +362,7 @@ fn collect_or_disjuncts<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     }
 }
 
-fn apply_time_cmp(bounds: &mut TimeBounds, op: cetra_query::BinaryOp, lit: i64, col_left: bool) {
+fn apply_time_cmp(bounds: &mut TimeBounds, op: BinaryOp, lit: i64, col_left: bool) {
     use cetra_query::BinaryOp;
     let op = if col_left {
         op
@@ -582,15 +585,19 @@ impl PartitionStream for BufferedBatchStream {
             return Ok(None);
         };
         let bytes = batch.memory_bytes();
-        self.res.shrink(self.res.size().min(bytes));
-        reconcile_res(res, before, bytes)?;
+        if let Err(err) = handoff_res(&mut self.res, res, before, bytes) {
+            self.res.shrink(self.res.size().min(bytes));
+            return Err(err);
+        }
         Ok(Some(batch))
     }
 }
 
-/// Moves `bytes` from `src` into `dst` without double-counting; if `src.size() < bytes`,
-/// transfers `src.size()` first and grows `dst` by the remainder (rolling back on error).
-pub(super) fn transfer_or_grow(
+/// Moves `bytes` from `src` into `dst` without double-counting; if `src.size() < bytes`:
+/// - when `src.can_spill()`, grows `dst` by the shortfall first then transfers `src.size()`
+///   (rolling back via infallible `dst.shrink` on error);
+/// - otherwise transfers `src.size()` first and grows `dst` by the remainder (rolling back on error).
+pub(crate) fn transfer_or_grow(
     src: &mut Reservation,
     dst: &mut Reservation,
     bytes: usize,
@@ -601,6 +608,16 @@ pub(super) fn transfer_or_grow(
     let avail = src.size();
     if avail >= bytes {
         src.transfer_to(dst, bytes)
+    } else if src.can_spill() {
+        let extra = bytes - avail;
+        dst.try_grow(extra)?;
+        if avail > 0
+            && let Err(err) = src.transfer_to(dst, avail)
+        {
+            dst.shrink(extra);
+            return Err(err);
+        }
+        Ok(())
     } else {
         if avail > 0 {
             src.transfer_to(dst, avail)?;
@@ -612,6 +629,145 @@ pub(super) fn transfer_or_grow(
             return Err(err);
         }
         Ok(())
+    }
+}
+
+/// Hands off `target_bytes` from `src` to an optional caller reservation `dst` (whose
+/// baseline before this batch was `before`) without double-counting against the pool.
+///
+/// When `dst` is `Some`, `dst` ends at `before + target_bytes` (transferring from `src`
+/// first and growing only any deficit). When `dst` is `None`, `src` shrinks by up to
+/// `target_bytes`. On error, `dst` is rolled back to `before` and `src` is left unchanged.
+pub(super) fn handoff_res(
+    src: &mut Reservation,
+    dst: Option<&mut Reservation>,
+    before: usize,
+    target_bytes: usize,
+) -> Result<(), QueryError> {
+    let Some(r) = dst else {
+        src.shrink(src.size().min(target_bytes));
+        return Ok(());
+    };
+    let Some(target) = before.checked_add(target_bytes) else {
+        rollback_res(Some(r), before);
+        return Err(QueryError::TooLarge);
+    };
+    let cur = r.size();
+    if target > cur {
+        let need = target - cur;
+        if let Err(err) = transfer_or_grow(src, r, need) {
+            rollback_res(Some(r), before);
+            return Err(err.into());
+        }
+        let excess = target_bytes.saturating_sub(need);
+        if excess > 0 {
+            src.shrink(src.size().min(excess));
+        }
+    } else {
+        if target < cur {
+            r.shrink(cur - target);
+        }
+        src.shrink(src.size().min(target_bytes));
+    }
+    Ok(())
+}
+
+/// Applies an inclusive `visible_from` floor to `spec`: clamps `spec.time_range.min_ns`
+/// upward and appends `column >= visible_from` as a row-level filter.
+pub(crate) fn apply_visible_from(
+    spec: &ScanSpec,
+    schema: &Schema,
+    column: &str,
+    visible_from: i64,
+) -> Result<ScanSpec, QueryError> {
+    let idx = schema.index_of(column).ok_or_else(|| {
+        QueryError::internal(format!("schema missing visible_from column {column}"))
+    })?;
+    let data_type = schema
+        .fields()
+        .get(idx)
+        .ok_or_else(|| {
+            QueryError::internal(format!("schema missing visible_from column {column}"))
+        })?
+        .data_type
+        .clone();
+    let mut out = spec.clone();
+    out.time_range.min_ns = Some(
+        out.time_range
+            .min_ns
+            .map_or(visible_from, |cur| cur.max(visible_from)),
+    );
+    out.filters.push(Expr::Binary {
+        left: Box::new(Expr::Column {
+            index: idx,
+            name: column.to_owned(),
+            data_type,
+        }),
+        op: BinaryOp::GtEq,
+        right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
+            value: visible_from,
+            utc: true,
+        })),
+        data_type: DataType::Bool,
+    });
+    Ok(out)
+}
+
+/// [`ScanSource`] wrapper enforcing an inclusive `column >= visible_from` visibility floor
+/// on every scan (both `time_range.min_ns` pruning hint and row-level filter).
+pub(crate) struct VisibleFromSource {
+    inner: Arc<dyn ScanSource>,
+    column: &'static str,
+    visible_from: i64,
+}
+
+impl std::fmt::Debug for VisibleFromSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VisibleFromSource")
+            .field("column", &self.column)
+            .field("visible_from", &self.visible_from)
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl VisibleFromSource {
+    /// Wraps `inner` to hide all rows with `column < visible_from`.
+    pub(crate) fn new(inner: Arc<dyn ScanSource>, column: &'static str, visible_from: i64) -> Self {
+        Self {
+            inner,
+            column,
+            visible_from,
+        }
+    }
+}
+
+impl ScanSource for VisibleFromSource {
+    fn schema(&self) -> Arc<Schema> {
+        self.inner.schema()
+    }
+
+    fn projected_schema(&self, spec: &ScanSpec) -> Result<Arc<Schema>, QueryError> {
+        self.inner.projected_schema(spec)
+    }
+
+    fn open_partitions(
+        &self,
+        spec: &ScanSpec,
+        ctx: &ExecContext,
+    ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+        let schema = self.inner.schema();
+        let scoped = apply_visible_from(spec, &schema, self.column, self.visible_from)?;
+        self.inner.open_partitions(&scoped, ctx)
+    }
+
+    fn explain_summary(&self, spec: &ScanSpec) -> String {
+        format!(
+            "VisibleFromSource(col={}, visible_from={}, {})",
+            self.column,
+            self.visible_from,
+            self.inner.explain_summary(spec)
+        )
     }
 }
 
@@ -1067,6 +1223,58 @@ mod tests {
         assert_eq!(res.size(), before + out.memory_bytes());
     }
 
+    #[test]
+    fn buffered_batch_stream_handoff_avoids_double_charge_and_preserves_remaining_batches() {
+        let schema = Schema::try_new_arc(vec![Field::new("x", DataType::I64, false)]).unwrap();
+        let mk_batch = |vals: Vec<i64>| {
+            let len = vals.len();
+            let col = Column::Flat(FlatColumn::try_new(FlatData::I64(vals), None).unwrap());
+            Batch::try_new(Arc::clone(&schema), vec![col], len, Selection::All).unwrap()
+        };
+        let b1 = mk_batch((0..128).collect());
+        let b2 = mk_batch((128..256).collect());
+        let b1_bytes = b1.memory_bytes();
+        let b2_bytes = b2.memory_bytes();
+
+        // Pool fits exactly b1 + b2: transferring b1 from BufferedBatchStream to caller must NOT spike!
+        let pool = GlobalPool::standalone(b1_bytes + b2_bytes);
+        let mut buf_res = pool.register("buf", false);
+        buf_res.try_grow(b1_bytes + b2_bytes).unwrap();
+        let mut stream = BufferedBatchStream::new(vec![b1, b2], buf_res);
+
+        let cancel = CancelToken::new();
+        let mut caller_res = pool.register("caller", false);
+        let out1 = stream
+            .next_batch(&cancel, Some(&mut caller_res))
+            .unwrap()
+            .unwrap();
+        assert_eq!(out1.num_rows(), 128);
+        assert_eq!(caller_res.size(), b1_bytes);
+        assert_eq!(pool.reserved(), b1_bytes + b2_bytes);
+
+        drop(out1);
+        caller_res.free();
+        assert_eq!(pool.reserved(), b2_bytes);
+
+        let out2 = stream
+            .next_batch(&cancel, Some(&mut caller_res))
+            .unwrap()
+            .unwrap();
+        assert_eq!(out2.num_rows(), 128);
+        assert_eq!(caller_res.size(), b2_bytes);
+        assert_eq!(pool.reserved(), b2_bytes);
+
+        drop(out2);
+        caller_res.free();
+        assert!(
+            stream
+                .next_batch(&cancel, Some(&mut caller_res))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(pool.reserved(), 0);
+    }
+
     mod integration_tests {
         use std::collections::HashSet;
         use std::ops::Range;
@@ -1438,8 +1646,7 @@ mod tests {
                 Arc::clone(&store),
                 project(),
                 vec![f_score_a, f_score_b],
-                Memtable::new(Table::Scores).snapshot(),
-                None,
+                crate::deletion::ProjectMemSnapshot::empty(),
                 Arc::from([]),
                 cache,
                 suspects,
@@ -1633,12 +1840,19 @@ mod tests {
                 offset: 0,
             });
 
+            let projected_scores = crate::deletion::project_snapshot(
+                Table::Scores,
+                &scores_mt.snapshot(),
+                project(),
+                None,
+                &deletions,
+            )
+            .unwrap();
             let scores_src = ScoresSource::new(
                 store,
                 project(),
                 Vec::new(),
-                scores_mt.snapshot(),
-                None,
+                projected_scores,
                 deletions,
                 cache,
                 suspects,
@@ -1838,8 +2052,7 @@ mod tests {
                 Arc::clone(&store),
                 project(),
                 vec![f_a, f_b],
-                Memtable::new(Table::Scores).snapshot(),
-                None,
+                crate::deletion::ProjectMemSnapshot::empty(),
                 Arc::from([]),
                 cache,
                 suspects,
@@ -2027,8 +2240,7 @@ mod tests {
                 store,
                 project(),
                 vec![f_score_a, f_score_b],
-                Memtable::new(Table::Scores).snapshot(),
-                None,
+                crate::deletion::ProjectMemSnapshot::empty(),
                 Arc::from([]),
                 cache,
                 suspects,
@@ -2162,6 +2374,158 @@ mod tests {
                 .map(Batch::num_rows)
                 .sum();
             assert_eq!(s_lim_rows, 13);
+        }
+
+        #[test]
+        fn visible_from_enforced_by_spans_traces_and_scores_sources() {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let cache = Arc::new(crate::file_format::FileMetadataCache::new(1024 * 1024));
+            let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
+
+            let base = 20_000 * DAY_NS;
+            let day = day_of(base);
+            let cutoff = base + 5_000;
+
+            // Single batch / file containing rows both BEFORE and AT/AFTER `cutoff` so pruning
+            // alone cannot drop the file: row-level filtering MUST enforce `visible_from`.
+            let spans_batch = span_rows(&[
+                span_row(1, 1, base + 1_000, base + 1_500),
+                span_row(2, 1, cutoff, cutoff + 500),
+                span_row(3, 1, cutoff + 2_000, cutoff + 2_500),
+            ]);
+            let scores_batch = score_rows(&[
+                score_row(1, 1, base + 1_000, base + 1_000, base + 1_000, false, "m"),
+                score_row(2, 2, cutoff, cutoff, cutoff, false, "m"),
+                score_row(
+                    3,
+                    3,
+                    cutoff + 2_000,
+                    cutoff + 2_000,
+                    cutoff + 2_000,
+                    false,
+                    "m",
+                ),
+            ]);
+
+            let f_trace = write_table_file(
+                &rt,
+                &store,
+                FileTable::Traces,
+                day,
+                "tables/traces/vf.parquet",
+                partials_from_spans_batch(&spans_batch).unwrap(),
+                0,
+            );
+            let f_score = write_table_file(
+                &rt,
+                &store,
+                FileTable::Scores,
+                day,
+                "tables/scores/vf.parquet",
+                scores_batch,
+                0,
+            );
+
+            let mut spans_mt = Memtable::new(Table::Spans);
+            spans_mt.insert(project(), spans_batch, 1).unwrap();
+            let projected_spans = crate::deletion::project_snapshot(
+                Table::Spans,
+                &spans_mt.snapshot(),
+                project(),
+                None,
+                &[],
+            )
+            .unwrap();
+            let spans_inner: Arc<dyn ScanSource> = Arc::new(
+                crate::engine::mem_source::MemtableSource::from_projected(
+                    Table::Spans,
+                    project(),
+                    &projected_spans,
+                )
+                .unwrap(),
+            );
+            let spans_src = super::super::VisibleFromSource::new(
+                spans_inner,
+                cetra_core::schema::spans::START_TIME,
+                cutoff,
+            );
+
+            let traces_src = TracesSource::new(
+                Arc::clone(&store),
+                project(),
+                vec![f_trace],
+                crate::deletion::ProjectMemSnapshot::empty(),
+                0,
+                Arc::from([]),
+                Arc::clone(&cache),
+                suspects.clone(),
+                rt.handle().clone(),
+            )
+            .unwrap()
+            .with_visible_from(Some(cutoff));
+
+            let scores_src = ScoresSource::new(
+                store,
+                project(),
+                vec![f_score],
+                crate::deletion::ProjectMemSnapshot::empty(),
+                Arc::from([]),
+                cache,
+                suspects,
+                rt.handle().clone(),
+            )
+            .unwrap()
+            .with_visible_from(Some(cutoff));
+
+            let (ctx, _dir) = make_ctx(8 * 1024 * 1024, 16 * 1024 * 1024, 1);
+
+            // Project ONLY id columns (omitting start_time / created_at) to prove row-level
+            // filtering works regardless of caller projection.
+            let sp_spec = ScanSpec {
+                projection: Some(vec![
+                    spans_src
+                        .schema()
+                        .index_of(cetra_core::schema::spans::SPAN_ID)
+                        .unwrap(),
+                ]),
+                ..Default::default()
+            };
+            let sp_rows: usize = run_source(&spans_src, &sp_spec, &ctx)
+                .unwrap()
+                .iter()
+                .map(Batch::num_rows)
+                .sum();
+            assert_eq!(sp_rows, 2, "VisibleFromSource must hide older span row");
+
+            let tr_spec = ScanSpec {
+                projection: Some(vec![
+                    traces_src.schema().index_of(traces::TRACE_ID).unwrap(),
+                ]),
+                ..Default::default()
+            };
+            let tr_rows: usize = run_source(&traces_src, &tr_spec, &ctx)
+                .unwrap()
+                .iter()
+                .map(Batch::num_rows)
+                .sum();
+            assert_eq!(tr_rows, 2, "TracesSource must hide older trace row");
+
+            let sc_spec = ScanSpec {
+                projection: Some(vec![
+                    scores_src.schema().index_of(scores::SCORE_ID).unwrap(),
+                ]),
+                ..Default::default()
+            };
+            let sc_rows: usize = run_source(&scores_src, &sc_spec, &ctx)
+                .unwrap()
+                .iter()
+                .map(Batch::num_rows)
+                .sum();
+            assert_eq!(sc_rows, 2, "ScoresSource must hide older score row");
         }
     }
 }

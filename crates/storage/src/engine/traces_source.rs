@@ -32,7 +32,7 @@ use crate::verify::Suspects;
 
 use super::{
     BufferedBatchStream, DAY_NS, HashPartitionedSortSink, TimeBounds, apply_tombstones_and_filters,
-    cap_partitions, claim_shared_limit, day_of_ns, extract_time_bounds, read_bool_at,
+    cap_partitions, claim_shared_limit, day_of_ns, extract_time_bounds, handoff_res, read_bool_at,
     read_fixed16_at, read_str_at, reconcile_res, rollback_res, transfer_or_grow,
 };
 
@@ -79,6 +79,7 @@ pub(crate) struct TracesSource {
     suspects: Suspects,
     runtime: tokio::runtime::Handle,
     list_mode: Option<TraceListMode>,
+    visible_from: Option<i64>,
 }
 
 impl std::fmt::Debug for TracesSource {
@@ -102,6 +103,7 @@ impl std::fmt::Debug for TracesSource {
             .field("mem_batches", &mem_batches)
             .field("deletions", &self.deletions.len())
             .field("lookback", &self.lookback)
+            .field("visible_from", &self.visible_from)
             .field("schema_len", &self.schema.len())
             .finish_non_exhaustive()
     }
@@ -148,12 +150,19 @@ impl TracesSource {
             suspects,
             runtime,
             list_mode: None,
+            visible_from: None,
         })
     }
 
     /// Configures a widening-window or two-phase rank→fetch list mode on this source.
     pub(crate) fn with_list_mode(mut self, mode: TraceListMode) -> Self {
         self.list_mode = Some(mode);
+        self
+    }
+
+    /// Sets an inclusive `start_time >= visible_from` visibility floor enforced on every scan.
+    pub(crate) fn with_visible_from(mut self, visible_from: Option<i64>) -> Self {
+        self.visible_from = visible_from;
         self
     }
 
@@ -1077,6 +1086,13 @@ impl ScanSource for TracesSource {
         if ctx.eval.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
         }
+        let scoped_spec;
+        let spec = if let Some(vf) = self.visible_from {
+            scoped_spec = super::apply_visible_from(spec, &self.schema, traces::START_TIME, vf)?;
+            &scoped_spec
+        } else {
+            spec
+        };
         let bounds = self.effective_bounds(spec);
         let trace_ids = self.effective_trace_ids(spec);
 
@@ -1321,8 +1337,10 @@ impl NativeTraceMergeStream {
             return Ok(None);
         }
         let mut merged = merger.finish()?;
+        let merged_bytes = merged.memory_bytes();
+        let transfer = transfer_or_grow(&mut self.merger_res, &mut self.scratch_res, merged_bytes);
         self.merger_res.free();
-        reconcile_res(Some(&mut self.scratch_res), 0, merged.memory_bytes())?;
+        transfer?;
 
         // 1. Evaluate unpadded `start_time` bounds `[a, b]`.
         if self.bounds.min.is_some() || self.bounds.max.is_some() {
@@ -1491,8 +1509,14 @@ impl PartitionStream for NativeTraceMergeStream {
                         match self.finish_and_filter_merger(&eval_ctx) {
                             Ok(Some(out)) => {
                                 let out_bytes = out.memory_bytes();
+                                let handoff = handoff_res(
+                                    &mut self.scratch_res,
+                                    res.as_deref_mut(),
+                                    before,
+                                    out_bytes,
+                                );
                                 self.scratch_res.free();
-                                reconcile_res(res.as_deref_mut(), before, out_bytes)?;
+                                handoff?;
                                 return Ok(Some(out));
                             }
                             Ok(None) => {
@@ -1598,8 +1622,14 @@ impl PartitionStream for NativeTraceMergeStream {
                 match self.finish_and_filter_merger(&eval_ctx) {
                     Ok(Some(out)) => {
                         let out_bytes = out.memory_bytes();
+                        let handoff = handoff_res(
+                            &mut self.scratch_res,
+                            res.as_deref_mut(),
+                            before,
+                            out_bytes,
+                        );
                         self.scratch_res.free();
-                        reconcile_res(res.as_deref_mut(), before, out_bytes)?;
+                        handoff?;
                         return Ok(Some(out));
                     }
                     Ok(None) => {

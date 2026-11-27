@@ -266,7 +266,7 @@ pub async fn user_deletion_scope(
 
     let user_col = col_expr(&spans_raw, spans::USER_ID).map_err(query_err_to_run)?;
     let ingest_col = col_expr(&spans_raw, spans::INGEST_TIME).map_err(query_err_to_run)?;
-    let mut filters = vec![
+    let filters = vec![
         Expr::Binary {
             left: Box::new(user_col),
             op: BinaryOp::Eq,
@@ -283,24 +283,12 @@ pub async fn user_deletion_scope(
             data_type: DataType::Bool,
         },
     ];
-    if let Some(vf) = ctx.visible_from {
-        let start_col = col_expr(&spans_raw, spans::START_TIME).map_err(query_err_to_run)?;
-        filters.push(Expr::Binary {
-            left: Box::new(start_col),
-            op: BinaryOp::GtEq,
-            right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
-                value: vf,
-                utc: true,
-            })),
-            data_type: DataType::Bool,
-        });
-    }
 
     let spec = ScanSpec {
         projection: Some(vec![tid_idx, sid_idx]),
         map_projections: Default::default(),
         time_range: TimeRangeHint {
-            min_ns: ctx.visible_from,
+            min_ns: None,
             max_ns: None,
             around_ns: ctx.around,
         },
@@ -321,8 +309,9 @@ pub async fn user_deletion_scope(
             if streams.is_empty() {
                 return Ok(UserDeletionScope::default());
             }
+            let pool_c = Arc::clone(&exec_ctx.pool);
             let cancel = exec_ctx.eval.cancel.clone();
-            let sinks = exec_run_pipeline(
+            let mut sinks = exec_run_pipeline(
                 exec_ctx,
                 streams,
                 |_| Ok(Vec::new()),
@@ -330,20 +319,52 @@ pub async fn user_deletion_scope(
                     Ok(UserDeletionSink {
                         trace_ids: BTreeSet::new(),
                         session_ids: BTreeSet::new(),
+                        res: pool_c.register("user_deletion_sink", false),
                         cancel: cancel.clone(),
                     })
                 },
             )?;
-            let mut trace_ids = BTreeSet::new();
-            let mut session_ids = BTreeSet::new();
-            for sink in sinks {
-                trace_ids.extend(sink.trace_ids);
-                session_ids.extend(sink.session_ids);
+            if sinks.is_empty() {
+                return Ok(UserDeletionScope::default());
             }
-            Ok(UserDeletionScope {
-                trace_ids: trace_ids.into_iter().collect(),
-                session_ids: session_ids.into_iter().collect(),
-            })
+            let largest_idx = sinks
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, s)| s.res.size())
+                .map_or(0, |(idx, _)| idx);
+            let mut base = sinks.swap_remove(largest_idx);
+            for mut sink in sinks {
+                for (i, tid) in sink.trace_ids.into_iter().enumerate() {
+                    if (i & 1023) == 0 && exec_ctx.eval.cancel.is_cancelled() {
+                        return Err(QueryError::Cancelled);
+                    }
+                    if !base.trace_ids.contains(&tid) {
+                        crate::engine::transfer_or_grow(
+                            &mut sink.res,
+                            &mut base.res,
+                            TRACE_ID_ENTRY_BYTES,
+                        )?;
+                        base.trace_ids.insert(tid);
+                    }
+                }
+                for (i, sid) in sink.session_ids.into_iter().enumerate() {
+                    if (i & 1023) == 0 && exec_ctx.eval.cancel.is_cancelled() {
+                        return Err(QueryError::Cancelled);
+                    }
+                    if !base.session_ids.contains(&sid) {
+                        let bytes = string_entry_bytes(&sid);
+                        crate::engine::transfer_or_grow(&mut sink.res, &mut base.res, bytes)?;
+                        base.session_ids.insert(sid);
+                    }
+                }
+                sink.res.free();
+            }
+            let out = UserDeletionScope {
+                trace_ids: base.trace_ids.into_iter().collect(),
+                session_ids: base.session_ids.into_iter().collect(),
+            };
+            base.res.free();
+            Ok(out)
         })
         .await?;
 
@@ -380,7 +401,7 @@ pub async fn eval_trace_ids(
         ))),
     };
 
-    let mut filters = vec![
+    let filters = vec![
         Expr::Binary {
             left: Box::new(env_col),
             op: BinaryOp::Eq,
@@ -395,18 +416,6 @@ pub async fn eval_trace_ids(
             data_type: DataType::Bool,
         },
     ];
-    if let Some(vf) = ctx.visible_from {
-        let start_col = col_expr(&spans_raw, spans::START_TIME).map_err(query_err_to_run)?;
-        filters.push(Expr::Binary {
-            left: Box::new(start_col),
-            op: BinaryOp::GtEq,
-            right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
-                value: vf,
-                utc: true,
-            })),
-            data_type: DataType::Bool,
-        });
-    }
 
     let mut map_projections = BTreeMap::new();
     map_projections.insert(
@@ -419,7 +428,7 @@ pub async fn eval_trace_ids(
         projection: Some(vec![tid_idx, meta_idx]),
         map_projections,
         time_range: TimeRangeHint {
-            min_ns: ctx.visible_from,
+            min_ns: None,
             max_ns: None,
             around_ns: ctx.around,
         },
@@ -455,8 +464,9 @@ pub async fn eval_trace_ids(
 
             let ctx_chain = exec_ctx.clone();
             let targets_sink = Arc::clone(&targets_c);
+            let pool_c = Arc::clone(&exec_ctx.pool);
             let cancel = exec_ctx.eval.cancel.clone();
-            let sinks = exec_run_pipeline(
+            let mut sinks = exec_run_pipeline(
                 exec_ctx,
                 streams,
                 move |_| {
@@ -471,16 +481,40 @@ pub async fn eval_trace_ids(
                     Ok(EvalTraceSink {
                         targets: Arc::clone(&targets_sink),
                         found: BTreeSet::new(),
+                        res: pool_c.register("eval_trace_sink", false),
                         cancel: cancel.clone(),
                     })
                 },
             )?;
 
-            let mut found = BTreeSet::new();
-            for sink in sinks {
-                found.extend(sink.found);
+            if sinks.is_empty() {
+                return Ok(Vec::new());
             }
-            Ok(found.into_iter().collect())
+            let largest_idx = sinks
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, s)| s.res.size())
+                .map_or(0, |(idx, _)| idx);
+            let mut base = sinks.swap_remove(largest_idx);
+            for mut sink in sinks {
+                for (i, tid) in sink.found.into_iter().enumerate() {
+                    if (i & 1023) == 0 && exec_ctx.eval.cancel.is_cancelled() {
+                        return Err(QueryError::Cancelled);
+                    }
+                    if !base.found.contains(&tid) {
+                        crate::engine::transfer_or_grow(
+                            &mut sink.res,
+                            &mut base.res,
+                            TRACE_ID_ENTRY_BYTES,
+                        )?;
+                        base.found.insert(tid);
+                    }
+                }
+                sink.res.free();
+            }
+            let out: Vec<TraceId> = base.found.into_iter().collect();
+            base.res.free();
+            Ok(out)
         })
         .await?;
 
@@ -508,23 +542,11 @@ pub async fn session_ids_of_traces(
         .map_err(query_err_to_run)?;
 
     let sid_col = col_expr(&spans_raw, spans::SESSION_ID).map_err(query_err_to_run)?;
-    let mut filters = vec![Expr::Unary {
+    let filters = vec![Expr::Unary {
         op: UnaryOp::IsNotNull,
         expr: Box::new(sid_col),
         data_type: DataType::Bool,
     }];
-    if let Some(vf) = ctx.visible_from {
-        let start_col = col_expr(&spans_raw, spans::START_TIME).map_err(query_err_to_run)?;
-        filters.push(Expr::Binary {
-            left: Box::new(start_col),
-            op: BinaryOp::GtEq,
-            right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
-                value: vf,
-                utc: true,
-            })),
-            data_type: DataType::Bool,
-        });
-    }
 
     let id_lookups = if traces.len() <= 1_000 {
         vec![IdLookupHint::Fixed16 {
@@ -539,7 +561,7 @@ pub async fn session_ids_of_traces(
         projection: Some(vec![tid_idx, sid_idx]),
         map_projections: Default::default(),
         time_range: TimeRangeHint {
-            min_ns: ctx.visible_from,
+            min_ns: None,
             max_ns: None,
             around_ns: ctx.around,
         },
@@ -559,8 +581,9 @@ pub async fn session_ids_of_traces(
                 return Ok(Vec::new());
             }
             let traces_sink = Arc::clone(&traces_c);
+            let pool_c = Arc::clone(&exec_ctx.pool);
             let cancel = exec_ctx.eval.cancel.clone();
-            let sinks = exec_run_pipeline(
+            let mut sinks = exec_run_pipeline(
                 exec_ctx,
                 streams,
                 |_| Ok(Vec::new()),
@@ -568,24 +591,54 @@ pub async fn session_ids_of_traces(
                     Ok(SessionIdsSink {
                         traces: Arc::clone(&traces_sink),
                         found: BTreeSet::new(),
+                        res: pool_c.register("session_ids_sink", false),
                         cancel: cancel.clone(),
                     })
                 },
             )?;
-            let mut found = BTreeSet::new();
-            for sink in sinks {
-                found.extend(sink.found);
+            if sinks.is_empty() {
+                return Ok(Vec::new());
             }
-            Ok(found.into_iter().collect())
+            let largest_idx = sinks
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, s)| s.res.size())
+                .map_or(0, |(idx, _)| idx);
+            let mut base = sinks.swap_remove(largest_idx);
+            for mut sink in sinks {
+                for (i, sid) in sink.found.into_iter().enumerate() {
+                    if (i & 1023) == 0 && exec_ctx.eval.cancel.is_cancelled() {
+                        return Err(QueryError::Cancelled);
+                    }
+                    if !base.found.contains(&sid) {
+                        let bytes = string_entry_bytes(&sid);
+                        crate::engine::transfer_or_grow(&mut sink.res, &mut base.res, bytes)?;
+                        base.found.insert(sid);
+                    }
+                }
+                sink.res.free();
+            }
+            let out: Vec<String> = base.found.into_iter().collect();
+            base.res.free();
+            Ok(out)
         })
         .await?;
 
     Ok(found)
 }
 
+const TRACE_ID_ENTRY_BYTES: usize = size_of::<TraceId>() + 16;
+
+fn string_entry_bytes(s: &str) -> usize {
+    size_of::<String>()
+        .saturating_add(s.len())
+        .saturating_add(16)
+}
+
 struct UserDeletionSink {
     trace_ids: BTreeSet<TraceId>,
     session_ids: BTreeSet<String>,
+    res: Reservation,
     cancel: CancelToken,
 }
 
@@ -603,12 +656,21 @@ impl PushSink for UserDeletionSink {
         }
         let id_col = require_col(&batch, spans::TRACE_ID).map_err(run_err_to_query)?;
         let sid_col = require_col(&batch, spans::SESSION_ID).map_err(run_err_to_query)?;
-        for phys in active_rows(&batch) {
-            if let Some(bytes) = raw_fixed16_at(id_col, phys) {
-                self.trace_ids
-                    .insert(TraceId::from_bytes(bytes).map_err(|_| bad_id())?);
+        for (i, phys) in active_rows(&batch).enumerate() {
+            if (i & 1023) == 0 && self.cancel.is_cancelled() {
+                return Err(QueryError::Cancelled);
             }
-            if let Some(sid) = raw_string_at(sid_col, phys).map_err(run_err_to_query)? {
+            if let Some(bytes) = raw_fixed16_at(id_col, phys) {
+                let tid = TraceId::from_bytes(bytes).map_err(|_| bad_id())?;
+                if !self.trace_ids.contains(&tid) {
+                    self.res.try_grow(TRACE_ID_ENTRY_BYTES)?;
+                    self.trace_ids.insert(tid);
+                }
+            }
+            if let Some(sid) = raw_string_at(sid_col, phys).map_err(run_err_to_query)?
+                && !self.session_ids.contains(&sid)
+            {
+                self.res.try_grow(string_entry_bytes(&sid))?;
                 self.session_ids.insert(sid);
             }
         }
@@ -619,6 +681,7 @@ impl PushSink for UserDeletionSink {
 struct EvalTraceSink {
     targets: Arc<HashSet<TraceId>>,
     found: BTreeSet<TraceId>,
+    res: Reservation,
     cancel: CancelToken,
 }
 
@@ -636,7 +699,10 @@ impl PushSink for EvalTraceSink {
         }
         let id_col = require_col(&batch, spans::TRACE_ID).map_err(run_err_to_query)?;
         let target_col = require_col(&batch, TARGET_COL).map_err(run_err_to_query)?;
-        for phys in active_rows(&batch) {
+        for (i, phys) in active_rows(&batch).enumerate() {
+            if (i & 1023) == 0 && self.cancel.is_cancelled() {
+                return Err(QueryError::Cancelled);
+            }
             let Some(target_text) = raw_string_at(target_col, phys).map_err(run_err_to_query)?
             else {
                 continue;
@@ -649,7 +715,8 @@ impl PushSink for EvalTraceSink {
             }
             let bytes = raw_fixed16_at(id_col, phys).ok_or_else(bad_id)?;
             let id = TraceId::from_bytes(bytes).map_err(|_| bad_id())?;
-            if !self.targets.contains(&id) {
+            if !self.targets.contains(&id) && !self.found.contains(&id) {
+                self.res.try_grow(TRACE_ID_ENTRY_BYTES)?;
                 self.found.insert(id);
             }
         }
@@ -660,6 +727,7 @@ impl PushSink for EvalTraceSink {
 struct SessionIdsSink {
     traces: Arc<HashSet<TraceId>>,
     found: BTreeSet<String>,
+    res: Reservation,
     cancel: CancelToken,
 }
 
@@ -677,13 +745,17 @@ impl PushSink for SessionIdsSink {
         }
         let id_col = require_col(&batch, spans::TRACE_ID).map_err(run_err_to_query)?;
         let sid_col = require_col(&batch, spans::SESSION_ID).map_err(run_err_to_query)?;
-        for phys in active_rows(&batch) {
+        for (i, phys) in active_rows(&batch).enumerate() {
+            if (i & 1023) == 0 && self.cancel.is_cancelled() {
+                return Err(QueryError::Cancelled);
+            }
             let Some(sid) = raw_string_at(sid_col, phys).map_err(run_err_to_query)? else {
                 continue;
             };
             let bytes = raw_fixed16_at(id_col, phys).ok_or_else(bad_id)?;
             let trace_id = TraceId::from_bytes(bytes).map_err(|_| bad_id())?;
-            if self.traces.contains(&trace_id) {
+            if self.traces.contains(&trace_id) && !self.found.contains(&sid) {
+                self.res.try_grow(string_entry_bytes(&sid))?;
                 self.found.insert(sid);
             }
         }
@@ -987,5 +1059,102 @@ mod tests {
         );
 
         let _ = storage.shutdown().await;
+    }
+
+    #[test]
+    fn deletion_sinks_enforce_pool_memory_limit_and_check_cancel() {
+        use cetra_column::{Column, FlatColumn, FlatData, GlobalPool, Utf8Data};
+
+        let tids: Vec<[u8; 16]> = (1..=16_u8).map(|i| [i; 16]).collect();
+        let sids: Vec<String> = (1..=16_u8)
+            .map(|i| format!("session-identifier-{i:04}"))
+            .collect();
+        let sid_refs: Vec<&str> = sids.iter().map(String::as_str).collect();
+        let schema = Schema::try_new_arc(vec![
+            Field::new(spans::TRACE_ID, DataType::FixedBytes16, false),
+            Field::new(spans::SESSION_ID, DataType::Utf8, true),
+        ])
+        .unwrap();
+        let batch = Batch::try_new_all(
+            schema,
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::FixedBytes16(tids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(sid_refs).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            16,
+        )
+        .unwrap();
+
+        // Tiny pool cap causes UserDeletionSink & SessionIdsSink to fail with TooLarge.
+        let tiny_pool = GlobalPool::standalone(64);
+        let mut dummy_res = tiny_pool.register("batch", false);
+        let mut user_sink = UserDeletionSink {
+            trace_ids: BTreeSet::new(),
+            session_ids: BTreeSet::new(),
+            res: tiny_pool.register("user_deletion_sink", false),
+            cancel: CancelToken::new(),
+        };
+        let err = user_sink
+            .consume(batch.clone(), &mut dummy_res)
+            .unwrap_err();
+        assert!(matches!(err, QueryError::TooLarge), "{err:?}");
+        drop(user_sink);
+        assert_eq!(tiny_pool.reserved(), 0);
+
+        let trace_set: HashSet<TraceId> = (1..=16_u8)
+            .map(|i| TraceId::from_bytes([i; 16]).unwrap())
+            .collect();
+        let mut sid_sink = SessionIdsSink {
+            traces: Arc::new(trace_set),
+            found: BTreeSet::new(),
+            res: tiny_pool.register("session_ids_sink", false),
+            cancel: CancelToken::new(),
+        };
+        let err = sid_sink.consume(batch, &mut dummy_res).unwrap_err();
+        assert!(matches!(err, QueryError::TooLarge), "{err:?}");
+        drop(sid_sink);
+        assert_eq!(tiny_pool.reserved(), 0);
+
+        // EvalTraceSink also enforces pool limit.
+        let eval_schema = Schema::try_new_arc(vec![
+            Field::new(spans::TRACE_ID, DataType::FixedBytes16, false),
+            Field::new(TARGET_COL, DataType::Utf8, true),
+        ])
+        .unwrap();
+        let target_tid = TraceId::from_bytes([99; 16]).unwrap();
+        let target_hex = target_tid.to_string();
+        let eval_tids: Vec<[u8; 16]> = (1..=8_u8).map(|i| [i; 16]).collect();
+        let target_vals: Vec<&str> = vec![target_hex.as_str(); 8];
+        let eval_batch = Batch::try_new_all(
+            eval_schema,
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::FixedBytes16(eval_tids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(target_vals).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            8,
+        )
+        .unwrap();
+        let mut eval_sink = EvalTraceSink {
+            targets: Arc::new([target_tid].into_iter().collect()),
+            found: BTreeSet::new(),
+            res: tiny_pool.register("eval_trace_sink", false),
+            cancel: CancelToken::new(),
+        };
+        let err = eval_sink.consume(eval_batch, &mut dummy_res).unwrap_err();
+        assert!(matches!(err, QueryError::TooLarge), "{err:?}");
+        drop(eval_sink);
+        assert_eq!(tiny_pool.reserved(), 0);
     }
 }

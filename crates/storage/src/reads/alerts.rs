@@ -294,7 +294,7 @@ fn eval_llm_latency_p95(
 
     let end_col = col_expr(&spans_raw, spans::END_TIME)?;
     let kind_col = col_expr(&spans_raw, spans::SPAN_KIND)?;
-    let mut filters = vec![
+    let filters = vec![
         cmp_ts(&end_col, BinaryOp::GtEq, window.from()),
         cmp_ts(&end_col, BinaryOp::Lt, window.to()),
         Expr::Binary {
@@ -306,16 +306,12 @@ fn eval_llm_latency_p95(
             data_type: DataType::Bool,
         },
     ];
-    if let Some(vf) = ctx.visible_from {
-        let start_col = col_expr(&spans_raw, spans::START_TIME)?;
-        filters.push(cmp_ts(&start_col, BinaryOp::GtEq, vf));
-    }
 
     let spec = ScanSpec {
         projection: Some(vec![trace_id_idx, duration_idx]),
         map_projections: Default::default(),
         time_range: TimeRangeHint {
-            min_ns: ctx.visible_from,
+            min_ns: None,
             max_ns: None,
             around_ns: None,
         },
@@ -399,10 +395,6 @@ fn eval_score_value(
     let target_col = col_expr(&scores_raw, scores::TARGET)?;
     let val_col = col_expr(&scores_raw, scores::VALUE_NUM)?;
 
-    let mut min_ns = window.from();
-    if let Some(vf) = ctx.visible_from {
-        min_ns = min_ns.max(vf);
-    }
     let mut filters = vec![
         cmp_ts(&created_col, BinaryOp::GtEq, window.from()),
         cmp_ts(&created_col, BinaryOp::Lt, window.to()),
@@ -429,9 +421,6 @@ fn eval_score_value(
             data_type: DataType::Bool,
         },
     ];
-    if let Some(vf) = ctx.visible_from {
-        filters.push(cmp_ts(&created_col, BinaryOp::GtEq, vf));
-    }
     if pass_rate {
         let dt_col = col_expr(&scores_raw, scores::DATA_TYPE)?;
         filters.push(Expr::Binary {
@@ -448,7 +437,7 @@ fn eval_score_value(
         projection: Some(vec![trace_id_idx, val_idx]),
         map_projections: Default::default(),
         time_range: TimeRangeHint {
-            min_ns: Some(min_ns),
+            min_ns: Some(window.from()),
             max_ns: window.to().checked_sub(1),
             around_ns: None,
         },
@@ -525,15 +514,11 @@ fn eval_score_count(
     let created_col = col_expr(&scores_raw, scores::CREATED_AT)?;
     let name_col = col_expr(&scores_raw, scores::NAME)?;
 
-    let mut min_ns = window.from();
-    if let Some(vf) = ctx.visible_from {
-        min_ns = min_ns.max(vf);
-    }
     let list = names
         .iter()
         .map(|n| Expr::Literal(ScalarValue::Utf8(n.clone())))
         .collect();
-    let mut filters = vec![
+    let filters = vec![
         Expr::InList {
             expr: Box::new(name_col),
             list,
@@ -543,15 +528,12 @@ fn eval_score_count(
         cmp_ts(&created_col, BinaryOp::GtEq, window.from()),
         cmp_ts(&created_col, BinaryOp::Lt, window.to()),
     ];
-    if let Some(vf) = ctx.visible_from {
-        filters.push(cmp_ts(&created_col, BinaryOp::GtEq, vf));
-    }
 
     let spec = ScanSpec {
         projection: Some(vec![created_idx]),
         map_projections: Default::default(),
         time_range: TimeRangeHint {
-            min_ns: Some(min_ns),
+            min_ns: Some(window.from()),
             max_ns: window.to().checked_sub(1),
             around_ns: None,
         },

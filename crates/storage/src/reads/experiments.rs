@@ -3,16 +3,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use cetra_column::{DataType, ScalarValue, Schema};
+use cetra_column::{Batch, CancelToken, DataType, Reservation, ScalarValue, Schema};
 use cetra_core::enums::ScoreDataType;
 use cetra_core::names::metadata_key;
 use cetra_core::schema::{scores, traces};
 use cetra_query::exec::hash_agg::execute_hash_agg;
 use cetra_query::exec::{
-    AggExpr, AggFunc, CollectSink, HashAggSpec, MapProjection, ScanSource, ScanSpec, TimeRangeHint,
-    run_pipeline as exec_run_pipeline,
+    AggExpr, AggFunc, ControlFlow, HashAggSpec, MapProjection, PushSink, ScanSource, ScanSpec,
+    TimeRangeHint, run_pipeline as exec_run_pipeline,
 };
 use cetra_query::{BinaryOp, Expr, QueryError};
 
@@ -92,13 +93,8 @@ pub async fn experiment_scores(
     let experiment = experiment_key(experiment)?;
     let scores_raw = scores_raw_schema()?;
 
-    let mut min_ns = since;
-    if let Some(vf) = ctx.visible_from {
-        min_ns = min_ns.max(vf);
-    }
-
     let created_col = col_expr(&scores_raw, scores::CREATED_AT).map_err(query_err_to_run)?;
-    let mut filters = vec![
+    let filters = vec![
         Expr::Binary {
             left: Box::new(col_expr(&scores_raw, scores::EXPERIMENT_ID).map_err(query_err_to_run)?),
             op: BinaryOp::Eq,
@@ -112,20 +108,12 @@ pub async fn experiment_scores(
             data_type: DataType::Bool,
         },
         Expr::Binary {
-            left: Box::new(created_col.clone()),
+            left: Box::new(created_col),
             op: BinaryOp::GtEq,
             right: Box::new(ts_lit(since)),
             data_type: DataType::Bool,
         },
     ];
-    if let Some(vf) = ctx.visible_from {
-        filters.push(Expr::Binary {
-            left: Box::new(created_col),
-            op: BinaryOp::GtEq,
-            right: Box::new(ts_lit(vf)),
-            data_type: DataType::Bool,
-        });
-    }
 
     let needed = [
         scores::TRACE_ID,
@@ -148,7 +136,7 @@ pub async fn experiment_scores(
         projection: Some(proj_indices),
         map_projections: Default::default(),
         time_range: TimeRangeHint {
-            min_ns: Some(min_ns),
+            min_ns: Some(since),
             max_ns: None,
             around_ns: None,
         },
@@ -167,59 +155,39 @@ pub async fn experiment_scores(
                 return Ok(Vec::new());
             }
             let pool_c = Arc::clone(&exec_ctx.pool);
-            let sinks = exec_run_pipeline(
+            let seen = Arc::new(AtomicUsize::new(0));
+            let cancel = exec_ctx.eval.cancel.clone();
+            let mut sinks = exec_run_pipeline(
                 exec_ctx,
                 streams,
                 |_| Ok(Vec::new()),
-                move |_| Ok(CollectSink::new(&pool_c)),
+                move |_| {
+                    Ok(ExperimentScoresSink {
+                        found: Vec::new(),
+                        seen: Arc::clone(&seen),
+                        cap: MAX_EXPERIMENT_SCORES,
+                        res: pool_c.register("experiment_scores_sink", false),
+                        cancel: cancel.clone(),
+                    })
+                },
             )?;
-            let mut found = Vec::new();
-            let mut seen = 0usize;
-            for sink in sinks {
-                for batch in sink.into_batches() {
-                    seen += batch.num_rows();
-                    // Check cap BEFORE skipping rows with `trace_id IS NULL`.
-                    if seen > MAX_EXPERIMENT_SCORES {
-                        return Err(QueryError::InvalidRequest(format!(
-                            "experiment has more than {MAX_EXPERIMENT_SCORES} scores"
-                        )));
-                    }
-                    if batch.num_rows() == 0 {
-                        continue;
-                    }
-                    let trace_col =
-                        require_col(&batch, scores::TRACE_ID).map_err(run_err_to_query)?;
-                    let item_col =
-                        require_col(&batch, scores::DATASET_ITEM_ID).map_err(run_err_to_query)?;
-                    let name_col = require_col(&batch, scores::NAME).map_err(run_err_to_query)?;
-                    let dt_col =
-                        require_col(&batch, scores::DATA_TYPE).map_err(run_err_to_query)?;
-                    let num_col =
-                        require_col(&batch, scores::VALUE_NUM).map_err(run_err_to_query)?;
-                    let str_col =
-                        require_col(&batch, scores::VALUE_STR).map_err(run_err_to_query)?;
-
-                    for phys in active_rows(&batch) {
-                        let Some(trace_bytes) = raw_fixed16_at(trace_col, phys) else {
-                            continue;
-                        };
-                        found.push(ExperimentScore {
-                            trace_id: hex::encode(trace_bytes),
-                            dataset_item_id: raw_string_at(item_col, phys)
-                                .map_err(run_err_to_query)?,
-                            name: raw_string_at(name_col, phys)
-                                .map_err(run_err_to_query)?
-                                .ok_or_else(bad_row)?,
-                            data_type: raw_string_at(dt_col, phys)
-                                .map_err(run_err_to_query)?
-                                .ok_or_else(bad_row)?,
-                            value_num: raw_f64_at(num_col, phys).map_err(run_err_to_query)?,
-                            value_str: raw_string_at(str_col, phys).map_err(run_err_to_query)?,
-                        });
-                    }
-                }
+            if sinks.is_empty() {
+                return Ok(Vec::new());
             }
-            Ok(found)
+            let largest_idx = sinks
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, s)| s.res.size())
+                .map_or(0, |(idx, _)| idx);
+            let mut base = sinks.swap_remove(largest_idx);
+            for mut sink in sinks {
+                let bytes = sink.res.size();
+                crate::engine::transfer_or_grow(&mut sink.res, &mut base.res, bytes)?;
+                base.found.extend(sink.found);
+                sink.res.free();
+            }
+            base.res.free();
+            Ok(base.found)
         })
         .await?;
 
@@ -238,14 +206,9 @@ pub async fn experiment_traces(
     let experiment = experiment_key(experiment)?;
     let traces_raw = traces_raw_schema()?;
 
-    let mut min_ns = since;
-    if let Some(vf) = ctx.visible_from {
-        min_ns = min_ns.max(vf);
-    }
-
     let meta_col = col_expr(&traces_raw, traces::METADATA).map_err(query_err_to_run)?;
     let start_col = col_expr(&traces_raw, traces::START_TIME).map_err(query_err_to_run)?;
-    let mut filters = vec![
+    let filters = vec![
         Expr::Binary {
             left: Box::new(Expr::MapIndex {
                 map: Box::new(meta_col),
@@ -258,20 +221,12 @@ pub async fn experiment_traces(
             data_type: DataType::Bool,
         },
         Expr::Binary {
-            left: Box::new(start_col.clone()),
+            left: Box::new(start_col),
             op: BinaryOp::GtEq,
             right: Box::new(ts_lit(since)),
             data_type: DataType::Bool,
         },
     ];
-    if let Some(vf) = ctx.visible_from {
-        filters.push(Expr::Binary {
-            left: Box::new(start_col),
-            op: BinaryOp::GtEq,
-            right: Box::new(ts_lit(vf)),
-            data_type: DataType::Bool,
-        });
-    }
 
     let needed = [
         traces::TRACE_ID,
@@ -298,7 +253,7 @@ pub async fn experiment_traces(
         projection: Some(proj_indices),
         map_projections,
         time_range: TimeRangeHint {
-            min_ns: Some(min_ns),
+            min_ns: Some(since),
             max_ns: None,
             around_ns: ctx.around,
         },
@@ -317,56 +272,175 @@ pub async fn experiment_traces(
                 return Ok(Vec::new());
             }
             let pool_c = Arc::clone(&exec_ctx.pool);
-            let sinks = exec_run_pipeline(
+            let seen = Arc::new(AtomicUsize::new(0));
+            let cancel = exec_ctx.eval.cancel.clone();
+            let mut sinks = exec_run_pipeline(
                 exec_ctx,
                 streams,
                 |_| Ok(Vec::new()),
-                move |_| Ok(CollectSink::new(&pool_c)),
+                move |_| {
+                    Ok(ExperimentTracesSink {
+                        found: Vec::new(),
+                        seen: Arc::clone(&seen),
+                        cap: MAX_EXPERIMENT_TRACES,
+                        res: pool_c.register("experiment_traces_sink", false),
+                        cancel: cancel.clone(),
+                    })
+                },
             )?;
-            let mut found = Vec::new();
-            let mut seen = 0usize;
-            for sink in sinks {
-                for batch in sink.into_batches() {
-                    seen += batch.num_rows();
-                    if seen > MAX_EXPERIMENT_TRACES {
-                        return Err(QueryError::InvalidRequest(format!(
-                            "experiment has more than {MAX_EXPERIMENT_TRACES} traces"
-                        )));
-                    }
-                    if batch.num_rows() == 0 {
-                        continue;
-                    }
-                    let trace_col =
-                        require_col(&batch, traces::TRACE_ID).map_err(run_err_to_query)?;
-                    let cost_col =
-                        require_col(&batch, traces::COST_TOTAL).map_err(run_err_to_query)?;
-                    let start_col =
-                        require_col(&batch, traces::START_TIME).map_err(run_err_to_query)?;
-                    let end_col =
-                        require_col(&batch, traces::END_TIME).map_err(run_err_to_query)?;
-                    let err_col =
-                        require_col(&batch, traces::ERROR_COUNT).map_err(run_err_to_query)?;
-
-                    for phys in active_rows(&batch) {
-                        let Some(trace_bytes) = raw_fixed16_at(trace_col, phys) else {
-                            continue;
-                        };
-                        let start = raw_time_at(start_col, phys).map_err(run_err_to_query)?;
-                        let end = raw_time_at(end_col, phys).map_err(run_err_to_query)?;
-                        found.push(ExperimentTrace {
-                            trace_id: hex::encode(trace_bytes),
-                            cost_total: raw_f64_at(cost_col, phys).map_err(run_err_to_query)?,
-                            duration_ns: end.saturating_sub(start),
-                            error_count: raw_i64_at(err_col, phys).map_err(run_err_to_query)?,
-                        });
-                    }
-                }
+            if sinks.is_empty() {
+                return Ok(Vec::new());
             }
-            Ok(found)
+            let largest_idx = sinks
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, s)| s.res.size())
+                .map_or(0, |(idx, _)| idx);
+            let mut base = sinks.swap_remove(largest_idx);
+            for mut sink in sinks {
+                let bytes = sink.res.size();
+                crate::engine::transfer_or_grow(&mut sink.res, &mut base.res, bytes)?;
+                base.found.extend(sink.found);
+                sink.res.free();
+            }
+            base.res.free();
+            Ok(base.found)
         })
         .await?;
 
     Ok(found)
+}
+
+fn experiment_score_bytes(row: &ExperimentScore) -> usize {
+    size_of::<ExperimentScore>()
+        .saturating_add(row.trace_id.len())
+        .saturating_add(row.dataset_item_id.as_ref().map_or(0, String::len))
+        .saturating_add(row.name.len())
+        .saturating_add(row.data_type.len())
+        .saturating_add(row.value_str.as_ref().map_or(0, String::len))
+}
+
+fn experiment_trace_bytes(row: &ExperimentTrace) -> usize {
+    size_of::<ExperimentTrace>().saturating_add(row.trace_id.len())
+}
+
+struct ExperimentScoresSink {
+    found: Vec<ExperimentScore>,
+    seen: Arc<AtomicUsize>,
+    cap: usize,
+    res: Reservation,
+    cancel: CancelToken,
+}
+
+impl PushSink for ExperimentScoresSink {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        _batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
+        if self.cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        let rows = batch.num_rows();
+        if rows == 0 {
+            return Ok(ControlFlow::Continue);
+        }
+        // Check cap BEFORE skipping rows with `trace_id IS NULL`.
+        let prev = self.seen.fetch_add(rows, Ordering::AcqRel);
+        if prev.saturating_add(rows) > self.cap {
+            return Err(QueryError::InvalidRequest(format!(
+                "experiment has more than {} scores",
+                self.cap
+            )));
+        }
+        let trace_col = require_col(&batch, scores::TRACE_ID).map_err(run_err_to_query)?;
+        let item_col = require_col(&batch, scores::DATASET_ITEM_ID).map_err(run_err_to_query)?;
+        let name_col = require_col(&batch, scores::NAME).map_err(run_err_to_query)?;
+        let dt_col = require_col(&batch, scores::DATA_TYPE).map_err(run_err_to_query)?;
+        let num_col = require_col(&batch, scores::VALUE_NUM).map_err(run_err_to_query)?;
+        let str_col = require_col(&batch, scores::VALUE_STR).map_err(run_err_to_query)?;
+
+        for (i, phys) in active_rows(&batch).enumerate() {
+            if (i & 1023) == 0 && self.cancel.is_cancelled() {
+                return Err(QueryError::Cancelled);
+            }
+            let Some(trace_bytes) = raw_fixed16_at(trace_col, phys) else {
+                continue;
+            };
+            let row = ExperimentScore {
+                trace_id: hex::encode(trace_bytes),
+                dataset_item_id: raw_string_at(item_col, phys).map_err(run_err_to_query)?,
+                name: raw_string_at(name_col, phys)
+                    .map_err(run_err_to_query)?
+                    .ok_or_else(bad_row)?,
+                data_type: raw_string_at(dt_col, phys)
+                    .map_err(run_err_to_query)?
+                    .ok_or_else(bad_row)?,
+                value_num: raw_f64_at(num_col, phys).map_err(run_err_to_query)?,
+                value_str: raw_string_at(str_col, phys).map_err(run_err_to_query)?,
+            };
+            self.res.try_grow(experiment_score_bytes(&row))?;
+            self.found.push(row);
+        }
+        Ok(ControlFlow::Continue)
+    }
+}
+
+struct ExperimentTracesSink {
+    found: Vec<ExperimentTrace>,
+    seen: Arc<AtomicUsize>,
+    cap: usize,
+    res: Reservation,
+    cancel: CancelToken,
+}
+
+impl PushSink for ExperimentTracesSink {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        _batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
+        if self.cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        let rows = batch.num_rows();
+        if rows == 0 {
+            return Ok(ControlFlow::Continue);
+        }
+        // Check cap BEFORE skipping rows with `trace_id IS NULL`.
+        let prev = self.seen.fetch_add(rows, Ordering::AcqRel);
+        if prev.saturating_add(rows) > self.cap {
+            return Err(QueryError::InvalidRequest(format!(
+                "experiment has more than {} traces",
+                self.cap
+            )));
+        }
+        let trace_col = require_col(&batch, traces::TRACE_ID).map_err(run_err_to_query)?;
+        let cost_col = require_col(&batch, traces::COST_TOTAL).map_err(run_err_to_query)?;
+        let start_col = require_col(&batch, traces::START_TIME).map_err(run_err_to_query)?;
+        let end_col = require_col(&batch, traces::END_TIME).map_err(run_err_to_query)?;
+        let err_col = require_col(&batch, traces::ERROR_COUNT).map_err(run_err_to_query)?;
+
+        for (i, phys) in active_rows(&batch).enumerate() {
+            if (i & 1023) == 0 && self.cancel.is_cancelled() {
+                return Err(QueryError::Cancelled);
+            }
+            let Some(trace_bytes) = raw_fixed16_at(trace_col, phys) else {
+                continue;
+            };
+            let start = raw_time_at(start_col, phys).map_err(run_err_to_query)?;
+            let end = raw_time_at(end_col, phys).map_err(run_err_to_query)?;
+            let row = ExperimentTrace {
+                trace_id: hex::encode(trace_bytes),
+                cost_total: raw_f64_at(cost_col, phys).map_err(run_err_to_query)?,
+                duration_ns: end.saturating_sub(start),
+                error_count: raw_i64_at(err_col, phys).map_err(run_err_to_query)?,
+            };
+            self.res.try_grow(experiment_trace_bytes(&row))?;
+            self.found.push(row);
+        }
+        Ok(ControlFlow::Continue)
+    }
 }
 
 /// Per experiment, score name and data type (`numeric` and `boolean`), the mean and row count
@@ -397,13 +471,9 @@ pub async fn experiment_score_means(
         .collect();
 
     let scores_raw = scores_raw_schema()?;
-    let mut min_ns = since;
-    if let Some(vf) = ctx.visible_from {
-        min_ns = min_ns.max(vf);
-    }
 
     let created_col = col_expr(&scores_raw, scores::CREATED_AT).map_err(query_err_to_run)?;
-    let mut filters = vec![
+    let filters = vec![
         Expr::InList {
             expr: Box::new(col_expr(&scores_raw, scores::EXPERIMENT_ID).map_err(query_err_to_run)?),
             list: distinct
@@ -420,7 +490,7 @@ pub async fn experiment_score_means(
             data_type: DataType::Bool,
         },
         Expr::Binary {
-            left: Box::new(created_col.clone()),
+            left: Box::new(created_col),
             op: BinaryOp::GtEq,
             right: Box::new(ts_lit(since)),
             data_type: DataType::Bool,
@@ -439,14 +509,6 @@ pub async fn experiment_score_means(
             redacted: false,
         },
     ];
-    if let Some(vf) = ctx.visible_from {
-        filters.push(Expr::Binary {
-            left: Box::new(created_col),
-            op: BinaryOp::GtEq,
-            right: Box::new(ts_lit(vf)),
-            data_type: DataType::Bool,
-        });
-    }
 
     let needed = [
         scores::EXPERIMENT_ID,
@@ -467,7 +529,7 @@ pub async fn experiment_score_means(
         projection: Some(proj_indices),
         map_projections: Default::default(),
         time_range: TimeRangeHint {
-            min_ns: Some(min_ns),
+            min_ns: Some(since),
             max_ns: None,
             around_ns: None,
         },
@@ -789,5 +851,136 @@ mod tests {
         ));
 
         let _ = storage.shutdown().await;
+    }
+
+    #[test]
+    fn experiment_sinks_check_cap_before_skipping_null_trace_id_and_enforce_pool_limit() {
+        use cetra_column::{Bitmap, Column, Field, FlatColumn, FlatData, GlobalPool, Utf8Data};
+
+        // 3 score rows where ALL have `trace_id IS NULL`: cap=2 must still fail with InvalidRequest.
+        let score_schema = Schema::try_new_arc(vec![
+            Field::new(scores::TRACE_ID, DataType::FixedBytes16, true),
+            Field::new(scores::DATASET_ITEM_ID, DataType::Utf8, true),
+            Field::new(scores::NAME, DataType::Utf8, false),
+            Field::new(scores::DATA_TYPE, DataType::Utf8, false),
+            Field::new(scores::VALUE_NUM, DataType::F64, true),
+            Field::new(scores::VALUE_STR, DataType::Utf8, true),
+        ])
+        .unwrap();
+        let all_null_bm = Bitmap::new_zeroed(3);
+        let null_scores = Batch::try_new_all(
+            score_schema,
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::FixedBytes16(vec![[0; 16]; 3]),
+                        Some(all_null_bm.clone()),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(["", "", ""]).unwrap()),
+                        Some(all_null_bm.clone()),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(["a", "b", "c"]).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(["numeric", "numeric", "numeric"]).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::F64(vec![1.0, 2.0, 3.0]), None).unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(["", "", ""]).unwrap()),
+                        Some(all_null_bm),
+                    )
+                    .unwrap(),
+                ),
+            ],
+            3,
+        )
+        .unwrap();
+
+        let pool = GlobalPool::standalone(1024 * 1024);
+        let mut dummy_res = pool.register("batch", false);
+        let mut cap_sink = ExperimentScoresSink {
+            found: Vec::new(),
+            seen: Arc::new(AtomicUsize::new(0)),
+            cap: 2,
+            res: pool.register("experiment_scores_sink", false),
+            cancel: CancelToken::new(),
+        };
+        let err = cap_sink.consume(null_scores, &mut dummy_res).unwrap_err();
+        assert!(matches!(err, QueryError::InvalidRequest(_)), "{err:?}");
+
+        // Tight pool enforces memory limit on ExperimentTracesSink.
+        let trace_schema = Schema::try_new_arc(vec![
+            Field::new(traces::TRACE_ID, DataType::FixedBytes16, false),
+            Field::new(traces::COST_TOTAL, DataType::F64, false),
+            Field::new(traces::START_TIME, DataType::timestamp_utc(), false),
+            Field::new(traces::END_TIME, DataType::timestamp_utc(), false),
+            Field::new(traces::ERROR_COUNT, DataType::I64, false),
+        ])
+        .unwrap();
+        let trace_batch = Batch::try_new_all(
+            trace_schema,
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::FixedBytes16(vec![[1; 16]; 8]), None).unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::F64(vec![0.1; 8]), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: vec![10; 8],
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: vec![20; 8],
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![0; 8]), None).unwrap()),
+            ],
+            8,
+        )
+        .unwrap();
+        let tiny_pool = GlobalPool::standalone(64);
+        let mut tiny_dummy = tiny_pool.register("batch", false);
+        let mut oom_sink = ExperimentTracesSink {
+            found: Vec::new(),
+            seen: Arc::new(AtomicUsize::new(0)),
+            cap: MAX_EXPERIMENT_TRACES,
+            res: tiny_pool.register("experiment_traces_sink", false),
+            cancel: CancelToken::new(),
+        };
+        let oom_err = oom_sink.consume(trace_batch, &mut tiny_dummy).unwrap_err();
+        assert!(matches!(oom_err, QueryError::TooLarge), "{oom_err:?}");
+        drop(oom_sink);
+        assert_eq!(tiny_pool.reserved(), 0);
     }
 }

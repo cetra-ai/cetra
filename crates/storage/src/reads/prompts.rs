@@ -146,10 +146,6 @@ pub async fn prompt_metrics(
 
             // 2. Linked `llm` spans in `window`, semi-joined with `semi` on `trace_id`.
             let spans_raw = spans_raw_schema().map_err(run_err_to_query)?;
-            let mut min_ns = window.from();
-            if let Some(vf) = ctx_c.visible_from {
-                min_ns = min_ns.max(vf);
-            }
             let max_ns = window.to().checked_sub(1);
 
             let start_col = col_expr(&spans_raw, spans::START_TIME)?;
@@ -164,7 +160,7 @@ pub async fn prompt_metrics(
                     data_type: DataType::Bool,
                 },
                 Expr::Binary {
-                    left: Box::new(start_col.clone()),
+                    left: Box::new(start_col),
                     op: BinaryOp::Lt,
                     right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
                         value: window.to(),
@@ -192,17 +188,6 @@ pub async fn prompt_metrics(
                     data_type: DataType::Bool,
                 },
             ];
-            if let Some(vf) = ctx_c.visible_from {
-                filters.push(Expr::Binary {
-                    left: Box::new(start_col),
-                    op: BinaryOp::GtEq,
-                    right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
-                        value: vf,
-                        utc: true,
-                    })),
-                    data_type: DataType::Bool,
-                });
-            }
             if !versions_filter.is_empty() {
                 filters.push(Expr::InList {
                     expr: Box::new(col_expr(&spans_raw, spans::PROMPT_VERSION)?),
@@ -237,7 +222,7 @@ pub async fn prompt_metrics(
                 projection: Some(proj_indices),
                 map_projections: Default::default(),
                 time_range: TimeRangeHint {
-                    min_ns: Some(min_ns),
+                    min_ns: Some(window.from()),
                     max_ns,
                     around_ns: None,
                 },
@@ -697,10 +682,6 @@ fn open_live_scores(
     target: ScoreTargetKind,
 ) -> Result<StreamSet, QueryError> {
     let scores_raw = scores_raw_schema().map_err(run_err_to_query)?;
-    let mut min_ns = window.from();
-    if let Some(vf) = ctx.visible_from {
-        min_ns = min_ns.max(vf);
-    }
 
     let created_col = col_expr(&scores_raw, scores::CREATED_AT)?;
     let mut filters = vec![
@@ -729,7 +710,7 @@ fn open_live_scores(
             data_type: DataType::Bool,
         },
         Expr::Binary {
-            left: Box::new(created_col.clone()),
+            left: Box::new(created_col),
             op: BinaryOp::GtEq,
             right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
                 value: window.from(),
@@ -750,17 +731,6 @@ fn open_live_scores(
             data_type: DataType::Bool,
         });
     }
-    if let Some(vf) = ctx.visible_from {
-        filters.push(Expr::Binary {
-            left: Box::new(created_col),
-            op: BinaryOp::GtEq,
-            right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
-                value: vf,
-                utc: true,
-            })),
-            data_type: DataType::Bool,
-        });
-    }
 
     let mut needed = vec![scores::TRACE_ID, scores::NAME, scores::VALUE_NUM];
     if target == ScoreTargetKind::Span {
@@ -778,7 +748,7 @@ fn open_live_scores(
         projection: Some(proj_indices),
         map_projections: Default::default(),
         time_range: TimeRangeHint {
-            min_ns: Some(min_ns),
+            min_ns: Some(window.from()),
             max_ns: None,
             around_ns: None,
         },

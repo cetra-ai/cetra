@@ -415,18 +415,20 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
                         .slice(split, combined.num_rows() - split, None)
                         .map_err(CompactionError::from)?;
                     drop(combined);
-                    scratch_res.free();
 
                     let tail_bytes = tail.memory_bytes();
-                    pending_res
-                        .resize(tail_bytes)
+                    let chunk_bytes = chunk.memory_bytes();
+                    crate::engine::transfer_or_grow(&mut scratch_res, &mut pending_res, tail_bytes)
                         .map_err(CompactionError::from)?;
                     pending = Some(tail);
 
-                    let chunk_bytes = chunk.memory_bytes();
-                    chunk_res
-                        .resize(chunk_bytes)
-                        .map_err(CompactionError::from)?;
+                    let chunk_transfer = crate::engine::transfer_or_grow(
+                        &mut scratch_res,
+                        &mut chunk_res,
+                        chunk_bytes,
+                    );
+                    scratch_res.free();
+                    chunk_transfer.map_err(CompactionError::from)?;
                     let (next_writer, next_partials, written) = emit_chunk(
                         table,
                         drop_deleted,
@@ -447,11 +449,13 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
                 } else {
                     // Entire `combined` belongs to one straddling group.
                     let pending_bytes = combined.memory_bytes();
-                    drop(scratch_res);
-                    scratch_res = scoped_pool.register("merge_scratch", false);
-                    pending_res
-                        .resize(pending_bytes)
-                        .map_err(CompactionError::from)?;
+                    let transfer = crate::engine::transfer_or_grow(
+                        &mut scratch_res,
+                        &mut pending_res,
+                        pending_bytes,
+                    );
+                    scratch_res.free();
+                    transfer.map_err(CompactionError::from)?;
                     pending = Some(combined);
                 }
             }
@@ -1093,10 +1097,7 @@ async fn emit_chunk<W: Write + Send + 'static>(
         FileTable::Spans => {
             let rows = dedup::latest_spans_batch(&filtered)?;
             drop(filtered);
-            chunk_res.free();
-            scratch_res
-                .resize(rows.memory_bytes())
-                .map_err(CompactionError::from)?;
+            reconcile_chunk_to_scratch(chunk_res, scratch_res, rows.memory_bytes())?;
             let partial = partials_from_spans_batch(&rows)?;
             let written = u64::try_from(rows.num_rows()).unwrap_or(u64::MAX);
             let writer = blocking_write(writer, rows).await?;
@@ -1107,14 +1108,12 @@ async fn emit_chunk<W: Write + Send + 'static>(
         FileTable::Scores => {
             let rows = dedup::latest_scores_batch(&filtered, drop_deleted)?;
             drop(filtered);
-            chunk_res.free();
             if rows.num_rows() == 0 {
+                chunk_res.free();
                 scratch_res.free();
                 return Ok((writer, partials, 0));
             }
-            scratch_res
-                .resize(rows.memory_bytes())
-                .map_err(CompactionError::from)?;
+            reconcile_chunk_to_scratch(chunk_res, scratch_res, rows.memory_bytes())?;
             let written = u64::try_from(rows.num_rows()).unwrap_or(u64::MAX);
             let writer = blocking_write(writer, rows).await?;
             scratch_res.free();
@@ -1123,6 +1122,26 @@ async fn emit_chunk<W: Write + Send + 'static>(
         FileTable::Traces => Err(CompactionError::Input {
             reason: "traces are not merged",
         }),
+    }
+}
+
+/// Reconciles `scratch_res` to `rows_bytes` by transferring any needed deficit from
+/// `chunk_res` before freeing `chunk_res`, avoiding double-charging when `filter_uncovered`
+/// already populated `scratch_res`.
+fn reconcile_chunk_to_scratch(
+    chunk_res: &mut Reservation,
+    scratch_res: &mut Reservation,
+    rows_bytes: usize,
+) -> Result<(), CompactionError> {
+    let cur = scratch_res.size();
+    if cur >= rows_bytes {
+        scratch_res.shrink(cur - rows_bytes);
+        chunk_res.free();
+        Ok(())
+    } else {
+        let transfer = crate::engine::transfer_or_grow(chunk_res, scratch_res, rows_bytes - cur);
+        chunk_res.free();
+        transfer.map_err(CompactionError::from)
     }
 }
 
@@ -1889,5 +1908,39 @@ mod tests {
         let dropped = score_tuples(&dropped);
         assert_eq!(dropped.len(), 1, "{dropped:?}");
         assert_eq!(dropped[0].0, t);
+    }
+
+    #[test]
+    fn reconcile_chunk_to_scratch_avoids_double_charge_when_scratch_pre_populated() {
+        use super::reconcile_chunk_to_scratch;
+        // Exact-fit pool: total cap = 1000 bytes.
+        let pool = cetra_column::GlobalPool::standalone(1000);
+        let mut chunk_res = pool.register("chunk", false);
+        let mut scratch_res = pool.register("scratch", false);
+
+        // Case 1: `filter_uncovered` already reserved 600 bytes in `scratch_res` while
+        // `chunk_res` holds 400 bytes; `rows_bytes = 900` needs only +300 from `chunk_res`.
+        chunk_res.try_grow(400).unwrap();
+        scratch_res.try_grow(600).unwrap();
+        assert_eq!(pool.reserved(), 1000);
+        reconcile_chunk_to_scratch(&mut chunk_res, &mut scratch_res, 900).unwrap();
+        assert_eq!(chunk_res.size(), 0);
+        assert_eq!(scratch_res.size(), 900);
+        assert_eq!(pool.reserved(), 900);
+
+        // Case 2: `scratch_res` already >= `rows_bytes` -> shrinks `scratch_res` and frees `chunk_res`.
+        chunk_res.try_grow(100).unwrap();
+        reconcile_chunk_to_scratch(&mut chunk_res, &mut scratch_res, 500).unwrap();
+        assert_eq!(chunk_res.size(), 0);
+        assert_eq!(scratch_res.size(), 500);
+        assert_eq!(pool.reserved(), 500);
+
+        // Case 3: `scratch_res` is empty, `chunk_res` holds 1000, `rows_bytes = 1000` -> transfers without spike.
+        scratch_res.free();
+        chunk_res.try_grow(1000).unwrap();
+        reconcile_chunk_to_scratch(&mut chunk_res, &mut scratch_res, 1000).unwrap();
+        assert_eq!(chunk_res.size(), 0);
+        assert_eq!(scratch_res.size(), 1000);
+        assert_eq!(pool.reserved(), 1000);
     }
 }

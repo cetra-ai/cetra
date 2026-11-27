@@ -48,8 +48,8 @@ pub(crate) enum SearchPredicate {
     },
 }
 
-/// Builds a `ScanSpec` over `ctx.traces` (raw schema) applying `scope.window`, `ctx.visible_from`,
-/// `ctx.around`, and default exclusions.
+/// Builds a `ScanSpec` over `ctx.traces` (raw schema) applying `scope.window`, `ctx.around`,
+/// and default exclusions (`visible_from` is enforced by `ctx.traces`).
 pub(crate) fn scoped_traces_spec(
     ctx: &EngineContext,
     scope: ListScope,
@@ -67,8 +67,8 @@ pub(crate) fn scoped_traces_spec(
     )
 }
 
-/// Builds a `ScanSpec` over `ctx.spans` (raw schema) applying `scope.window`, `ctx.visible_from`,
-/// `ctx.around`, and default exclusions.
+/// Builds a `ScanSpec` over `ctx.spans` (raw schema) applying `scope.window`, `ctx.around`,
+/// and default exclusions (`visible_from` is enforced by `ctx.spans`).
 pub(crate) fn scoped_spans_spec(
     ctx: &EngineContext,
     scope: ListScope,
@@ -97,18 +97,15 @@ fn scoped_spec_for_table(
 ) -> Result<ScanSpec, RunError> {
     let time_col = col_expr(raw, time_col_name).map_err(crate::reads::context::query_err_to_run)?;
     let mut filters = Vec::new();
-    let mut min_ns = ctx.visible_from;
+    let mut min_ns = None;
     let mut max_ns = None;
 
     if let Some(window) = scope.window {
-        min_ns = Some(min_ns.map_or(window.from(), |vf| vf.max(window.from())));
+        min_ns = Some(window.from());
         // `TimeWindow` is `[from, to)`; `TimeRangeHint::max_ns` is inclusive.
         max_ns = window.to().checked_sub(1);
         filters.push(cmp_ts(&time_col, BinaryOp::GtEq, window.from()));
         filters.push(cmp_ts(&time_col, BinaryOp::Lt, window.to()));
-    }
-    if let Some(vf) = ctx.visible_from {
-        filters.push(cmp_ts(&time_col, BinaryOp::GtEq, vf));
     }
 
     let exclusions = default_exclusions(
@@ -121,17 +118,9 @@ fn scoped_spec_for_table(
     )?;
     filters.extend(exclusions);
 
-    let mut map_projections = BTreeMap::new();
-    if !scope.include_experiments {
-        map_projections.insert(
-            meta_col_name.to_owned(),
-            MapProjection::Keys(BTreeSet::from([metadata_key::EXPERIMENT_ID.to_owned()])),
-        );
-    }
-
     Ok(ScanSpec {
         projection: None,
-        map_projections,
+        map_projections: BTreeMap::new(),
         time_range: TimeRangeHint {
             min_ns,
             max_ns,
@@ -233,10 +222,6 @@ pub(crate) fn strict_exclusions_spans(
     };
 
     let mut filters = vec![not_clean];
-    if let Some(vf) = ctx.visible_from {
-        let start_col = col_expr(&traces_raw, traces::START_TIME)?;
-        filters.push(cmp_ts(&start_col, BinaryOp::GtEq, vf));
-    }
     let mut id_lookups = Vec::new();
     if let Some(ids) = trace_ids {
         let trace_col = col_expr(&traces_raw, traces::TRACE_ID)?;
@@ -265,7 +250,7 @@ pub(crate) fn strict_exclusions_spans(
         projection: Some(vec![trace_id_idx]),
         map_projections,
         time_range: TimeRangeHint {
-            min_ns: ctx.visible_from,
+            min_ns: None,
             max_ns: None,
             around_ns: ctx.around,
         },
@@ -597,25 +582,18 @@ pub(crate) fn search_predicate(
         .ok_or_else(|| crate::reads::columns::internal("trace_id missing from spans schema"))?;
     let start_col =
         col_expr(&spans_raw, spans::START_TIME).map_err(crate::reads::context::query_err_to_run)?;
-    let mut min_ns = window.from();
-    if let Some(vf) = ctx.visible_from {
-        min_ns = min_ns.max(vf);
-    }
     let max_ns = window.to().checked_sub(1);
-    let mut filters = vec![
+    let filters = vec![
         cmp_ts(&start_col, BinaryOp::GtEq, window.from()),
         cmp_ts(&start_col, BinaryOp::Lt, window.to()),
         ilike_expr,
     ];
-    if let Some(vf) = ctx.visible_from {
-        filters.push(cmp_ts(&start_col, BinaryOp::GtEq, vf));
-    }
 
     let spec = ScanSpec {
         projection: Some(vec![trace_id_idx]),
         map_projections: BTreeMap::new(),
         time_range: TimeRangeHint {
-            min_ns: Some(min_ns),
+            min_ns: Some(window.from()),
             max_ns,
             around_ns: None,
         },

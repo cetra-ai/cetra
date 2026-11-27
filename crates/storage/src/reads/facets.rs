@@ -1036,8 +1036,6 @@ fn open_facets_streams(
             FacetView::Spans => scoped_spans_spec(ctx, scope, references_environment)?,
             FacetView::Sessions => return Err(internal("unreachable sessions branch")),
         };
-        // View projections read full map columns before `apply_compiled_filter` and facet reads.
-        spec.map_projections.clear();
         if let SearchPredicate::Spans {
             filter: s_expr,
             substrings,

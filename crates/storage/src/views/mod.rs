@@ -45,7 +45,7 @@ impl ProjectQuery {
     /// Returns a copy with `visible_from` overridden for visibility tests.
     #[cfg(test)]
     pub(crate) fn with_visible_from(mut self, visible_from: Option<i64>) -> Self {
-        self.inner.visible_from = visible_from;
+        self.inner = self.inner.with_visible_from(visible_from);
         self
     }
 

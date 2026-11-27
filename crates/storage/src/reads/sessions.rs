@@ -394,7 +394,7 @@ fn load_root_payloads(
 
     let trace_raw_col = col_expr(&spans_raw, spans::TRACE_ID)?;
     let span_raw_col = col_expr(&spans_raw, spans::SPAN_ID)?;
-    let mut filters = vec![
+    let filters = vec![
         Expr::InList {
             expr: Box::new(trace_raw_col),
             list: trace_vec
@@ -414,24 +414,12 @@ fn load_root_payloads(
             redacted: false,
         },
     ];
-    if let Some(vf) = ctx.visible_from {
-        let start_col = col_expr(&spans_raw, spans::START_TIME)?;
-        filters.push(Expr::Binary {
-            left: Box::new(start_col),
-            op: BinaryOp::GtEq,
-            right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
-                value: vf,
-                utc: true,
-            })),
-            data_type: DataType::Bool,
-        });
-    }
 
     let span_spec = ScanSpec {
         projection: Some(proj_indices),
         map_projections: Default::default(),
         time_range: TimeRangeHint {
-            min_ns: ctx.visible_from,
+            min_ns: None,
             max_ns: None,
             around_ns: ctx.around,
         },
