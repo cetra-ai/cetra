@@ -3,11 +3,153 @@
 //! Messages name the table, segment, offset, sequence number, or size.
 //! They never include row content or attribute values.
 
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use arrow::error::ArrowError;
+use cetra_column::ColumnError;
 use uuid::Uuid;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EngineErrorKind {
+    ResourcesExhausted,
+    Parquet,
+    ObjectStore,
+    #[cfg(test)]
+    Io,
+    Column,
+    Busy,
+    Internal,
+}
+
+impl EngineErrorKind {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ResourcesExhausted => "resources_exhausted",
+            Self::Parquet => "parquet",
+            Self::ObjectStore => "object_store",
+            #[cfg(test)]
+            Self::Io => "io",
+            Self::Column => "column",
+            Self::Busy => "busy",
+            Self::Internal => "internal",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::ResourcesExhausted => "query memory or spill limit exceeded",
+            Self::Parquet => "corrupt parquet file",
+            Self::ObjectStore => "object store read error",
+            #[cfg(test)]
+            Self::Io => "query I/O error",
+            Self::Column => "columnar batch error",
+            Self::Busy => "too many queries are running",
+            Self::Internal => "internal query engine error",
+        }
+    }
+}
+
+/// Opaque, privacy-safe internal error from the query or compaction read engine.
+///
+/// [`fmt::Display`] and [`fmt::Debug`] only ever emit static category labels and
+/// never expose row values, prompts, query text, or object paths (`AGENTS.md` § Privacy).
+#[derive(Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("{}", self.kind.message())]
+pub struct EngineError {
+    kind: EngineErrorKind,
+}
+
+impl fmt::Debug for EngineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("EngineError")
+            .field(&self.kind.label())
+            .finish()
+    }
+}
+
+impl EngineError {
+    pub(crate) fn kind(self) -> EngineErrorKind {
+        self.kind
+    }
+
+    pub(crate) fn kind_label(self) -> &'static str {
+        self.kind.label()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_busy(self) -> bool {
+        self.kind == EngineErrorKind::Busy
+    }
+
+    pub(crate) fn to_query_error(self) -> cetra_query::QueryError {
+        match self.kind {
+            EngineErrorKind::ResourcesExhausted => cetra_query::QueryError::TooLarge,
+            EngineErrorKind::Busy => cetra_query::QueryError::Busy,
+            EngineErrorKind::Parquet => {
+                cetra_query::QueryError::CorruptData("corrupt parquet file".to_owned())
+            }
+            EngineErrorKind::ObjectStore => {
+                cetra_query::QueryError::StorageIo("storage read error".to_owned())
+            }
+            _ => cetra_query::QueryError::internal(self.kind.label()),
+        }
+    }
+
+    pub(crate) fn from_query(err: &cetra_query::QueryError) -> Self {
+        let kind = match err {
+            cetra_query::QueryError::TooLarge => EngineErrorKind::ResourcesExhausted,
+            cetra_query::QueryError::CorruptData(_) => EngineErrorKind::Parquet,
+            cetra_query::QueryError::StorageIo(_) => EngineErrorKind::ObjectStore,
+            cetra_query::QueryError::Column(_) => EngineErrorKind::Column,
+            cetra_query::QueryError::Busy => EngineErrorKind::Busy,
+            _ => EngineErrorKind::Internal,
+        };
+        Self { kind }
+    }
+
+    pub(crate) fn from_parquet(err: &parquet::errors::ParquetError) -> Self {
+        let kind = if crate::verify::is_store_error(err) {
+            EngineErrorKind::ObjectStore
+        } else {
+            EngineErrorKind::Parquet
+        };
+        Self { kind }
+    }
+
+    pub(crate) fn from_column(_err: &ColumnError) -> Self {
+        Self {
+            kind: EngineErrorKind::Column,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_resources_exhausted() -> Self {
+        Self {
+            kind: EngineErrorKind::ResourcesExhausted,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_io() -> Self {
+        Self {
+            kind: EngineErrorKind::Io,
+        }
+    }
+
+    pub(crate) fn internal(_reason: &'static str) -> Self {
+        Self {
+            kind: EngineErrorKind::Internal,
+        }
+    }
+}
+
+/// Constructs an opaque [`EngineError`] for downstream crate tests without exposing
+/// internal engine types.
+#[doc(hidden)]
+pub fn engine_error_for_test(_msg: &str) -> EngineError {
+    EngineError::internal("test error")
+}
 
 /// A `[storage]` value failed a parse or a bound check.
 ///
@@ -76,9 +218,6 @@ pub enum OpenError {
     /// The object store could not be opened, or a startup cleanup failed.
     #[error(transparent)]
     Objects(#[from] ObjectError),
-    /// The shared DataFusion runtime could not be built.
-    #[error("building the query runtime")]
-    Runtime,
 }
 
 /// `append_spans` or `append_scores` failed.
@@ -164,9 +303,9 @@ pub enum FlushNowError {
 /// `Storage::query` failed.
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
-    /// DataFusion rejected the session or the scan.
+    /// The native query engine failed to initialize or project a snapshot.
     #[error(transparent)]
-    DataFusion(#[from] datafusion::error::DataFusionError),
+    Internal(#[from] EngineError),
     /// No query memory came free within `query.admission_wait`. The server
     /// maps this to 503 `busy` (spec 09).
     #[error("too many queries are running")]
@@ -195,7 +334,13 @@ pub enum MemtableError {
     },
     /// Filtering or concatenating batches failed.
     #[error("building a memtable batch")]
-    Arrow(#[source] ArrowError),
+    Column(#[from] ColumnError),
+}
+
+impl MemtableError {
+    pub(crate) fn from_column(err: ColumnError) -> Self {
+        Self::Column(err)
+    }
 }
 
 /// A WAL codec, segment, or replay failure.
@@ -203,15 +348,12 @@ pub enum MemtableError {
 /// Callers outside the WAL map this into [`OpenError`] or [`AppendError`].
 #[derive(Debug, thiserror::Error)]
 pub enum WalError {
-    /// The IPC payload is not one batch of the table's schema.
+    /// The binary frame payload is not one batch of the table's schema.
     #[error("invalid WAL payload: {reason}")]
     InvalidPayload {
         /// Static reason. Never row content.
         reason: &'static str,
     },
-    /// Arrow could not write the record batch.
-    #[error("encoding WAL record")]
-    Encode(#[source] ArrowError),
     /// A record failed its checksum, ran backwards, or was not a batch of this table.
     ///
     /// `segment` is the file name. `offset` is the byte where the bad record starts.
@@ -277,6 +419,20 @@ impl WalError {
             action,
             path: path.to_path_buf(),
             source,
+        }
+    }
+
+    pub(crate) fn from_column(err: &ColumnError) -> Self {
+        match *err {
+            ColumnError::InvalidFrame { reason }
+            | ColumnError::InvalidBatch { reason }
+            | ColumnError::Overflow { reason } => Self::InvalidPayload { reason },
+            ColumnError::InvalidUtf8 => Self::InvalidPayload {
+                reason: "invalid utf-8 in column data",
+            },
+            ColumnError::MemoryLimit { .. } => Self::InvalidPayload {
+                reason: "memory limit exceeded",
+            },
         }
     }
 }
@@ -494,7 +650,7 @@ pub enum MediaError {
     Catalog(#[from] CatalogError),
     /// Reading the live set failed.
     #[error("media query: {0}")]
-    Query(#[from] datafusion::error::DataFusionError),
+    Query(#[from] EngineError),
     /// An injected test fault.
     #[error("injected fault")]
     Fault,
@@ -660,12 +816,12 @@ pub enum ParquetWriteError {
         /// Static reason. Never a cell value.
         reason: &'static str,
     },
-    /// An Arrow kernel failed while sorting or measuring the batches.
+    /// Columnar batch preparation or encoding failed.
     #[error("parquet write: {source}")]
-    Arrow {
-        /// The Arrow error.
+    Column {
+        /// The columnar error.
         #[source]
-        source: ArrowError,
+        source: ColumnError,
     },
     /// The Parquet writer failed.
     #[error("parquet write: {source}")]
@@ -685,9 +841,9 @@ pub enum AnchorError {
         /// Column name. Never a row value.
         name: &'static str,
     },
-    /// Arrow rejected a batch operation.
+    /// Columnar batch processing failed.
     #[error("anchor: {0}")]
-    Arrow(#[from] ArrowError),
+    Batch(#[from] ColumnError),
     /// An async Parquet read during the startup rebuild failed.
     #[error("anchor rebuild: {0}")]
     Parquet(#[source] Box<parquet::errors::ParquetError>),
@@ -700,6 +856,14 @@ impl AnchorError {
 
     pub(crate) fn parquet(source: parquet::errors::ParquetError) -> Self {
         Self::Parquet(Box::new(source))
+    }
+
+    pub(crate) fn from_column(err: ColumnError) -> Self {
+        Self::Batch(err)
+    }
+
+    pub(crate) fn is_store_error(&self) -> bool {
+        matches!(self, Self::Parquet(err) if crate::verify::is_store_error(err))
     }
 }
 
@@ -715,9 +879,9 @@ pub enum PartialsError {
     /// A `trace_id` value is not a valid id.
     #[error("partials trace id is invalid")]
     InvalidTraceId,
-    /// Arrow rejected the output batch.
+    /// Columnar batch construction failed.
     #[error("partials: {0}")]
-    Arrow(#[from] ArrowError),
+    Batch(#[from] ColumnError),
 }
 
 impl PartialsError {
@@ -725,6 +889,10 @@ impl PartialsError {
         Self::Column {
             name: name.to_owned(),
         }
+    }
+
+    pub(crate) fn from_column(err: ColumnError) -> Self {
+        Self::Batch(err)
     }
 }
 
@@ -734,9 +902,9 @@ pub enum CompactionError {
     /// Reading or merging the input files failed.
     #[error("reading compaction inputs failed")]
     Read {
-        /// The DataFusion error. Names files and columns, never values.
+        /// Opaque internal engine error. Names category only, never values.
         #[source]
-        source: datafusion::error::DataFusionError,
+        source: EngineError,
     },
     /// Encoding an output failed.
     #[error(transparent)]
@@ -783,10 +951,25 @@ pub enum CompactionError {
     DiskFull,
 }
 
+impl From<cetra_query::QueryError> for CompactionError {
+    fn from(err: cetra_query::QueryError) -> Self {
+        Self::Read {
+            source: EngineError::from_query(&err),
+        }
+    }
+}
+
+impl From<ColumnError> for CompactionError {
+    fn from(err: ColumnError) -> Self {
+        Self::Read {
+            source: EngineError::from_column(&err),
+        }
+    }
+}
+
 impl CompactionError {
     /// The variant name in snake case. The job failure logs print this instead
-    /// of the error text: a DataFusion error raised by a plan that holds the
-    /// covered-row predicate may quote its literals (spec 03 §7).
+    /// of the error text: internal read errors never quote predicates or values (spec 03 §7).
     pub(crate) fn label(&self) -> &'static str {
         match self {
             Self::Read { .. } => "read",
@@ -805,28 +988,13 @@ impl CompactionError {
         }
     }
 
-    /// For [`Self::Read`], the variant of the DataFusion error under its
-    /// wrappers, in snake case; `None` otherwise. Never the text: it can quote
-    /// the literals of the covered-row predicate (spec 03 §7).
+    /// For [`Self::Read`], the engine error category in snake case; `None` otherwise.
+    /// Never exposes query text or row literals (spec 03 §7).
     pub(crate) fn read_source(&self) -> Option<&'static str> {
-        use datafusion::error::DataFusionError as E;
         let Self::Read { source } = self else {
             return None;
         };
-        Some(match crate::query_error::root(source) {
-            E::ResourcesExhausted(_) => "resources_exhausted",
-            E::ParquetError(_) => "parquet",
-            E::ArrowError(..) => "arrow",
-            E::IoError(_) => "io",
-            E::ObjectStore(_) => "object_store",
-            E::External(_) => "external",
-            E::Execution(_) | E::ExecutionJoin(_) => "execution",
-            E::Internal(_) => "internal",
-            E::Plan(_) => "plan",
-            E::SchemaError(..) => "schema",
-            E::NotImplemented(_) => "not_implemented",
-            _ => "other",
-        })
+        Some(source.kind_label())
     }
 }
 
@@ -908,22 +1076,19 @@ impl OrphanError {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompactionError, ObjectError, OrphanError};
-    use datafusion::error::DataFusionError;
+    use super::{CompactionError, EngineError, ObjectError, OrphanError, engine_error_for_test};
 
     #[test]
-    fn a_read_failure_names_its_datafusion_variant_and_no_text() {
+    fn a_read_failure_names_its_category_and_hides_arbitrary_text() {
+        let secret = engine_error_for_test("secret-literal");
+        assert!(!secret.to_string().contains("secret-literal"));
+        assert!(!format!("{secret:?}").contains("secret-literal"));
         let wrapped = CompactionError::Read {
-            source: DataFusionError::Context(
-                "merge".to_owned(),
-                Box::new(DataFusionError::ResourcesExhausted(
-                    "secret-literal".to_owned(),
-                )),
-            ),
+            source: EngineError::from_resources_exhausted(),
         };
         assert_eq!(wrapped.read_source(), Some("resources_exhausted"));
         let io = CompactionError::Read {
-            source: DataFusionError::IoError(std::io::Error::other("x")),
+            source: EngineError::from_io(),
         };
         assert_eq!(io.read_source(), Some("io"));
         assert_eq!(CompactionError::DiskFull.read_source(), None);
@@ -945,6 +1110,55 @@ mod tests {
         assert!(!text.contains(key), "{text}");
         assert!(!text.contains("9f86d081"), "{text}");
         assert_eq!(text, "deleting an orphan: store");
+    }
+
+    #[test]
+    fn engine_error_preserves_corrupt_vs_store_vs_resources_exhausted() {
+        use super::AnchorError;
+        use crate::verify::may_be_corrupt;
+        use cetra_query::QueryError;
+
+        let too_large = EngineError::from_query(&QueryError::TooLarge);
+        assert!(!may_be_corrupt(&too_large));
+        assert_eq!(
+            CompactionError::Read { source: too_large }.read_source(),
+            Some("resources_exhausted")
+        );
+
+        let corrupt =
+            EngineError::from_query(&QueryError::CorruptData("corrupt parquet file".to_owned()));
+        assert!(may_be_corrupt(&corrupt));
+        assert_eq!(
+            CompactionError::Read { source: corrupt }.read_source(),
+            Some("parquet")
+        );
+
+        let store =
+            EngineError::from_query(&QueryError::StorageIo("storage read error".to_owned()));
+        assert!(!may_be_corrupt(&store));
+        assert_eq!(
+            CompactionError::Read { source: store }.read_source(),
+            Some("object_store")
+        );
+
+        let string_only = EngineError::from_query(&QueryError::internal("corrupt parquet file"));
+        assert!(!may_be_corrupt(&string_only));
+        assert_eq!(string_only.kind_label(), "internal");
+
+        let anchor_store = AnchorError::parquet(parquet::errors::ParquetError::External(Box::new(
+            object_store::Error::Generic {
+                store: "test",
+                source: "err".into(),
+            },
+        )));
+        assert!(anchor_store.is_store_error());
+        let anchor_missing = AnchorError::parquet(parquet::errors::ParquetError::External(
+            Box::new(object_store::Error::NotFound {
+                path: "x".to_owned(),
+                source: "missing".into(),
+            }),
+        ));
+        assert!(!anchor_missing.is_store_error());
     }
 }
 
@@ -1040,13 +1254,13 @@ impl ParquetWriteError {
         Self::Invalid { reason }
     }
 
-    pub(crate) fn arrow(source: ArrowError) -> Self {
-        Self::Arrow { source }
-    }
-
     pub(crate) fn parquet(source: parquet::errors::ParquetError) -> Self {
         Self::Parquet {
             source: Box::new(source),
         }
+    }
+
+    pub(crate) fn from_column(err: ColumnError) -> Self {
+        Self::Column { source: err }
     }
 }

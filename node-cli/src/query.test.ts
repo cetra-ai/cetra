@@ -14,7 +14,7 @@ const PROJECT_ID = "01900000-0000-7000-8000-000000000001";
 const PROJECT_PATH = "/api/v1/projects/acme%2Fdemo/sql";
 const NOW = Date.parse("2026-01-02T00:00:00.000Z");
 const deps = { now: () => NOW };
-const ONE_ROW = { columns: [{ name: "n", type: "Int64" }], rows: [{ n: 1 }], truncated: false };
+const ONE_ROW = { columns: [{ name: "n", type: "integer" }], rows: [{ n: 1 }], truncated: false };
 const PROBLEM_400 = {
   type: "about:blank",
   title: "Bad Request",
@@ -149,12 +149,12 @@ describe.skipIf(process.platform !== "linux")("cetra-cli query", () => {
     const server = await canned([
       {
         status: 200,
-        body: { columns: [{ name: "n", type: "Int64" }], rows: [], truncated: false },
+        body: { columns: [{ name: "n", type: "integer" }], rows: [], truncated: false },
       },
       {
         status: 200,
         body: {
-          columns: [{ name: "n", type: "Int64" }],
+          columns: [{ name: "n", type: "integer" }],
           rows: [{ n: 1 }, { n: 2 }],
           truncated: false,
         },
@@ -179,7 +179,7 @@ describe.skipIf(process.platform !== "linux")("cetra-cli query", () => {
     const server = await canned([
       {
         status: 200,
-        body: { columns: [{ name: "n", type: "Int64" }], rows: [{ n: 1 }], truncated: true },
+        body: { columns: [{ name: "n", type: "integer" }], rows: [{ n: 1 }], truncated: true },
       },
     ]);
     const { config, cwd } = await dirs();

@@ -1,0 +1,1 @@
+score('quality') >= 0.5 AND score_label('tone') = 'good' AND has_score('quality') AND start_time >= now() - INTERVAL '7 days' AND date_trunc('hour', start_time) >= '2026-01-01T00:00:00Z'

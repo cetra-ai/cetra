@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use arrow::array::RecordBatch;
+use cetra_column::Batch;
 use cetra_core::ids::ProjectId;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -38,9 +38,9 @@ pub(crate) const CHANNEL_CAPACITY: usize = 1024;
 pub(crate) struct AppendRequest {
     /// Project that owns the rows.
     pub project: ProjectId,
-    /// Rows to write. The schema is the table's schema.
-    pub batch: RecordBatch,
-    /// [`RecordBatch::get_array_memory_size`], used for group limits.
+    /// Rows to write. The schema is the table's columnar schema.
+    pub batch: Batch,
+    /// [`Batch::memory_bytes`], used for group limits.
     pub bytes: usize,
     /// Completed when the group is acknowledged, or when it fails.
     pub ack: oneshot::Sender<Result<AppendReceipt, AppendError>>,
@@ -167,7 +167,7 @@ impl WalWriterHandle {
     pub(crate) async fn append(
         &self,
         project: ProjectId,
-        batch: RecordBatch,
+        batch: Batch,
         bytes: usize,
     ) -> Result<AppendReceipt, AppendError> {
         if self.state.failed() {
@@ -202,6 +202,7 @@ impl WalWriterHandle {
     }
 
     /// Clones the queue sender. Dropping every clone is what ends the task.
+    #[cfg(test)]
     fn sender(&self) -> Option<mpsc::Sender<AppendRequest>> {
         self.tx
             .lock()
@@ -318,7 +319,7 @@ pub(crate) fn spawn(mut params: WriterParams) -> WalWriterHandle {
 
 struct Prepared {
     project: ProjectId,
-    batch: RecordBatch,
+    batch: Option<Batch>,
     bytes: usize,
     rows: usize,
     seq: u64,
@@ -730,7 +731,7 @@ async fn run(
                     prepared.push(Prepared {
                         project: request.project,
                         rows: request.batch.num_rows(),
-                        batch: request.batch,
+                        batch: Some(request.batch),
                         bytes: request.bytes,
                         seq,
                         ack: request.ack,
@@ -808,7 +809,7 @@ async fn run(
 
         let inserted = match hooks.fail(HookPoint::AfterWalSync) {
             Some(err) => Err(err),
-            None => insert_all(&shared, &prepared, flush_max_bytes).map_err(io::Error::other),
+            None => insert_all(&shared, &mut prepared, flush_max_bytes).map_err(io::Error::other),
         };
         if let Err(err) = inserted {
             tracing::error!(
@@ -864,7 +865,7 @@ async fn run(
 
 fn insert_all(
     shared: &WriterShared,
-    prepared: &[Prepared],
+    prepared: &mut [Prepared],
     flush_max_bytes: u64,
 ) -> Result<(), crate::error::MemtableError> {
     let notify = {
@@ -873,7 +874,12 @@ fn insert_all(
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         for item in prepared {
-            memtable.insert(item.project, item.batch.clone(), item.seq)?;
+            let batch = item.batch.take().ok_or_else(|| {
+                crate::error::MemtableError::from_column(cetra_column::ColumnError::InvalidBatch {
+                    reason: "prepared WAL batch already consumed",
+                })
+            })?;
+            memtable.insert(item.project, batch, item.seq)?;
         }
         let bytes = u64::try_from(memtable.bytes()).unwrap_or(u64::MAX);
         let active = u64::try_from(memtable.active_bytes()).unwrap_or(u64::MAX);
@@ -955,7 +961,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use arrow::array::TimestampNanosecondArray;
+    use cetra_column::{Column, FlatData};
     use cetra_core::ids::ProjectId;
     use cetra_core::schema::spans::START_TIME;
 
@@ -1027,12 +1033,13 @@ mod tests {
 
     async fn append_at(handle: &WalWriterHandle, start: i64) -> Result<AppendReceipt, AppendError> {
         let batch = spans_at(&[start]);
-        let bytes = batch.get_array_memory_size();
+        let bytes = batch.memory_bytes();
         handle.append(project(), batch, bytes).await
     }
 
     fn batch_bytes() -> u64 {
-        u64::try_from(spans_at(&[0]).get_array_memory_size()).unwrap()
+        let batch = spans_at(&[0]);
+        u64::try_from(batch.memory_bytes()).unwrap()
     }
 
     async fn wait_for(mut ready: impl FnMut() -> bool) {
@@ -1066,13 +1073,13 @@ mod tests {
                     .batch
                     .column_by_name(START_TIME)
                     .expect("start_time column");
-                let array = column
-                    .as_any()
-                    .downcast_ref::<TimestampNanosecondArray>()
-                    .expect("start_time is timestamp ns");
-                for row in 0..array.len() {
-                    times.push(array.value(row));
-                }
+                let Column::Flat(flat) = column else {
+                    panic!("expected flat start_time column");
+                };
+                let FlatData::TimestampNs { values, .. } = flat.data() else {
+                    panic!("expected timestamp ns column");
+                };
+                times.extend_from_slice(values);
             }
         }
         times
@@ -1378,7 +1385,7 @@ mod tests {
             return Err(AppendError::WalFailed);
         }
         let batch = spans_at(&[start]);
-        let bytes = batch.get_array_memory_size();
+        let bytes = batch.memory_bytes();
         let (ack, rx) = oneshot::channel();
         tx.send(AppendRequest {
             project: project(),

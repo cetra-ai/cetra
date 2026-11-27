@@ -1,9 +1,9 @@
-//! Errors from parsing identifiers and stored values, and from building Arrow batches.
+//! Errors from parsing identifiers and stored values, and from building columnar batches.
 //!
 //! Messages name the field and the reason. They never include payload content
 //! (prompts, completions, attribute values). Spec README § Cross-cutting conventions.
 
-/// Errors from parsing identifiers and stored values, and from building Arrow batches.
+/// Errors from parsing identifiers and stored values, and from building columnar batches.
 ///
 /// Messages name the field and the reason. They never include payload content
 /// (prompts, completions, attribute values). Spec README § Cross-cutting conventions.
@@ -17,11 +17,11 @@ pub enum CoreError {
         /// Static reason. Never the rejected input.
         reason: &'static str,
     },
-    /// Arrow failed while building a record batch.
+    /// Columnar batch or schema construction failed.
     ///
-    /// Spec 03 § WAL payload. The message is Arrow's, which does not include payload content.
+    /// Spec 03 § WAL payload. `ColumnError` messages never include payload content.
     #[error(transparent)]
-    Arrow(#[from] arrow::error::ArrowError),
+    Column(#[from] cetra_column::ColumnError),
     /// A stored enum string is not one of the canonical spellings.
     ///
     /// `value` is an enum token, truncated to 64 characters.

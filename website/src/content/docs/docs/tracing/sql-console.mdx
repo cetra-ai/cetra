@@ -87,6 +87,7 @@ The console runs read-only queries in a sandbox:
 - A query that runs too long is stopped, and so is one that needs more memory than the server allows. The error says which.
 - A result holds at most 10,000 rows. When more rows match, the result is marked as truncated. Exports are not capped at that figure.
 - Some functions are not available, such as those that can build very large values (`generate_series`, `repeat`, `replace`).
+- Correlated subqueries, `WITH RECURSIVE`, `LATERAL` joins, `ROLLUP`, `CUBE`, `GROUPING SETS`, and non-equi joins without an equality key are refused. See the [SQL schema](/docs/reference/sql-schema/) for the available functions.
 
 Errors show in the console with the position of the problem.
 

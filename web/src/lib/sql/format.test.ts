@@ -5,7 +5,7 @@ import { isSqlResult, resultStatus, sqlProblemMessage } from "@/lib/sql/format";
 it("narrows a run answer to a SQL result", () => {
   expect(isSqlResult({ columns: [], rows: [], truncated: false })).toBe(true);
   expect(
-    isSqlResult({ columns: [{ name: "a", type: "Utf8" }], rows: [{ a: null }], truncated: true }),
+    isSqlResult({ columns: [{ name: "a", type: "string" }], rows: [{ a: null }], truncated: true }),
   ).toBe(true);
   expect(isSqlResult("a,b")).toBe(false);
   expect(isSqlResult("")).toBe(false);

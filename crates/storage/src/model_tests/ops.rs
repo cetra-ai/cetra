@@ -28,7 +28,7 @@ use crate::read_cache::cached_name;
 use crate::reads::MAX_PAGE;
 use crate::test_support::{ChaosStore, span_rows};
 use crate::wal::{Table, parse_segment_name};
-use cetra_core::batch::scores_to_record_batch;
+use cetra_core::batch::scores_to_batch;
 use cetra_core::ids::TraceId;
 use cetra_core::span::Span;
 use object_store::path::Path as ObjectPath;
@@ -834,7 +834,7 @@ fn send_score(
     step: &mut dyn FnMut(StepEvent<'_>),
 ) {
     let project = key.project;
-    let batch = scores_to_record_batch(&[score(&key, version, deleted, clock)])
+    let batch = scores_to_batch(&[score(&key, version, deleted, clock)])
         .expect("a score batch of one score");
     if model.project(project).dropped {
         let result = harness.block_on(harness.storage().append_scores(project.id(), batch));

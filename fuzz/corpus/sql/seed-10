@@ -1,0 +1,1 @@
+SELECT coalesce(nullif(name, ''), 'anon') AS n, CAST(duration_ns AS DOUBLE) / 1000.0 AS us FROM spans WHERE start_time >= {since:Timestamp} AND name ILIKE '%chat%'

@@ -626,7 +626,7 @@ async fn write_manifest(dir: &Path, manifest: &Value) -> Result<(), BackupError>
 
 #[cfg(test)]
 mod tests {
-    use cetra_core::batch::spans_to_record_batch;
+    use cetra_core::batch::spans_to_batch;
     use cetra_core::ids::ProjectId;
     use cetra_core::span::Span;
 
@@ -645,7 +645,7 @@ mod tests {
                 span
             })
             .collect();
-        let batch = spans_to_record_batch(&spans).unwrap();
+        let batch = spans_to_batch(&spans).unwrap();
         running
             .state()
             .storage

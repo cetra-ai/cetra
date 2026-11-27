@@ -1,0 +1,1 @@
+EXPLAIN SELECT trace_id, name FROM traces WHERE trace_id = '00010001000100010001000100010001' AND metadata['k1'] = 'v1'

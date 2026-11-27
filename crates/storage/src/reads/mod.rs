@@ -1,33 +1,31 @@
 //! Queries behind the read endpoints (D92).
 //!
 //! Each function takes a [`QueryContext`] and a request and runs under the
-//! request's timeout. Lists return Arrow batches in view-column order.
+//! request's timeout. Lists return `cetra_column::Batch` batches in view-column order.
 
 mod alerts;
 mod buckets;
-mod columns;
+pub(crate) mod columns;
+pub(crate) mod context;
 mod cursor;
 mod deletions;
 mod experiments;
 mod facets;
 mod prompts;
+mod scope;
 mod scores;
+pub(crate) mod scores_join;
 mod sessions;
 mod targets;
 mod traces;
 mod users;
 mod widgets;
 
-use arrow::record_batch::RecordBatch;
-use datafusion::logical_expr::Expr;
-use datafusion::prelude::DataFrame;
-
-use crate::filter::{FilterView, exclusions, time_window};
-use crate::query_error::{RunError, classify};
-use crate::views::{QueryContext, TimeWindow, ViewName};
+use crate::views::TimeWindow;
 
 pub use alerts::{AlertMeasure, AlertValue, AlertValueRequest, alert_value};
 pub use buckets::{Bucket, BucketWidth};
+pub use cursor::Page;
 pub use deletions::{
     FilterDeletionRequest, MAX_FILTER_DELETION_TRACES, UserDeletionScope, eval_trace_ids,
     filter_trace_ids, session_ids_of_traces, user_deletion_scope,
@@ -51,6 +49,7 @@ pub use scores::{
     ScoreNameCountsRequest, ScoreTargets, latest_scores, score_list, score_name_counts,
     scores_by_id,
 };
+pub use scores_join::validate_filter;
 pub use sessions::{
     MAX_SESSION_TURNS, SESSION_ERROR_TRACE_COUNT, SESSION_FIRST_INPUT_PREVIEW,
     SESSION_LAST_OUTPUT_PREVIEW, SessionDetailData, SessionExtrasRequest, SessionListRequest,
@@ -81,6 +80,8 @@ pub use widgets::{
     WidgetRequest, WidgetSeries, WidgetSource, validate_expressions, validate_shape, widget_query,
 };
 
+pub(crate) use context::EngineContext;
+
 /// Sort direction for a list. Nulls are last in both directions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortOrder {
@@ -101,75 +102,12 @@ pub struct ListScope {
     pub include_experiments: bool,
 }
 
-/// One page of a list.
-#[derive(Debug)]
-pub struct Page {
-    /// Rows in sort order, at most [`MAX_PAGE`].
-    pub batches: Vec<RecordBatch>,
-    /// Cursor for the next page. `None` when this page is the last.
-    pub next_cursor: Option<String>,
-}
-
 /// Most rows one list page returns.
 pub const MAX_PAGE: usize = 1000;
 
 /// Empty or all-whitespace text is no filter and no search.
 pub(crate) fn present(text: Option<&str>) -> Option<&str> {
     text.filter(|text| !text.chars().all(char::is_whitespace))
-}
-
-/// Parses `text` as a filter of `view` without running anything (D-I-30). Empty or blank text
-/// is accepted (it means no filter).
-///
-/// # Errors
-///
-/// [`RunError::Invalid`] when the text does not parse or names an unknown column;
-/// [`RunError::InvalidRequest`] for a view other than traces, spans, sessions or scores.
-pub fn validate_filter(ctx: &QueryContext, view: ViewName, text: &str) -> Result<(), RunError> {
-    let view = match view {
-        ViewName::Traces => FilterView::Traces,
-        ViewName::Spans => FilterView::Spans,
-        ViewName::Sessions => FilterView::Sessions,
-        ViewName::Scores => FilterView::Scores,
-        _ => {
-            return Err(RunError::InvalidRequest(
-                "filters are checked for traces, spans, sessions and scores only".to_owned(),
-            ));
-        }
-    };
-    match present(Some(text)) {
-        None => Ok(()),
-        Some(text) => ctx
-            .parse_filter(view, text)
-            .map(|_| ())
-            .map_err(RunError::from),
-    }
-}
-
-/// The `traces` view restricted by a list's window and default exclusions.
-pub(crate) async fn scoped_traces(
-    ctx: &QueryContext,
-    scope: ListScope,
-    references_environment: bool,
-) -> Result<DataFrame, RunError> {
-    let mut frame = ctx.session().table("traces").await.map_err(classify)?;
-    let mut conjuncts = Vec::new();
-    if let Some(window) = scope.window {
-        conjuncts.push(time_window(window));
-    }
-    if let Some(expr) = exclusions(
-        ctx,
-        FilterView::Traces,
-        scope.include_eval,
-        scope.include_experiments,
-        references_environment,
-    )? {
-        conjuncts.push(expr);
-    }
-    if let Some(predicate) = conjuncts.into_iter().reduce(Expr::and) {
-        frame = frame.filter(predicate).map_err(classify)?;
-    }
-    Ok(frame)
 }
 
 #[cfg(test)]

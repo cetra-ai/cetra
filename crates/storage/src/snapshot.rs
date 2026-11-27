@@ -711,24 +711,9 @@ mod tests {
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
-        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
-            datafusion::execution::context::SessionConfig::new(),
-            Arc::clone(&query.runtime),
-        );
-        ctx.register_table("spans_t", query.spans).unwrap();
-        let counted = ctx
-            .sql("SELECT count(*) FROM spans_t")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-        counted[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap()
-            .value(0)
+        let ctx = crate::views::QueryContext::new(query, None).unwrap();
+        let counted = crate::test_support::rows(&ctx, "SELECT count(*) AS n FROM spans").await;
+        counted[0]["n"].as_i64().unwrap()
     }
 
     /// Rows of the scores table that `project` sees through a query.
@@ -737,24 +722,9 @@ mod tests {
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
-        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
-            datafusion::execution::context::SessionConfig::new(),
-            Arc::clone(&query.runtime),
-        );
-        ctx.register_table("scores_t", query.scores).unwrap();
-        let counted = ctx
-            .sql("SELECT count(*) FROM scores_t")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-        counted[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap()
-            .value(0)
+        let ctx = crate::views::QueryContext::new(query, None).unwrap();
+        let counted = crate::test_support::rows(&ctx, "SELECT count(*) AS n FROM scores").await;
+        counted[0]["n"].as_i64().unwrap()
     }
 
     /// The core restore test: a backup taken from a running storage opens on

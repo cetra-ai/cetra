@@ -6,29 +6,33 @@
 //! parents are ignored too, and `just test` runs each in a test process of
 //! its own.
 
-use crate::QueryOptions;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::{Array, FixedSizeBinaryArray};
 use bytes::Bytes;
 use bytesize::ByteSize;
-use cetra_core::batch::spans_to_record_batch;
+use cetra_column::{Batch, Column, FlatData};
+use cetra_core::batch::spans_to_batch;
 use cetra_core::enums::{SpanKind, SpanStatus};
 use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::schema::spans;
 use cetra_core::span::Span;
-use datafusion::execution::context::{SessionConfig, SessionContext};
 use sha2::{Digest, Sha256};
 
+use crate::QueryOptions;
 use crate::catalog::FileTable;
 use crate::config::{FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig};
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::error::AppendError;
 use crate::hooks::HookPoint;
 use crate::media::MediaBlob;
+use crate::reads::columns::active_rows;
+use crate::test_support::{rows, trace_ids_of};
+use crate::views::QueryContext;
 use crate::wal::{Table, segment_name, spans_at};
 
 const POINTS: &[(&str, HookPoint)] = &[
@@ -131,11 +135,11 @@ fn parse_point(name: &str) -> Option<HookPoint> {
 }
 
 /// Two batches, four rows, distinct span ids.
-fn batches() -> Vec<arrow::array::RecordBatch> {
+fn batches() -> Vec<Batch> {
     (0..2).map(batch_rows).collect()
 }
 
-fn batch_rows(batch: u8) -> arrow::array::RecordBatch {
+fn batch_rows(batch: u8) -> Batch {
     let project_id = project();
     let trace_id = "4bf92f3577b34da6a3ce929d0e0e4736"
         .parse::<TraceId>()
@@ -204,7 +208,7 @@ fn batch_rows(batch: u8) -> arrow::array::RecordBatch {
             }
         })
         .collect();
-    spans_to_record_batch(&spans).unwrap()
+    spans_to_batch(&spans).unwrap()
 }
 
 fn expected_ids() -> Vec<Vec<u8>> {
@@ -244,28 +248,20 @@ async fn stored_ids(storage: &crate::Storage) -> Vec<Vec<u8>> {
         .query(project(), QueryOptions::new(None, None))
         .await
         .unwrap();
-    let ctx = SessionContext::new_with_config_rt(
-        SessionConfig::new(),
-        std::sync::Arc::clone(&query.runtime),
-    );
-    ctx.register_table("spans_t", std::sync::Arc::clone(&query.spans))
-        .unwrap();
-    let batches = ctx
-        .sql("SELECT span_id FROM spans_t")
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap();
+    let batches = query.collect_raw_spans().await.unwrap();
     let mut ids = Vec::new();
     for batch in batches {
-        let column = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<FixedSizeBinaryArray>()
-            .unwrap();
-        for index in 0..batch.num_rows() {
-            ids.push(column.value(index).to_vec());
+        let column = batch.column_by_name(spans::SPAN_ID).unwrap();
+        match column {
+            Column::Flat(flat) => match flat.data() {
+                FlatData::FixedBytes8(arr) => {
+                    for row in active_rows(&batch) {
+                        ids.push(arr[row].to_vec());
+                    }
+                }
+                other => panic!("unexpected span_id flat data: {other:?}"),
+            },
+            other => panic!("unexpected span_id column: {other:?}"),
         }
     }
     ids.sort();
@@ -681,7 +677,7 @@ async fn check_deletion(dir: &Path, name: &str) {
     assert_eq!(ids, deletion_span_ids(), "{name}: acknowledged rows");
     for file in storage.catalog_files(Table::Spans) {
         let rows = crate::test_support::object_rows(dir, &file);
-        let covered = crate::test_support::trace_ids_of(&rows)
+        let covered = trace_ids_of(&rows)
             .into_iter()
             .any(|trace| trace.as_slice() == trace1.as_slice());
         assert!(!covered, "{name}: {} holds a trace 1 row", file.path);
@@ -1175,34 +1171,24 @@ async fn catalog_counts(dir: &Path) -> (i64, i64) {
 }
 
 /// The `trace_id` bytes of every row of the project's `spans` (`traces` is
-/// false) or `traces` provider, sorted.
+/// false) or `traces` view, sorted.
 async fn stored_trace_ids(storage: &crate::Storage, traces: bool) -> Vec<Vec<u8>> {
     let query = storage
         .query(project(), QueryOptions::new(None, None))
         .await
         .unwrap();
-    let ctx = SessionContext::new_with_config_rt(
-        SessionConfig::new(),
-        std::sync::Arc::clone(&query.runtime),
-    );
-    let provider = if traces { query.traces } else { query.spans };
-    ctx.register_table("t", provider).unwrap();
-    let batches = ctx
-        .sql("SELECT trace_id FROM t")
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap();
     let mut ids = Vec::new();
-    for batch in batches {
-        let column = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<FixedSizeBinaryArray>()
-            .unwrap();
-        for index in 0..batch.num_rows() {
-            ids.push(column.value(index).to_vec());
+    if traces {
+        let ctx = QueryContext::new(query, None).unwrap();
+        for row in rows(&ctx, "SELECT trace_id FROM traces").await {
+            let tid: TraceId = row["trace_id"].as_str().unwrap().parse().unwrap();
+            ids.push(tid.as_bytes().to_vec());
+        }
+    } else {
+        for batch in query.collect_raw_spans().await.unwrap() {
+            for tid in trace_ids_of(&batch) {
+                ids.push(tid.to_vec());
+            }
         }
     }
     ids.sort();
@@ -1432,7 +1418,7 @@ fn keep_from() -> chrono::NaiveDate {
 }
 
 /// Two spans of `old_day`, noon on that day plus `index` minutes.
-fn old_day_rows(index: u8) -> arrow::array::RecordBatch {
+fn old_day_rows(index: u8) -> Batch {
     use chrono::Datelike;
     let midnight = (i64::from(old_day().num_days_from_ce()) - 719_163) * 86_400_000_000_000;
     let start = midnight + 12 * 3_600 * 1_000_000_000 + i64::from(index) * 60 * 1_000_000_000;
@@ -1664,7 +1650,8 @@ async fn rotation_child() {
     let storage = crate::Storage::open(config).await.unwrap();
     storage.hooks().abort_at(HookPoint::FlushAfterRotate);
     let batches = batches();
-    let one = arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap();
+    let refs: Vec<&Batch> = batches.iter().collect();
+    let one = Batch::concat(Arc::clone(batches[0].schema()), &refs, None).unwrap();
     storage.append_spans(project(), one).await.unwrap();
     // The age trigger fires about 200 ms after the append, well before this
     // sleep ends. The abort then ends the process.

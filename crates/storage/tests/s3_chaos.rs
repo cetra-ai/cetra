@@ -40,16 +40,14 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use arrow::array::{Array, StringArray};
 use bytesize::ByteSize;
-use cetra_core::batch::spans_to_record_batch;
+use cetra_core::batch::spans_to_batch;
 use cetra_core::enums::{SpanKind, SpanStatus};
 use cetra_core::ids::{ProjectId, SpanId, TraceId};
 use cetra_core::span::Span;
 use cetra_storage::config::{FlushConfig, MemtableConfig, ObjectStoreUrl, S3Config, StorageConfig};
 use cetra_storage::error::AppendError;
 use cetra_storage::{ProjectQuery, Storage};
-use datafusion::execution::context::{SessionConfig, SessionContext};
 use futures::TryStreamExt;
 use object_store::aws::AmazonS3Builder;
 use object_store::{ObjectStore, ObjectStoreExt};
@@ -522,7 +520,7 @@ fn project() -> ProjectId {
 }
 
 /// `rows` spans of one trace, each with `payload` bytes of output (copied from `tests/it/s3.rs`).
-fn spans(rows: usize, payload: usize) -> arrow::array::RecordBatch {
+fn spans(rows: usize, payload: usize) -> cetra_column::Batch {
     static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let base = NEXT_ID.fetch_add(rows as u64, std::sync::atomic::Ordering::Relaxed);
     let project_id = project();
@@ -594,7 +592,7 @@ fn spans(rows: usize, payload: usize) -> arrow::array::RecordBatch {
             }
         })
         .collect();
-    spans_to_record_batch(&spans).unwrap()
+    spans_to_batch(&spans).unwrap()
 }
 
 /// Printable bytes that do not compress (copied from `tests/it/s3.rs`).
@@ -618,29 +616,12 @@ fn filler(row: usize, len: usize) -> String {
 }
 
 async fn span_count(query: &ProjectQuery) -> usize {
-    let ctx = SessionContext::new_with_config_rt(
-        SessionConfig::new(),
-        std::sync::Arc::clone(&query.runtime),
-    );
-    ctx.register_table("spans_t", std::sync::Arc::clone(&query.spans))
-        .unwrap();
-    let batches = ctx
-        .sql("SELECT name FROM spans_t")
+    query
+        .collect_raw_spans()
         .await
         .unwrap()
-        .collect()
-        .await
-        .unwrap();
-    batches
         .iter()
-        .map(|batch| {
-            batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap()
-                .len()
-        })
+        .map(cetra_column::Batch::num_rows)
         .sum()
 }
 

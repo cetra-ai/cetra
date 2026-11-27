@@ -1,0 +1,1 @@
+WITH cte AS (SELECT trace_id, span_id, duration_ns, row_number() OVER (PARTITION BY trace_id ORDER BY start_time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS rn FROM spans) SELECT trace_id, span_id FROM cte WHERE rn = 1

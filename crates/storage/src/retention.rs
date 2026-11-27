@@ -46,13 +46,8 @@ async fn scalar(storage: &Storage, project: ProjectId, sql: &str) -> i64 {
         .await
         .unwrap();
     let ctx = QueryContext::new(query, None).unwrap();
-    let batches = rows(&ctx, sql).await;
-    let column = batches[0]
-        .column(0)
-        .as_any()
-        .downcast_ref::<arrow::array::Int64Array>()
-        .unwrap();
-    column.value(0)
+    let result = rows(&ctx, sql).await;
+    result[0].values().next().unwrap().as_i64().unwrap()
 }
 
 /// The `data_files.state` values of the test project's files of `day`.

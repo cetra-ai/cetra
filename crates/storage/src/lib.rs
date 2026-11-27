@@ -1,12 +1,8 @@
 //! Columnar storage for spans and scores: a write-ahead log, an in-memory
-//! memtable, Parquet files, and a SQLite catalog, queried through DataFusion.
+//! memtable, Parquet files, and a SQLite catalog, queried through `cetra-query`.
 //!
 //! See `docs/spec/03-storage.md`. The design and milestones are in
 //! `docs/plans/a1-storage/00-design.md`.
-//!
-//! # What this crate does not do yet
-//!
-//! - Parquet footers and page indexes use DataFusion's built-in metadata cache.
 
 #![warn(missing_docs)]
 
@@ -18,16 +14,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use arrow::array::{Array, RecordBatch, StringArray};
+use cetra_column::Batch;
 use cetra_core::ids::ProjectId;
 use chrono::NaiveDate;
-use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::catalog::{Catalog, Committer, Registered};
+use crate::catalog::{Committer, Registered};
 use crate::config::{QueryConfig, StorageConfig, WalSync};
-use crate::deletion::PendingDeletion;
 use crate::error::{
     AppendError, DeletionError, MediaError, MemtableError, OpenError, QueryError, StorageError,
     WalError,
@@ -35,10 +29,10 @@ use crate::error::{
 use crate::flush::FlushHandle;
 use crate::hooks::{HookPoint, Hooks};
 use crate::media::MediaGc;
-use crate::memtable::{MemSnapshot, Memtable};
+use crate::memtable::Memtable;
 use crate::objects::{Objects, PutSizes};
 use crate::read_state::{Published, ReadState};
-use crate::verify::{Suspects, VerifyQueue};
+use crate::verify::VerifyQueue;
 use crate::wal::Table;
 use crate::wal::writer::{WalWriterHandle, WriterExit, WriterParams, spawn};
 use crate::wal::{SegmentWriter, replay};
@@ -51,8 +45,9 @@ pub(crate) mod counters;
 pub(crate) mod dedup;
 pub(crate) mod deletion;
 pub(crate) mod disk;
+pub(crate) mod engine;
 pub mod error;
-mod filter;
+pub(crate) mod file_format;
 pub(crate) mod flush;
 pub(crate) mod format;
 pub(crate) mod fs;
@@ -61,12 +56,9 @@ mod maintenance;
 pub(crate) mod media;
 pub(crate) mod memory;
 pub(crate) mod objects;
-pub(crate) mod parquet;
 pub(crate) mod partials;
 pub(crate) mod projects;
-pub mod query;
 mod query_error;
-mod query_text;
 pub(crate) mod read_cache;
 mod reads;
 mod snapshot;
@@ -93,6 +85,7 @@ pub type CopyCancel = Arc<Mutex<bool>>;
 pub use crate::media::{MediaBlob, MediaRead, MediaReport};
 pub use crate::read_cache::ReadCacheStats;
 pub use query_error::{InvalidQuery, Position, RunError};
+pub(crate) use reads::EngineContext;
 pub use reads::{
     ACTIVITY_BUCKETS, Agg, AlertMeasure, AlertValue, AlertValueRequest, Breakdown, Bucket,
     BucketWidth, DEFAULT_BREAKDOWN_LIMIT, ERROR_SPAN_COLUMNS, ERROR_TRACE_COUNT, ErrorSpansRequest,
@@ -143,6 +136,15 @@ pub(crate) mod wal;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz_entry;
+
+#[doc(hidden)]
+pub use file_format::read_parquet_rows_for_test;
+
+// The shipped binary's allocator (D56), so the lib resource tests (`model_tests::resources::memory`)
+// measure the memory `cetra` uses rather than glibc per-thread arenas (M5-8).
+#[cfg(test)]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[cfg(test)]
 mod crash_tests;
@@ -243,7 +245,6 @@ pub struct RetentionReport {
 /// `Send + Sync`. The server holds this in an `Arc`.
 pub struct Storage {
     hard_limit: u64,
-    target_partitions: NonZeroUsize,
     /// `query.trace_lookback` in ns, the padded window around a trace range.
     lookback: i64,
     shutting_down: AtomicBool,
@@ -280,22 +281,139 @@ pub struct Storage {
     committer: Arc<Committer>,
     /// `wal/spans` and `wal/scores` under the data directory, measured by [`Self::stats`].
     wal_dirs: [PathBuf; 2],
-    runtime: Arc<RuntimeEnv>,
-    /// Process-wide query memory (spec 03 §6). Each query's pool takes from it.
-    memory: Arc<memory::SharedPool>,
-    /// What [`Self::query`] admits each query with.
-    query_memory: QueryMemory,
+    /// Persistent native query engine runtime shared across queries on this `Storage`.
+    qe_runtime: Arc<QeRuntime>,
     /// Records replayed into the memtable at open. A flushed record is not counted.
     #[cfg_attr(not(test), allow(dead_code))]
     replayed: [u64; 2],
     /// Shared with the writers and the flush tasks. Tests arm faults here.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     hooks: Hooks,
+}
+
+/// Persistent native query engine runtime shared across all queries on one [`Storage`].
+pub(crate) struct QeRuntime {
+    pub(crate) admission: Arc<engine::admission::AsyncAdmissionPool>,
+    workers: std::sync::OnceLock<Arc<cetra_query::exec::WorkerPool>>,
+    workers_init: Mutex<()>,
+    bg_workers: std::sync::OnceLock<Arc<cetra_query::exec::WorkerPool>>,
+    bg_workers_init: Mutex<()>,
+    pub(crate) coordinator_slots: Arc<tokio::sync::Semaphore>,
+    pub(crate) metadata_cache: Arc<file_format::FileMetadataCache>,
+    pub(crate) spill: Arc<cetra_query::exec::SpillManager>,
+    pub(crate) target_partitions: usize,
+    pub(crate) query_memory: QueryMemory,
+}
+
+impl QeRuntime {
+    pub(crate) fn new(
+        admission: Arc<engine::admission::AsyncAdmissionPool>,
+        metadata_cache: Arc<file_format::FileMetadataCache>,
+        spill: Arc<cetra_query::exec::SpillManager>,
+        target_partitions: usize,
+        query_memory: QueryMemory,
+    ) -> Arc<Self> {
+        let max_coordinators = target_partitions.saturating_mul(4).max(32);
+        Arc::new(Self {
+            admission,
+            workers: std::sync::OnceLock::new(),
+            workers_init: Mutex::new(()),
+            bg_workers: std::sync::OnceLock::new(),
+            bg_workers_init: Mutex::new(()),
+            coordinator_slots: Arc::new(tokio::sync::Semaphore::new(max_coordinators)),
+            metadata_cache,
+            spill,
+            target_partitions,
+            query_memory,
+        })
+    }
+
+    /// Lazily initializes and returns the persistent [`cetra_query::exec::WorkerPool`].
+    pub(crate) fn workers(
+        &self,
+    ) -> Result<Arc<cetra_query::exec::WorkerPool>, cetra_query::QueryError> {
+        if let Some(pool) = self.workers.get() {
+            return Ok(Arc::clone(pool));
+        }
+        let _guard = self
+            .workers_init
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(pool) = self.workers.get() {
+            return Ok(Arc::clone(pool));
+        }
+        let pool = Arc::new(cetra_query::exec::WorkerPool::new(self.target_partitions)?);
+        let _ = self.workers.set(Arc::clone(&pool));
+        Ok(pool)
+    }
+
+    /// Lazily initializes and returns the dedicated low-concurrency background maintenance
+    /// [`cetra_query::exec::WorkerPool`] (`(target_partitions / 2).clamp(1, 4)`), isolating
+    /// compaction and media GC from interactive query workers.
+    pub(crate) fn bg_workers(
+        &self,
+    ) -> Result<Arc<cetra_query::exec::WorkerPool>, cetra_query::QueryError> {
+        if let Some(pool) = self.bg_workers.get() {
+            return Ok(Arc::clone(pool));
+        }
+        let _guard = self
+            .bg_workers_init
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(pool) = self.bg_workers.get() {
+            return Ok(Arc::clone(pool));
+        }
+        let count = (self.target_partitions / 2).clamp(1, 4);
+        let pool = Arc::new(cetra_query::exec::WorkerPool::new(count)?);
+        let _ = self.bg_workers.set(Arc::clone(&pool));
+        Ok(pool)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Arc<Self> {
+        Self::for_test_with_cache(64 << 20)
+    }
+
+    #[cfg(any(test, fuzzing))]
+    pub(crate) fn for_test_with_cache(metadata_cache_bytes: usize) -> Arc<Self> {
+        Self::new(
+            Arc::new(engine::admission::AsyncAdmissionPool::new(64 << 20)),
+            Arc::new(file_format::FileMetadataCache::new(metadata_cache_bytes)),
+            Arc::new(cetra_query::exec::SpillManager::with_fixed_cap(
+                PathBuf::new(),
+                0,
+            )),
+            2,
+            QueryMemory {
+                initial: 1 << 20,
+                cap: 64 << 20,
+                wait: std::time::Duration::from_secs(1),
+            },
+        )
+    }
+}
+
+impl std::fmt::Debug for QeRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QeRuntime")
+            .field("target_partitions", &self.target_partitions)
+            .field("admission_limit", &self.admission.limit())
+            .field("admission_used", &self.admission.used())
+            .field("workers_initialized", &self.workers.get().is_some())
+            .field("bg_workers_initialized", &self.bg_workers.get().is_some())
+            .field(
+                "coordinator_slots_available",
+                &self.coordinator_slots.available_permits(),
+            )
+            .field("metadata_cache_bytes", &self.metadata_cache.bytes())
+            .field("spill", &self.spill)
+            .finish()
+    }
 }
 
 /// What [`Storage::query`] needs to admit a query (spec 03 §6).
 #[derive(Debug, Clone, Copy)]
-struct QueryMemory {
+pub(crate) struct QueryMemory {
     /// Bytes a query takes from the shared pool before it starts.
     initial: usize,
     /// Most memory one query may hold.
@@ -390,9 +508,6 @@ impl Storage {
         let hooks = Hooks::default();
         let (lock, committer, mut objects) = open_shared(&config, &hooks, remote).await?;
         let committer = Arc::new(committer);
-        // Spill directories of a crashed process, then the query runtime. The disk monitor
-        // caps the spill of that runtime's disk manager, so the runtime exists before `Disk`.
-        // `LOCK` is held (taken by `prepare_layout`), so no live storage uses the directories.
         let spill_dir = data_dir.join("tmp").join("query");
         let spill_for_cleanup = spill_dir.clone();
         let removed = tokio::task::spawn_blocking(move || remove_spill_files(&spill_for_cleanup))
@@ -407,14 +522,9 @@ impl Storage {
         if removed > 0 {
             tracing::info!(removed, "removed leftover query spill files");
         }
-        let runtime = build_runtime(config.query.metadata_cache_bytes.0, &spill_dir)?;
         let mut disk_paths = vec![data_dir.clone()];
         disk_paths.extend(objects.local_root().map(Path::to_path_buf));
-        let disk = Arc::new(disk::Disk::open(
-            disk_paths,
-            config.min_free_bytes.0,
-            Arc::clone(&runtime.disk_manager),
-        )?);
+        let disk = Arc::new(disk::Disk::open(disk_paths, config.min_free_bytes.0)?);
         // The read cache is for remote stores only: local files are on disk already.
         if objects.local_root().is_none() {
             let capacity = read_cache_capacity(&config.query, &data_dir)?;
@@ -450,7 +560,6 @@ impl Storage {
         if removed > 0 {
             tracing::info!(removed, "removed leftover object temp files");
         }
-        objects.register(&runtime);
         let (query_memory, total_memory) = resolve_query_memory(&config.query);
         let budget = memory::budget_bytes(&config, u64::try_from(total_memory).unwrap_or(u64::MAX));
         let detected = memory::detected_memory();
@@ -461,7 +570,26 @@ impl Storage {
                 "the storage memory budgets exceed the memory limit; the process can be killed under load (spec 03 § 10, Resource needs)"
             );
         }
-        let memory = Arc::new(memory::SharedPool::new(total_memory));
+        let qe_runtime = {
+            let admission = Arc::new(engine::admission::AsyncAdmissionPool::new(total_memory));
+            let disk_for_spill = Arc::clone(&disk);
+            let spill = Arc::new(cetra_query::exec::SpillManager::new(
+                spill_dir,
+                Arc::new(move || disk_for_spill.engine_spill_cap()),
+            ));
+            disk.set_engine_spilled(spill.spilled_bytes_counter());
+            let metadata_cache_bytes =
+                usize::try_from(config.query.metadata_cache_bytes.0).unwrap_or(usize::MAX);
+            let metadata_cache =
+                Arc::new(file_format::FileMetadataCache::new(metadata_cache_bytes));
+            QeRuntime::new(
+                admission,
+                metadata_cache,
+                spill,
+                target_partitions.get(),
+                query_memory,
+            )
+        };
         let spans_flushed = committer.flushed_seq(Table::Spans).await;
         let scores_flushed = committer.flushed_seq(Table::Scores).await;
         let replay_dir = data_dir.clone();
@@ -500,37 +628,25 @@ impl Storage {
             tombstones,
             projects,
         }));
-        // Compaction gets a runtime of its own, so its memory pool is
-        // independent of the query runtime's.
+        // Compaction gets a memory pool of its own, independent of the query runtime's.
         let compactor = {
             let memory = usize::try_from(config.compaction.max_memory.0).unwrap_or(usize::MAX);
-            // The merge never spills, so the compaction runtime has no spill directory: a
-            // spill would fail, and would not be capped by the query spill limit.
-            let runtime = RuntimeEnvBuilder::new()
-                .with_memory_pool(Arc::new(
-                    datafusion::execution::memory_pool::GreedyMemoryPool::new(memory),
-                ))
-                .with_disk_manager_builder(
-                    datafusion::execution::disk_manager::DiskManagerBuilder::default()
-                        .with_mode(datafusion::execution::disk_manager::DiskManagerMode::Disabled),
-                )
-                .build_arc()
-                .map_err(|error| {
-                    tracing::error!(%error, "building the compaction runtime");
-                    OpenError::Runtime
-                })?;
-            objects.register(&runtime);
+            let compaction_pool = cetra_column::GlobalPool::new(memory);
             Arc::new(compaction::job::Compactor::new(
                 Arc::clone(&committer),
                 Arc::clone(&objects),
                 Arc::clone(&disk),
                 Arc::clone(&verify),
                 Arc::clone(&published),
-                compaction::merge::MergeContext {
-                    runtime,
-                    batch_size: 8192,
-                    jobs: config.compaction.threads,
-                },
+                compaction::merge::MergeContext::new(
+                    8192,
+                    config.compaction.threads,
+                    compaction_pool,
+                    Arc::clone(&qe_runtime),
+                    objects.store(),
+                    Arc::clone(&verify),
+                    tokio::runtime::Handle::current(),
+                ),
                 compaction::plan::Policy::from(&config.compaction),
                 compaction::job::CompactorLimits {
                     threads: config.compaction.threads,
@@ -603,16 +719,17 @@ impl Storage {
             tracing::warn!("obsolete file collection failed");
             tracing::debug!(error = error.label(), "obsolete file collection error");
         }
-        let media = MediaGc {
-            committer: Arc::clone(&committer),
-            objects: Arc::clone(&objects),
-            published: Arc::clone(&published),
-            runtime: Arc::clone(&runtime),
+        let media = MediaGc::new(
+            Arc::clone(&committer),
+            Arc::clone(&objects),
+            Arc::clone(&published),
             target_partitions,
             lookback,
-            hooks: share_hooks(&hooks),
-            verify: Arc::clone(&verify),
-        };
+            share_hooks(&hooks),
+            Arc::clone(&verify),
+            Arc::clone(&qe_runtime),
+            tokio::runtime::Handle::current(),
+        );
         // Finish drops interrupted by a crash or a failed media step, after
         // the first obsolete-file collection (spec 03 §7).
         media.finish_drops().await;
@@ -631,7 +748,6 @@ impl Storage {
         );
         Ok(Self {
             hard_limit,
-            target_partitions,
             lookback,
             shutting_down: AtomicBool::new(false),
             append_gate: tokio::sync::RwLock::new(()),
@@ -654,9 +770,7 @@ impl Storage {
                 data_dir.join("wal").join(Table::Spans.name()),
                 data_dir.join("wal").join(Table::Scores.name()),
             ],
-            runtime,
-            memory,
-            query_memory,
+            qe_runtime,
             replayed: [recovered.spans_records, recovered.scores_records],
             hooks,
         })
@@ -667,7 +781,7 @@ impl Storage {
     pub async fn append_spans(
         &self,
         project: ProjectId,
-        batch: RecordBatch,
+        batch: Batch,
     ) -> Result<AppendReceipt, AppendError> {
         self.append(Table::Spans, project, batch).await
     }
@@ -676,53 +790,28 @@ impl Storage {
     pub async fn append_scores(
         &self,
         project: ProjectId,
-        batch: RecordBatch,
+        batch: Batch,
     ) -> Result<AppendReceipt, AppendError> {
         self.append(Table::Scores, project, batch).await
     }
 
-    /// Admits a query, then returns providers for `project` over one published
-    /// snapshot, with a runtime of the query's own: its memory pool takes from
-    /// the process-wide pool, up to `query.max_memory` (spec 03 §6).
+    /// Admits a query against the shared admission pool, then returns a
+    /// [`ProjectQuery`] over the newest published snapshot for `project`.
     ///
     /// Waits up to `query.admission_wait` for `query.initial_memory`; then fails
     /// with [`QueryError::Busy`]. The snapshot is loaded after admission, so a
     /// query that waited sees the newest data.
     ///
-    /// No DataFusion session is built. The query layer builds one from
-    /// [`ProjectQuery::runtime`] and [`ProjectQuery::target_partitions`].
-    ///
-    /// The snapshot's pending deletions hide their rows from every provider
-    /// (spec 03 §7): the memtable snapshots are filtered copies, and the
-    /// providers carry the tombstones for the file side. A memtable partition
-    /// of a day before the project's retention watermark is left out of the
-    /// copies the same way (spec 03 §8); the files were removed from the
-    /// catalog by the retention commit itself.
+    /// The snapshot's pending deletions hide their rows from every read
+    /// (spec 03 §7), and partitions older than the project's retention
+    /// watermark are excluded (spec 03 §8).
     pub async fn query(
         &self,
         project: ProjectId,
         options: QueryOptions,
     ) -> Result<ProjectQuery, QueryError> {
-        let deadline = tokio::time::Instant::now() + self.query_memory.wait;
-        let pool = self
-            .memory
-            .admit(self.query_memory.initial, self.query_memory.cap, deadline)
-            .await
-            .ok_or(QueryError::Busy)?;
-        // Shares the metadata cache, the object stores and the spill directory
-        // with the base runtime, and swaps only the memory pool.
-        let runtime = RuntimeEnvBuilder::from_runtime_env(&self.runtime)
-            .with_memory_pool(pool)
-            .build_arc()?;
-        project_query(
-            &self.published.load(),
-            project,
-            options,
-            &runtime,
-            self.target_partitions,
-            self.lookback,
-            &self.verify,
-        )
+        let engine = EngineContext::admit_from_storage(self, project, &options).await?;
+        Ok(ProjectQuery::from_engine(engine))
     }
 
     /// Registers a `traces` or `user` deletion. Idempotent by `deletion.id`.
@@ -1212,7 +1301,7 @@ impl Storage {
     pub(crate) async fn commit_test_edit(
         &self,
         edit: &catalog::CatalogEdit,
-    ) -> Result<Arc<Catalog>, error::CommitError> {
+    ) -> Result<Arc<catalog::Catalog>, error::CommitError> {
         let published = Arc::clone(&self.published);
         self.committer
             .commit(edit, move |next| {
@@ -1304,7 +1393,7 @@ impl Storage {
         &self,
         table: Table,
         project: ProjectId,
-        batch: RecordBatch,
+        batch: Batch,
     ) -> Result<AppendReceipt, AppendError> {
         // Held until `writer.append` returns, so `drop_project`'s write guard
         // waits for every in-flight append and holds new ones while it
@@ -1324,7 +1413,7 @@ impl Storage {
             return Err(AppendError::DiskFull);
         }
         validate_batch(table, &project, &batch)?;
-        let bytes = batch.get_array_memory_size();
+        let bytes = batch.memory_bytes();
         let adding = u64::try_from(bytes).unwrap_or(u64::MAX);
         if writer.shared().memtable_bytes().saturating_add(adding) > self.hard_limit {
             return Err(AppendError::Backpressure);
@@ -1426,131 +1515,6 @@ impl Drop for Storage {
     }
 }
 
-/// The body of [`Storage::query`]: providers for `project` over one published
-/// `state`. `Storage::query` and the media collection's live set both call it.
-pub(crate) fn project_query(
-    state: &ReadState,
-    project: ProjectId,
-    options: QueryOptions,
-    runtime: &Arc<RuntimeEnv>,
-    target_partitions: NonZeroUsize,
-    lookback: i64,
-    verify: &Arc<VerifyQueue>,
-) -> Result<ProjectQuery, QueryError> {
-    let partitions = target_partitions.get();
-    let suspects = Suspects::new(Arc::clone(verify));
-    // A dropped project gets empty tables (spec 03 §7): the drop commit
-    // removed its files from the catalog, its memtable partitions are dropped
-    // at flush, and no file of it can be committed again, so nothing of it is
-    // read at all.
-    if state.projects.is_dropped(project) {
-        let spans_snapshot = Arc::new(MemSnapshot::default());
-        let scores_snapshot = Arc::new(MemSnapshot::default());
-        let catalog = Arc::new(Catalog::empty());
-        let no_deletions: Arc<[Arc<PendingDeletion>]> = Arc::from(Vec::new());
-        return Ok(ProjectQuery {
-            spans: Arc::new(query::SpansProvider::new(
-                project,
-                Arc::clone(&spans_snapshot),
-                Arc::clone(&catalog),
-                partitions,
-                options.around(),
-                Arc::clone(&no_deletions),
-                suspects.clone(),
-            )),
-            traces: Arc::new(query::TracesProvider::new(
-                project,
-                Arc::clone(&catalog),
-                spans_snapshot,
-                options,
-                lookback,
-                partitions,
-                Arc::clone(&no_deletions),
-                suspects.clone(),
-            )),
-            scores: Arc::new(query::ScoresProvider::new(
-                project,
-                scores_snapshot,
-                catalog,
-                partitions,
-                no_deletions,
-                suspects.clone(),
-            )),
-            runtime: Arc::clone(runtime),
-            target_partitions,
-            optimizer_rules: vec![Arc::new(query::TraceListRule)],
-            suspects,
-            visible_from: options.visible_from(),
-        });
-    }
-    let deletions = state.tombstones.for_project(project);
-    let keep_from = state.projects.keep_from(project);
-    let has_late = |snapshot: &MemSnapshot| {
-        keep_from.is_some_and(|keep| {
-            snapshot
-                .partitions
-                .keys()
-                .any(|key| key.project == project && key.day < keep)
-        })
-    };
-    let (spans_snapshot, scores_snapshot) = if deletions.is_empty()
-        && !has_late(&state.spans)
-        && !has_late(&state.scores)
-    {
-        (Arc::clone(&state.spans), Arc::clone(&state.scores))
-    } else {
-        (
-            deletion::project_snapshot(Table::Spans, &state.spans, project, keep_from, &deletions)?,
-            deletion::project_snapshot(
-                Table::Scores,
-                &state.scores,
-                project,
-                keep_from,
-                &deletions,
-            )?,
-        )
-    };
-    let spans = Arc::new(query::SpansProvider::new(
-        project,
-        Arc::clone(&spans_snapshot),
-        Arc::clone(&state.catalog),
-        partitions,
-        options.around(),
-        Arc::clone(&deletions),
-        suspects.clone(),
-    ));
-    let scores = Arc::new(query::ScoresProvider::new(
-        project,
-        scores_snapshot,
-        Arc::clone(&state.catalog),
-        partitions,
-        Arc::clone(&deletions),
-        suspects.clone(),
-    ));
-    // The traces provider reads the filtered spans snapshot too, so its
-    // memtable partials are computed from the rows that remain.
-    let traces = Arc::new(query::TracesProvider::new(
-        project,
-        Arc::clone(&state.catalog),
-        spans_snapshot,
-        options,
-        lookback,
-        partitions,
-        deletions,
-        suspects.clone(),
-    ));
-    Ok(ProjectQuery {
-        spans,
-        traces,
-        scores,
-        runtime: Arc::clone(runtime),
-        target_partitions,
-        optimizer_rules: vec![Arc::new(query::TraceListRule)],
-        suspects,
-        visible_from: options.visible_from(),
-    })
-}
-
 struct Recovered {
     spans: RecoveredTable,
     scores: RecoveredTable,
@@ -1576,9 +1540,8 @@ fn prepare_layout(data_dir: &Path) -> Result<File, OpenError> {
     lock_dir(data_dir)
 }
 
-/// Removes every entry of `spill_dir`: the spill directories of a process that
-/// crashed. DataFusion removes its own on a clean drop. Returns how many were
-/// removed; a missing entry is not an error.
+/// Removes every entry of `spill_dir`: the spill files of a process that
+/// crashed. Returns how many were removed; a missing entry is not an error.
 fn remove_spill_files(spill_dir: &Path) -> Result<usize, OpenError> {
     let entries = fs::read_dir(spill_dir)
         .map_err(|source| open_io("removing query spill files", spill_dir, source))?;
@@ -1717,7 +1680,7 @@ fn recover_table(
 }
 
 /// Inserts one replayed batch into `memtable`, as WAL recovery does. An empty batch is skipped.
-fn replay_batch(memtable: &mut Memtable, seq: u64, batch: RecordBatch) -> Result<(), WalError> {
+fn replay_batch(memtable: &mut Memtable, seq: u64, batch: Batch) -> Result<(), WalError> {
     if batch.num_rows() == 0 {
         return Ok(());
     }
@@ -1818,26 +1781,6 @@ fn read_cache_capacity(query: &QueryConfig, data_dir: &Path) -> Result<u64, Open
     }
 }
 
-/// The base runtime: the metadata cache, the object stores (registered by the
-/// caller) and the spill directory. Its memory pool is DataFusion's default
-/// (unbounded): it runs the media collection, and each query's runtime shares
-/// its spill directory and caches (spec 03 §6).
-fn build_runtime(
-    metadata_cache_bytes: u64,
-    spill_dir: &Path,
-) -> Result<Arc<RuntimeEnv>, OpenError> {
-    let limit = usize::try_from(metadata_cache_bytes).unwrap_or(usize::MAX);
-    let runtime = RuntimeEnvBuilder::new()
-        .with_metadata_cache_limit(limit)
-        .with_temp_file_path(spill_dir)
-        .build()
-        .map_err(|error| {
-            tracing::error!(%error, "building the query runtime");
-            OpenError::Runtime
-        })?;
-    Ok(Arc::new(runtime))
-}
-
 struct WriterTune {
     sync: WalSync,
     group_max_bytes: u64,
@@ -1870,33 +1813,127 @@ fn spawn_writer(
     })
 }
 
-fn project_of(batch: &RecordBatch) -> Result<ProjectId, WalError> {
+fn project_of(batch: &Batch) -> Result<ProjectId, WalError> {
     let Some(column) = batch.column_by_name(cetra_core::schema::spans::PROJECT_ID) else {
         return Err(WalError::InvalidPayload {
             reason: "batch is missing project_id",
         });
     };
-    let Some(values) = column.as_any().downcast_ref::<StringArray>() else {
+    if column.data_type() != cetra_column::DataType::Utf8 {
         return Err(WalError::InvalidPayload {
             reason: "project_id has an unexpected type",
         });
-    };
-    if values.is_empty() || values.null_count() > 0 {
+    }
+    if batch.num_rows() == 0 {
         return Err(WalError::InvalidPayload {
             reason: "project_id is null",
         });
     }
-    let first = values.value(0);
-    for row in 1..values.len() {
-        if values.value(row) != first {
+    if let cetra_column::Column::Const { value, .. } = column {
+        return match value {
+            cetra_column::ScalarValue::Utf8(first) => {
+                first.parse().map_err(|_| WalError::InvalidPayload {
+                    reason: "invalid project id",
+                })
+            }
+            cetra_column::ScalarValue::Null(_) => Err(WalError::InvalidPayload {
+                reason: "project_id is null",
+            }),
+            _ => Err(WalError::InvalidPayload {
+                reason: "project_id has an unexpected type",
+            }),
+        };
+    }
+
+    let mut first: Option<&str> = None;
+    let mut check_row = |row: usize| -> Result<(), WalError> {
+        let Some(val) = read_utf8(column, row) else {
             return Err(WalError::InvalidPayload {
-                reason: "batch contains more than one project",
+                reason: "project_id is null",
             });
+        };
+        match first {
+            None => first = Some(val),
+            Some(expected) if val != expected => {
+                return Err(WalError::InvalidPayload {
+                    reason: "batch contains more than one project",
+                });
+            }
+            Some(_) => {}
+        }
+        Ok(())
+    };
+    match batch.selection() {
+        cetra_column::Selection::All => {
+            for row in 0..batch.raw_len() {
+                check_row(row)?;
+            }
+        }
+        cetra_column::Selection::Mask(mask) => {
+            for row in mask.iter_ones() {
+                check_row(row)?;
+            }
+        }
+        cetra_column::Selection::Indices(indices) => {
+            for &row in indices {
+                check_row(row as usize)?;
+            }
         }
     }
+    let Some(first) = first else {
+        return Err(WalError::InvalidPayload {
+            reason: "project_id is null",
+        });
+    };
     first.parse().map_err(|_| WalError::InvalidPayload {
         reason: "invalid project id",
     })
+}
+
+fn read_utf8(col: &cetra_column::Column, row: usize) -> Option<&str> {
+    match col {
+        cetra_column::Column::Flat(flat) => {
+            if flat.is_null(row) {
+                return None;
+            }
+            match flat.data() {
+                cetra_column::FlatData::Utf8(u) => u.get(row),
+                _ => None,
+            }
+        }
+        cetra_column::Column::Const { value, len } => {
+            (row < *len).then_some(value).and_then(|v| match v {
+                cetra_column::ScalarValue::Utf8(s) => Some(s.as_str()),
+                _ => None,
+            })
+        }
+        cetra_column::Column::Dict(dict) => {
+            if dict.is_null(row) {
+                return None;
+            }
+            let code = *dict.codes().get(row)? as usize;
+            if dict.values().is_null(code) {
+                return None;
+            }
+            match dict.values().data() {
+                cetra_column::FlatData::Utf8(u) => u.get(code),
+                _ => None,
+            }
+        }
+        cetra_column::Column::Rle(rle) => {
+            if row >= rle.len() {
+                return None;
+            }
+            let run = rle.run_ends().partition_point(|&end| (end as usize) <= row);
+            if rle.values().is_null(run) {
+                return None;
+            }
+            match rle.values().data() {
+                cetra_column::FlatData::Utf8(u) => u.get(run),
+                _ => None,
+            }
+        }
+    }
 }
 
 fn memtable_to_wal(err: &MemtableError) -> WalError {
@@ -1904,7 +1941,7 @@ fn memtable_to_wal(err: &MemtableError) -> WalError {
         MemtableError::TimeOutOfRange => "time column is outside the supported range",
         MemtableError::MissingColumn { .. } => "batch is missing a required column",
         MemtableError::BadColumn { .. } => "time column has an unexpected type or a null",
-        MemtableError::Arrow(_) => "building a memtable batch",
+        MemtableError::Column(_) => "building a memtable batch",
     };
     WalError::InvalidPayload { reason }
 }
@@ -1924,35 +1961,55 @@ fn replay_error(err: WalError) -> OpenError {
     }
 }
 
-fn validate_batch(
-    table: Table,
-    project: &ProjectId,
-    batch: &RecordBatch,
-) -> Result<(), AppendError> {
+fn validate_batch(table: Table, project: &ProjectId, batch: &Batch) -> Result<(), AppendError> {
     if batch.num_rows() == 0 {
         return Err(AppendError::InvalidBatch {
             reason: "batch has no rows",
         });
     }
-    if batch.schema().fields() != table.schema().fields() {
+    let expected_schema = match table {
+        Table::Spans => cetra_core::schema::spans_schema(),
+        Table::Scores => cetra_core::schema::scores_schema(),
+    };
+    if batch.schema().as_ref() != expected_schema.as_ref() {
         return Err(AppendError::InvalidBatch {
             reason: "batch schema does not match the table",
         });
     }
-    let Some(values) = batch
-        .column_by_name(cetra_core::schema::spans::PROJECT_ID)
-        .and_then(|column| column.as_any().downcast_ref::<StringArray>())
-    else {
+    let Some(column) = batch.column_by_name(cetra_core::schema::spans::PROJECT_ID) else {
         return Err(AppendError::InvalidBatch {
             reason: "batch schema does not match the table",
         });
     };
+    if column.data_type() != cetra_column::DataType::Utf8 {
+        return Err(AppendError::InvalidBatch {
+            reason: "batch schema does not match the table",
+        });
+    }
     let expected = project.to_string();
-    for row in 0..values.len() {
-        if values.is_null(row) || values.value(row) != expected {
-            return Err(AppendError::InvalidBatch {
+    let check_row = |row: usize| -> Result<(), AppendError> {
+        match read_utf8(column, row) {
+            Some(val) if val == expected => Ok(()),
+            _ => Err(AppendError::InvalidBatch {
                 reason: "batch project_id does not match the project",
-            });
+            }),
+        }
+    };
+    match batch.selection() {
+        cetra_column::Selection::All => {
+            for row in 0..batch.raw_len() {
+                check_row(row)?;
+            }
+        }
+        cetra_column::Selection::Mask(mask) => {
+            for row in mask.iter_ones() {
+                check_row(row)?;
+            }
+        }
+        cetra_column::Selection::Indices(indices) => {
+            for &row in indices {
+                check_row(row as usize)?;
+            }
         }
     }
     Ok(())
@@ -2037,16 +2094,12 @@ impl Drop for ForceFlushGuard<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{File, OpenOptions};
+    use std::fs::OpenOptions;
     use std::sync::Arc;
     use std::time::Duration;
 
-    use ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use arrow::array::{ArrayRef, FixedSizeBinaryBuilder, StringArray};
-    use arrow::compute::concat_batches;
-    use arrow::datatypes::{DataType, Field, Schema};
     use bytesize::ByteSize;
-    use cetra_core::batch::scores_to_record_batch;
+    use cetra_column::{Column, DataType, Field, FlatColumn, FlatData, Schema, Utf8Data};
     use cetra_core::enums::ScoreSource;
     use cetra_core::ids::{ProjectId, TraceId};
     use cetra_core::schema::{spans, spans_schema};
@@ -2064,8 +2117,9 @@ mod tests {
     use crate::hooks::HookPoint;
     use crate::media::MediaBlob;
     use crate::objects::PutSizes;
-    use crate::partials::partials_from_spans;
-    use crate::test_support::{Call, ChaosStore, span_row, span_rows};
+    use crate::partials::partials_from_spans_batch;
+    use crate::reads::columns::{active_rows, i64_at, require_col, string_at};
+    use crate::test_support::{Call, ChaosStore, parquet_rows, score_rows, span_row, span_rows};
     use crate::views::QueryContext;
     use crate::wal::segment::SEGMENT_HEADER_LEN;
     use crate::wal::{parse_segment_name, segment_name, spans_at, spans_keyed, spans_named};
@@ -2217,40 +2271,27 @@ mod tests {
     }
 
     /// Three distinct traces spread over two UTC days (one partition per day).
-    fn three_traces_two_days() -> RecordBatch {
+    fn three_traces_two_days() -> Batch {
         const DAY_NS: i64 = 86_400_000_000_000;
-        let base = spans_at(&[1_000, 1_100, DAY_NS + 2_000]);
-        let mut ids = FixedSizeBinaryBuilder::with_capacity(3, 16);
-        for last in [1_u8, 2, 3] {
-            let mut bytes = [0_u8; 16];
-            bytes[15] = last;
-            ids.append_value(bytes).unwrap();
-        }
-        let mut columns: Vec<ArrayRef> = base.columns().to_vec();
-        let index = base.schema().index_of(spans::TRACE_ID).unwrap();
-        columns[index] = Arc::new(ids.finish());
-        RecordBatch::try_new(base.schema(), columns).unwrap()
+        let rows = [
+            span_row(1, 0, 1_000, 1),
+            span_row(2, 0, 1_100, 2),
+            span_row(3, 0, DAY_NS + 2_000, 3),
+        ];
+        span_rows(&rows)
     }
 
     /// Reads one Parquet object back with the sync reader.
-    fn read_parquet(dir: &Path, path: &str) -> RecordBatch {
-        let file = File::open(dir.join("objects").join(path)).unwrap();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        let schema = Arc::clone(builder.schema());
-        let batches: Vec<RecordBatch> = builder
-            .build()
-            .unwrap()
-            .map(|batch| batch.unwrap())
-            .collect();
-        concat_batches(&schema, &batches).unwrap()
+    fn read_parquet(dir: &Path, path: &str) -> Batch {
+        let bytes = std::fs::read(dir.join("objects").join(path)).unwrap();
+        parquet_rows(bytes::Bytes::from(bytes))
     }
 
-    /// Compares two batches column by column; the stored file's schema also
-    /// carries Parquet KV metadata, so whole-batch equality is too strict.
-    fn assert_same_rows(actual: &RecordBatch, expected: &RecordBatch, label: &str) {
+    /// Compares two batches column by column.
+    fn assert_same_rows(actual: &Batch, expected: &Batch, label: &str) {
         assert_eq!(actual.num_rows(), expected.num_rows(), "{label}: rows");
         for field in expected.schema().fields() {
-            let name = field.name();
+            let name = field.name.as_str();
             assert_eq!(
                 actual.column_by_name(name),
                 expected.column_by_name(name),
@@ -2286,7 +2327,7 @@ mod tests {
             .collect()
     }
 
-    fn score_batch(name: &str) -> RecordBatch {
+    fn score_batch(name: &str) -> Batch {
         let score = Score {
             project_id: project(),
             score_id: "018f6b4e-7c1a-7c1a-8c1a-0000000000ab".parse().unwrap(),
@@ -2313,7 +2354,7 @@ mod tests {
             deleted: false,
             ingest_time: 7,
         };
-        scores_to_record_batch(&[score]).unwrap()
+        score_rows(&[score])
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2366,7 +2407,7 @@ mod tests {
         let storage = Storage::open(config_in(dir.path())).await.unwrap();
         let marker = "marker-7f3a9c2e-not-a-real-row";
 
-        let empty = RecordBatch::new_empty(spans_schema());
+        let empty = Batch::empty(spans_schema());
         let error = storage.append_spans(project(), empty).await.unwrap_err();
         assert_eq!(
             error,
@@ -2376,12 +2417,15 @@ mod tests {
         );
         assert!(!error.to_string().contains(marker));
 
-        let schema = Arc::new(Schema::new(vec![Field::new(marker, DataType::Utf8, true)]));
-        let wrong_schema = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(StringArray::from(vec![Some(marker)]))],
-        )
-        .unwrap();
+        let schema = Schema::try_new_arc(vec![Field::new(marker, DataType::Utf8, true)]).unwrap();
+        let col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices([marker]).unwrap()),
+                None,
+            )
+            .unwrap(),
+        );
+        let wrong_schema = Batch::try_new_all(schema, vec![col], 1).unwrap();
         let error = storage
             .append_spans(project(), wrong_schema)
             .await
@@ -2583,52 +2627,33 @@ mod tests {
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
-        // The query's runtime has the object store that flushed files are read from.
-        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
-            datafusion::execution::context::SessionConfig::new(),
-            query.runtime,
-        );
-        ctx.register_table("spans_t", query.spans).unwrap();
-        let batches = ctx
-            .sql("SELECT span_id FROM spans_t")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
+        let batches = query.collect_raw_spans().await.unwrap();
         let mut ids = Vec::new();
-        for batch in batches {
-            let column = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-                .unwrap();
-            for index in 0..column.len() {
-                ids.push(column.value(index).to_vec());
+        for batch in &batches {
+            let idx = batch.schema().index_of(spans::SPAN_ID).unwrap();
+            let col = batch.columns()[idx].as_ref();
+            for phys in active_rows(batch) {
+                if let Column::Flat(flat) = col
+                    && let FlatData::FixedBytes8(arr) = flat.data()
+                {
+                    ids.push(arr[phys].to_vec());
+                } else {
+                    panic!("unexpected span_id encoding");
+                }
             }
         }
         ids
     }
 
-    async fn span_names(spans: Arc<dyn datafusion::catalog::TableProvider>) -> Vec<String> {
-        let ctx = datafusion::execution::context::SessionContext::new();
-        ctx.register_table("spans_t", spans).unwrap();
-        let batches = ctx
-            .sql("SELECT name FROM spans_t")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
+    async fn span_names(query: ProjectQuery) -> Vec<String> {
+        let batches = query.collect_raw_spans().await.unwrap();
         let mut names = Vec::new();
-        for batch in batches {
-            let column = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            for index in 0..column.len() {
-                names.push(column.value(index).to_owned());
+        for batch in &batches {
+            let col = require_col(batch, spans::NAME).unwrap();
+            for row in 0..batch.num_rows() {
+                if let Some(name) = string_at(batch, col, row).unwrap() {
+                    names.push(name);
+                }
             }
         }
         names
@@ -2655,15 +2680,15 @@ mod tests {
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
-        assert!(span_names(Arc::clone(&during.spans)).await.is_empty());
+        assert!(span_names(during.clone()).await.is_empty());
         storage.hooks().release(HookPoint::AfterWalSync);
         append.await.unwrap().unwrap();
         let after = storage
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
-        assert_eq!(span_names(after.spans).await.len(), 1);
-        assert!(span_names(during.spans).await.is_empty());
+        assert_eq!(span_names(after).await.len(), 1);
+        assert!(span_names(during).await.is_empty());
         storage.shutdown().await.unwrap();
     }
 
@@ -2829,7 +2854,7 @@ mod tests {
     /// them into the distinct list `prompts` (D-V-15).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn prompt_columns_round_trip() {
-        use arrow::array::{Array, Int64Array, ListArray};
+        use cetra_query::encode::encode_json_result;
 
         use crate::reads::{
             ListScope, SortOrder, TraceListRequest, TraceSort, trace_detail, trace_list,
@@ -2868,20 +2893,13 @@ mod tests {
             .expect("the trace exists");
         let mut span_values = Vec::new();
         for batch in &detail.spans {
-            let names = batch
-                .column_by_name(spans::PROMPT_NAME)
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let versions = batch
-                .column_by_name(spans::PROMPT_VERSION)
-                .unwrap()
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap();
+            let names_col = require_col(batch, spans::PROMPT_NAME).unwrap();
+            let versions_col = require_col(batch, spans::PROMPT_VERSION).unwrap();
             for row in 0..batch.num_rows() {
-                span_values.push((names.value(row).to_owned(), versions.value(row)));
+                span_values.push((
+                    string_at(batch, names_col, row).unwrap().unwrap(),
+                    i64_at(batch, versions_col, row).unwrap(),
+                ));
             }
         }
         assert_eq!(span_values, [("p".to_owned(), 1), ("p".to_owned(), 2)]);
@@ -2907,15 +2925,21 @@ mod tests {
         .await
         .unwrap();
         let trace_batch = &list.batches[0];
-        let prompts = trace_batch
-            .column_by_name(cetra_core::schema::traces::PROMPTS)
+        let encoded = encode_json_result(
+            trace_batch.schema(),
+            std::slice::from_ref(trace_batch),
+            10,
+            SQL_MAX_RESULT_BYTES,
+            false,
+            None,
+        )
+        .unwrap();
+        let prompts: Vec<String> = encoded.rows[0][cetra_core::schema::traces::PROMPTS]
+            .as_array()
             .unwrap()
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .unwrap()
-            .value(0);
-        let prompts = prompts.as_any().downcast_ref::<StringArray>().unwrap();
-        let prompts: Vec<_> = (0..prompts.len()).map(|i| prompts.value(i)).collect();
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
         assert_eq!(prompts, ["p@1", "p@2"]);
 
         for (filter, matches) in [("prompts @> ['p@2']", 1), ("prompts @> ['p@3']", 0)] {
@@ -2960,7 +2984,7 @@ mod tests {
         )
         .unwrap();
         ctx.sql_json(SqlRequest {
-            query: "SELECT count(*) AS n FROM (SELECT row_number() OVER (ORDER BY input, span_id) AS r FROM spans) WHERE r > 0",
+            query: "SELECT count(*) AS n FROM (SELECT row_number() OVER (PARTITION BY trace_id ORDER BY input, span_id) AS r FROM spans) WHERE r > 0",
             params: &params,
             limit: 1,
             timeout: Duration::from_secs(30),
@@ -2969,18 +2993,20 @@ mod tests {
         .map(drop)
     }
 
-    /// Opens storage holding 40,000 spans of one trace in a Parquet file, with a
-    /// 1 MiB floor. `spill_query` over them sorts all of them, which spills under 32 MiB.
+    /// Opens storage holding 40,000 spans across 40 traces in a Parquet file, with a
+    /// 1 MiB floor. `spill_query` over them sorts all of them globally, which spills under 32 MiB
+    /// while keeping each window partition (1,000 spans / ~1 MiB) within the pool.
     async fn spilling_storage(dir: &Path) -> Storage {
         let mut config = config_with_query_memory(dir, 32);
         config.query.initial_memory = ByteSize::mib(16);
         config.query.target_partitions = 1;
         config.min_free_bytes = ByteSize::mib(1);
         let storage = Storage::open(config.clone()).await.unwrap();
-        // 40,000 spans of one trace, each with a 1 KiB input.
+        // 40,000 spans across 40 traces (1,000 spans per trace), each with a 1 KiB input.
         let spans: Vec<_> = (1..=40_000_u64)
             .map(|index| {
-                let mut span = span_row(1, 0, i64::try_from(index).unwrap(), 1);
+                let trace = u16::try_from((index - 1) / 1_000).unwrap() + 1;
+                let mut span = span_row(trace, 0, i64::try_from(index).unwrap(), 1);
                 span.span_id = cetra_core::ids::SpanId::from_bytes(index.to_be_bytes()).unwrap();
                 span.input = Some("i".repeat(1024));
                 span
@@ -2998,12 +3024,14 @@ mod tests {
     /// Waits until the spill files and the shared query memory are back to 0.
     async fn wait_for_spill_release(storage: &Storage) {
         let started = std::time::Instant::now();
-        while storage.runtime.disk_manager.used_disk_space() != 0 || storage.memory.used() != 0 {
+        while storage.qe_runtime.spill.spilled_bytes() != 0
+            || storage.qe_runtime.admission.used() != 0
+        {
             assert!(
                 started.elapsed() < Duration::from_secs(10),
                 "spill bytes left: {}, pool bytes left: {}",
-                storage.runtime.disk_manager.used_disk_space(),
-                storage.memory.used()
+                storage.qe_runtime.spill.spilled_bytes(),
+                storage.qe_runtime.admission.used()
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -3022,8 +3050,12 @@ mod tests {
             .expect_err("the spill is past the cap");
         assert!(matches!(error, RunError::TooLarge), "{error:?}");
         wait_for_spill_release(&storage).await;
-        assert_eq!(storage.runtime.disk_manager.used_disk_space(), 0);
-        assert_eq!(storage.memory.used(), 0, "the failed query's pool bytes");
+        assert_eq!(storage.qe_runtime.spill.spilled_bytes(), 0);
+        assert_eq!(
+            storage.qe_runtime.admission.used(),
+            0,
+            "the failed query's pool bytes"
+        );
 
         // A small query that does not spill succeeds once the disk has room again.
         storage.disk().set_free_for_test(None);
@@ -3067,11 +3099,11 @@ mod tests {
         assert!(matches!(error, RunError::TooLarge), "{error:?}");
         // The failed query's spill files go away as its tasks wind down.
         let started = std::time::Instant::now();
-        while storage.runtime.disk_manager.used_disk_space() != 0 {
+        while storage.qe_runtime.spill.spilled_bytes() != 0 {
             assert!(
                 started.elapsed() < Duration::from_secs(10),
                 "spill files left: {} bytes",
-                storage.runtime.disk_manager.used_disk_space()
+                storage.qe_runtime.spill.spilled_bytes()
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -3085,7 +3117,7 @@ mod tests {
     #[tokio::test]
     async fn open_removes_leftover_spill_directories() {
         let dir = tempfile::tempdir().unwrap();
-        let stale = dir.path().join("tmp").join("query").join("datafusion-old");
+        let stale = dir.path().join("tmp").join("query").join("spill-old");
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::write(stale.join("x"), b"spill").unwrap();
         let storage = Storage::open(config_in(dir.path())).await.unwrap();
@@ -3094,8 +3126,7 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(entries.len(), 1, "{entries:?}");
-        assert!(entries[0].starts_with("datafusion-"), "{entries:?}");
+        assert!(entries.is_empty(), "{entries:?}");
         storage.shutdown().await.unwrap();
     }
 
@@ -3158,7 +3189,8 @@ mod tests {
         let mut newer = b"LWAL".to_vec();
         newer.extend_from_slice(&2_u16.to_le_bytes());
         newer.extend_from_slice(&0_u16.to_le_bytes());
-        wal::encode(9, &spans_at(&[2]), &mut newer).unwrap();
+        let col = spans_at(&[2]);
+        wal::encode(9, &col, &mut newer).unwrap();
         let mut headerless = Vec::new();
         wal::push_framed(&mut headerless, 9, b"not ipc");
         let cases = [
@@ -3184,9 +3216,7 @@ mod tests {
                     storage
                         .append_scores(
                             project(),
-                            test_support::score_rows(&[test_support::score_row(
-                                1, 1, 1, 1, 1, false, "q",
-                            )]),
+                            score_rows(&[test_support::score_row(1, 1, 1, 1, 1, false, "q")]),
                         )
                         .await
                         .unwrap();
@@ -3335,8 +3365,7 @@ mod tests {
                 storage
                     .query(project(), QueryOptions::new(None, None))
                     .await
-                    .unwrap()
-                    .spans,
+                    .unwrap(),
             )
             .await;
             assert!(!names.iter().any(|name| name == "lost"));
@@ -3347,8 +3376,7 @@ mod tests {
             storage
                 .query(project(), QueryOptions::new(None, None))
                 .await
-                .unwrap()
-                .spans,
+                .unwrap(),
         )
         .await;
         assert_eq!(names, vec!["kept".to_owned()]);
@@ -3423,8 +3451,8 @@ mod tests {
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
-        // Each query has a runtime of its own (spec 03 §6).
-        assert!(!Arc::ptr_eq(&first.runtime, &second.runtime));
+        // Each query gets an admitted memory pool of its own (spec 03 §6).
+        assert!(!Arc::ptr_eq(first.engine().pool(), second.engine().pool()));
         let receipt = storage
             .append_spans(project(), spans_at(&[1]))
             .await
@@ -3639,7 +3667,7 @@ mod tests {
         assert_eq!(pairs.len(), 2, "{pairs:?}");
         for (spans_path, traces_path) in &pairs {
             let spans_batch = read_parquet(dir.path(), spans_path);
-            let expected = partials_from_spans(&spans_batch).unwrap();
+            let expected = partials_from_spans_batch(&spans_batch).unwrap();
             let actual = read_parquet(dir.path(), traces_path);
             assert_same_rows(&actual, &expected, traces_path);
         }
@@ -3804,25 +3832,17 @@ mod tests {
         wait_for_catalog(&storage, Table::Spans, 1).await;
         assert!(storage.read_cache_stats().unwrap().blocks > 0);
 
-        // The file is read through the query's runtime, which has the store.
+        // The file is read through the query engine's cache.
         let query = storage
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
-        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
-            datafusion::prelude::SessionConfig::new(),
-            Arc::clone(&query.runtime),
-        );
-        ctx.register_table("spans_t", query.spans).unwrap();
-        let rows: usize = ctx
-            .sql("SELECT name FROM spans_t")
-            .await
-            .unwrap()
-            .collect()
+        let rows: usize = query
+            .collect_raw_spans()
             .await
             .unwrap()
             .iter()
-            .map(|batch| batch.num_rows())
+            .map(Batch::num_rows)
             .sum();
         assert_eq!(rows, 1);
         let stats = storage.read_cache_stats().unwrap();
@@ -3899,7 +3919,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                span_names(query.spans).await.len(),
+                span_names(query).await.len(),
                 1,
                 "the acknowledged span is gone with the wal directory"
             );
@@ -4427,28 +4447,25 @@ mod tests {
 
     /// Spans rows that `project` sees through a query.
     async fn span_count(storage: &Storage) -> i64 {
-        let query = storage
-            .query(project(), QueryOptions::new(None, None))
+        let ctx = QueryContext::new(
+            storage
+                .query(project(), QueryOptions::new(None, None))
+                .await
+                .unwrap(),
+            None,
+        )
+        .unwrap();
+        let params = serde_json::Map::new();
+        let res = ctx
+            .sql_json(SqlRequest {
+                query: "SELECT count(*) AS n FROM spans",
+                params: &params,
+                limit: 1,
+                timeout: Duration::from_secs(30),
+            })
             .await
             .unwrap();
-        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
-            datafusion::execution::context::SessionConfig::new(),
-            Arc::clone(&query.runtime),
-        );
-        ctx.register_table("spans_t", query.spans).unwrap();
-        let counted = ctx
-            .sql("SELECT count(*) FROM spans_t")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-        counted[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap()
-            .value(0)
+        res.rows[0]["n"].as_i64().unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4608,5 +4625,71 @@ mod tests {
         );
         storage.hooks().release(HookPoint::FlushAfterFreeze);
         storage.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn project_of_and_replay_batch_handle_all_four_encodings_and_selection() {
+        use cetra_column::{
+            Batch, Column, DictColumn, FlatColumn, FlatData, RleColumn, ScalarValue, Selection,
+            Utf8Data,
+        };
+
+        let base = spans_at(&[10, 20]);
+        let pid_idx = base.schema().index_of(spans::PROJECT_ID).unwrap();
+        let pid_str = project().to_string();
+        let other_str = other_project().to_string();
+
+        // 1. Flat
+        assert_eq!(project_of(&base).unwrap(), project());
+
+        // 2. Const
+        let mut const_cols = base.columns().to_vec();
+        const_cols[pid_idx] =
+            Arc::new(Column::try_new_const(ScalarValue::Utf8(pid_str.clone()), 2).unwrap());
+        let const_batch =
+            Batch::try_new_shared(Arc::clone(base.schema()), const_cols, 2, Selection::All)
+                .unwrap();
+        assert_eq!(project_of(&const_batch).unwrap(), project());
+
+        // 3. Dict (with Selection::Indices keeping only row 1 so mixed row 0 is ignored)
+        let mut dict_cols = base.columns().to_vec();
+        let dict_vals = FlatColumn::try_new(
+            FlatData::Utf8(
+                Utf8Data::try_from_slices([other_str.as_str(), pid_str.as_str()]).unwrap(),
+            ),
+            None,
+        )
+        .unwrap();
+        dict_cols[pid_idx] = Arc::new(Column::Dict(
+            DictColumn::try_new(dict_vals, vec![0, 1], None).unwrap(),
+        ));
+        let dict_batch = Batch::try_new_shared(
+            Arc::clone(base.schema()),
+            dict_cols,
+            2,
+            Selection::Indices(vec![1]),
+        )
+        .unwrap();
+        assert_eq!(project_of(&dict_batch).unwrap(), project());
+
+        // 4. Rle
+        let mut rle_cols = base.columns().to_vec();
+        let rle_vals = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices([pid_str.as_str()]).unwrap()),
+            None,
+        )
+        .unwrap();
+        rle_cols[pid_idx] = Arc::new(Column::Rle(RleColumn::try_new(rle_vals, vec![2]).unwrap()));
+        let rle_batch =
+            Batch::try_new_shared(Arc::clone(base.schema()), rle_cols, 2, Selection::All).unwrap();
+        assert_eq!(project_of(&rle_batch).unwrap(), project());
+
+        // Replay across all 4 encodings into a memtable.
+        let mut memtable = Memtable::new(Table::Spans);
+        replay_batch(&mut memtable, 1, base).unwrap();
+        replay_batch(&mut memtable, 2, const_batch).unwrap();
+        replay_batch(&mut memtable, 3, dict_batch).unwrap();
+        replay_batch(&mut memtable, 4, rle_batch).unwrap();
+        assert_eq!(memtable.max_seq(), 4);
     }
 }

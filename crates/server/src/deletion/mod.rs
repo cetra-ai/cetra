@@ -137,7 +137,7 @@ fn forever_meta(error: &MetaError) -> Step {
 fn from_query(error: &QueryError) -> Step {
     match error {
         QueryError::Busy => Step::Retry("busy", None),
-        QueryError::DataFusion(_) => Step::Retry("query", None),
+        QueryError::Internal(_) => Step::Retry("query", None),
     }
 }
 
@@ -149,6 +149,7 @@ fn from_run(error: &RunError, kind: DeletionKind) -> Step {
         RunError::Timeout => Step::Retry("timeout", None),
         RunError::Internal(_) => Step::Retry("internal", None),
         RunError::TooLarge => Step::Retry("too_large", None),
+        RunError::Busy => Step::Retry("busy", None),
         RunError::Failed(_) if kind == DeletionKind::Filter => {
             Step::Fail(FailReason::ResolutionFailed)
         }
@@ -761,7 +762,7 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use axum::http::{Method, StatusCode};
-    use cetra_core::batch::spans_to_record_batch;
+    use cetra_core::batch::spans_to_batch;
     use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
     use cetra_core::names::metadata_key;
     use cetra_core::span::Span;
@@ -1466,7 +1467,7 @@ mod tests {
 
         let mut span = dataset_span(0);
         span.project_id = doomed.id;
-        let batch = spans_to_record_batch(&[span]).unwrap();
+        let batch = spans_to_batch(&[span]).unwrap();
         let result = app.state.storage.append_spans(doomed.id, batch).await;
         assert!(
             matches!(result, Err(AppendError::ProjectDropped)),
@@ -1624,7 +1625,7 @@ mod tests {
         }
         let mut span = dataset_span(0);
         span.project_id = p2.id;
-        let batch = spans_to_record_batch(&[span]).unwrap();
+        let batch = spans_to_batch(&[span]).unwrap();
         let result = app.state.storage.append_spans(p2.id, batch).await;
         assert!(matches!(result, Err(AppendError::ProjectDropped)));
     }

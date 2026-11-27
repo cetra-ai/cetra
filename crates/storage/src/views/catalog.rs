@@ -2,7 +2,7 @@
 
 use super::ViewName;
 
-/// Arrow-facing kind of a view column.
+/// Columnar kind of a view column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnKind {
     /// `Utf8`.
@@ -89,22 +89,6 @@ const fn col(
         kind,
         nullable,
         description,
-    }
-}
-
-const fn func(
-    name: &'static str,
-    signature: &'static str,
-    description: &'static str,
-    in_filter: bool,
-    in_sql: bool,
-) -> FunctionInfo {
-    FunctionInfo {
-        name,
-        signature,
-        description,
-        in_filter,
-        in_sql,
     }
 }
 
@@ -760,100 +744,29 @@ pub fn view_catalog() -> Vec<ViewColumns> {
     ]
 }
 
-const FUNCTIONS: &[FunctionInfo] = &[
-    func("now", "now() -> timestamp", "Current time.", true, true),
-    func(
-        "lower",
-        "lower(value: string) -> string",
-        "Lowercase a string.",
-        true,
-        true,
-    ),
-    func(
-        "upper",
-        "upper(value: string) -> string",
-        "Uppercase a string.",
-        true,
-        true,
-    ),
-    func(
-        "length",
-        "length(value: string) -> integer",
-        "Number of characters.",
-        true,
-        true,
-    ),
-    func(
-        "coalesce",
-        "coalesce(value: any, fallback: any) -> any",
-        "First non-null argument.",
-        true,
-        true,
-    ),
-    func(
-        "array_has",
-        "array_has(array: string_list, value: string) -> boolean",
-        "Whether the list contains the value.",
-        true,
-        true,
-    ),
-    func(
-        "array_length",
-        "array_length(array: string_list) -> integer",
-        "Number of elements.",
-        true,
-        true,
-    ),
-    func(
-        "date_trunc",
-        "date_trunc(unit: string, time: timestamp) -> timestamp",
-        "Truncate a timestamp to a unit such as day or hour.",
-        true,
-        true,
-    ),
-    func(
-        "abs",
-        "abs(value: float) -> float",
-        "Absolute value.",
-        true,
-        true,
-    ),
-    func(
-        "score",
-        "score(name: string) -> float",
-        "Latest numeric score of that name on the row's target.",
-        true,
-        false,
-    ),
-    func(
-        "score_label",
-        "score_label(name: string) -> string",
-        "Latest categorical or text score of that name.",
-        true,
-        false,
-    ),
-    func(
-        "has_score",
-        "has_score(name: string) -> boolean",
-        "Whether the row's target has a score of that name.",
-        true,
-        false,
-    ),
-];
-
-/// Filter and SQL functions, in spec 05 order.
+/// Filter and SQL functions, mapped from `cetra-query`'s catalog.
 pub fn function_catalog() -> Vec<FunctionInfo> {
-    FUNCTIONS.to_vec()
+    cetra_query::sql::catalog::function_catalog()
+        .iter()
+        .map(|entry| FunctionInfo {
+            name: entry.name,
+            signature: entry.signature,
+            description: entry.description,
+            in_filter: entry.in_filter,
+            in_sql: entry.in_sql,
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::DataType;
+    use cetra_column::DataType;
     use serde_json::Value;
 
     use super::*;
-    use crate::test_support::example_query;
-    use crate::views::QueryContext;
+    use crate::reads::context::{
+        scores_view_schema, sessions_view_schema, spans_view_schema, traces_view_schema,
+    };
 
     const JSON_TEXT: &[&str] = &["request_params", "system_instructions", "tool_definitions"];
 
@@ -862,30 +775,20 @@ mod tests {
             .expect("schema fixture")
     }
 
-    fn arrow_kind(name: &str, data_type: &DataType) -> ColumnKind {
+    fn column_kind(name: &str, data_type: &DataType) -> ColumnKind {
         if JSON_TEXT.contains(&name) {
             return ColumnKind::Json;
         }
         match data_type {
-            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => ColumnKind::String,
-            DataType::Boolean => ColumnKind::Boolean,
-            DataType::Float32 | DataType::Float64 => ColumnKind::Float,
-            DataType::Timestamp(_, _) => ColumnKind::Timestamp,
-            DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::UInt8
-            | DataType::UInt16
-            | DataType::UInt32
-            | DataType::UInt64 => ColumnKind::Integer,
-            DataType::Map(_, _) => ColumnKind::StringMap,
-            DataType::List(field) | DataType::LargeList(field) => match field.data_type() {
-                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => ColumnKind::StringList,
-                DataType::Struct(_) => ColumnKind::Json,
-                other => panic!("{name} list of {other}"),
-            },
-            other => panic!("{name} has {other}"),
+            DataType::Utf8 => ColumnKind::String,
+            DataType::Bool => ColumnKind::Boolean,
+            DataType::F64 => ColumnKind::Float,
+            DataType::TimestampNs { .. } => ColumnKind::Timestamp,
+            DataType::I64 => ColumnKind::Integer,
+            DataType::MapUtf8 => ColumnKind::StringMap,
+            DataType::List(inner) if **inner == DataType::Utf8 => ColumnKind::StringList,
+            DataType::Events | DataType::Links => ColumnKind::Json,
+            other => panic!("{name} has {other:?}"),
         }
     }
 
@@ -932,23 +835,27 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn catalog_columns_match_the_registered_views() {
-        let ctx = QueryContext::new(example_query(), None).expect("context");
+    #[test]
+    fn catalog_columns_match_the_registered_views() {
         for view in view_catalog() {
-            let frame = ctx
-                .session()
-                .table(view.view.as_str())
-                .await
-                .unwrap_or_else(|error| panic!("{}: {error}", view.view.as_str()));
-            let fields = frame.schema().fields();
+            let schema = match view.view {
+                ViewName::Traces => traces_view_schema(),
+                ViewName::Spans => spans_view_schema(),
+                ViewName::Sessions => sessions_view_schema(),
+                ViewName::Scores => scores_view_schema(),
+                other @ (ViewName::ExperimentItems | ViewName::DatasetItems) => {
+                    unreachable!("catalog only includes engine views, got {other:?}")
+                }
+            }
+            .unwrap_or_else(|error| panic!("{}: {error}", view.view.as_str()));
+            let fields = schema.fields();
             let names: Vec<&str> = view.columns.iter().map(|column| column.name).collect();
-            let actual: Vec<&str> = fields.iter().map(|field| field.name().as_str()).collect();
+            let actual: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
             assert_eq!(actual, names, "{}", view.view.as_str());
             for (column, field) in view.columns.iter().zip(fields.iter()) {
                 assert_eq!(
                     column.kind,
-                    arrow_kind(column.name, field.data_type()),
+                    column_kind(column.name, &field.data_type),
                     "{}.{}",
                     view.view.as_str(),
                     column.name
@@ -977,8 +884,12 @@ mod tests {
                 function.in_filter,
                 expected["in_filter"].as_bool().expect("in_filter")
             );
-            let score = matches!(function.name, "score" | "score_label" | "has_score");
-            assert_eq!(function.in_sql, !score, "{}", function.name);
+            assert_eq!(
+                function.in_sql,
+                expected["in_sql"].as_bool().expect("in_sql"),
+                "{}",
+                function.name
+            );
         }
     }
 }

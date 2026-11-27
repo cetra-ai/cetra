@@ -22,9 +22,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray};
+use arrow::array::{Array, FixedSizeBinaryArray, Int64Array};
 use bytesize::ByteSize;
-use cetra_core::batch::spans_to_record_batch;
+use cetra_core::batch::spans_to_batch;
 use cetra_core::enums::{SpanKind, SpanStatus};
 use cetra_core::ids::{ProjectId, SpanId, TraceId};
 use cetra_core::span::Span;
@@ -34,7 +34,6 @@ use cetra_storage::config::{
 };
 use cetra_storage::{ProjectQuery, Storage};
 use chrono::{Datelike, NaiveDate};
-use datafusion::execution::context::{SessionConfig, SessionContext};
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use sqlx::ConnectOptions;
@@ -109,7 +108,7 @@ fn anchor_start() -> i64 {
 /// `(iteration, trace index)` identifies a trace; span ids come from the batch
 /// counter. Each trace's rows are appended in three consecutive batches, far
 /// enough apart that a kill usually splits them across flushes.
-fn span_batch(batch_id: u64, rows: usize) -> arrow::array::RecordBatch {
+fn span_batch(batch_id: u64, rows: usize) -> cetra_column::Batch {
     let project_id = project();
     let sequence = batch_id % 1_000_000;
     let run_id = batch_id / 1_000_000;
@@ -187,7 +186,7 @@ fn span_batch(batch_id: u64, rows: usize) -> arrow::array::RecordBatch {
             }
         })
         .collect();
-    spans_to_record_batch(&spans).unwrap()
+    spans_to_batch(&spans).unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -926,30 +925,25 @@ fn parse_batch_name(name: &str) -> Option<(u64, u32)> {
 }
 
 async fn stored_rows(query: &ProjectQuery) -> Vec<(String, Vec<u8>)> {
-    let ctx = SessionContext::new_with_config_rt(SessionConfig::new(), Arc::clone(&query.runtime));
-    ctx.register_table("spans_t", Arc::clone(&query.spans))
-        .unwrap();
-    let batches = ctx
-        .sql("SELECT name, span_id FROM spans_t")
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap();
+    let batches = query.collect_raw_spans().await.unwrap();
     let mut rows = Vec::new();
     for batch in batches {
         let names = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
+            .column_by_name(cetra_core::schema::spans::NAME)
             .unwrap();
         let ids = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<FixedSizeBinaryArray>()
+            .column_by_name(cetra_core::schema::spans::SPAN_ID)
             .unwrap();
         for index in 0..batch.num_rows() {
-            rows.push((names.value(index).to_owned(), ids.value(index).to_vec()));
+            let name = match names.get_scalar(index).unwrap() {
+                cetra_column::ScalarValue::Utf8(s) => s,
+                other => panic!("unexpected name scalar: {other:?}"),
+            };
+            let id = match ids.get_scalar(index).unwrap() {
+                cetra_column::ScalarValue::FixedBytes8(bytes) => bytes.to_vec(),
+                other => panic!("unexpected span_id scalar: {other:?}"),
+            };
+            rows.push((name, id));
         }
     }
     rows

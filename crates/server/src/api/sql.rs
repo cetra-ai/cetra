@@ -39,7 +39,9 @@ pub struct SqlQueryRequest {
 pub struct SqlColumnInfo {
     /// Output column name.
     pub name: String,
-    /// Arrow type as DataFusion prints it, for example `Int64` or `Utf8`.
+    /// Unified cetra type display name (D-QE-15): `string`, `integer`, `float`, `decimal`,
+    /// `boolean`, `timestamp`, `date`, `interval`, `binary`, `string_list`, `string_map`,
+    /// `list`, `json`, or `null`.
     #[serde(rename = "type")]
     pub data_type: String,
 }

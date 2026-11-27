@@ -22,7 +22,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use bytesize::ByteSize;
-use cetra_core::batch::{scores_to_record_batch, spans_to_record_batch};
+use cetra_core::batch::{scores_to_batch, spans_to_batch};
 use cetra_core::enums::ScoreSource;
 use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
 use cetra_core::names::PRODUCT;
@@ -31,7 +31,7 @@ use cetra_core::span::Span;
 use cetra_storage::config::{
     AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
-use cetra_storage::{MediaBlob, ProjectQuery, QueryContext, Storage};
+use cetra_storage::{MediaBlob, ProjectQuery, Storage};
 use http_body_util::BodyExt;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -753,7 +753,7 @@ impl TestApp {
             ),
             (
                 "tool",
-                r#"[{"type":"tool_result","id":"call_1","name":"query_sql","ok":true,"result":{"columns":[{"name":"name","type":"VARCHAR"},{"name":"errors","type":"BIGINT"}],"rows":[{"name":"checkout","errors":3}]},"size_bytes":120,"rows":1,"stubbed":false}]"#,
+                r#"[{"type":"tool_result","id":"call_1","name":"query_sql","ok":true,"result":{"columns":[{"name":"name","type":"string"},{"name":"errors","type":"integer"}],"rows":[{"name":"checkout","errors":3}]},"size_bytes":120,"rows":1,"stubbed":false}]"#,
                 None,
                 Some(TOOL_STUB_AFTER),
             ),
@@ -1102,24 +1102,14 @@ pub(crate) async fn raw_query(storage: &Storage, project: ProjectId) -> ProjectQ
         .expect("query opens")
 }
 
-/// Spans of `project` in storage, no window: `SELECT count(*) FROM spans` over
-/// `QueryContext::new(raw_query(storage, project).await, None)`.
+/// Spans of `project` in storage, no window.
 pub(crate) async fn raw_span_count(storage: &Storage, project: ProjectId) -> u64 {
-    let ctx = QueryContext::new(raw_query(storage, project).await, None).expect("context");
-    let batches = ctx
-        .session()
-        .sql("SELECT count(*) AS n FROM spans")
+    let batches = raw_query(storage, project)
         .await
-        .expect("count plans")
-        .collect()
+        .collect_raw_spans()
         .await
-        .expect("count runs");
-    let count = batches[0]
-        .column(0)
-        .as_any()
-        .downcast_ref::<arrow::array::Int64Array>()
-        .expect("count is Int64")
-        .value(0);
+        .expect("collect raw spans");
+    let count: usize = batches.iter().map(cetra_column::Batch::num_rows).sum();
     u64::try_from(count).unwrap_or(0)
 }
 
@@ -1185,7 +1175,7 @@ impl TestApp {
         for span in &mut spans {
             span.project_id = project;
         }
-        let batch = spans_to_record_batch(&spans).unwrap();
+        let batch = spans_to_batch(&spans).unwrap();
         self.state
             .storage
             .append_spans(project, batch)
@@ -1197,7 +1187,7 @@ impl TestApp {
         for score in &mut scores {
             score.project_id = project;
         }
-        let batch = scores_to_record_batch(&scores).unwrap();
+        let batch = scores_to_batch(&scores).unwrap();
         self.state
             .storage
             .append_scores(project, batch)
@@ -2149,7 +2139,7 @@ pub(crate) async fn put_score(app: &TestApp, project: ProjectId, score: TestScor
         deleted: score.deleted,
         ingest_time: score.created_at,
     };
-    let batch = scores_to_record_batch(&[score]).unwrap();
+    let batch = scores_to_batch(&[score]).unwrap();
     app.state
         .storage
         .append_scores(project, batch)

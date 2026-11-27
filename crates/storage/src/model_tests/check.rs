@@ -14,9 +14,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use arrow::array::AsArray;
+use cetra_column::ScalarValue;
 use cetra_core::schema::{scores, spans};
-use datafusion::execution::context::{SessionConfig, SessionContext};
 
 use super::harness::Harness;
 use super::model::{ExpectedScore, ExpectedTrace, Model, ProjectModel};
@@ -1444,7 +1443,7 @@ pub(super) fn check_quiet_state(h: &mut Harness) {
         );
         // 3. No query memory held: each query pool returns its bytes on drop.
         eventually("query memory is still held", || {
-            let used = storage.memory.used();
+            let used = storage.qe_runtime.admission.used();
             (used == 0)
                 .then_some(())
                 .ok_or_else(|| format!("{used} bytes of query memory are held"))
@@ -1615,28 +1614,30 @@ fn check_settled_spans(
         }
         let batch = parquet_rows(h.object_bytes(&file));
         let trace_bytes = trace_ids_of(&batch);
-        let span_bytes = batch
-            .column_by_name(spans::SPAN_ID)
-            .expect("a spans file has a span_id column")
-            .as_fixed_size_binary();
-        let ingests = batch
-            .column_by_name(spans::INGEST_TIME)
-            .expect("a spans file has an ingest_time column")
-            .as_primitive::<arrow::datatypes::TimestampNanosecondType>();
+        let span_col = crate::reads::columns::require_col(&batch, spans::SPAN_ID)
+            .expect("a spans file has a span_id column");
+        let ingest_col = crate::reads::columns::require_col(&batch, spans::INGEST_TIME)
+            .expect("a spans file has an ingest_time column");
         let mut keys = BTreeSet::new();
         for (row, bytes) in trace_bytes.iter().enumerate() {
             let trace = *traces_by_id
                 .get(bytes)
                 .expect("a stored span belongs to a trace of the model");
-            let ingest = ingests.value(row);
+            let ingest =
+                crate::reads::columns::time_at(&batch, ingest_col, row).expect("ingest_time");
             assert!(
                 !state.covers_span(trace, ingest),
                 "project {project:?}: spans file {} keeps trace {trace} written at {ingest}, \
                  which a deletion covers",
                 file.path
             );
+            let phys = crate::reads::columns::physical_row(&batch, row).expect("span row");
+            let span_bytes = match span_col.get_scalar(phys).expect("span_id scalar") {
+                ScalarValue::FixedBytes8(bytes) => bytes.to_vec(),
+                other => panic!("unexpected span_id value: {other:?}"),
+            };
             assert!(
-                keys.insert((trace, span_bytes.value(row).to_vec())),
+                keys.insert((trace, span_bytes)),
                 "project {project:?}: spans file {} holds a span of trace {trace} twice",
                 file.path
             );
@@ -1657,21 +1658,18 @@ fn check_settled_scores(
             file.path
         );
         let batch = parquet_rows(h.object_bytes(&file));
-        let ids = batch
-            .column_by_name(scores::SCORE_ID)
-            .expect("a scores file has a score_id column")
-            .as_string::<i32>();
-        let deleted = batch
-            .column_by_name(scores::DELETED)
-            .expect("a scores file has a deleted column")
-            .as_boolean();
-        let ingests = batch
-            .column_by_name(scores::INGEST_TIME)
-            .expect("a scores file has an ingest_time column")
-            .as_primitive::<arrow::datatypes::TimestampNanosecondType>();
+        let ids = crate::reads::columns::require_col(&batch, scores::SCORE_ID)
+            .expect("a scores file has a score_id column");
+        let deleted = crate::reads::columns::require_col(&batch, scores::DELETED)
+            .expect("a scores file has a deleted column");
+        let ingests = crate::reads::columns::require_col(&batch, scores::INGEST_TIME)
+            .expect("a scores file has an ingest_time column");
         for row in 0..batch.num_rows() {
+            let id = crate::reads::columns::string_at(&batch, ids, row)
+                .expect("score_id")
+                .expect("non-null score_id");
             let key = keys_by_id
-                .get(ids.value(row))
+                .get(&id)
                 .expect("a stored score belongs to a key of the model");
             assert_eq!(
                 key.project, project,
@@ -1679,12 +1677,15 @@ fn check_settled_scores(
                 file.path, key.project
             );
             assert!(
-                !deleted.value(row),
+                !crate::reads::columns::bool_at(&batch, deleted, row)
+                    .expect("deleted")
+                    .unwrap_or(false),
                 "scores file {} keeps a deleted version after settle",
                 file.path
             );
+            let ingest = crate::reads::columns::time_at(&batch, ingests, row).expect("ingest_time");
             assert!(
-                !state.covers_score(key, ingests.value(row)),
+                !state.covers_score(key, ingest),
                 "project {project:?}: scores file {} keeps a score a deletion covers",
                 file.path
             );
@@ -1771,25 +1772,28 @@ fn stored_partials(h: &Harness, project: P) -> Vec<(String, i32)> {
             .query(project.id(), crate::QueryOptions::new(None, None))
             .await
             .expect("query for the traces file check");
-        let ctx =
-            SessionContext::new_with_config_rt(SessionConfig::new(), Arc::clone(&query.runtime));
-        ctx.register_table("traces_t", Arc::clone(&query.traces))
-            .expect("register traces_t");
-        let batches = ctx
-            .sql("SELECT trace_id, partial_count FROM traces_t")
-            .await
-            .expect("select from traces_t")
-            .collect()
-            .await
-            .expect("collect traces_t");
+        let batches = query.collect_raw_traces().await.expect("collect traces_t");
         let mut rows = Vec::new();
         for batch in batches {
-            let ids = batch.column(0).as_fixed_size_binary();
-            let partials = batch
-                .column(1)
-                .as_primitive::<arrow::datatypes::Int32Type>();
+            let ids =
+                crate::reads::columns::require_col(&batch, cetra_core::schema::traces::TRACE_ID)
+                    .expect("traces trace_id");
+            let partials = crate::reads::columns::require_col(
+                &batch,
+                cetra_core::schema::traces::PARTIAL_COUNT,
+            )
+            .expect("traces partial_count");
             for row in 0..batch.num_rows() {
-                rows.push((hex(ids.value(row)), partials.value(row)));
+                let phys = crate::reads::columns::physical_row(&batch, row).expect("trace row");
+                let trace_id = match ids.get_scalar(phys).expect("trace_id scalar") {
+                    ScalarValue::FixedBytes16(bytes) => hex(&bytes),
+                    other => panic!("unexpected trace_id value: {other:?}"),
+                };
+                let partial = i32::try_from(
+                    crate::reads::columns::i64_at(&batch, partials, row).expect("partial_count"),
+                )
+                .expect("partial_count fits in i32");
+                rows.push((trace_id, partial));
             }
         }
         rows

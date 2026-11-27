@@ -8,12 +8,11 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use std::time::Duration;
 
-use datafusion::execution::disk_manager::DiskManager;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -26,7 +25,7 @@ use crate::read_cache::{self, ReadCache};
 const INTERVAL: Duration = Duration::from_secs(1);
 
 /// Free disk, refreshed by the monitor, and the bytes compaction reserved. It also caps
-/// the query spill that the query runtimes share (spec 03 §6).
+/// the query spill that [`cetra_query::exec::SpillManager`] enforces (spec 03 §6).
 #[derive(Debug)]
 pub(crate) struct Disk {
     /// `data_dir`, plus the object store root in local mode.
@@ -35,30 +34,26 @@ pub(crate) struct Disk {
     free: AtomicU64,
     /// Bytes held by running compaction jobs.
     reserved: Mutex<u64>,
-    /// The disk manager of the query runtime, which every query's runtime shares.
-    spill: Arc<DiskManager>,
-    /// Set once a failed spill-limit update has been logged.
-    spill_cap_warned: AtomicBool,
+    /// Frozen total spill byte cap for `cetra_query::exec::SpillManager`, refreshed at `statvfs` time.
+    engine_spill_cap: AtomicU64,
+    /// Shared live spilled-bytes counter registered by `cetra_query::exec::SpillManager`.
+    engine_spilled: OnceLock<Arc<AtomicU64>>,
     /// Tests set this to stand in for `statvfs`.
     #[cfg(test)]
     fake_free: Mutex<Option<u64>>,
 }
 
 impl Disk {
-    /// Measures once, and applies the spill cap to `spill` from that measurement. A
+    /// Measures once, and initializes the spill cap from that measurement. A
     /// `statvfs` error is an [`OpenError::Io`].
-    pub(crate) fn open(
-        paths: Vec<PathBuf>,
-        min_free: u64,
-        spill: Arc<DiskManager>,
-    ) -> Result<Self, OpenError> {
+    pub(crate) fn open(paths: Vec<PathBuf>, min_free: u64) -> Result<Self, OpenError> {
         let disk = Self {
             paths,
             min_free,
             free: AtomicU64::new(0),
             reserved: Mutex::new(0),
-            spill,
-            spill_cap_warned: AtomicBool::new(false),
+            engine_spill_cap: AtomicU64::new(0),
+            engine_spilled: OnceLock::new(),
             #[cfg(test)]
             fake_free: Mutex::new(None),
         };
@@ -85,15 +80,23 @@ impl Disk {
     /// most the bytes spilled during one measurement interval: spill written between the
     /// `statvfs` and the read of the spilled total is in the total but not in `free`.
     fn apply_spill_cap(&self, free: u64) {
-        let cap = self
-            .spill
-            .used_disk_space()
-            .saturating_add(free.saturating_sub(self.min_free));
-        if let Err(error) = self.spill.set_max_temp_directory_size(cap)
-            && !self.spill_cap_warned.swap(true, Ordering::Relaxed)
-        {
-            tracing::warn!(%error, "setting the query spill limit failed");
-        }
+        let engine_used = self
+            .engine_spilled
+            .get()
+            .map_or(0, |counter| counter.load(Ordering::Acquire));
+        let engine_cap = engine_used.saturating_add(free.saturating_sub(self.min_free));
+        self.engine_spill_cap.store(engine_cap, Ordering::Release);
+    }
+
+    /// Registers the native query engine's live spilled-bytes counter and refreshes the spill cap.
+    pub(crate) fn set_engine_spilled(&self, counter: Arc<AtomicU64>) {
+        let _ = self.engine_spilled.set(counter);
+        self.apply_spill_cap(self.free());
+    }
+
+    /// Frozen process-wide maximum total spilled bytes allowed for `cetra_query::exec::SpillManager`.
+    pub(crate) fn engine_spill_cap(&self) -> u64 {
+        self.engine_spill_cap.load(Ordering::Acquire)
     }
 
     /// The last measured free bytes.
@@ -292,19 +295,6 @@ pub(crate) fn spawn(disk: Arc<Disk>, cache: Option<Arc<ReadCache>>) -> DiskHandl
     }
 }
 
-/// A disk manager that spills under `dir`, as the query runtime's does.
-#[cfg(test)]
-#[allow(clippy::expect_used)] // a test helper: a disk manager over an existing directory cannot fail
-pub(crate) fn test_spill(dir: &Path) -> Arc<DiskManager> {
-    use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
-    Arc::new(
-        DiskManagerBuilder::default()
-            .with_mode(DiskManagerMode::Directories(vec![dir.to_path_buf()]))
-            .build()
-            .expect("test disk manager"),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,22 +302,29 @@ mod tests {
     #[test]
     fn the_spill_cap_is_the_free_disk_above_min_free() {
         let dir = tempfile::tempdir().unwrap();
-        let spill = test_spill(dir.path());
-        let disk = Disk::open(vec![dir.path().to_path_buf()], 100, Arc::clone(&spill)).unwrap();
+        let disk = Disk::open(vec![dir.path().to_path_buf()], 100).unwrap();
         disk.set_free_for_test(Some(1_000));
-        assert_eq!(spill.max_temp_directory_size(), 900);
+        assert_eq!(disk.engine_spill_cap(), 900);
         disk.set_free_for_test(Some(50));
-        assert_eq!(spill.max_temp_directory_size(), 0);
+        assert_eq!(disk.engine_spill_cap(), 0);
         disk.set_free_for_test(Some(100));
-        assert_eq!(spill.max_temp_directory_size(), 0);
+        assert_eq!(disk.engine_spill_cap(), 0);
+
+        let engine_counter = Arc::new(AtomicU64::new(250));
+        disk.set_engine_spilled(Arc::clone(&engine_counter));
+        disk.set_free_for_test(Some(1_000));
+        assert_eq!(disk.engine_spill_cap(), 250 + 900);
+        engine_counter.store(500, Ordering::Release);
+        // Frozen until the next `statvfs` refresh.
+        assert_eq!(disk.engine_spill_cap(), 250 + 900);
+        disk.set_free_for_test(Some(1_000));
+        assert_eq!(disk.engine_spill_cap(), 500 + 900);
     }
 
     #[test]
     fn try_reserve_grants_up_to_free_and_gives_back_on_drop() {
         let dir = tempfile::tempdir().unwrap();
-        let disk = Arc::new(
-            Disk::open(vec![dir.path().to_path_buf()], 0, test_spill(dir.path())).unwrap(),
-        );
+        let disk = Arc::new(Disk::open(vec![dir.path().to_path_buf()], 0).unwrap());
         disk.set_free_for_test(Some(100));
 
         let first = disk.try_reserve(60).expect("60 of 100 fits");

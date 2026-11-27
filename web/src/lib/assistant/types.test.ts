@@ -105,11 +105,11 @@ describe("parseDraft", () => {
       parseDraft("sql", {
         query: "SELECT 1",
         params: { limit: 5 },
-        columns: [{ name: "n", type: "BIGINT" }],
+        columns: [{ name: "n", type: "integer" }],
       }),
     ).toEqual({
       kind: "sql",
-      draft: { query: "SELECT 1", params: { limit: 5 }, columns: [{ name: "n", type: "BIGINT" }] },
+      draft: { query: "SELECT 1", params: { limit: 5 }, columns: [{ name: "n", type: "integer" }] },
     });
     expect(parseDraft("dashboard", { name: "Errors", definition: { widgets: [] } })).toEqual({
       kind: "dashboard",

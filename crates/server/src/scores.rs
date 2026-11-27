@@ -675,7 +675,7 @@ async fn live_scores(
 
 /// Appends `rows` as one batch (spec 06 § Score write rules, step 7).
 async fn append(state: &AppState, project: ProjectId, rows: &[Score]) -> Result<(), ApiError> {
-    let batch = cetra_core::batch::scores_to_record_batch(rows)
+    let batch = cetra_core::batch::scores_to_batch(rows)
         .map_err(|error| ApiError::Internal(Box::new(error)))?;
     state
         .storage

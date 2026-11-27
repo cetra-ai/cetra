@@ -1,27 +1,28 @@
-//! Score list and the latest score of each name on a trace or session.
-//!
-//! Default exclusions do not apply (spec 09). The list is the `scores` view
-//! with equality conjuncts and a `created_at` window. Latest scores follow
-//! D97: greatest `updated_at`, then greatest `score_id`.
+//! Native query-engine (`cetra-query` + `cetra-column`) implementations of the
+//! `scores` read entry points: `score_list`, `latest_scores`, `scores_by_id`,
+//! and `score_name_counts`.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::{Array, ArrayRef, AsArray, Int64Array};
-use arrow::datatypes::{DataType, Int64Type};
-use arrow::error::ArrowError;
-use arrow::record_batch::RecordBatch;
+use cetra_column::{Batch, DataType, Field, ScalarValue, Schema};
 use cetra_core::enums::{ScoreSource, ScoreTargetKind};
 use cetra_core::schema::scores;
-use datafusion::common::ScalarValue;
-use datafusion::error::DataFusionError;
-use datafusion::functions_aggregate::expr_fn::{count, count_distinct, max};
-use datafusion::functions_window::expr_fn::row_number;
-use datafusion::logical_expr::{Expr, ExprFunctionExt, cast, col, lit};
-use datafusion::prelude::DataFrame;
+use cetra_query::exec::sort_window::{WindowFunc, WindowSpec, eval_window_group};
+use cetra_query::exec::streaming::{FilterOp, ProjectOp, TopKSink};
+use cetra_query::exec::{
+    AggExpr, AggFunc, CollectSink, ControlFlow, ExecContext, HashAgg, HashAggSpec, PartitionStream,
+    PushOperator, ScanSource, ScanSpec, SortKey, TimeRangeHint, run_pipeline as exec_run_pipeline,
+};
+use cetra_query::{BinaryOp, CastMode, Expr, QueryError, ScalarFn};
 
-use super::cursor::{after, assemble, decode, order_by};
-use super::{MAX_PAGE, Page, SortOrder};
-use crate::query_error::{RunError, classify};
+use crate::query_error::RunError;
+use crate::reads::columns::{i64_at, internal, require_col, string_at};
+use crate::reads::context::{
+    OperatorStream, query_err_to_run, scores_raw_schema, scores_view_projection,
+};
+use crate::reads::cursor::{self, Page};
+use crate::reads::{MAX_PAGE, SortOrder};
 use crate::views::{QueryContext, TimeWindow};
 
 const LIST: &str = "scores";
@@ -66,151 +67,6 @@ pub struct ScoreNameCountsRequest<'a> {
     pub timeout: Duration,
 }
 
-/// Live scores per name, in each bucket or in the window of the request (D-IC-9). Rows are sorted
-/// by name, then by bucket. Names with no live score in the window have no row.
-///
-/// # Errors
-///
-/// [`RunError::InvalidRequest`] for more than [`MAX_COUNT_NAMES`] names or a bucket width that is
-/// not positive; [`RunError::Timeout`];
-/// DataFusion failures through [`classify`] and `ctx.fail`.
-pub async fn score_name_counts(
-    ctx: &QueryContext,
-    request: ScoreNameCountsRequest<'_>,
-) -> Result<Vec<ScoreNameCount>, RunError> {
-    if request.names.len() > MAX_COUNT_NAMES {
-        return Err(RunError::InvalidRequest(format!(
-            "at most {MAX_COUNT_NAMES} names"
-        )));
-    }
-    if matches!(request.bucket_ns, Some(width) if width <= 0) {
-        return Err(RunError::InvalidRequest(
-            "the bucket width must be positive".to_owned(),
-        ));
-    }
-    if request.names.is_empty() {
-        return Ok(Vec::new());
-    }
-    match tokio::time::timeout(request.timeout, counts(ctx, &request)).await {
-        Err(_) => Err(RunError::Timeout),
-        Ok(result) => result,
-    }
-}
-
-async fn counts(
-    ctx: &QueryContext,
-    request: &ScoreNameCountsRequest<'_>,
-) -> Result<Vec<ScoreNameCount>, RunError> {
-    let names: Vec<Expr> = request
-        .names
-        .iter()
-        .map(|name| lit(name.as_str()))
-        .collect();
-    let created = cast(col(scores::CREATED_AT), DataType::Int64);
-    let predicate = col(scores::NAME)
-        .in_list(names, false)
-        .and(request.window.predicate(scores::CREATED_AT));
-    let mut keys = vec![col(scores::NAME)];
-    let mut order = vec![col(scores::NAME).sort(true, false)];
-    if let Some(width) = request.bucket_ns {
-        keys.push((created.clone() - created.clone() % lit(width)).alias(BUCKET));
-        order.push(col(BUCKET).sort(true, false));
-    }
-    let batches = ctx
-        .session()
-        .table(LIST)
-        .await
-        .map_err(classify)?
-        .filter(predicate)
-        .map_err(classify)?
-        .aggregate(
-            keys,
-            vec![
-                count(lit(1_i64)).alias(COUNT),
-                count_distinct(col(scores::USER_ID)).alias(USERS),
-                max(created).alias(LAST),
-            ],
-        )
-        .map_err(classify)?
-        .sort(order)
-        .map_err(classify)?
-        .collect()
-        .await
-        .map_err(|error| ctx.fail(error))?;
-    counts_of(&batches, request)
-}
-
-/// Converts the aggregate rows: name, then the bucket when `bucket_ns` is set, then count, users
-/// and last.
-fn counts_of(
-    batches: &[RecordBatch],
-    request: &ScoreNameCountsRequest<'_>,
-) -> Result<Vec<ScoreNameCount>, RunError> {
-    let mut found = Vec::new();
-    let offset = usize::from(request.bucket_ns.is_some());
-    for batch in batches {
-        let names =
-            arrow::compute::cast(batch.column(0), &DataType::Utf8).map_err(arrow_failure)?;
-        let names = names.as_string::<i32>();
-        let buckets = if request.bucket_ns.is_some() {
-            Some(int64_column(batch.column(1))?)
-        } else {
-            None
-        };
-        let buckets = buckets
-            .as_ref()
-            .map(|column| column.as_primitive::<Int64Type>());
-        let counts = int64_column(batch.column(1 + offset))?;
-        let counts = counts.as_primitive::<Int64Type>();
-        let users = int64_column(batch.column(2 + offset))?;
-        let users = users.as_primitive::<Int64Type>();
-        let lasts = int64_column(batch.column(3 + offset))?;
-        let lasts = lasts.as_primitive::<Int64Type>();
-        for row in 0..batch.num_rows() {
-            let bucket_start = match buckets {
-                Some(buckets) => required_int(buckets, row)?,
-                None => request.window.from(),
-            };
-            found.push(ScoreNameCount {
-                name: names
-                    .is_valid(row)
-                    .then(|| names.value(row).to_owned())
-                    .ok_or_else(bad_row)?,
-                bucket_start,
-                count: non_negative(required_int(counts, row)?)?,
-                users: non_negative(required_int(users, row)?)?,
-                last_created_at: required_int(lasts, row)?,
-            });
-        }
-    }
-    Ok(found)
-}
-
-fn int64_column(column: &ArrayRef) -> Result<ArrayRef, RunError> {
-    arrow::compute::cast(column, &DataType::Int64).map_err(arrow_failure)
-}
-
-fn required_int(column: &Int64Array, row: usize) -> Result<i64, RunError> {
-    if column.is_null(row) {
-        return Err(bad_row());
-    }
-    Ok(column.value(row))
-}
-
-fn non_negative(value: i64) -> Result<u64, RunError> {
-    u64::try_from(value).map_err(|_| bad_row())
-}
-
-fn arrow_failure(error: ArrowError) -> RunError {
-    RunError::Internal(DataFusionError::ArrowError(Box::new(error), None))
-}
-
-fn bad_row() -> RunError {
-    RunError::Internal(DataFusionError::Internal(
-        "a view returned a null where a value is required".to_owned(),
-    ))
-}
-
 /// Columns of [`latest_scores`], in order.
 pub const LATEST_SCORE_COLUMNS: &[&str] = &[
     TARGET_KEY,
@@ -247,7 +103,7 @@ pub struct ScoreListRequest<'a> {
     pub queue_id: Option<&'a str>,
     /// `created_at ∈ [from, to)`.
     pub window: Option<TimeWindow>,
-    /// Rows to return, from 1 to [`MAX_PAGE`].
+    /// Rows to return, from 1 to [`super::MAX_PAGE`].
     pub limit: usize,
     /// Cursor from the previous page.
     pub cursor: Option<&'a str>,
@@ -264,81 +120,565 @@ pub enum ScoreTargets<'a> {
     Sessions(&'a [&'a str]),
 }
 
-/// One page of scores, ordered `created_at DESC, score_id DESC`.
-///
-/// The cursor's sort name is `created_at` and its direction is descending.
-///
-/// # Errors
-///
-/// [`RunError::InvalidRequest`] for a bad limit, cursor, or id.
-/// [`RunError::Timeout`] when the query exceeds `timeout`.
+/// One page of scores, ordered `created_at DESC NULLS LAST, score_id DESC`.
 pub async fn score_list(
     ctx: &QueryContext,
     request: ScoreListRequest<'_>,
 ) -> Result<Page, RunError> {
+    let ctx = ctx.engine();
     if !(1..=MAX_PAGE).contains(&request.limit) {
         return Err(RunError::InvalidRequest(
             "limit must be between 1 and 1000".to_owned(),
         ));
     }
-    match tokio::time::timeout(request.timeout, list(ctx, &request)).await {
-        Err(_) => Err(RunError::Timeout),
-        Ok(result) => result,
+    let cursor = match request.cursor {
+        Some(text) => {
+            let decoded = cursor::decode(text, LIST, scores::CREATED_AT, SortOrder::Desc)?;
+            if decoded.tie_len() != 1 {
+                return Err(RunError::InvalidRequest("invalid cursor".to_owned()));
+            }
+            Some(decoded)
+        }
+        None => None,
+    };
+
+    let raw_schema = scores_raw_schema()?;
+    let mut filters = list_filters(&raw_schema, &request)?;
+    if let Some(cur) = &cursor {
+        filters.push(cursor::after_expr(
+            cur,
+            &raw_schema,
+            scores::CREATED_AT,
+            TIES,
+        )?);
     }
+
+    let mut min_ns = None;
+    let mut max_ns = None;
+    if let Some(window) = request.window {
+        min_ns = Some(window.from());
+        max_ns = window.to().checked_sub(1);
+    }
+
+    let spec = ScanSpec {
+        projection: None,
+        map_projections: Default::default(),
+        time_range: TimeRangeHint {
+            min_ns,
+            max_ns,
+            around_ns: None,
+        },
+        id_lookups: Vec::new(),
+        filters,
+        substrings: Vec::new(),
+        sort_hints: Vec::new(),
+        limit: None,
+    };
+
+    let sort_keys = cursor::order_by(&raw_schema, scores::CREATED_AT, TIES, SortOrder::Desc)?;
+    let fetch = request.limit + 1;
+    let scores_source = Arc::clone(&ctx.scores);
+    let raw_schema_c = Arc::clone(&raw_schema);
+    let sort_keys_c = sort_keys.clone();
+
+    let (view_batches, _) = ctx
+        .run_with_ctx(request.timeout, move |exec_ctx| {
+            let partitions = scores_source.open_partitions(&spec, exec_ctx)?;
+            if partitions.is_empty() {
+                return Ok(Vec::new());
+            }
+            let sink_schema = Arc::clone(&raw_schema_c);
+            let sink_keys = sort_keys_c.clone();
+            let sink_ctx = exec_ctx.clone();
+            let sinks = exec_run_pipeline(
+                exec_ctx,
+                partitions,
+                |_| Ok(Vec::new()),
+                move |_| {
+                    Ok(TopKSink::new(
+                        Arc::clone(&sink_schema),
+                        sink_keys.clone(),
+                        fetch,
+                        0,
+                        sink_ctx.clone(),
+                    ))
+                },
+            )?;
+            let raw_batches = TopKSink::merge(
+                sinks,
+                Arc::clone(&raw_schema_c),
+                &sort_keys_c,
+                0,
+                fetch,
+                exec_ctx,
+            )?;
+            project_batches_to_scores_view(&raw_schema_c, raw_batches, exec_ctx)
+        })
+        .await?;
+
+    cursor::assemble(
+        view_batches,
+        request.limit,
+        LIST,
+        scores::CREATED_AT,
+        SortOrder::Desc,
+        TIES,
+    )
 }
 
-/// Latest live score of each name for the given traces or sessions.
-///
-/// Rows are sorted by `target_key`, then `name`. An empty key list returns
-/// no batches and does not run a query. More than [`MAX_PAGE`] keys is
-/// [`RunError::InvalidRequest`].
-///
-/// # Errors
-///
-/// [`RunError::InvalidRequest`] for too many keys or a trace id that is not
-/// 32 hex digits. [`RunError::Timeout`] when the query exceeds `timeout`.
+/// Latest live score of each name for the given traces or sessions (excluding `source = 'issue'`).
 pub async fn latest_scores(
     ctx: &QueryContext,
     targets: ScoreTargets<'_>,
     timeout: Duration,
-) -> Result<Vec<RecordBatch>, RunError> {
+) -> Result<Vec<Batch>, RunError> {
+    let ctx = ctx.engine();
     let Some(prepared) = prepare_keys(targets)? else {
         return Ok(Vec::new());
     };
-    match tokio::time::timeout(
-        timeout,
-        latest(ctx, prepared.kind, prepared.column, &prepared.keys),
-    )
-    .await
-    {
-        Err(_) => Err(RunError::Timeout),
-        Ok(result) => result,
-    }
+    let raw_schema = scores_raw_schema()?;
+    let proj_cols = [
+        prepared.column,
+        scores::NAME,
+        scores::SCORE_ID,
+        scores::DATA_TYPE,
+        scores::VALUE_NUM,
+        scores::VALUE_STR,
+        scores::SOURCE,
+        scores::UPDATED_AT,
+    ];
+    let proj_indices: Vec<usize> = proj_cols
+        .iter()
+        .map(|name| {
+            raw_schema
+                .index_of(name)
+                .ok_or_else(|| internal(format!("scores schema missing column {name}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let filters = vec![
+        eq_lit_str(&raw_schema, scores::TARGET, prepared.kind.as_str())
+            .map_err(query_err_to_run)?,
+        in_list_expr(col_expr(&raw_schema, prepared.column)?, prepared.literals),
+        Expr::Binary {
+            left: Box::new(col_expr(&raw_schema, scores::SOURCE)?),
+            op: BinaryOp::NotEq,
+            right: Box::new(Expr::Literal(ScalarValue::Utf8(
+                ScoreSource::Issue.as_str().to_owned(),
+            ))),
+            data_type: DataType::Bool,
+        },
+    ];
+
+    let spec = ScanSpec {
+        projection: Some(proj_indices),
+        map_projections: Default::default(),
+        time_range: TimeRangeHint {
+            min_ns: None,
+            max_ns: None,
+            around_ns: None,
+        },
+        id_lookups: Vec::new(),
+        filters,
+        substrings: Vec::new(),
+        sort_hints: Vec::new(),
+        limit: None,
+    };
+
+    let scores_source = Arc::clone(&ctx.scores);
+    let key_col_name = prepared.column;
+    let (batches, _) = ctx
+        .run_with_ctx(timeout, move |exec_ctx| {
+            let scan_schema = scores_source.projected_schema(&spec)?;
+            let partitions = scores_source.open_partitions(&spec, exec_ctx)?;
+            if partitions.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let pre_fields = vec![
+                Field::new(TARGET_KEY, DataType::Utf8, true),
+                Field::new(scores::NAME, DataType::Utf8, false),
+                Field::new(scores::SCORE_ID, DataType::Utf8, false),
+                Field::new(scores::DATA_TYPE, DataType::Utf8, false),
+                Field::new(scores::VALUE_NUM, DataType::F64, true),
+                Field::new(scores::VALUE_STR, DataType::Utf8, true),
+                Field::new(scores::SOURCE, DataType::Utf8, false),
+                Field::new(scores::UPDATED_AT, DataType::timestamp_utc(), false),
+            ];
+            let pre_schema = Schema::try_new_arc(pre_fields)?;
+            let key_in = col_expr_q(&scan_schema, key_col_name)?;
+            let target_key_expr = if key_in.data_type() == DataType::FixedBytes16 {
+                Expr::Call {
+                    func: ScalarFn::Encode,
+                    args: vec![key_in, Expr::Literal(ScalarValue::Utf8("hex".to_owned()))],
+                    data_type: DataType::Utf8,
+                }
+            } else {
+                key_in
+            };
+            let pre_exprs = vec![
+                target_key_expr,
+                col_expr_q(&scan_schema, scores::NAME)?,
+                col_expr_q(&scan_schema, scores::SCORE_ID)?,
+                col_expr_q(&scan_schema, scores::DATA_TYPE)?,
+                col_expr_q(&scan_schema, scores::VALUE_NUM)?,
+                col_expr_q(&scan_schema, scores::VALUE_STR)?,
+                col_expr_q(&scan_schema, scores::SOURCE)?,
+                col_expr_q(&scan_schema, scores::UPDATED_AT)?,
+            ];
+            let projected_streams: Vec<Box<dyn PartitionStream>> = partitions
+                .into_iter()
+                .map(|s| {
+                    let op = ProjectOp::with_schema(
+                        pre_exprs.clone(),
+                        Arc::clone(&pre_schema),
+                        exec_ctx.clone(),
+                    )?;
+                    Ok(
+                        Box::new(OperatorStream::new(s, vec![Box::new(op)], exec_ctx))
+                            as Box<dyn PartitionStream>,
+                    )
+                })
+                .collect::<Result<Vec<_>, QueryError>>()?;
+
+            let chained = chain_streams(projected_streams);
+            let partition_by = vec![
+                col_expr_q(&pre_schema, TARGET_KEY)?,
+                col_expr_q(&pre_schema, scores::NAME)?,
+            ];
+            let order_by = vec![
+                SortKey {
+                    expr: col_expr_q(&pre_schema, scores::UPDATED_AT)?,
+                    descending: true,
+                    nulls_first: true,
+                },
+                SortKey {
+                    expr: col_expr_q(&pre_schema, scores::SCORE_ID)?,
+                    descending: true,
+                    nulls_first: true,
+                },
+            ];
+            let win_spec = WindowSpec {
+                partition_by: partition_by.clone(),
+                order_by: order_by.clone(),
+                frame: None,
+                func: WindowFunc::RowNumber,
+                output_name: RANK.to_owned(),
+            };
+            let ranked_stream = eval_window_group(
+                chained,
+                Arc::clone(&pre_schema),
+                partition_by,
+                order_by,
+                vec![win_spec],
+                exec_ctx,
+            )?;
+
+            let mut win_fields = pre_schema.fields().to_vec();
+            win_fields.push(Field::new(RANK, DataType::I64, false));
+            let win_schema = Schema::try_new_arc(win_fields)?;
+            let rank_filter = Expr::Binary {
+                left: Box::new(col_expr_q(&win_schema, RANK)?),
+                op: BinaryOp::Eq,
+                right: Box::new(Expr::Literal(ScalarValue::I64(1))),
+                data_type: DataType::Bool,
+            };
+
+            let out_fields = pre_schema.fields()[..LATEST_SCORE_COLUMNS.len()].to_vec();
+            let out_schema = Schema::try_new_arc(out_fields)?;
+            let out_exprs: Vec<Expr> = LATEST_SCORE_COLUMNS
+                .iter()
+                .map(|name| col_expr_q(&win_schema, name))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let pool = Arc::clone(&exec_ctx.pool);
+            let win_ctx = exec_ctx.clone();
+            let sinks = exec_run_pipeline(
+                exec_ctx,
+                vec![ranked_stream],
+                move |_| {
+                    let f = FilterOp::new(rank_filter.clone(), win_ctx.clone());
+                    let p = ProjectOp::with_schema(
+                        out_exprs.clone(),
+                        Arc::clone(&out_schema),
+                        win_ctx.clone(),
+                    )?;
+                    Ok(vec![
+                        Box::new(f) as Box<dyn PushOperator>,
+                        Box::new(p) as Box<dyn PushOperator>,
+                    ])
+                },
+                move |_| Ok(CollectSink::new(&pool)),
+            )?;
+            Ok(sinks
+                .into_iter()
+                .flat_map(CollectSink::into_batches)
+                .collect())
+        })
+        .await?;
+
+    Ok(batches)
 }
 
-/// The live version of each score in `ids` (scores-view columns), in no particular order.
-///
-/// Ids are UUID strings, either case. An empty list returns no batches and runs no query.
-///
-/// # Errors
-///
-/// [`RunError::InvalidRequest`] for more than [`MAX_PAGE`] ids or an id that is not a UUID.
-/// [`RunError::Timeout`] when the query exceeds `timeout`.
+/// The live version of each score in `ids` (`scores`-view columns), in no particular order.
 pub async fn scores_by_id(
     ctx: &QueryContext,
     ids: &[&str],
     timeout: Duration,
-) -> Result<Vec<RecordBatch>, RunError> {
+) -> Result<Vec<Batch>, RunError> {
+    let ctx = ctx.engine();
     let Some(keys) = prepare_score_ids(ids)? else {
         return Ok(Vec::new());
     };
-    match tokio::time::timeout(timeout, by_id(ctx, &keys)).await {
-        Err(_) => Err(RunError::Timeout),
-        Ok(result) => result,
-    }
+    let raw_schema = scores_raw_schema()?;
+    let literals: Vec<ScalarValue> = keys.into_iter().map(ScalarValue::Utf8).collect();
+    let filters = vec![in_list_expr(
+        col_expr(&raw_schema, scores::SCORE_ID)?,
+        literals,
+    )];
+
+    let spec = ScanSpec {
+        projection: None,
+        map_projections: Default::default(),
+        time_range: TimeRangeHint {
+            min_ns: None,
+            max_ns: None,
+            around_ns: None,
+        },
+        id_lookups: Vec::new(),
+        filters,
+        substrings: Vec::new(),
+        sort_hints: Vec::new(),
+        limit: None,
+    };
+
+    let scores_source = Arc::clone(&ctx.scores);
+    let raw_schema_c = Arc::clone(&raw_schema);
+    let (batches, _) = ctx
+        .run_with_ctx(timeout, move |exec_ctx| {
+            let partitions = scores_source.open_partitions(&spec, exec_ctx)?;
+            if partitions.is_empty() {
+                return Ok(Vec::new());
+            }
+            let pool = Arc::clone(&exec_ctx.pool);
+            let proj_ctx = exec_ctx.clone();
+            let schema_c = Arc::clone(&raw_schema_c);
+            let sinks = exec_run_pipeline(
+                exec_ctx,
+                partitions,
+                move |_| {
+                    let proj = scores_view_projection(&schema_c, proj_ctx.clone())?;
+                    Ok(vec![Box::new(proj) as Box<dyn PushOperator>])
+                },
+                move |_| Ok(CollectSink::new(&pool)),
+            )?;
+            Ok(sinks
+                .into_iter()
+                .flat_map(CollectSink::into_batches)
+                .collect())
+        })
+        .await?;
+
+    Ok(batches)
 }
 
-/// `None` is an empty id list: the caller returns no batches and runs nothing.
+/// Live scores per name, in each bucket or in the window of the request, sorted `(name ASC[, bucket ASC])`.
+pub async fn score_name_counts(
+    ctx: &QueryContext,
+    request: ScoreNameCountsRequest<'_>,
+) -> Result<Vec<ScoreNameCount>, RunError> {
+    let ctx = ctx.engine();
+    if request.names.len() > MAX_COUNT_NAMES {
+        return Err(RunError::InvalidRequest(format!(
+            "at most {MAX_COUNT_NAMES} names"
+        )));
+    }
+    if matches!(request.bucket_ns, Some(width) if width <= 0) {
+        return Err(RunError::InvalidRequest(
+            "the bucket width must be positive".to_owned(),
+        ));
+    }
+    if request.names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let raw_schema = scores_raw_schema()?;
+    let proj_indices = [scores::NAME, scores::CREATED_AT, scores::USER_ID]
+        .iter()
+        .map(|name| {
+            raw_schema
+                .index_of(name)
+                .ok_or_else(|| internal(format!("scores schema missing column {name}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let max_ns = request.window.to().checked_sub(1);
+
+    let name_lits: Vec<ScalarValue> = request
+        .names
+        .iter()
+        .map(|n| ScalarValue::Utf8(n.clone()))
+        .collect();
+    let created_raw = col_expr(&raw_schema, scores::CREATED_AT)?;
+    let filters = vec![
+        in_list_expr(col_expr(&raw_schema, scores::NAME)?, name_lits),
+        cmp_ts(&created_raw, BinaryOp::GtEq, request.window.from()),
+        cmp_ts(&created_raw, BinaryOp::Lt, request.window.to()),
+    ];
+
+    let spec = ScanSpec {
+        projection: Some(proj_indices),
+        map_projections: Default::default(),
+        time_range: TimeRangeHint {
+            min_ns: Some(request.window.from()),
+            max_ns,
+            around_ns: None,
+        },
+        id_lookups: Vec::new(),
+        filters,
+        substrings: Vec::new(),
+        sort_hints: Vec::new(),
+        limit: None,
+    };
+
+    let bucket_ns = request.bucket_ns;
+    let window_from = request.window.from();
+    let scores_source = Arc::clone(&ctx.scores);
+
+    let (batches, _) = ctx
+        .run_with_ctx(request.timeout, move |exec_ctx| {
+            let scan_schema = scores_source.projected_schema(&spec)?;
+            let partitions = scores_source.open_partitions(&spec, exec_ctx)?;
+            if partitions.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let name_col = col_expr_q(&scan_schema, scores::NAME)?;
+            let created_i64 = Expr::Cast {
+                expr: Box::new(col_expr_q(&scan_schema, scores::CREATED_AT)?),
+                target: DataType::I64,
+                mode: CastMode::Strict,
+            };
+            let user_col = col_expr_q(&scan_schema, scores::USER_ID)?;
+
+            let mut group_by = vec![(scores::NAME.to_owned(), name_col)];
+            if let Some(width) = bucket_ns {
+                let width_lit = Expr::Literal(ScalarValue::I64(width));
+                let rem = Expr::Binary {
+                    left: Box::new(created_i64.clone()),
+                    op: BinaryOp::Mod,
+                    right: Box::new(width_lit),
+                    data_type: DataType::I64,
+                };
+                let bucket_expr = Expr::Binary {
+                    left: Box::new(created_i64.clone()),
+                    op: BinaryOp::Sub,
+                    right: Box::new(rem),
+                    data_type: DataType::I64,
+                };
+                group_by.push((BUCKET.to_owned(), bucket_expr));
+            }
+
+            let agg_spec = HashAggSpec {
+                group_by,
+                aggs: vec![
+                    AggExpr {
+                        func: AggFunc::Count(Expr::Literal(ScalarValue::I64(1))),
+                        filter: None,
+                        output_name: COUNT.to_owned(),
+                    },
+                    AggExpr {
+                        func: AggFunc::CountDistinct(user_col),
+                        filter: None,
+                        output_name: USERS.to_owned(),
+                    },
+                    AggExpr {
+                        func: AggFunc::Max(created_i64),
+                        filter: None,
+                        output_name: LAST.to_owned(),
+                    },
+                ],
+            };
+
+            let spec_c = agg_spec.clone();
+            let schema_c = Arc::clone(&scan_schema);
+            let ctx_c = exec_ctx.clone();
+            let sinks = exec_run_pipeline(
+                exec_ctx,
+                partitions,
+                |_| Ok(Vec::new()),
+                move |_| HashAgg::new(spec_c.clone(), Arc::clone(&schema_c), ctx_c.clone()),
+            )?;
+
+            HashAgg::merge_sinks(sinks, &agg_spec, &scan_schema, exec_ctx)
+        })
+        .await?;
+
+    let mut found = Vec::new();
+    for batch in &batches {
+        let name_col = require_col(batch, scores::NAME)?;
+        let bucket_col = if bucket_ns.is_some() {
+            Some(require_col(batch, BUCKET)?)
+        } else {
+            None
+        };
+        let count_col = require_col(batch, COUNT)?;
+        let users_col = require_col(batch, USERS)?;
+        let last_col = require_col(batch, LAST)?;
+
+        for row in 0..batch.num_rows() {
+            let name = string_at(batch, name_col, row)?.ok_or_else(bad_row)?;
+            let bucket_start = match bucket_col {
+                Some(col) => i64_at(batch, col, row)?,
+                None => window_from,
+            };
+            let count = non_negative(i64_at(batch, count_col, row)?)?;
+            let users = non_negative(i64_at(batch, users_col, row)?)?;
+            let last_created_at = i64_at(batch, last_col, row)?;
+            found.push(ScoreNameCount {
+                name,
+                bucket_start,
+                count,
+                users,
+                last_created_at,
+            });
+        }
+    }
+
+    found.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.bucket_start.cmp(&b.bucket_start))
+    });
+    Ok(found)
+}
+
+fn project_batches_to_scores_view(
+    raw_schema: &Schema,
+    batches: Vec<Batch>,
+    exec_ctx: &ExecContext,
+) -> Result<Vec<Batch>, QueryError> {
+    if batches.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut proj = scores_view_projection(raw_schema, exec_ctx.clone())?;
+    let mut dummy_res = exec_ctx.pool.register("scores_proj_in", false);
+    let mut out = Vec::with_capacity(batches.len());
+    for batch in batches {
+        if batch.is_empty() {
+            continue;
+        }
+        proj.push(batch, &mut dummy_res, &mut |projected, _out_res| {
+            if !projected.is_empty() {
+                out.push(projected);
+            }
+            Ok(ControlFlow::Continue)
+        })?;
+        dummy_res.free();
+    }
+    Ok(out)
+}
+
 fn prepare_score_ids(ids: &[&str]) -> Result<Option<Vec<String>>, RunError> {
     if ids.len() > MAX_PAGE {
         return Err(RunError::InvalidRequest("at most 1000 ids".to_owned()));
@@ -355,26 +695,12 @@ fn prepare_score_ids(ids: &[&str]) -> Result<Option<Vec<String>>, RunError> {
     Ok(Some(keys))
 }
 
-async fn by_id(ctx: &QueryContext, keys: &[String]) -> Result<Vec<RecordBatch>, RunError> {
-    let keys: Vec<Expr> = keys.iter().map(|key| lit(key.as_str())).collect();
-    ctx.session()
-        .table(LIST)
-        .await
-        .map_err(classify)?
-        .filter(col(scores::SCORE_ID).in_list(keys, false))
-        .map_err(classify)?
-        .collect()
-        .await
-        .map_err(|error| ctx.fail(error))
-}
-
 struct PreparedKeys {
     kind: ScoreTargetKind,
     column: &'static str,
-    keys: Vec<String>,
+    literals: Vec<ScalarValue>,
 }
 
-/// `None` is an empty key list: the caller returns no batches and runs nothing.
 fn prepare_keys(targets: ScoreTargets<'_>) -> Result<Option<PreparedKeys>, RunError> {
     let (kind, column, ids, hex_width) = match targets {
         ScoreTargets::Traces(ids) => (ScoreTargetKind::Trace, scores::TRACE_ID, ids, Some(32)),
@@ -386,199 +712,263 @@ fn prepare_keys(targets: ScoreTargets<'_>) -> Result<Option<PreparedKeys>, RunEr
     if ids.is_empty() {
         return Ok(None);
     }
-    let mut keys = Vec::with_capacity(ids.len());
+    let mut literals = Vec::with_capacity(ids.len());
     for id in ids {
-        keys.push(match hex_width {
-            Some(width) => hex_id(id, width, "trace_id")?,
-            None => (*id).to_owned(),
-        });
-    }
-    Ok(Some(PreparedKeys { kind, column, keys }))
-}
-
-async fn list(ctx: &QueryContext, request: &ScoreListRequest<'_>) -> Result<Page, RunError> {
-    let cursor = match request.cursor {
-        Some(text) => {
-            let cursor = decode(text, LIST, scores::CREATED_AT, SortOrder::Desc)?;
-            if cursor.tie_len() != 1 {
-                return Err(RunError::InvalidRequest("invalid cursor".to_owned()));
+        match hex_width {
+            Some(width) => {
+                let bytes = decode_hex_16(id, width, "trace_id")?;
+                literals.push(ScalarValue::FixedBytes16(bytes));
             }
-            Some(cursor)
+            None => literals.push(ScalarValue::Utf8((*id).to_owned())),
         }
-        None => None,
-    };
-    let mut frame = ctx.session().table(LIST).await.map_err(classify)?;
-    if let Some(predicate) = filters(request)? {
-        frame = frame.filter(predicate).map_err(classify)?;
     }
-    if let Some(cursor) = &cursor {
-        frame = frame
-            .filter(after(cursor, scores::CREATED_AT, TIES))
-            .map_err(classify)?;
-    }
-    let frame = frame
-        .sort(order_by(scores::CREATED_AT, TIES, SortOrder::Desc))
-        .map_err(classify)?
-        .limit(0, Some(request.limit + 1))
-        .map_err(classify)?;
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
-    assemble(
-        batches,
-        request.limit,
-        LIST,
-        scores::CREATED_AT,
-        SortOrder::Desc,
-        TIES,
-    )
+    Ok(Some(PreparedKeys {
+        kind,
+        column,
+        literals,
+    }))
 }
 
-fn filters(request: &ScoreListRequest<'_>) -> Result<Option<Expr>, RunError> {
+fn list_filters(schema: &Schema, request: &ScoreListRequest<'_>) -> Result<Vec<Expr>, RunError> {
     let mut conjuncts = Vec::new();
     if let Some(target) = request.target {
-        conjuncts.push(col(scores::TARGET).eq(lit(target.as_str())));
+        conjuncts
+            .push(eq_lit_str(schema, scores::TARGET, target.as_str()).map_err(query_err_to_run)?);
     }
     if let Some(trace_id) = request.trace_id {
-        conjuncts.push(col(scores::TRACE_ID).eq(lit(hex_id(trace_id, 32, "trace_id")?)));
+        let bytes = decode_hex_16(trace_id, 32, "trace_id")?;
+        conjuncts.push(Expr::Binary {
+            left: Box::new(col_expr(schema, scores::TRACE_ID)?),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(ScalarValue::FixedBytes16(bytes))),
+            data_type: DataType::Bool,
+        });
     }
     if let Some(span_id) = request.span_id {
-        conjuncts.push(col(scores::SPAN_ID).eq(lit(hex_id(span_id, 16, "span_id")?)));
+        let bytes = decode_hex_8(span_id, 16, "span_id")?;
+        conjuncts.push(Expr::Binary {
+            left: Box::new(col_expr(schema, scores::SPAN_ID)?),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(ScalarValue::FixedBytes8(bytes))),
+            data_type: DataType::Bool,
+        });
     }
     if let Some(session_id) = request.session_id {
-        conjuncts.push(col(scores::SESSION_ID).eq(lit(session_id)));
+        conjuncts
+            .push(eq_lit_str(schema, scores::SESSION_ID, session_id).map_err(query_err_to_run)?);
     }
     if let Some(name) = request.name {
-        conjuncts.push(col(scores::NAME).eq(lit(name)));
+        conjuncts.push(eq_lit_str(schema, scores::NAME, name).map_err(query_err_to_run)?);
     }
     if let Some(source) = request.source {
-        conjuncts.push(col(scores::SOURCE).eq(lit(source.as_str())));
+        conjuncts
+            .push(eq_lit_str(schema, scores::SOURCE, source.as_str()).map_err(query_err_to_run)?);
     }
     if let Some(evaluator_id) = request.evaluator_id {
-        conjuncts.push(col(scores::EVALUATOR_ID).eq(lit(evaluator_id)));
+        conjuncts.push(
+            eq_lit_str(schema, scores::EVALUATOR_ID, evaluator_id).map_err(query_err_to_run)?,
+        );
     }
     if let Some(rule_id) = request.rule_id {
-        conjuncts.push(col(scores::RULE_ID).eq(lit(rule_id)));
+        conjuncts.push(eq_lit_str(schema, scores::RULE_ID, rule_id).map_err(query_err_to_run)?);
     }
     if let Some(queue_id) = request.queue_id {
-        conjuncts.push(col(scores::QUEUE_ID).eq(lit(queue_id)));
+        conjuncts.push(eq_lit_str(schema, scores::QUEUE_ID, queue_id).map_err(query_err_to_run)?);
     }
     if let Some(window) = request.window {
-        conjuncts.push(window.predicate(scores::CREATED_AT));
+        let created = col_expr(schema, scores::CREATED_AT)?;
+        conjuncts.push(cmp_ts(&created, BinaryOp::GtEq, window.from()));
+        conjuncts.push(cmp_ts(&created, BinaryOp::Lt, window.to()));
     }
-    Ok(conjuncts.into_iter().reduce(Expr::and))
+    Ok(conjuncts)
 }
 
-async fn latest(
-    ctx: &QueryContext,
-    kind: ScoreTargetKind,
-    key_column: &str,
-    keys: &[String],
-) -> Result<Vec<RecordBatch>, RunError> {
-    let keys: Vec<Expr> = keys.iter().map(|key| lit(key.as_str())).collect();
-    let frame = ctx
-        .session()
-        .table(LIST)
-        .await
-        .map_err(classify)?
-        .filter(
-            col(scores::TARGET)
-                .eq(lit(kind.as_str()))
-                .and(col(key_column).in_list(keys, false))
-                // Issue occurrences never show as score columns or briefs (D-IC-18).
-                .and(col(scores::SOURCE).not_eq(lit(ScoreSource::Issue.as_str()))),
-        )
-        .map_err(classify)?
-        .select(vec![
-            col(key_column).alias(TARGET_KEY),
-            col(scores::NAME),
-            col(scores::SCORE_ID),
-            col(scores::DATA_TYPE),
-            col(scores::VALUE_NUM),
-            col(scores::VALUE_STR),
-            col(scores::SOURCE),
-            col(scores::UPDATED_AT),
-        ])
-        .map_err(classify)?;
-    let ranked = rank_latest(frame)?;
-    let batches = ranked
-        .filter(col(RANK).eq(lit(ScalarValue::UInt64(Some(1)))))
-        .map_err(classify)?
-        .select(
-            LATEST_SCORE_COLUMNS
-                .iter()
-                .copied()
-                .map(col)
-                .collect::<Vec<_>>(),
-        )
-        .map_err(classify)?
-        .sort(vec![
-            col(TARGET_KEY).sort(true, false),
-            col(scores::NAME).sort(true, false),
-        ])
-        .map_err(classify)?
-        .collect()
-        .await
-        .map_err(|error| ctx.fail(error))?;
-    Ok(batches)
-}
-
-fn rank_latest(frame: DataFrame) -> Result<DataFrame, RunError> {
-    let rank = row_number()
-        .partition_by(vec![col(TARGET_KEY), col(scores::NAME)])
-        .order_by(vec![
-            col(scores::UPDATED_AT).sort(false, true),
-            col(scores::SCORE_ID).sort(false, true),
-        ])
-        .build()
-        .map_err(classify)?
-        .alias(RANK);
-    frame.window(vec![rank]).map_err(classify)
-}
-
-fn hex_id(text: &str, width: usize, name: &str) -> Result<String, RunError> {
-    if text.len() == width && text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Ok(text.to_ascii_lowercase());
+fn decode_hex_16(text: &str, width: usize, name: &str) -> Result<[u8; 16], RunError> {
+    if text.len() == width && text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let bytes = hex::decode(text)
+            .map_err(|_| RunError::InvalidRequest(format!("{name} must be {width} hex digits")))?;
+        return bytes
+            .try_into()
+            .map_err(|_| RunError::InvalidRequest(format!("{name} must be {width} hex digits")));
     }
     Err(RunError::InvalidRequest(format!(
         "{name} must be {width} hex digits"
     )))
 }
 
+fn decode_hex_8(text: &str, width: usize, name: &str) -> Result<[u8; 8], RunError> {
+    if text.len() == width && text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let bytes = hex::decode(text)
+            .map_err(|_| RunError::InvalidRequest(format!("{name} must be {width} hex digits")))?;
+        return bytes
+            .try_into()
+            .map_err(|_| RunError::InvalidRequest(format!("{name} must be {width} hex digits")));
+    }
+    Err(RunError::InvalidRequest(format!(
+        "{name} must be {width} hex digits"
+    )))
+}
+
+fn col_expr(schema: &Schema, name: &str) -> Result<Expr, RunError> {
+    col_expr_q(schema, name).map_err(query_err_to_run)
+}
+
+fn col_expr_q(schema: &Schema, name: &str) -> Result<Expr, QueryError> {
+    let idx = schema
+        .index_of(name)
+        .ok_or_else(|| QueryError::internal(format!("missing column {name} in schema")))?;
+    Ok(Expr::Column {
+        index: idx,
+        name: name.to_owned(),
+        data_type: schema.fields()[idx].data_type.clone(),
+    })
+}
+
+fn eq_lit_str(schema: &Schema, col_name: &str, value: &str) -> Result<Expr, QueryError> {
+    Ok(Expr::Binary {
+        left: Box::new(col_expr_q(schema, col_name)?),
+        op: BinaryOp::Eq,
+        right: Box::new(Expr::Literal(ScalarValue::Utf8(value.to_owned()))),
+        data_type: DataType::Bool,
+    })
+}
+
+fn in_list_expr(col: Expr, literals: Vec<ScalarValue>) -> Expr {
+    Expr::InList {
+        expr: Box::new(col),
+        list: literals.into_iter().map(Expr::Literal).collect(),
+        negated: false,
+        redacted: false,
+    }
+}
+
+fn cmp_ts(col: &Expr, op: BinaryOp, ns: i64) -> Expr {
+    Expr::Binary {
+        left: Box::new(col.clone()),
+        op,
+        right: Box::new(Expr::Literal(ScalarValue::TimestampNs {
+            value: ns,
+            utc: true,
+        })),
+        data_type: DataType::Bool,
+    }
+}
+
+fn non_negative(value: i64) -> Result<u64, RunError> {
+    u64::try_from(value).map_err(|_| bad_row())
+}
+
+fn bad_row() -> RunError {
+    internal("a view returned a null where a value is required")
+}
+
+struct ChainedStream {
+    streams: std::collections::VecDeque<Box<dyn PartitionStream>>,
+}
+
+impl PartitionStream for ChainedStream {
+    fn next_batch(
+        &mut self,
+        cancel: &cetra_column::CancelToken,
+        mut res: Option<&mut cetra_column::Reservation>,
+    ) -> Result<Option<Batch>, QueryError> {
+        while let Some(front) = self.streams.front_mut() {
+            if cancel.is_cancelled() {
+                return Err(QueryError::Cancelled);
+            }
+            match front.next_batch(cancel, res.as_deref_mut())? {
+                Some(batch) => return Ok(Some(batch)),
+                None => {
+                    self.streams.pop_front();
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+fn chain_streams(streams: Vec<Box<dyn PartitionStream>>) -> Box<dyn PartitionStream> {
+    Box::new(ChainedStream {
+        streams: streams.into(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
-    use std::str::FromStr;
-    use std::sync::Arc;
     use std::time::Duration;
 
-    use arrow::json::{ArrayWriter, WriterBuilder};
-    use arrow::record_batch::RecordBatch;
-    use cetra_core::enums::{ScoreSource, ScoreTargetKind};
-    use cetra_core::ids::TraceId;
-    use cetra_core::score::{ScoreTarget, ScoreValue};
+    use bytesize::ByteSize;
+    use cetra_core::enums::ScoreSource;
+    use cetra_core::ids::ProjectId;
+    use cetra_core::score::{Score, ScoreValue};
     use cetra_core::time_serde::parse_rfc3339;
-    use datafusion::execution::runtime_env::RuntimeEnv;
-    use serde_json::{Value, json};
+    use cetra_query::encode::{SQL_MAX_RESULT_BYTES, SQL_MAX_ROWS, encode_json_result};
+    use serde_json::{Map, Value};
 
-    use super::{
-        LATEST_SCORE_COLUMNS, MAX_COUNT_NAMES, ScoreListRequest, ScoreNameCount,
-        ScoreNameCountsRequest, ScoreTargets, latest_scores, score_list, score_name_counts,
-        scores_by_id,
+    use super::*;
+    use crate::config::{
+        FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
     };
-    use crate::query_error::RunError;
-    use crate::reads::Page;
-    use crate::test_support::{
-        dataset_scores, dataset_spans, example_query, live_scores_table, score_row, spans_table,
-        traces_table,
-    };
-    use crate::views::{ProjectQuery, QueryContext, TimeWindow};
+    use crate::deletion::{Deletion, DeletionScope};
+    use crate::reads::MAX_PAGE;
+    use crate::test_support::{dataset_scores, dataset_spans, score_row, score_rows, span_rows};
+    use crate::views::{QueryContext, TimeWindow};
+    use crate::{QueryOptions, Storage};
 
     const TIMEOUT: Duration = Duration::from_secs(30);
+    const DAY: i64 = 86_400_000_000_000;
 
-    fn context() -> QueryContext {
-        QueryContext::new(example_query(), None).expect("context")
+    fn test_config(dir: &std::path::Path) -> StorageConfig {
+        StorageConfig {
+            delete_objects: true,
+            data_dir: dir.to_path_buf(),
+            min_free_bytes: ByteSize::b(0),
+            object_store: None,
+            s3: S3Config::default(),
+            wal: WalConfig::default(),
+            flush: FlushConfig::default(),
+            memtable: MemtableConfig::default(),
+            query: QueryConfig {
+                target_partitions: 2,
+                ..QueryConfig::default()
+            },
+            anchor: Default::default(),
+            gc: Default::default(),
+            compaction: Default::default(),
+            deletion: Default::default(),
+        }
     }
 
-    fn request() -> ScoreListRequest<'static> {
+    fn qe_rows(batches: &[Batch]) -> Vec<Map<String, Value>> {
+        let non_empty: Vec<Batch> = batches
+            .iter()
+            .filter(|b| b.num_rows() > 0)
+            .cloned()
+            .collect();
+        let Some(first) = non_empty.first() else {
+            return Vec::new();
+        };
+        encode_json_result(
+            first.schema(),
+            &non_empty,
+            SQL_MAX_ROWS,
+            SQL_MAX_RESULT_BYTES,
+            false,
+            None,
+        )
+        .expect("encode json")
+        .rows
+    }
+
+    async fn build_context(
+        storage: &Storage,
+        project: ProjectId,
+        options: QueryOptions,
+    ) -> QueryContext {
+        QueryContext::new(storage.query(project, options).await.expect("query"), None).expect("ctx")
+    }
+
+    fn base_req() -> ScoreListRequest<'static> {
         ScoreListRequest {
             target: None,
             trace_id: None,
@@ -596,792 +986,391 @@ mod tests {
         }
     }
 
-    fn fixture(name: &str) -> Value {
-        let text = match name {
-            "scores.json" => include_str!("../../../../fixtures/api/responses/scores.json"),
-            "traces-include-eval.json" => {
-                include_str!("../../../../fixtures/api/responses/traces-include-eval.json")
-            }
-            "sessions-include-eval.json" => {
-                include_str!("../../../../fixtures/api/responses/sessions-include-eval.json")
-            }
-            other => panic!("unknown fixture {other}"),
-        };
-        serde_json::from_str(text).expect(name)
-    }
+    #[tokio::test]
+    async fn score_reads_pagination_latest_by_id_and_counts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(test_config(dir.path())).await.expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
 
-    fn json_rows(batches: &[RecordBatch]) -> Vec<Value> {
-        if batches.iter().all(|batch| batch.num_rows() == 0) {
-            return Vec::new();
+        // Flush dataset spans & dataset scores into Parquet (L0).
+        let mut ds_spans = dataset_spans();
+        for s in &mut ds_spans {
+            s.project_id = project;
         }
-        let mut buffer = Vec::new();
-        let mut writer: ArrayWriter<&mut Vec<u8>> = WriterBuilder::new()
-            .with_explicit_nulls(true)
-            .with_timestamp_tz_format("%Y-%m-%dT%H:%M:%S%.9fZ".to_owned())
-            .with_timestamp_format("%Y-%m-%dT%H:%M:%S%.9f".to_owned())
-            .build(&mut buffer);
-        for batch in batches {
-            writer.write(batch).expect("encode");
+        storage
+            .append_spans(project, span_rows(&ds_spans))
+            .await
+            .expect("spans");
+        let mut ds_scores = dataset_scores();
+        // Add an issue score + tied updated_at scores + deleted update + multi-day scores.
+        let t0 = ds_scores[0].target.clone();
+        let mut issue_score = score_row(100, 0, 10 * DAY + 100, 100, 100, false, "issue:err");
+        issue_score.target = t0.clone();
+        issue_score.source = ScoreSource::Issue;
+        issue_score.user_id = Some("u1".to_owned());
+
+        let mut tie_low = score_row(101, 0, 10 * DAY + 200, 200, 200, false, "tie_score");
+        tie_low.score_id = "01900000-0000-7000-8000-0000000009a1"
+            .parse()
+            .expect("uuid");
+        tie_low.target = t0.clone();
+        tie_low.value = ScoreValue::Numeric(0.2);
+        tie_low.user_id = Some("u2".to_owned());
+
+        let mut tie_high = score_row(102, 0, 10 * DAY + 200, 200, 200, false, "tie_score");
+        tie_high.score_id = "01900000-0000-7000-8000-0000000009a2"
+            .parse()
+            .expect("uuid");
+        tie_high.target = t0.clone();
+        tie_high.value = ScoreValue::Numeric(0.8);
+        tie_high.user_id = Some("u1".to_owned());
+
+        let mut to_delete_old = score_row(103, 0, 10 * DAY + 300, 100, 100, false, "issue:err");
+        to_delete_old.target = t0.clone();
+        to_delete_old.user_id = Some("u3".to_owned());
+
+        let mut erased_user_score =
+            score_row(104, 0, 10 * DAY + 400, 100, 100, false, "erased_score");
+        erased_user_score.target = t0;
+        erased_user_score.user_id = Some("erased-user".to_owned());
+
+        ds_scores.extend([
+            issue_score,
+            tie_low,
+            tie_high,
+            to_delete_old.clone(),
+            erased_user_score,
+        ]);
+        for s in &mut ds_scores {
+            s.project_id = project;
         }
-        writer.finish().expect("finish");
-        drop(writer);
-        serde_json::from_slice(&buffer).expect("rows")
-    }
+        storage
+            .append_scores(project, score_rows(&ds_scores))
+            .await
+            .expect("append scores 1");
+        storage
+            .flush_now(Duration::from_secs(10))
+            .await
+            .expect("flush");
 
-    fn rows(page: &Page) -> Vec<Value> {
-        json_rows(&page.batches)
-    }
+        // Append memtable scores: a tombstone-deleting LWW update + day2 score + evaluator/rule/queue scores.
+        let mut to_delete_new = to_delete_old;
+        to_delete_new.updated_at = 500;
+        to_delete_new.ingest_time = 500;
+        to_delete_new.deleted = true;
 
-    fn values_match(actual: &Value, expected: &Value) -> bool {
-        match (actual, expected) {
-            (Value::Number(left), Value::Number(right)) => match (left.as_i64(), right.as_i64()) {
-                (Some(left), Some(right)) => left == right,
-                _ => {
-                    let left = left.as_f64().expect("left");
-                    let right = right.as_f64().expect("right");
-                    (left - right).abs() < 1e-12
+        let mut day2_score: Score = score_row(105, 1, 11 * DAY + 50, 100, 100, false, "issue:err");
+        day2_score.evaluator_id = Some("018f6b4e-7c1a-7c1a-8c1a-0000000000e1".parse().expect("ev"));
+        day2_score.rule_id = Some("018f6b4e-7c1a-7c1a-8c1a-0000000000f1".parse().expect("rl"));
+        day2_score.queue_id = Some("018f6b4e-7c1a-7c1a-8c1a-0000000000a1".parse().expect("qu"));
+
+        let mut mem_scores = vec![to_delete_new, day2_score];
+        for s in &mut mem_scores {
+            s.project_id = project;
+        }
+        storage
+            .append_scores(project, score_rows(&mem_scores))
+            .await
+            .expect("append scores 2");
+
+        storage
+            .register_deletion(Deletion {
+                id: "018f6b4e-7c1a-7c1a-8c1a-0000000000d1".parse().expect("did"),
+                project,
+                cutoff: i64::MAX,
+                scope: DeletionScope::User {
+                    user_id: "erased-user".to_owned(),
+                    trace_ids: Vec::new(),
+                    session_ids: Vec::new(),
+                },
+            })
+            .await
+            .expect("register deletion");
+
+        for vf in [
+            None,
+            Some(parse_rfc3339("2026-01-01T10:07:00Z").expect("vf")),
+        ] {
+            let ctx = build_context(&storage, project, QueryOptions::new(None, vf)).await;
+
+            // 1. score_list full + cursor walk + filters
+            let full = score_list(&ctx, base_req()).await.expect("score_list");
+            assert!(full.next_cursor.is_none());
+            let full_rows = qe_rows(&full.batches);
+            assert!(!full_rows.is_empty());
+            // Deleted & erased-user scores must never appear.
+            assert!(
+                !full_rows.iter().any(|r| r["name"] == "erased_score"),
+                "erased_user_score leaked"
+            );
+
+            // Walk with limit = 2 cursor-for-cursor and verify it reassembles `full_rows`.
+            let mut cursor: Option<String> = None;
+            let mut walked = Vec::new();
+            loop {
+                let mut req = base_req();
+                req.limit = 2;
+                req.cursor = cursor.as_deref();
+                let page = score_list(&ctx, req).await.expect("page");
+                let rows = qe_rows(&page.batches);
+                assert!(rows.len() <= 2);
+                walked.extend(rows);
+                match page.next_cursor {
+                    Some(c) => cursor = Some(c),
+                    None => break,
                 }
-            },
-            (Value::Array(left), Value::Array(right)) => {
-                left.len() == right.len()
-                    && left
-                        .iter()
-                        .zip(right)
-                        .all(|(left, right)| values_match(left, right))
             }
-            (Value::Object(left), Value::Object(right)) => {
-                left.len() == right.len()
-                    && left.iter().all(|(key, value)| {
-                        right
-                            .get(key)
-                            .is_some_and(|expected| values_match(value, expected))
-                    })
+            assert_eq!(walked, full_rows, "cursor walk mismatch vf={vf:?}");
+
+            // Equality conjuncts & window
+            let by_issue = score_list(
+                &ctx,
+                ScoreListRequest {
+                    source: Some(ScoreSource::Issue),
+                    ..base_req()
+                },
+            )
+            .await
+            .expect("source issue");
+            assert!(
+                qe_rows(&by_issue.batches)
+                    .iter()
+                    .all(|r| r["source"] == "issue")
+            );
+            let by_ids = score_list(
+                &ctx,
+                ScoreListRequest {
+                    evaluator_id: Some("018f6b4e-7c1a-7c1a-8c1a-0000000000e1"),
+                    rule_id: Some("018f6b4e-7c1a-7c1a-8c1a-0000000000f1"),
+                    queue_id: Some("018f6b4e-7c1a-7c1a-8c1a-0000000000a1"),
+                    ..base_req()
+                },
+            )
+            .await
+            .expect("ev/rl/qu");
+            let id_rows = qe_rows(&by_ids.batches);
+            assert_eq!(id_rows.len(), if vf.is_some() { 0 } else { 1 });
+
+            // 2. latest_scores (traces + sessions, excludes source = 'issue', tie-breaks score_id DESC)
+            let trace_keys = [
+                "A1000000000000000000000000000001",
+                "a1000000000000000000000000000002",
+            ];
+            let q_lat_t = latest_scores(&ctx, ScoreTargets::Traces(&trace_keys), TIMEOUT)
+                .await
+                .expect("latest traces");
+            let q_lat_json = qe_rows(&q_lat_t);
+            assert!(!q_lat_json.iter().any(|r| r["source"] == "issue"));
+            if let Some(tie_row) = q_lat_json.iter().find(|r| r["name"] == "tie_score") {
+                assert_eq!(tie_row["score_id"], "01900000-0000-7000-8000-0000000009a2");
             }
-            _ => actual == expected,
-        }
-    }
 
-    fn ids(rows: &[Value]) -> Vec<String> {
-        rows.iter()
-            .map(|row| row["score_id"].as_str().expect("score_id").to_owned())
-            .collect()
-    }
+            let sess_keys = ["sess-001", "sess-002"];
+            let q_lat_s = latest_scores(&ctx, ScoreTargets::Sessions(&sess_keys), TIMEOUT)
+                .await
+                .expect("latest sessions");
+            let _ = qe_rows(&q_lat_s);
 
-    fn or_null(value: &Value, key: &str) -> Value {
-        value.get(key).cloned().unwrap_or(Value::Null)
-    }
-
-    /// One API score object as a `scores` view row.
-    fn view_score(score: &Value) -> Value {
-        let target = &score["target"];
-        let value = &score["value"];
-        let data_type = value["data_type"].as_str().expect("data_type");
-        let (value_num, value_str) = match data_type {
-            "numeric" => (value["value"].clone(), Value::Null),
-            "boolean" => (
-                json!(if value["value"].as_bool().expect("bool") {
-                    1.0
-                } else {
-                    0.0
-                }),
-                Value::Null,
-            ),
-            "text" => (Value::Null, value["value"].clone()),
-            "categorical" => {
-                let inner = &value["value"];
-                (
-                    inner.get("value").cloned().unwrap_or(Value::Null),
-                    inner["label"].clone(),
-                )
-            }
-            other => panic!("unknown data_type {other}"),
-        };
-        let session_id = if target["type"] == "session" {
-            target["session_id"].clone()
-        } else {
-            or_null(score, "session_id")
-        };
-        json!({
-            "score_id": score["score_id"],
-            "target": target["type"],
-            "trace_id": or_null(target, "trace_id"),
-            "span_id": or_null(target, "span_id"),
-            "session_id": session_id,
-            "user_id": or_null(score, "user_id"),
-            "name": score["name"],
-            "data_type": data_type,
-            "value_num": value_num,
-            "value_str": value_str,
-            "reason": or_null(score, "reason"),
-            "source": score["source"],
-            "evaluator_id": or_null(score, "evaluator_id"),
-            "rule_id": or_null(score, "rule_id"),
-            "experiment_id": or_null(score, "experiment_id"),
-            "dataset_item_id": or_null(score, "dataset_item_id"),
-            "queue_id": or_null(score, "queue_id"),
-            "author_user_id": or_null(score, "author_user_id"),
-            "metadata": score.get("metadata").cloned().unwrap_or_else(|| json!({})),
-            "created_at": score["created_at"],
-            "updated_at": score["updated_at"],
-            "deleted": score["deleted"],
-            "ingest_time": score["ingest_time"],
-        })
-    }
-
-    fn assert_view_rows(actual: &[Value], expected: &[Value]) {
-        assert_eq!(actual.len(), expected.len());
-        for (row, fixture) in actual.iter().zip(expected) {
-            let expected = view_score(fixture);
-            let object = expected.as_object().expect("object");
-            for (key, value) in object {
+            // 3. scores_by_id
+            let ids = [
+                "01900000-0000-7000-8000-000000000301",
+                "01900000-0000-7000-8000-000000000302",
+                "01900000-0000-7000-8000-0000000009A2",
+            ];
+            let mut by_id = qe_rows(&scores_by_id(&ctx, &ids, TIMEOUT).await.expect("by_id"));
+            by_id.sort_by(|a, b| a["score_id"].as_str().cmp(&b["score_id"].as_str()));
+            if vf.is_none() {
                 assert!(
-                    row.get(key)
-                        .is_some_and(|actual| values_match(actual, value)),
-                    "{key}: {} vs {value}",
-                    row.get(key).unwrap_or(&Value::Null)
+                    by_id
+                        .iter()
+                        .any(|r| r["score_id"] == "01900000-0000-7000-8000-0000000009a2")
                 );
             }
-        }
-    }
 
-    #[tokio::test]
-    async fn score_list_matches_the_fixture() {
-        let page = score_list(&context(), request()).await.expect("list");
-        let listed = fixture("scores.json");
-        let expected = listed["data"].as_array().expect("data");
-        let actual = rows(&page);
-        assert_eq!(ids(&actual), ids(expected));
-        assert_view_rows(&actual, expected);
-        assert!(page.next_cursor.is_none());
-    }
-
-    #[tokio::test]
-    async fn each_filter_field_narrows_the_list() {
-        let ctx = context();
-        let mut target = request();
-        target.target = Some(ScoreTargetKind::Session);
-        let page = score_list(&ctx, target).await.expect("target");
-        assert_eq!(ids(&rows(&page)), ["01900000-0000-7000-8000-000000000305"]);
-
-        let mut trace = request();
-        let upper = "A1000000000000000000000000000001";
-        trace.trace_id = Some(upper);
-        let page = score_list(&ctx, trace).await.expect("trace");
-        assert_eq!(
-            ids(&rows(&page)),
-            [
-                "01900000-0000-7000-8000-000000000303",
-                "01900000-0000-7000-8000-000000000302",
-                "01900000-0000-7000-8000-000000000301",
-            ]
-        );
-
-        let mut span = request();
-        span.span_id = Some("B100000000000014");
-        let page = score_list(&ctx, span).await.expect("span");
-        assert_eq!(ids(&rows(&page)), ["01900000-0000-7000-8000-000000000303"]);
-
-        let mut session = request();
-        session.session_id = Some("sess-002");
-        let page = score_list(&ctx, session).await.expect("session");
-        assert_eq!(ids(&rows(&page)), ["01900000-0000-7000-8000-000000000306"]);
-
-        let mut name = request();
-        name.name = Some("helpfulness");
-        let page = score_list(&ctx, name).await.expect("name");
-        assert_eq!(
-            ids(&rows(&page)),
-            [
-                "01900000-0000-7000-8000-000000000302",
-                "01900000-0000-7000-8000-000000000301",
-            ]
-        );
-
-        let mut source = request();
-        source.source = Some(ScoreSource::EndUser);
-        let page = score_list(&ctx, source).await.expect("source");
-        assert_eq!(ids(&rows(&page)), ["01900000-0000-7000-8000-000000000304"]);
-
-        let mut window = request();
-        window.window = Some(
-            TimeWindow::new(
-                parse_rfc3339("2026-01-01T10:07:00Z").expect("from"),
-                parse_rfc3339("2026-01-01T10:11:00Z").expect("to"),
-            )
-            .expect("window"),
-        );
-        let page = score_list(&ctx, window).await.expect("window");
-        assert_eq!(
-            ids(&rows(&page)),
-            [
-                "01900000-0000-7000-8000-000000000305",
-                "01900000-0000-7000-8000-000000000304",
-            ]
-        );
-
-        match score_list(
-            &ctx,
-            ScoreListRequest {
-                trace_id: Some("abc"),
-                ..request()
-            },
-        )
-        .await
-        {
-            Err(RunError::InvalidRequest(message)) => {
-                assert_eq!(message, "trace_id must be 32 hex digits");
-            }
-            other => panic!("expected an invalid trace id, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn score_pages_walk_the_full_list() {
-        let ctx = context();
-        let full = score_list(&ctx, request()).await.expect("full");
-        let expected = ids(&rows(&full));
-        assert!(full.next_cursor.is_none());
-        let mut walked = Vec::new();
-        let mut cursor = None;
-        loop {
-            let mut page_request = request();
-            page_request.limit = 2;
-            page_request.cursor = cursor.as_deref();
-            let page = score_list(&ctx, page_request).await.expect("page");
-            let page_ids = ids(&rows(&page));
-            assert!(page_ids.len() <= 2);
-            walked.extend(page_ids);
-            match page.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => break,
+            // 4. score_name_counts
+            let names = vec!["issue:err".to_owned(), "tie_score".to_owned()];
+            let window = TimeWindow::new(0, 100 * DAY).expect("window");
+            for bucket_ns in [Some(DAY), None] {
+                let req = ScoreNameCountsRequest {
+                    names: &names,
+                    window,
+                    bucket_ns,
+                    timeout: TIMEOUT,
+                };
+                let counts = score_name_counts(&ctx, req).await.expect("counts");
+                if vf.is_none() {
+                    assert!(
+                        !counts.is_empty(),
+                        "expected non-empty counts bucket_ns={bucket_ns:?}"
+                    );
+                }
             }
         }
-        assert_eq!(walked, expected);
-    }
 
-    #[tokio::test]
-    async fn latest_scores_match_the_row_fixtures() {
-        let ctx = context();
-        let traces = fixture("traces-include-eval.json");
-        let traces = traces["data"].as_array().expect("traces");
-        let trace_ids: Vec<&str> = traces
-            .iter()
-            .map(|trace| trace["trace_id"].as_str().expect("id"))
-            .collect();
-        let batches = latest_scores(&ctx, ScoreTargets::Traces(&trace_ids), TIMEOUT)
-            .await
-            .expect("traces");
-        let actual = json_rows(&batches);
-        assert_eq!(
-            actual[0]
-                .as_object()
-                .expect("row")
-                .keys()
-                .collect::<Vec<_>>(),
-            LATEST_SCORE_COLUMNS
-        );
-        for trace in traces {
-            let id = trace["trace_id"].as_str().expect("id");
-            let rows: Vec<&Value> = actual
-                .iter()
-                .filter(|row| row["target_key"] == id)
-                .collect();
-            assert_briefs(&rows, trace["scores"].as_array().expect("scores"));
-        }
-
-        let sessions = fixture("sessions-include-eval.json");
-        let sessions = sessions["data"].as_array().expect("sessions");
-        let session_ids: Vec<&str> = sessions
-            .iter()
-            .map(|session| session["session_id"].as_str().expect("id"))
-            .collect();
-        let batches = latest_scores(&ctx, ScoreTargets::Sessions(&session_ids), TIMEOUT)
-            .await
-            .expect("sessions");
-        let actual = json_rows(&batches);
-        for session in sessions {
-            let id = session["session_id"].as_str().expect("id");
-            let rows: Vec<&Value> = actual
-                .iter()
-                .filter(|row| row["target_key"] == id)
-                .collect();
-            assert_briefs(&rows, session["scores"].as_array().expect("scores"));
-        }
-    }
-
-    fn assert_briefs(actual: &[&Value], expected: &[Value]) {
-        assert_eq!(actual.len(), expected.len());
-        for (row, fixture) in actual.iter().zip(expected) {
-            assert_eq!(row["name"], fixture["name"]);
-            assert_eq!(row["score_id"], fixture["score_id"]);
-            assert_eq!(row["source"], fixture["source"]);
-            assert_eq!(row["data_type"], fixture["value"]["data_type"]);
-            let value = &fixture["value"]["value"];
-            match row["data_type"].as_str() {
-                Some("boolean") => {
-                    let number = if value.as_bool().expect("bool") {
-                        1.0
-                    } else {
-                        0.0
-                    };
-                    assert!(values_match(&row["value_num"], &json!(number)));
-                    assert_eq!(row["value_str"], Value::Null);
-                }
-                Some("numeric") => {
-                    assert!(values_match(&row["value_num"], value));
-                    assert_eq!(row["value_str"], Value::Null);
-                }
-                Some("text") => {
-                    assert_eq!(row["value_num"], Value::Null);
-                    assert_eq!(&row["value_str"], value);
-                }
-                Some("categorical") => {
-                    assert_eq!(row["value_str"], value["label"]);
-                    assert!(values_match(
-                        &row["value_num"],
-                        value.get("value").unwrap_or(&Value::Null)
-                    ));
-                }
-                other => panic!("unexpected data_type {other:?}"),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn scores_by_id_returns_the_live_rows() {
-        let ctx = context();
-        let listed = fixture("scores.json");
-        let expected: Vec<Value> = listed["data"]
-            .as_array()
-            .expect("data")
-            .iter()
-            .filter(|score| {
-                matches!(
-                    score["score_id"].as_str(),
-                    Some(
-                        "01900000-0000-7000-8000-000000000301"
-                            | "01900000-0000-7000-8000-000000000302"
-                    )
-                )
-            })
-            .cloned()
-            .collect();
-        assert_eq!(expected.len(), 2);
-
-        let wanted = [
-            "01900000-0000-7000-8000-000000000301",
-            "01900000-0000-7000-8000-000000000302",
-        ];
-        let batches = scores_by_id(&ctx, &wanted, TIMEOUT).await.expect("by id");
-        let actual = json_rows(&batches);
-        assert_eq!(actual.len(), 2);
-        let mut found = ids(&actual);
-        found.sort();
-        assert_eq!(found, wanted);
-        for score in &expected {
-            let row = actual
-                .iter()
-                .find(|row| row["score_id"] == score["score_id"])
-                .expect("row");
-            assert_view_rows(std::slice::from_ref(row), std::slice::from_ref(score));
-        }
-
-        let upper = wanted.map(str::to_ascii_uppercase);
-        let upper: Vec<&str> = upper.iter().map(String::as_str).collect();
-        let batches = scores_by_id(&ctx, &upper, TIMEOUT).await.expect("upper");
-        assert_eq!(json_rows(&batches).len(), 2);
-
-        let unknown = ["0190aaaa-0000-7000-8000-000000000001"];
-        let batches = scores_by_id(&ctx, &unknown, TIMEOUT)
-            .await
-            .expect("unknown");
-        assert!(json_rows(&batches).is_empty());
-
-        let empty = scores_by_id(&ctx, &[], TIMEOUT).await.expect("empty");
-        assert!(empty.is_empty());
-
-        match scores_by_id(&ctx, &["nope"], TIMEOUT).await {
-            Err(RunError::InvalidRequest(message)) => assert_eq!(message, "invalid score_id"),
-            other => panic!("expected an invalid score_id, got {other:?}"),
-        }
-        let many = vec!["01900000-0000-7000-8000-000000000301"; 1001];
-        match scores_by_id(&ctx, &many, TIMEOUT).await {
-            Err(RunError::InvalidRequest(message)) => assert_eq!(message, "at most 1000 ids"),
-            other => panic!("expected too many ids, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn latest_scores_leave_out_issue_occurrences() {
-        // Trace 0 is `00010001000100010001000100010001` (see `trace_id_of` in test_support).
-        let trace = "00010001000100010001000100010001";
-        let mut occurrence = score_row(1, 0, 100, 100, 100, false, "issue:a");
-        occurrence.source = ScoreSource::Issue;
-        let mut api = score_row(2, 0, 100, 100, 100, false, "quality");
-        api.source = ScoreSource::Api;
-        let query = ProjectQuery {
-            scores: live_scores_table(&[occurrence, api]),
-            ..example_query()
-        };
-        let ctx = QueryContext::new(query, None).expect("context");
-        let batches = latest_scores(&ctx, ScoreTargets::Traces(&[trace]), TIMEOUT)
-            .await
-            .expect("latest");
-        let rows = json_rows(&batches);
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0]["name"], "quality");
-        assert_eq!(rows[0]["source"], "api");
-    }
-
-    #[tokio::test]
-    async fn the_greater_score_id_wins_a_latest_tie() {
-        let template = dataset_scores().into_iter().next().expect("score");
-        let mut low = template.clone();
-        let mut high = template.clone();
-        low.score_id = "01900000-0000-7000-8000-0000000003a1".parse().expect("low");
-        high.score_id = "01900000-0000-7000-8000-0000000003a2"
-            .parse()
-            .expect("high");
-        low.name = "tie".to_owned();
-        high.name = "tie".to_owned();
-        low.value = ScoreValue::Numeric(0.1);
-        high.value = ScoreValue::Numeric(0.9);
-        let trace_id = "a2000000000000000000000000000001";
-        let trace = TraceId::from_str(trace_id).expect("trace");
-        low.target = ScoreTarget::Trace { trace_id: trace };
-        high.target = ScoreTarget::Trace { trace_id: trace };
-        high.updated_at = low.updated_at;
-        let ctx = QueryContext::new(
-            ProjectQuery {
-                spans: spans_table(&dataset_spans()),
-                traces: traces_table(&dataset_spans()),
-                scores: live_scores_table(&[low, high]),
-                runtime: Arc::new(RuntimeEnv::default()),
-                target_partitions: NonZeroUsize::new(1).expect("one partition"),
-                optimizer_rules: Vec::new(),
-
-                suspects: crate::verify::Suspects::detached(),
-                visible_from: None,
-            },
-            None,
-        )
-        .expect("context");
-        let batches = latest_scores(&ctx, ScoreTargets::Traces(&[trace_id]), TIMEOUT)
-            .await
-            .expect("latest");
-        let rows = json_rows(&batches);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["score_id"], "01900000-0000-7000-8000-0000000003a2");
-        assert!(values_match(&rows[0]["value_num"], &json!(0.9)));
-    }
-
-    #[tokio::test]
-    async fn key_limits_are_enforced_before_a_query() {
-        let ctx = context();
-        let empty = latest_scores(&ctx, ScoreTargets::Traces(&[]), TIMEOUT)
-            .await
-            .expect("empty traces");
-        assert!(empty.is_empty());
-        let empty = latest_scores(&ctx, ScoreTargets::Sessions(&[]), TIMEOUT)
-            .await
-            .expect("empty sessions");
-        assert!(empty.is_empty());
-
-        let keys = vec!["a1000000000000000000000000000001"; 1001];
-        match latest_scores(&ctx, ScoreTargets::Traces(&keys), TIMEOUT).await {
-            Err(RunError::InvalidRequest(message)) => assert_eq!(message, "at most 1000 keys"),
-            other => panic!("expected too many keys, got {other:?}"),
-        }
-        match latest_scores(&ctx, ScoreTargets::Traces(&["abc"]), TIMEOUT).await {
-            Err(RunError::InvalidRequest(message)) => {
-                assert_eq!(message, "trace_id must be 32 hex digits");
-            }
-            other => panic!("expected an invalid trace id, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn score_list_filters_by_evaluator_and_rule() {
-        const EVALUATOR: &str = "018f6b4e-7c1a-7c1a-8c1a-000000000003";
-        const RULE: &str = "018f6b4e-7c1a-7c1a-8c1a-000000000004";
-        let mut by_rule = score_row(1, 0, 100, 100, 100, false, "relevance");
-        by_rule.evaluator_id = Some(EVALUATOR.parse().expect("evaluator"));
-        by_rule.rule_id = Some(RULE.parse().expect("rule"));
-        let mut by_evaluator = score_row(2, 1, 200, 200, 200, false, "tone");
-        by_evaluator.evaluator_id = Some(EVALUATOR.parse().expect("evaluator"));
-        let unlinked = score_row(3, 2, 300, 300, 300, false, "length");
-        let query = ProjectQuery {
-            scores: live_scores_table(&[by_rule, by_evaluator, unlinked]),
-            ..example_query()
-        };
-        let ctx = QueryContext::new(query, None).expect("context");
-
-        let mut evaluator = request();
-        evaluator.evaluator_id = Some(EVALUATOR);
-        let page = score_list(&ctx, evaluator).await.expect("evaluator");
-        assert_eq!(
-            ids(&rows(&page)),
-            [
-                "00000000-0000-0000-0000-000000000002",
-                "00000000-0000-0000-0000-000000000001",
-            ]
-        );
-
-        let mut rule = request();
-        rule.rule_id = Some(RULE);
-        let page = score_list(&ctx, rule).await.expect("rule");
-        assert_eq!(ids(&rows(&page)), ["00000000-0000-0000-0000-000000000001"]);
-    }
-
-    const DAY: i64 = 86_400_000_000_000;
-    const HOUR: i64 = 3_600_000_000_000;
-
-    /// The live scores of `scores`, in a context of the test project.
-    fn counts_context(scores: &[cetra_core::score::Score]) -> QueryContext {
-        let query = ProjectQuery {
-            scores: live_scores_table(scores),
-            ..example_query()
-        };
-        QueryContext::new(query, None).expect("context")
-    }
-
-    /// Three scores of `issue:a` on two days (two users, one without a user) and one of
-    /// `issue:b`. Score 1 is `day1 + 100`, score 2 `day1 + 200`, score 3 `day2 + 50`, and
-    /// score 4 `day1 + 400`.
-    fn counted_scores(day1: i64, day2: i64) -> Vec<cetra_core::score::Score> {
-        let mut first = score_row(1, 0, day1 + 100, 100, 100, false, "issue:a");
-        first.user_id = Some("u1".to_owned());
-        let mut second = score_row(2, 1, day1 + 200, 200, 200, false, "issue:a");
-        second.user_id = Some("u2".to_owned());
-        let third = score_row(3, 2, day2 + 50, 300, 300, false, "issue:a");
-        let mut other = score_row(4, 3, day1 + 400, 400, 400, false, "issue:b");
-        other.user_id = Some("u1".to_owned());
-        vec![first, second, third, other]
-    }
-
-    fn count_row(
-        name: &str,
-        bucket_start: i64,
-        count: u64,
-        users: u64,
-        last: i64,
-    ) -> ScoreNameCount {
-        ScoreNameCount {
-            name: name.to_owned(),
-            bucket_start,
-            count,
-            users,
-            last_created_at: last,
-        }
-    }
-
-    #[tokio::test]
-    async fn score_name_counts_by_day() {
-        let (day1, day2) = (10 * DAY, 11 * DAY);
-        let ctx = counts_context(&counted_scores(day1, day2));
-        let names = ["issue:a".to_owned(), "issue:b".to_owned()];
-        let window = TimeWindow::new(0, 100 * DAY).expect("window");
-        let request = ScoreNameCountsRequest {
-            names: &names,
-            window,
-            bucket_ns: Some(DAY),
-            timeout: TIMEOUT,
-        };
-        let counts = score_name_counts(&ctx, request).await.expect("by day");
-        assert_eq!(
-            counts,
-            [
-                count_row("issue:a", day1, 2, 2, day1 + 200),
-                count_row("issue:a", day2, 1, 0, day2 + 50),
-                count_row("issue:b", day1, 1, 1, day1 + 400),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn score_name_counts_by_hour() {
-        let (day1, day2) = (10 * DAY, 11 * DAY);
-        let names = ["issue:a".to_owned(), "issue:b".to_owned()];
-        let window = TimeWindow::new(0, 100 * DAY).expect("window");
-        let ctx = counts_context(&counted_scores(day1, day2));
-        let by_hour = ScoreNameCountsRequest {
-            names: &names,
-            window,
-            bucket_ns: Some(HOUR),
-            timeout: TIMEOUT,
-        };
-        let counts = score_name_counts(&ctx, by_hour).await.expect("by hour");
-        assert_eq!(
-            counts,
-            [
-                count_row("issue:a", day1, 2, 2, day1 + 200),
-                count_row("issue:a", day2, 1, 0, day2 + 50),
-                count_row("issue:b", day1, 1, 1, day1 + 400),
-            ]
-        );
-
-        // Score 2 moves to the next hour, so `issue:a` has one score in each of two hours.
-        let mut moved = counted_scores(day1, day2);
-        moved[1].created_at = day1 + HOUR + 5;
-        let ctx = counts_context(&moved);
-        let by_hour = ScoreNameCountsRequest {
-            names: &names,
-            window,
-            bucket_ns: Some(HOUR),
-            timeout: TIMEOUT,
-        };
-        let counts = score_name_counts(&ctx, by_hour).await.expect("moved");
-        assert_eq!(
-            counts,
-            [
-                count_row("issue:a", day1, 1, 1, day1 + 100),
-                count_row("issue:a", day1 + HOUR, 1, 1, day1 + HOUR + 5),
-                count_row("issue:a", day2, 1, 0, day2 + 50),
-                count_row("issue:b", day1, 1, 1, day1 + 400),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn score_name_counts_whole_window() {
-        let (day1, day2) = (10 * DAY, 11 * DAY);
-        let ctx = counts_context(&counted_scores(day1, day2));
-        let names = ["issue:a".to_owned(), "issue:b".to_owned()];
-        let window = TimeWindow::new(0, 100 * DAY).expect("window");
-        let request = ScoreNameCountsRequest {
-            names: &names,
-            window,
-            bucket_ns: None,
-            timeout: TIMEOUT,
-        };
-        let counts = score_name_counts(&ctx, request)
-            .await
-            .expect("whole window");
-        assert_eq!(
-            counts,
-            [
-                count_row("issue:a", 0, 3, 2, day2 + 50),
-                count_row("issue:b", 0, 1, 1, day1 + 400),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn score_name_counts_respects_the_window() {
-        let (day1, day2) = (10 * DAY, 11 * DAY);
-        let ctx = counts_context(&counted_scores(day1, day2));
-        let names = ["issue:a".to_owned(), "issue:b".to_owned()];
-        // `from` is inclusive (score 1 starts there) and `to` is exclusive (score 3 is after it).
-        let window = TimeWindow::new(day1 + 100, day2).expect("window");
-        let request = ScoreNameCountsRequest {
-            names: &names,
-            window,
-            bucket_ns: None,
-            timeout: TIMEOUT,
-        };
-        let counts = score_name_counts(&ctx, request).await.expect("window");
-        assert_eq!(
-            counts,
-            [
-                count_row("issue:a", day1 + 100, 2, 2, day1 + 200),
-                count_row("issue:b", day1 + 100, 1, 1, day1 + 400),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn score_name_counts_ignores_deleted_scores() {
-        let (day1, day2) = (10 * DAY, 11 * DAY);
-        let mut scores = counted_scores(day1, day2);
-        // A later deleted version of score 1 replaces it, so only score 2 is live for `issue:a`.
-        scores.push(score_row(1, 0, day1 + 100, 500, 500, true, "issue:a"));
-        let ctx = counts_context(&scores);
-        let names = ["issue:a".to_owned()];
-        let window = TimeWindow::new(0, 100 * DAY).expect("window");
-        let request = ScoreNameCountsRequest {
-            names: &names,
-            window,
-            bucket_ns: Some(DAY),
-            timeout: TIMEOUT,
-        };
-        let counts = score_name_counts(&ctx, request).await.expect("live");
-        assert_eq!(
-            counts,
-            [
-                count_row("issue:a", day1, 1, 1, day1 + 200),
-                count_row("issue:a", day2, 1, 0, day2 + 50),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn score_name_counts_rejects_1001_names_and_is_empty_without_names() {
-        let ctx = counts_context(&counted_scores(10 * DAY, 11 * DAY));
-        let window = TimeWindow::new(0, 100 * DAY).expect("window");
-        let many = vec!["issue:a".to_owned(); MAX_COUNT_NAMES + 1];
-        let too_many = ScoreNameCountsRequest {
-            names: &many,
-            window,
-            bucket_ns: Some(DAY),
-            timeout: TIMEOUT,
-        };
+        // Error checks
+        let ctx = build_context(&storage, project, QueryOptions::new(None, None)).await;
         assert!(matches!(
-            score_name_counts(&ctx, too_many).await,
+            score_list(
+                &ctx,
+                ScoreListRequest {
+                    limit: 0,
+                    ..base_req()
+                }
+            )
+            .await,
             Err(RunError::InvalidRequest(_))
         ));
-        let none: Vec<String> = Vec::new();
-        let empty = ScoreNameCountsRequest {
-            names: &none,
-            window,
-            bucket_ns: Some(DAY),
-            timeout: TIMEOUT,
-        };
+        assert!(matches!(
+            score_list(
+                &ctx,
+                ScoreListRequest {
+                    trace_id: Some("bad"),
+                    ..base_req()
+                }
+            )
+            .await,
+            Err(RunError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            scores_by_id(&ctx, &["not-a-uuid"], TIMEOUT).await,
+            Err(RunError::InvalidRequest(m)) if m == "invalid score_id"
+        ));
         assert!(
-            score_name_counts(&ctx, empty)
+            latest_scores(&ctx, ScoreTargets::Traces(&[]), TIMEOUT)
                 .await
-                .expect("no names")
+                .expect("empty")
                 .is_empty()
         );
-    }
-
-    #[tokio::test]
-    async fn score_name_counts_refuses_a_non_positive_bucket() {
-        let ctx = counts_context(&counted_scores(10 * DAY, 11 * DAY));
-        let window = TimeWindow::new(0, 100 * DAY).expect("window");
-        let names = ["issue:a".to_owned()];
-        let none: Vec<String> = Vec::new();
-        for (list, width) in [(&names[..], 0), (&names[..], -1), (&none[..], 0)] {
-            let request = ScoreNameCountsRequest {
-                names: list,
-                window,
-                bucket_ns: Some(width),
-                timeout: TIMEOUT,
-            };
+        let too_many = vec!["a1000000000000000000000000000001"; MAX_PAGE + 1];
+        assert!(matches!(
+            latest_scores(&ctx, ScoreTargets::Traces(&too_many), TIMEOUT).await,
+            Err(RunError::InvalidRequest(_))
+        ));
+        let too_many_names = vec!["x".to_owned(); MAX_COUNT_NAMES + 1];
+        assert!(matches!(
+            score_name_counts(
+                &ctx,
+                ScoreNameCountsRequest {
+                    names: &too_many_names,
+                    window: TimeWindow::new(0, DAY).expect("w"),
+                    bucket_ns: None,
+                    timeout: TIMEOUT,
+                }
+            )
+            .await,
+            Err(RunError::InvalidRequest(_))
+        ));
+        for width in [0, -1] {
             assert!(matches!(
-                score_name_counts(&ctx, request).await,
+                score_name_counts(
+                    &ctx,
+                    ScoreNameCountsRequest {
+                        names: &[],
+                        window: TimeWindow::new(0, DAY).expect("w"),
+                        bucket_ns: Some(width),
+                        timeout: TIMEOUT,
+                    }
+                )
+                .await,
                 Err(RunError::InvalidRequest(_))
             ));
         }
+
+        let _ = storage.shutdown().await;
     }
 
     #[tokio::test]
-    async fn list_filters_by_queue_id() {
-        const QUEUE_A: &str = "018f6b4e-7c1a-7c1a-8c1a-0000000000a1";
-        const QUEUE_B: &str = "018f6b4e-7c1a-7c1a-8c1a-0000000000b1";
-        let mut in_a = score_row(1, 0, 100, 100, 100, false, "relevance");
-        in_a.queue_id = Some(QUEUE_A.parse().expect("queue a"));
-        let mut in_b = score_row(2, 1, 200, 200, 200, false, "tone");
-        in_b.queue_id = Some(QUEUE_B.parse().expect("queue b"));
-        let no_queue = score_row(3, 2, 300, 300, 300, false, "length");
-        let query = ProjectQuery {
-            scores: live_scores_table(&[in_a, in_b, no_queue]),
-            ..example_query()
-        };
-        let ctx = QueryContext::new(query, None).expect("context");
+    async fn score_name_counts_by_hour_and_non_positive_width() {
+        const HOUR: i64 = 3_600_000_000_000;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(test_config(dir.path())).await.expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000002".parse().expect("pid");
 
-        let mut queue = request();
-        queue.queue_id = Some(QUEUE_A);
-        let page = score_list(&ctx, queue).await.expect("queue");
-        assert_eq!(ids(&rows(&page)), ["00000000-0000-0000-0000-000000000001"]);
+        let day1 = 10 * DAY;
+        let day2 = 11 * DAY;
+        let mut s1 = score_row(1, 1, day1 + 100, day1 + 100, 1, false, "issue:a");
+        s1.user_id = Some("u1".to_owned());
+        let mut s2 = score_row(2, 1, day1 + HOUR + 5, day1 + HOUR + 5, 2, false, "issue:a");
+        s2.user_id = Some("u2".to_owned());
+        let mut s3 = score_row(3, 1, day2 + 50, day2 + 50, 3, false, "issue:a");
+        s3.user_id = None;
+        let mut s4 = score_row(4, 1, day1 + 400, day1 + 400, 4, false, "issue:b");
+        s4.user_id = Some("u1".to_owned());
+        let mut rows = vec![s1, s2, s3, s4];
+        for r in &mut rows {
+            r.project_id = project;
+        }
+        storage
+            .append_scores(project, score_rows(&rows))
+            .await
+            .expect("append scores");
+
+        let ctx = build_context(&storage, project, QueryOptions::new(None, None)).await;
+        let names = ["issue:a".to_owned(), "issue:b".to_owned()];
+        let window = TimeWindow::new(0, 100 * DAY).expect("window");
+
+        let counts = score_name_counts(
+            &ctx,
+            ScoreNameCountsRequest {
+                names: &names,
+                window,
+                bucket_ns: Some(HOUR),
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("by hour");
+        assert_eq!(
+            counts,
+            [
+                ScoreNameCount {
+                    name: "issue:a".to_owned(),
+                    bucket_start: day1,
+                    count: 1,
+                    users: 1,
+                    last_created_at: day1 + 100,
+                },
+                ScoreNameCount {
+                    name: "issue:a".to_owned(),
+                    bucket_start: day1 + HOUR,
+                    count: 1,
+                    users: 1,
+                    last_created_at: day1 + HOUR + 5,
+                },
+                ScoreNameCount {
+                    name: "issue:a".to_owned(),
+                    bucket_start: day2,
+                    count: 1,
+                    users: 0,
+                    last_created_at: day2 + 50,
+                },
+                ScoreNameCount {
+                    name: "issue:b".to_owned(),
+                    bucket_start: day1,
+                    count: 1,
+                    users: 1,
+                    last_created_at: day1 + 400,
+                },
+            ]
+        );
+
+        let none: Vec<String> = Vec::new();
+        for (list, width) in [(&names[..], 0), (&names[..], -1), (&none[..], 0)] {
+            assert!(matches!(
+                score_name_counts(
+                    &ctx,
+                    ScoreNameCountsRequest {
+                        names: list,
+                        window,
+                        bucket_ns: Some(width),
+                        timeout: TIMEOUT,
+                    }
+                )
+                .await,
+                Err(RunError::InvalidRequest(_))
+            ));
+        }
+
+        let _ = storage.shutdown().await;
     }
 }

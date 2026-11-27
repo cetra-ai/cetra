@@ -3,7 +3,6 @@
 //! `Storage::open` loads this from `catalog.db` and publishes it with the
 //! replayed memtables. A flush replaces it in the same publish that drops
 //! `frozen`.
-#![allow(dead_code)]
 
 mod committer;
 mod db;
@@ -47,6 +46,15 @@ impl FileTable {
             Self::Scores => "scores",
         }
     }
+
+    /// Stored columnar schema of this table, cached for the process lifetime.
+    pub(crate) fn column_schema(self) -> Arc<cetra_column::Schema> {
+        match self {
+            Self::Spans => cetra_core::schema::spans_schema(),
+            Self::Traces => cetra_core::schema::traces_schema(),
+            Self::Scores => cetra_core::schema::scores_schema(),
+        }
+    }
 }
 
 impl From<Table> for FileTable {
@@ -84,8 +92,10 @@ pub(crate) enum FileState {
     /// Readable. These rows are the in-memory catalog.
     Active,
     /// Replaced. GC deletes it after `gc.grace`.
+    #[cfg_attr(not(test), allow(dead_code))]
     Obsolete,
     /// Unreadable. Only accepted as an expected state.
+    #[cfg_attr(not(test), allow(dead_code))]
     Quarantined,
 }
 

@@ -37,7 +37,7 @@ macro_rules! stored_enum {
         }
 
         impl $name {
-            /// Canonical snake_case spelling stored in Arrow and JSON.
+            /// Canonical snake_case spelling stored in columnar batches and JSON.
             pub fn as_str(self) -> &'static str {
                 <&str>::from(self)
             }

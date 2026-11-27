@@ -11357,7 +11357,11 @@ export interface components {
         SqlColumnInfo: {
             /** @description Output column name. */
             name: string;
-            /** @description Arrow type as DataFusion prints it, for example `Int64` or `Utf8`. */
+            /**
+             * @description Unified cetra type display name (D-QE-15): `string`, `integer`, `float`, `decimal`,
+             *     `boolean`, `timestamp`, `date`, `interval`, `binary`, `string_list`, `string_map`,
+             *     `list`, `json`, or `null`.
+             */
             type: string;
         };
         /**

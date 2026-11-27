@@ -864,9 +864,9 @@ fn a_spilling_query_stops_at_min_free() {
         let mut clock = clock_start();
         model_steps(&mut h, &mut model, &mut clock, &seed_ops(), 0);
 
-        // Four chunks of 16 batches (about 25 MiB of Arrow). Each chunk ends with a restart, so the WAL
+        // Four chunks of 16 batches (about 25 MiB of column batches). Each chunk ends with a restart, so the WAL
         // holds at most one chunk. Larger tries failed run 1 as TooLarge: 40 batches per chunk, and
-        // then 20 (a 33 MiB spill that DataFusion's cap counted above the 47 MB above min_free).
+        // then 20 (a 33 MiB spill that the query pool cap counted above the 47 MB above min_free).
         let mut accepted = 0;
         let mut sent: u16 = 0;
         for _ in 0..4 {
@@ -896,13 +896,13 @@ fn a_spilling_query_stops_at_min_free() {
         );
 
         // Run 1, room to spill. The peak is the spill space in use, sampled every 5 ms.
-        let disk_manager = Arc::clone(&h.storage().runtime.disk_manager);
+        let spill = Arc::clone(&h.storage().qe_runtime.spill);
         let stop = AtomicBool::new(false);
         let (first_run, peak) = std::thread::scope(|scope| {
             let sampler = scope.spawn(|| {
                 let mut peak = 0;
                 while !stop.load(Ordering::Acquire) {
-                    peak = peak.max(disk_manager.used_disk_space());
+                    peak = peak.max(spill.spilled_bytes());
                     std::thread::sleep(Duration::from_millis(5));
                 }
                 peak
@@ -936,35 +936,25 @@ fn a_spilling_query_stops_at_min_free() {
         );
         assert!(
             wait_for(Duration::from_secs(10), Duration::from_millis(50), || {
-                disk_manager.used_disk_space() == 0
+                spill.spilled_bytes() == 0
             }),
             "the failed spill's files are removed within 10 s"
         );
         // The failed query's memory goes back to the shared pool as its tasks wind down.
         assert!(
             wait_for(Duration::from_secs(10), Duration::from_millis(50), || {
-                h.storage().memory.used() == 0
+                h.storage().qe_runtime.admission.used() == 0
             }),
             "the failed query's pool bytes are released within 10 s: {} bytes left",
-            h.storage().memory.used()
+            h.storage().qe_runtime.admission.used()
         );
         let query_dir = h.dir().join("tmp").join("query");
         if let Ok(entries) = std::fs::read_dir(&query_dir) {
-            for entry in entries {
-                let entry = entry.expect("read a spill directory entry");
-                let name = entry.file_name();
-                assert!(
-                    name.to_string_lossy().starts_with("datafusion-"),
-                    "only DataFusion's spill directories remain under tmp/query: {name:?}"
-                );
-                assert!(
-                    std::fs::read_dir(entry.path())
-                        .expect("read a spill directory")
-                        .next()
-                        .is_none(),
-                    "a spill directory left after the failed query is empty"
-                );
-            }
+            assert_eq!(
+                entries.count(),
+                0,
+                "no spill files remain under tmp/query after the failed query"
+            );
         }
 
         // Ingestion still works with the space kept for it.

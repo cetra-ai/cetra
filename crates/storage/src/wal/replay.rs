@@ -6,11 +6,9 @@
 //! that is not one batch of this table, is corruption.
 //!
 //! Called from tests until `Storage::open` lands.
-#![allow(dead_code)]
-
 use std::path::Path;
 
-use arrow::array::RecordBatch;
+use cetra_column::Batch;
 
 use crate::error::WalError;
 use crate::fs;
@@ -36,8 +34,8 @@ pub(crate) struct ReplayOutcome {
 /// Reads every segment in `dir`, in seq order, and calls `on_batch` for each
 /// record newer than `after_seq`.
 ///
-/// `on_batch` is not called for skipped seqs, and those records are not decoded
-/// as Arrow. `read_batch` failing is corruption wherever the record sits: the
+/// `on_batch` is not called for skipped seqs, and those records are not decoded.
+/// `read_batch` failing is corruption wherever the record sits: the
 /// checksum matched, so the bytes are what was written. With `skip_corrupt`,
 /// that one record is skipped. A torn tail is truncated even when `skip_corrupt`
 /// is set.
@@ -46,7 +44,7 @@ pub(crate) fn replay(
     table: Table,
     after_seq: u64,
     skip_corrupt: bool,
-    on_batch: &mut dyn FnMut(u64, RecordBatch) -> Result<(), WalError>,
+    on_batch: &mut dyn FnMut(u64, Batch) -> Result<(), WalError>,
 ) -> Result<ReplayOutcome, WalError> {
     let segments = list_segments(dir)?;
     let mut progress = Progress {
@@ -130,7 +128,7 @@ fn scan_segment(
     bytes: &[u8],
     path: &Path,
     scan: &mut Scan<'_>,
-    on_batch: &mut dyn FnMut(u64, RecordBatch) -> Result<(), WalError>,
+    on_batch: &mut dyn FnMut(u64, Batch) -> Result<(), WalError>,
 ) -> Result<bool, WalError> {
     let mut offset = match check_header(scan.table.name(), scan.name, bytes)? {
         HeaderState::Valid => SEGMENT_HEADER_LEN,
@@ -350,8 +348,9 @@ mod tests {
     }
 
     fn encoded(seq: u64) -> Vec<u8> {
+        let batch = sample_span_batch();
         let mut buf = Vec::new();
-        encode(seq, &sample_span_batch(), &mut buf).unwrap();
+        encode(seq, &batch, &mut buf).unwrap();
         buf
     }
 

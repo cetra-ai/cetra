@@ -8,9 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use arrow::array::{Array, ArrayRef, AsArray, RecordBatch};
-use arrow::compute::cast;
-use arrow::datatypes::{DataType, Float64Type, Int64Type};
+use cetra_column::{Batch, ScalarValue, Selection};
 use cetra_core::ids::{ProjectId, TraceId};
 use cetra_core::schema::traces;
 use cetra_storage::{Storage, trace_detail};
@@ -198,35 +196,66 @@ fn shuffle<T>(items: &mut [T], rng: &mut Rng) {
     }
 }
 
-/// The first row's value of `name`, cast to `Int64`, or `None` for a null.
-fn int_at(batch: &RecordBatch, name: &str) -> Result<Option<i64>, String> {
-    let column: ArrayRef = batch
-        .column_by_name(name)
-        .cloned()
-        .ok_or_else(|| format!("no column {name}"))?;
-    let cast = cast(&column, &DataType::Int64).map_err(|error| error.to_string())?;
-    let array = cast.as_primitive::<Int64Type>();
-    Ok((!array.is_null(0)).then(|| array.value(0)))
+fn first_phys_row(batch: &Batch) -> Result<usize, String> {
+    if batch.num_rows() == 0 {
+        return Err("empty batch".to_owned());
+    }
+    match batch.selection() {
+        Selection::All => Ok(0),
+        Selection::Mask(mask) => mask
+            .iter_ones()
+            .next()
+            .ok_or_else(|| "no active rows".to_owned()),
+        Selection::Indices(indices) => indices
+            .first()
+            .map(|&idx| idx as usize)
+            .ok_or_else(|| "no active rows".to_owned()),
+    }
 }
 
-fn float_at(batch: &RecordBatch, name: &str) -> Result<Option<f64>, String> {
-    let column: ArrayRef = batch
+/// The first row's value of `name`, as `i64`, or `None` for a null.
+fn int_at(batch: &Batch, name: &str) -> Result<Option<i64>, String> {
+    let column = batch
         .column_by_name(name)
-        .cloned()
         .ok_or_else(|| format!("no column {name}"))?;
-    let cast = cast(&column, &DataType::Float64).map_err(|error| error.to_string())?;
-    let array = cast.as_primitive::<Float64Type>();
-    Ok((!array.is_null(0)).then(|| array.value(0)))
+    let phys = first_phys_row(batch)?;
+    match column.get_scalar(phys).map_err(|e| e.to_string())? {
+        ScalarValue::Null(_) => Ok(None),
+        ScalarValue::I64(v) => Ok(Some(v)),
+        ScalarValue::TimestampNs { value, .. } => Ok(Some(value)),
+        other => Err(format!("column {name} is not integer/timestamp: {other:?}")),
+    }
 }
 
-fn string_at(batch: &RecordBatch, name: &str) -> Result<Option<String>, String> {
-    let column: ArrayRef = batch
+fn float_at(batch: &Batch, name: &str) -> Result<Option<f64>, String> {
+    let column = batch
         .column_by_name(name)
-        .cloned()
         .ok_or_else(|| format!("no column {name}"))?;
-    let cast = cast(&column, &DataType::Utf8).map_err(|error| error.to_string())?;
-    let array = cast.as_string::<i32>();
-    Ok((!array.is_null(0)).then(|| array.value(0).to_owned()))
+    let phys = first_phys_row(batch)?;
+    match column.get_scalar(phys).map_err(|e| e.to_string())? {
+        ScalarValue::Null(_) => Ok(None),
+        ScalarValue::F64(v) => Ok(Some(v)),
+        ScalarValue::Decimal128 { value, scale, .. } => {
+            if scale >= 0 {
+                Ok(Some((value as f64) / 10f64.powi(i32::from(scale))))
+            } else {
+                Ok(Some((value as f64) * 10f64.powi(-i32::from(scale))))
+            }
+        }
+        other => Err(format!("column {name} is not float/decimal: {other:?}")),
+    }
+}
+
+fn string_at(batch: &Batch, name: &str) -> Result<Option<String>, String> {
+    let column = batch
+        .column_by_name(name)
+        .ok_or_else(|| format!("no column {name}"))?;
+    let phys = first_phys_row(batch)?;
+    match column.get_scalar(phys).map_err(|e| e.to_string())? {
+        ScalarValue::Null(_) => Ok(None),
+        ScalarValue::Utf8(s) => Ok(Some(s)),
+        other => Err(format!("column {name} is not string: {other:?}")),
+    }
 }
 
 /// The mismatches between a stored trace row and what the registry expects.
@@ -313,7 +342,7 @@ fn compare(
         )),
         (Err(error), _) => out.push(format!("{hex}: cost_total unreadable: {error}")),
     }
-    let stored_spans: usize = detail.spans.iter().map(RecordBatch::num_rows).sum();
+    let stored_spans: usize = detail.spans.iter().map(Batch::num_rows).sum();
     if stored_spans as i64 != summary.span_count {
         out.push(format!(
             "{hex}: span rows expected {} got {stored_spans}",

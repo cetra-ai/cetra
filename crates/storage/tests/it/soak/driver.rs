@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use arrow::array::RecordBatch;
-use cetra_core::batch::{scores_to_record_batch, spans_to_record_batch};
+use cetra_column::Batch;
+use cetra_core::batch::{scores_to_batch, spans_to_batch};
 use cetra_core::enums::ScoreSource;
 use cetra_core::ids::{ProjectId, TraceId};
 use cetra_core::score::{Score, ScoreTarget, ScoreValue};
@@ -318,7 +318,7 @@ async fn append_with_retry(
     shared: &Shared,
     spans: bool,
     project: ProjectId,
-    batch: RecordBatch,
+    batch: Batch,
 ) -> Result<(), AppendError> {
     loop {
         let result = if spans {
@@ -365,7 +365,7 @@ async fn flush_spans(
     for span in &mut batch {
         span.ingest_time = ingest;
     }
-    let rows = match spans_to_record_batch(&batch) {
+    let rows = match spans_to_batch(&batch) {
         Ok(rows) => rows,
         Err(error) => {
             shared
@@ -634,7 +634,7 @@ pub(crate) async fn scores(shared: Arc<Shared>, stop: watch::Receiver<bool>) {
             if batch.is_empty() {
                 continue;
             }
-            let rows = match scores_to_record_batch(&batch) {
+            let rows = match scores_to_batch(&batch) {
                 Ok(rows) => rows,
                 Err(error) => {
                     shared.failures.record(
