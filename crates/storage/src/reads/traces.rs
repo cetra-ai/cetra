@@ -1133,14 +1133,7 @@ async fn run_span_list_attempt(
 
                         let mut disk_winners: Vec<Batch> = Vec::new();
                         let mut idx = 0usize;
-                        let mut wave_size = if p1_spec.substrings.is_empty() {
-                            1usize
-                        } else {
-                            exec_ctx
-                                .target_partitions
-                                .max(1)
-                                .min(kept_files.len().max(1))
-                        };
+                        let mut wave_size = 1usize;
                         while idx < kept_files.len() {
                             if exec_ctx.eval.cancel.is_cancelled() {
                                 return Err(QueryError::Cancelled);
