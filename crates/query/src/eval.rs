@@ -652,6 +652,20 @@ pub(crate) fn read_str(col: &Column, row: usize) -> Option<&str> {
     }
 }
 
+pub(crate) fn read_str_bytes(col: &Column, row: usize) -> Option<&[u8]> {
+    if let Column::Const { value, len } = col {
+        return (row < *len).then_some(value).and_then(|v| match v {
+            ScalarValue::Utf8(s) => Some(s.as_bytes()),
+            _ => None,
+        });
+    }
+    let (fc, flat_row) = resolve_flat(col, row)?;
+    match fc.data() {
+        FlatData::Utf8(u) => u.get_bytes(flat_row),
+        _ => None,
+    }
+}
+
 pub(crate) fn read_bytes(col: &Column, row: usize) -> Option<&[u8]> {
     if let Column::Const { value, len } = col {
         return (row < *len).then_some(value).and_then(|v| match v {
@@ -861,6 +875,15 @@ impl<'a> ElemRef<'a> {
             Self::Null => None,
             Self::Col(c, r) => read_str(c, r),
             Self::Scalar(ScalarValue::Utf8(s)) => Some(s.as_str()),
+            Self::Scalar(_) => None,
+        }
+    }
+
+    pub(crate) fn read_str_bytes(self) -> Option<&'a [u8]> {
+        match self {
+            Self::Null => None,
+            Self::Col(c, r) => read_str_bytes(c, r),
+            Self::Scalar(ScalarValue::Utf8(s)) => Some(s.as_bytes()),
             Self::Scalar(_) => None,
         }
     }
@@ -1995,7 +2018,9 @@ fn compare_row(lcol: &Column, rcol: &Column, row: usize) -> Result<Ordering, Que
                 _ => Err(QueryError::failed("invalid interval comparison")),
             }
         }
-        (DataType::Utf8, DataType::Utf8) => Ok(read_str(lcol, row).cmp(&read_str(rcol, row))),
+        (DataType::Utf8, DataType::Utf8) => {
+            Ok(read_str_bytes(lcol, row).cmp(&read_str_bytes(rcol, row)))
+        }
         (
             DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16,
             DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16,

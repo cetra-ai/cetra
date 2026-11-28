@@ -3201,13 +3201,12 @@ fn read_column(
                                 reason: "const utf8 column length mismatch",
                             });
                         }
-                        let bytes = u.into_bytes();
-                        if bytes.len() > max_decoded as usize {
+                        let s = u.into_string();
+                        if s.len() > max_decoded as usize {
                             return Err(ColumnError::InvalidFrame {
                                 reason: "const scalar exceeds decoded size limit",
                             });
                         }
-                        let s = String::from_utf8(bytes).map_err(|_| ColumnError::InvalidUtf8)?;
                         ScalarValue::Utf8(s)
                     }
                     FlatData::Binary(b) => {

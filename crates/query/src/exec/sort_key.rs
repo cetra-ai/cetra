@@ -118,7 +118,9 @@ fn compare_non_null_cols(col_a: &Column, a: usize, col_b: &Column, b: usize) -> 
                 _ => Ordering::Equal,
             }
         }
-        (DataType::Utf8, DataType::Utf8) => eval::read_str(col_a, a).cmp(&eval::read_str(col_b, b)),
+        (DataType::Utf8, DataType::Utf8) => {
+            eval::read_str_bytes(col_a, a).cmp(&eval::read_str_bytes(col_b, b))
+        }
         (
             DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16,
             DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16,
@@ -140,16 +142,16 @@ fn map_ref_len(m: MapRef<'_>) -> usize {
     }
 }
 
-fn map_ref_entry(m: MapRef<'_>, idx: usize) -> (&str, Option<&str>) {
+fn map_ref_entry(m: MapRef<'_>, idx: usize) -> (&[u8], Option<&[u8]>) {
     match m {
-        MapRef::Const(v) => (v[idx].0.as_str(), v[idx].1.as_deref()),
+        MapRef::Const(v) => (v[idx].0.as_bytes(), v[idx].1.as_deref().map(str::as_bytes)),
         MapRef::Flat { data, start, .. } => {
             let pos = start + idx;
-            let k = data.keys().get(pos).unwrap_or("");
+            let k = data.keys().get_bytes(pos).unwrap_or(b"");
             let v = if data.value_nulls().is_some_and(|bm| !bm.get(pos)) {
                 None
             } else {
-                data.values().get(pos)
+                data.values().get_bytes(pos)
             };
             (k, v)
         }
@@ -163,21 +165,21 @@ fn events_ref_len(e: EventsRef<'_>) -> usize {
     }
 }
 
-fn events_ref_item(e: EventsRef<'_>, idx: usize) -> (i64, &str, Option<&str>) {
+fn events_ref_item(e: EventsRef<'_>, idx: usize) -> (i64, &[u8], Option<&[u8]>) {
     match e {
         EventsRef::Const(v) => (
             v[idx].time,
-            v[idx].name.as_str(),
-            v[idx].attributes.as_deref(),
+            v[idx].name.as_bytes(),
+            v[idx].attributes.as_deref().map(str::as_bytes),
         ),
         EventsRef::Flat { data, start, .. } => {
             let pos = start + idx;
             let t = data.times()[pos];
-            let n = data.names().get(pos).unwrap_or("");
+            let n = data.names().get_bytes(pos).unwrap_or(b"");
             let a = if data.attribute_nulls().is_some_and(|bm| !bm.get(pos)) {
                 None
             } else {
-                data.attributes().get(pos)
+                data.attributes().get_bytes(pos)
             };
             (t, n, a)
         }
@@ -191,12 +193,12 @@ fn links_ref_len(l: LinksRef<'_>) -> usize {
     }
 }
 
-fn links_ref_item(l: LinksRef<'_>, idx: usize) -> (&[u8; 16], &[u8; 8], Option<&str>) {
+fn links_ref_item(l: LinksRef<'_>, idx: usize) -> (&[u8; 16], &[u8; 8], Option<&[u8]>) {
     match l {
         LinksRef::Const(v) => (
             &v[idx].trace_id,
             &v[idx].span_id,
-            v[idx].attributes.as_deref(),
+            v[idx].attributes.as_deref().map(str::as_bytes),
         ),
         LinksRef::Flat { data, start, .. } => {
             let pos = start + idx;
@@ -205,7 +207,7 @@ fn links_ref_item(l: LinksRef<'_>, idx: usize) -> (&[u8; 16], &[u8; 8], Option<&
             let a = if data.attribute_nulls().is_some_and(|bm| !bm.get(pos)) {
                 None
             } else {
-                data.attributes().get(pos)
+                data.attributes().get_bytes(pos)
             };
             (tid, sid, a)
         }
@@ -246,7 +248,7 @@ pub(crate) fn compare_elem_refs(ea: ElemRef<'_>, eb: ElemRef<'_>) -> Ordering {
                 _ => Ordering::Equal,
             }
         }
-        (DataType::Utf8, DataType::Utf8) => ea.read_str().cmp(&eb.read_str()),
+        (DataType::Utf8, DataType::Utf8) => ea.read_str_bytes().cmp(&eb.read_str_bytes()),
         (
             DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16,
             DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16,
@@ -598,5 +600,108 @@ mod tests {
             Ordering::Equal
         );
         assert_eq!(compare_rows(&[iv_canon], &k_asc, 0, 2), Ordering::Less);
+    }
+
+    #[test]
+    fn sort_key_utf8_byte_order_matches_str_order_unicode() {
+        let samples = [
+            "",
+            "a",
+            "Z",
+            "café",
+            "cafe",
+            "café_2",
+            "α",
+            "β",
+            "日本語",
+            "🚀",
+            "🧪",
+        ];
+        let flat = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(Utf8Data::try_from_slices(samples).unwrap()),
+                None,
+            )
+            .unwrap(),
+        );
+        let dict_indices: Vec<u32> = (0..samples.len() as u32).rev().collect();
+        let dict_vals: Vec<&str> = samples.iter().copied().rev().collect();
+        let dict = Column::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(dict_vals).unwrap()),
+                    None,
+                )
+                .unwrap(),
+                dict_indices,
+                None,
+            )
+            .unwrap(),
+        );
+        let run_ends: Vec<u32> = (1..=samples.len() as u32).collect();
+        let rle = Column::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(samples).unwrap()),
+                    None,
+                )
+                .unwrap(),
+                run_ends,
+            )
+            .unwrap(),
+        );
+
+        let k_asc = [key(false, false)];
+        let k_desc = [key(true, false)];
+
+        for (i, &sa) in samples.iter().enumerate() {
+            let const_a = Column::try_new_const(ScalarValue::Utf8(sa.to_owned()), 1).unwrap();
+            for (j, &sb) in samples.iter().enumerate() {
+                let expected = sa.cmp(sb);
+                assert_eq!(
+                    compare_rows(std::slice::from_ref(&flat), &k_asc, i, j),
+                    expected,
+                    "flat asc ({sa:?}, {sb:?})"
+                );
+                assert_eq!(
+                    compare_rows(std::slice::from_ref(&flat), &k_desc, i, j),
+                    expected.reverse(),
+                    "flat desc ({sa:?}, {sb:?})"
+                );
+                assert_eq!(
+                    compare_rows_across(
+                        std::slice::from_ref(&flat),
+                        i,
+                        std::slice::from_ref(&dict),
+                        j,
+                        &k_asc
+                    ),
+                    expected,
+                    "flat vs dict ({sa:?}, {sb:?})"
+                );
+                assert_eq!(
+                    compare_rows_across(
+                        std::slice::from_ref(&dict),
+                        i,
+                        std::slice::from_ref(&rle),
+                        j,
+                        &k_asc
+                    ),
+                    expected,
+                    "dict vs rle ({sa:?}, {sb:?})"
+                );
+                assert_eq!(
+                    compare_rows_across(
+                        std::slice::from_ref(&const_a),
+                        0,
+                        std::slice::from_ref(&rle),
+                        j,
+                        &k_asc
+                    ),
+                    expected,
+                    "const vs rle ({sa:?}, {sb:?})"
+                );
+            }
+        }
     }
 }
