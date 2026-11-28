@@ -1,4 +1,4 @@
-//! Native spillable `NativeTraceMerger` and `TracesSource` (`mode=lookup`, `mode=list`,
+//! Native spillable `SortedTraceMerger` and `TracesSource` (`mode=lookup`, `mode=list`,
 //! `mode=range`, and generalized `TwoPhase` rank→fetch for non-time sorts).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -256,7 +256,6 @@ impl TracesSource {
         let input_indices = indices_of_names(&self.schema, &input_names)?;
         let output_indices = indices_of_names(&self.schema, &output_names)?;
         let input_schema = Arc::new(self.schema.project(&input_indices)?);
-        let merged_schema = Arc::new(self.schema.project(&output_indices)?);
 
         // Push ONLY padded `start_time` bounds and `trace_id` lookups to partial scans.
         let mut full_to_input: Vec<Option<usize>> = vec![None; self.schema.len()];
@@ -458,10 +457,6 @@ impl TracesSource {
             }
         };
 
-        let merged_start_idx = merged_schema
-            .index_of(traces::START_TIME)
-            .ok_or_else(|| QueryError::internal("start_time missing from merged schema"))?;
-
         let active_p = sorted_streams.len().max(1);
         let budget_bytes = (ctx.pool.spill_share() / (4 * active_p)).max(4096);
         let max_traces_per_chunk = (ctx.pool.cap() / (4096 * active_p)).clamp(8, MERGE_CHUNK_ROWS);
@@ -470,22 +465,20 @@ impl TracesSource {
         let streams = sorted_streams
             .into_iter()
             .map(|input| {
+                let merger = SortedTraceMerger::new(merge_columns, &self.schema)?
+                    .with_bounds(bounds)
+                    .with_initial_cap(max_traces_per_chunk);
                 Ok(Box::new(NativeTraceMergeStream {
                     input,
                     input_res: ctx.pool.register("trace_merge_in", false),
-                    merger: NativeTraceMerger::new(merge_columns, &self.schema)?,
+                    merger,
                     merger_res: ctx.pool.register("trace_merger", false),
                     scratch_res: ctx.pool.register("trace_merge_scratch", false),
-                    merge_columns: merge_columns.clone(),
-                    full_schema: Arc::clone(&self.schema),
-                    merged_start_idx,
-                    bounds,
                     post_filters: post_filters.clone(),
                     projection: merged_to_output.clone(),
                     remaining: shared_limit.clone(),
                     eval: ctx.eval.clone(),
                     active_input: None,
-                    current_trace_id: None,
                     budget_bytes,
                     max_traces_per_chunk,
                     done: false,
@@ -1306,70 +1299,45 @@ impl PartitionStream for MemPartialsStream {
 struct NativeTraceMergeStream {
     input: Box<dyn PartitionStream>,
     input_res: Reservation,
-    merger: NativeTraceMerger,
+    merger: SortedTraceMerger,
     merger_res: Reservation,
     scratch_res: Reservation,
-    merge_columns: MergeColumns,
-    full_schema: Arc<Schema>,
-    merged_start_idx: usize,
-    bounds: TimeBounds,
     post_filters: Vec<Expr>,
     projection: Option<Vec<usize>>,
     remaining: Option<Arc<AtomicUsize>>,
     eval: EvalContext,
     active_input: Option<(Batch, usize)>,
-    current_trace_id: Option<[u8; 16]>,
     budget_bytes: usize,
     max_traces_per_chunk: usize,
     done: bool,
 }
 
 impl NativeTraceMergeStream {
+    fn abort_and_free(&mut self, res: Option<&mut Reservation>, before: usize) {
+        self.done = true;
+        self.active_input = None;
+        self.merger.clear();
+        self.scratch_res.free();
+        self.merger_res.free();
+        self.input_res.free();
+        rollback_res(res, before);
+    }
+
     fn finish_and_filter_merger(
         &mut self,
         eval_ctx: &EvalContext,
     ) -> Result<Option<Batch>, QueryError> {
-        let merger = std::mem::replace(
-            &mut self.merger,
-            NativeTraceMerger::new(&self.merge_columns, &self.full_schema)?,
-        );
-        self.current_trace_id = None;
-        if merger.is_empty() {
+        if self.merger.flushed_rows() == 0 {
             self.merger_res.free();
             return Ok(None);
         }
-        let mut merged = merger.finish()?;
+        let mut merged = self.merger.take_batch()?;
         let merged_bytes = merged.memory_bytes();
         let transfer = transfer_or_grow(&mut self.merger_res, &mut self.scratch_res, merged_bytes);
         self.merger_res.free();
         transfer?;
 
-        // 1. Evaluate unpadded `start_time` bounds `[a, b]`.
-        if self.bounds.min.is_some() || self.bounds.max.is_some() {
-            let start_col = merged
-                .column(self.merged_start_idx)
-                .ok_or_else(|| QueryError::internal("merged start_time missing"))?;
-            let raw_len = merged.raw_len();
-            let mut mask = Bitmap::new_ones(raw_len);
-            for row in 0..raw_len {
-                let keep = read_ts_at(start_col, row).is_some_and(|ts| {
-                    self.bounds.min.is_none_or(|lo| ts >= lo)
-                        && self.bounds.max.is_none_or(|hi| ts <= hi)
-                });
-                if !keep {
-                    let _ = mask.set(row, false);
-                }
-            }
-            merged = merged.into_filter_mask(&mask)?;
-            drop(mask);
-            reconcile_res(Some(&mut self.scratch_res), 0, merged.memory_bytes())?;
-            if merged.is_empty() {
-                self.scratch_res.free();
-                return Ok(None);
-            }
-        }
-
-        // 2. Evaluate all post-merge user filters.
+        // 1. Evaluate all post-merge user filters (bounds already filtered pre-builder).
         for filter in &self.post_filters {
             let mask = eval_filter(filter, &merged, eval_ctx, Some(&mut self.scratch_res))?;
             merged = merged.into_filter_mask(&mask)?;
@@ -1381,7 +1349,7 @@ impl NativeTraceMergeStream {
             }
         }
 
-        // 3. Apply shared `limit`.
+        // 2. Apply shared `limit`.
         if self.remaining.is_some() {
             let take = claim_shared_limit(self.remaining.as_ref(), merged.num_rows());
             if self
@@ -1392,11 +1360,13 @@ impl NativeTraceMergeStream {
                 self.done = true;
                 self.active_input = None;
                 self.input_res.free();
+                self.merger.clear();
             }
             if take == 0 {
                 self.done = true;
                 self.active_input = None;
                 self.input_res.free();
+                self.merger.clear();
                 self.scratch_res.free();
                 return Ok(None);
             }
@@ -1404,6 +1374,7 @@ impl NativeTraceMergeStream {
                 self.done = true;
                 self.active_input = None;
                 self.input_res.free();
+                self.merger.clear();
                 let end = u32::try_from(take).map_err(|_| ColumnError::Overflow {
                     reason: "traces limit exceeds u32::MAX",
                 })?;
@@ -1419,7 +1390,7 @@ impl NativeTraceMergeStream {
             }
         }
 
-        // 4. Project to requested output schema.
+        // 3. Project to requested output schema.
         if let Some(indices) = &self.projection {
             merged = merged.into_project(indices)?;
             reconcile_res(Some(&mut self.scratch_res), 0, merged.memory_bytes())?;
@@ -1447,10 +1418,7 @@ impl PartitionStream for NativeTraceMergeStream {
 
         loop {
             if cancel.is_cancelled() {
-                self.scratch_res.free();
-                self.merger_res.free();
-                self.input_res.free();
-                rollback_res(res, before);
+                self.abort_and_free(res, before);
                 return Err(QueryError::Cancelled);
             }
             if self.done
@@ -1459,12 +1427,7 @@ impl PartitionStream for NativeTraceMergeStream {
                     .as_ref()
                     .is_some_and(|r| r.load(Ordering::Acquire) == 0)
             {
-                self.done = true;
-                self.active_input = None;
-                self.scratch_res.free();
-                self.merger_res.free();
-                self.input_res.free();
-                rollback_res(res, before);
+                self.abort_and_free(res, before);
                 return Ok(None);
             }
 
@@ -1486,19 +1449,13 @@ impl PartitionStream for NativeTraceMergeStream {
                                         0,
                                         c.memory_bytes(),
                                     ) {
-                                        self.scratch_res.free();
-                                        self.merger_res.free();
-                                        self.input_res.free();
-                                        rollback_res(res, before);
+                                        self.abort_and_free(res, before);
                                         return Err(err);
                                     }
                                     c
                                 }
                                 Err(err) => {
-                                    self.scratch_res.free();
-                                    self.merger_res.free();
-                                    self.input_res.free();
-                                    rollback_res(res, before);
+                                    self.abort_and_free(res, before);
                                     return Err(err.into());
                                 }
                             }
@@ -1508,17 +1465,27 @@ impl PartitionStream for NativeTraceMergeStream {
                     Ok(None) => {
                         self.done = true;
                         self.input_res.free();
+                        if let Err(err) = self.merger.flush_pending() {
+                            self.abort_and_free(res, before);
+                            return Err(err);
+                        }
+                        if self.merger.is_empty() {
+                            self.abort_and_free(res, before);
+                            return Ok(None);
+                        }
                         match self.finish_and_filter_merger(&eval_ctx) {
                             Ok(Some(out)) => {
                                 let out_bytes = out.memory_bytes();
-                                let handoff = handoff_res(
+                                if let Err(err) = handoff_res(
                                     &mut self.scratch_res,
                                     res.as_deref_mut(),
                                     before,
                                     out_bytes,
-                                );
+                                ) {
+                                    self.abort_and_free(res, before);
+                                    return Err(err);
+                                }
                                 self.scratch_res.free();
-                                handoff?;
                                 return Ok(Some(out));
                             }
                             Ok(None) => {
@@ -1527,18 +1494,13 @@ impl PartitionStream for NativeTraceMergeStream {
                                 return Ok(None);
                             }
                             Err(err) => {
-                                self.scratch_res.free();
-                                self.merger_res.free();
-                                rollback_res(res, before);
+                                self.abort_and_free(res, before);
                                 return Err(err);
                             }
                         }
                     }
                     Err(err) => {
-                        self.scratch_res.free();
-                        self.merger_res.free();
-                        self.input_res.free();
-                        rollback_res(res, before);
+                        self.abort_and_free(res, before);
                         return Err(err);
                     }
                 }
@@ -1549,81 +1511,32 @@ impl PartitionStream for NativeTraceMergeStream {
                 continue;
             };
             let total = batch.raw_len();
-            let trace_id_col = match batch.column_by_name(traces::TRACE_ID) {
-                Some(c) => c,
-                None => {
-                    self.scratch_res.free();
-                    self.merger_res.free();
-                    self.input_res.free();
-                    rollback_res(res, before);
-                    return Err(QueryError::internal(
-                        "trace_id missing from sorted partials",
-                    ));
+            let reconcile_threshold = self.budget_bytes.min(64 * 1024);
+            let ready_to_emit = match self.merger.consume_batch_chunk(
+                &batch,
+                &mut offset,
+                total,
+                Some(ChunkBudget {
+                    budget_bytes: self.budget_bytes,
+                    max_traces: self.max_traces_per_chunk,
+                    merger_res: &mut self.merger_res,
+                    reconcile_threshold,
+                    cancel,
+                }),
+            ) {
+                Ok(ready) => ready,
+                Err(err) => {
+                    drop(batch);
+                    self.abort_and_free(res, before);
+                    return Err(err);
                 }
             };
-
-            let mut ready_to_emit = false;
-            let reconcile_threshold = self.budget_bytes.min(64 * 1024);
-            while offset < total {
-                if cancel.is_cancelled() {
-                    self.scratch_res.free();
-                    self.merger_res.free();
-                    self.input_res.free();
-                    rollback_res(res, before);
-                    return Err(QueryError::Cancelled);
-                }
-                let run_id = match read_fixed16_at(trace_id_col, offset) {
-                    Some(id) => id,
-                    None => {
-                        self.scratch_res.free();
-                        self.merger_res.free();
-                        self.input_res.free();
-                        rollback_res(res, before);
-                        return Err(QueryError::internal("null trace_id in sorted partials"));
-                    }
-                };
-                if let Some(prev_id) = self.current_trace_id
-                    && prev_id != run_id
-                    && (self.merger.size() >= self.budget_bytes
-                        || self.merger.len() >= self.max_traces_per_chunk)
-                {
-                    ready_to_emit = true;
-                    break;
-                }
-
-                let mut run_end = offset + 1;
-                while run_end < total && read_fixed16_at(trace_id_col, run_end) == Some(run_id) {
-                    run_end += 1;
-                }
-
-                if let Err(err) = self.merger.push_range(&batch, offset, run_end) {
-                    self.scratch_res.free();
-                    self.merger_res.free();
-                    self.input_res.free();
-                    rollback_res(res, before);
-                    return Err(err);
-                }
-                if self.merger.size().abs_diff(self.merger_res.size()) >= reconcile_threshold
-                    && let Err(err) =
-                        reconcile_res(Some(&mut self.merger_res), 0, self.merger.size())
-                {
-                    self.scratch_res.free();
-                    self.merger_res.free();
-                    self.input_res.free();
-                    rollback_res(res, before);
-                    return Err(err);
-                }
-                self.current_trace_id = Some(run_id);
-                offset = run_end;
-            }
 
             if self.merger.size() != self.merger_res.size()
                 && let Err(err) = reconcile_res(Some(&mut self.merger_res), 0, self.merger.size())
             {
-                self.scratch_res.free();
-                self.merger_res.free();
-                self.input_res.free();
-                rollback_res(res, before);
+                drop(batch);
+                self.abort_and_free(res, before);
                 return Err(err);
             }
 
@@ -1638,24 +1551,23 @@ impl PartitionStream for NativeTraceMergeStream {
                 match self.finish_and_filter_merger(&eval_ctx) {
                     Ok(Some(out)) => {
                         let out_bytes = out.memory_bytes();
-                        let handoff = handoff_res(
+                        if let Err(err) = handoff_res(
                             &mut self.scratch_res,
                             res.as_deref_mut(),
                             before,
                             out_bytes,
-                        );
+                        ) {
+                            self.abort_and_free(res, before);
+                            return Err(err);
+                        }
                         self.scratch_res.free();
-                        handoff?;
                         return Ok(Some(out));
                     }
                     Ok(None) => {
                         self.scratch_res.free();
                     }
                     Err(err) => {
-                        self.scratch_res.free();
-                        self.merger_res.free();
-                        self.input_res.free();
-                        rollback_res(res, before);
+                        self.abort_and_free(res, before);
                         return Err(err);
                     }
                 }
@@ -1665,7 +1577,7 @@ impl PartitionStream for NativeTraceMergeStream {
 }
 
 // ---------------------------------------------------------------------------
-// NativeTraceMerger: exact 30-column rollup matching `crates/storage/src/partials.rs`
+// SortedTraceMerger: streaming 30-column rollup matching `crates/storage/src/partials.rs`
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1777,11 +1689,11 @@ impl TraceColumn {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Rank {
     root: u8,
     start_time: i64,
-    tie: Option<Vec<u8>>,
+    tie: Option<[u8; 8]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1819,6 +1731,10 @@ impl TraceAcc {
         }
     }
 
+    fn reset(&mut self) {
+        self.slots.fill(None);
+    }
+
     fn update_from_col(
         &mut self,
         slot_idx: usize,
@@ -1826,17 +1742,17 @@ impl TraceAcc {
         col: &Column,
         row: usize,
         ctx: &RowCtx,
-    ) -> Result<usize, QueryError> {
+        size: &mut usize,
+    ) -> Result<(), QueryError> {
         if col.is_null(row) {
-            return Ok(0);
+            return Ok(());
         }
         let slot = &mut self.slots[slot_idx];
-        let grown = match col_kind {
+        match col_kind {
             TraceColumn::TraceId => {
                 let id = read_fixed16_at(col, row)
                     .ok_or_else(|| QueryError::internal("trace_id column type mismatch"))?;
                 *slot = Some(Acc::Fixed16(id));
-                0
             }
             TraceColumn::ProjectId
             | TraceColumn::Name
@@ -1846,24 +1762,20 @@ impl TraceAcc {
             | TraceColumn::Release => {
                 let text = read_str_at(col, row)
                     .ok_or_else(|| QueryError::internal("string column type mismatch"))?;
-                ranked_str_slot(slot, text, ctx)
+                ranked_str_slot(slot, text, ctx.rank, size);
             }
             TraceColumn::InputPreview | TraceColumn::OutputPreview => {
                 if ctx.preview {
                     let text = read_str_at(col, row)
                         .ok_or_else(|| QueryError::internal("preview column type mismatch"))?;
-                    ranked_str_slot(slot, text, ctx)
-                } else {
-                    0
+                    ranked_str_slot(slot, text, ctx.rank, size);
                 }
             }
             TraceColumn::Status => {
                 if ctx.root {
                     let text = read_str_at(col, row)
                         .ok_or_else(|| QueryError::internal("status column type mismatch"))?;
-                    ranked_str_slot(slot, text, ctx)
-                } else {
-                    0
+                    ranked_str_slot(slot, text, ctx.rank, size);
                 }
             }
             TraceColumn::RootSpanId => {
@@ -1871,7 +1783,7 @@ impl TraceAcc {
                     let bytes = read_fixed8_at(col, row)
                         .ok_or_else(|| QueryError::internal("root_span_id column type mismatch"))?;
                     let candidate = Ranked {
-                        rank: ctx.rank.clone(),
+                        rank: ctx.rank,
                         value: bytes,
                     };
                     match slot {
@@ -1880,11 +1792,11 @@ impl TraceAcc {
                                 *kept = candidate;
                             }
                         }
-                        _ => *slot = Some(Acc::RankedFixed8(candidate)),
+                        _ => {
+                            *slot = Some(Acc::RankedFixed8(candidate));
+                            *size = size.saturating_add(8);
+                        }
                     }
-                    8
-                } else {
-                    0
                 }
             }
             TraceColumn::HasRoot => {
@@ -1894,7 +1806,6 @@ impl TraceAcc {
                     Some(Acc::Bool(kept)) => *kept |= val,
                     _ => *slot = Some(Acc::Bool(val)),
                 }
-                0
             }
             TraceColumn::StartTime => {
                 let ts = read_ts_at(col, row)
@@ -1903,7 +1814,6 @@ impl TraceAcc {
                     Some(Acc::I64(kept)) => *kept = (*kept).min(ts),
                     _ => *slot = Some(Acc::I64(ts)),
                 }
-                0
             }
             TraceColumn::EndTime | TraceColumn::LastIngestTime => {
                 let ts = read_ts_at(col, row)
@@ -1912,57 +1822,58 @@ impl TraceAcc {
                     Some(Acc::I64(kept)) => *kept = (*kept).max(ts),
                     _ => *slot = Some(Acc::I64(ts)),
                 }
-                0
             }
             TraceColumn::Tags | TraceColumn::Models | TraceColumn::Prompts => {
-                let list = read_str_list_at(col, row)
-                    .ok_or_else(|| QueryError::internal("string list column type mismatch"))?;
-                match slot {
+                let visited = visit_str_list(col, row, |s| match slot {
                     Some(Acc::StrSet(set)) => {
-                        let mut added = 0usize;
-                        for s in list {
-                            if set.insert(s.clone()) {
-                                added += s.len();
-                            }
+                        if !set.contains(s) {
+                            *size = size.saturating_add(s.len());
+                            set.insert(s.to_owned());
                         }
-                        added
                     }
                     _ => {
-                        let set: BTreeSet<String> = list.into_iter().collect();
-                        let added = set.iter().map(String::len).sum();
+                        let mut set = BTreeSet::new();
+                        *size = size.saturating_add(s.len());
+                        set.insert(s.to_owned());
                         *slot = Some(Acc::StrSet(set));
-                        added
                     }
+                })?;
+                if visited && slot.is_none() {
+                    *slot = Some(Acc::StrSet(BTreeSet::new()));
                 }
             }
             TraceColumn::Metadata => {
-                let entries = read_str_map_at(col, row)
-                    .ok_or_else(|| QueryError::internal("metadata map column type mismatch"))?;
-                if !matches!(slot, Some(Acc::StrMap(_))) {
-                    *slot = Some(Acc::StrMap(BTreeMap::new()));
-                }
-                let Some(Acc::StrMap(map)) = slot else {
-                    return Ok(0);
-                };
-                let mut added = 0usize;
-                for (key, value) in entries {
-                    let candidate = Ranked {
-                        rank: ctx.rank.clone(),
-                        value,
+                let visited = visit_str_map(col, row, |key, value| {
+                    if !matches!(slot, Some(Acc::StrMap(_))) {
+                        *slot = Some(Acc::StrMap(BTreeMap::new()));
+                    }
+                    let Some(Acc::StrMap(map)) = slot else {
+                        return;
                     };
-                    added += key.len() + candidate.value.len();
-                    match map.get_mut(&key) {
+                    match map.get_mut(key) {
                         Some(kept) => {
-                            if candidate < *kept {
-                                *kept = candidate;
+                            if (ctx.rank, value) < (kept.rank, kept.value.as_str()) {
+                                let old_len = kept.value.len();
+                                kept.rank = ctx.rank;
+                                kept.value = value.to_owned();
+                                *size = size.saturating_sub(old_len).saturating_add(value.len());
                             }
                         }
                         None => {
-                            map.insert(key, candidate);
+                            *size = size.saturating_add(key.len()).saturating_add(value.len());
+                            map.insert(
+                                key.to_owned(),
+                                Ranked {
+                                    rank: ctx.rank,
+                                    value: value.to_owned(),
+                                },
+                            );
                         }
                     }
+                })?;
+                if visited && slot.is_none() {
+                    *slot = Some(Acc::StrMap(BTreeMap::new()));
                 }
-                added
             }
             TraceColumn::SpanCount
             | TraceColumn::ErrorCount
@@ -1980,7 +1891,6 @@ impl TraceAcc {
                     Some(Acc::I64(kept)) => *kept = kept.saturating_add(val),
                     _ => *slot = Some(Acc::I64(val)),
                 }
-                0
             }
             TraceColumn::CostTotal => {
                 let val = read_f64_at(col, row)
@@ -1990,28 +1900,30 @@ impl TraceAcc {
                     Some(Acc::Usd(kept)) => *kept = kept.saturating_add(units),
                     _ => *slot = Some(Acc::Usd(units)),
                 }
-                0
             }
-        };
-        Ok(grown)
+        }
+        Ok(())
     }
 }
 
-fn ranked_str_slot(slot: &mut Option<Acc>, text: &str, ctx: &RowCtx) -> usize {
-    let grown = text.len();
-    let candidate = Ranked {
-        rank: ctx.rank.clone(),
-        value: text.to_owned(),
-    };
+fn ranked_str_slot(slot: &mut Option<Acc>, text: &str, rank: Rank, size: &mut usize) {
     match slot {
         Some(Acc::RankedStr(kept)) => {
-            if candidate < *kept {
-                *kept = candidate;
+            if (rank, text) < (kept.rank, kept.value.as_str()) {
+                let old_len = kept.value.len();
+                kept.rank = rank;
+                kept.value = text.to_owned();
+                *size = size.saturating_sub(old_len).saturating_add(text.len());
             }
         }
-        _ => *slot = Some(Acc::RankedStr(candidate)),
+        _ => {
+            *slot = Some(Acc::RankedStr(Ranked {
+                rank,
+                value: text.to_owned(),
+            }));
+            *size = size.saturating_add(text.len());
+        }
     }
-    grown
 }
 
 fn usd_units(value: f64) -> i128 {
@@ -2022,29 +1934,999 @@ fn usd_from_units(units: i128) -> f64 {
     units as f64 / USD_UNITS
 }
 
-/// Spill-aware columnar trace partial merger matching `partials.rs::TraceMerger`.
-pub(crate) struct NativeTraceMerger {
+fn col_matches_trace_type(col: TraceColumn, dt: &DataType) -> bool {
+    match col {
+        TraceColumn::TraceId => *dt == DataType::FixedBytes16,
+        TraceColumn::StartTime => matches!(dt, DataType::TimestampNs { .. } | DataType::I64),
+        TraceColumn::HasRoot => *dt == DataType::Bool,
+        TraceColumn::RootSpanId => matches!(dt, DataType::FixedBytes8 | DataType::Null),
+        TraceColumn::EndTime | TraceColumn::LastIngestTime => {
+            matches!(
+                dt,
+                DataType::TimestampNs { .. } | DataType::I64 | DataType::Null
+            )
+        }
+        TraceColumn::ProjectId
+        | TraceColumn::Name
+        | TraceColumn::Status
+        | TraceColumn::SessionId
+        | TraceColumn::UserId
+        | TraceColumn::Environment
+        | TraceColumn::Release
+        | TraceColumn::InputPreview
+        | TraceColumn::OutputPreview => matches!(dt, DataType::Utf8 | DataType::Null),
+        TraceColumn::Tags | TraceColumn::Models | TraceColumn::Prompts => {
+            matches!(dt, DataType::List(inner) if **inner == DataType::Utf8)
+                || *dt == DataType::Null
+        }
+        TraceColumn::Metadata => matches!(dt, DataType::MapUtf8 | DataType::Null),
+        TraceColumn::SpanCount
+        | TraceColumn::ErrorCount
+        | TraceColumn::LlmCount
+        | TraceColumn::InputTokens
+        | TraceColumn::OutputTokens
+        | TraceColumn::CacheReadTokens
+        | TraceColumn::CacheWriteTokens
+        | TraceColumn::ReasoningTokens
+        | TraceColumn::TotalTokens
+        | TraceColumn::PartialCount => matches!(dt, DataType::I64 | DataType::Null),
+        TraceColumn::CostTotal => matches!(dt, DataType::F64 | DataType::Null),
+    }
+}
+
+struct BatchAccessors<'a> {
+    cols: [Option<&'a Column>; TraceColumn::COUNT],
+    start_col: &'a Column,
+    has_root_col: &'a Column,
+    root_span_col: &'a Column,
+    trace_id_col: &'a Column,
+    flat_trace_ids: Option<&'a [[u8; 16]]>,
+    flat_start_times: Option<&'a [i64]>,
+    flat_has_roots: Option<&'a Bitmap>,
+}
+
+impl<'a> BatchAccessors<'a> {
+    fn resolve(batch: &'a Batch, input_cols: &[TraceColumn]) -> Result<Self, QueryError> {
+        if !batch.selection().is_all(batch.raw_len()) {
+            return Err(ColumnError::InvalidBatch {
+                reason: "SortedTraceMerger requires Selection::All",
+            }
+            .into());
+        }
+        let mut cols: [Option<&'a Column>; TraceColumn::COUNT] = [None; TraceColumn::COUNT];
+        for &col_kind in input_cols {
+            let name = col_kind.name();
+            let col = batch.column_by_name(name).ok_or_else(|| {
+                QueryError::internal(format!("partial batch missing column {name}"))
+            })?;
+            if !col_matches_trace_type(col_kind, &col.data_type()) {
+                return Err(QueryError::internal(format!(
+                    "partial batch column {name} type mismatch"
+                )));
+            }
+            cols[col_kind as usize] = Some(col);
+        }
+
+        let resolve_key = |kind: TraceColumn| -> Result<&'a Column, QueryError> {
+            if let Some(col) = cols[kind as usize] {
+                return Ok(col);
+            }
+            let name = kind.name();
+            let col = batch.column_by_name(name).ok_or_else(|| {
+                QueryError::internal(format!("partial batch missing column {name}"))
+            })?;
+            if !col_matches_trace_type(kind, &col.data_type()) {
+                return Err(QueryError::internal(format!(
+                    "partial batch column {name} type mismatch"
+                )));
+            }
+            Ok(col)
+        };
+
+        let start_col = resolve_key(TraceColumn::StartTime)?;
+        let has_root_col = resolve_key(TraceColumn::HasRoot)?;
+        let root_span_col = resolve_key(TraceColumn::RootSpanId)?;
+        let trace_id_col = resolve_key(TraceColumn::TraceId)?;
+
+        let flat_trace_ids = match trace_id_col {
+            Column::Flat(f) if f.nulls().is_none() => match f.data() {
+                FlatData::FixedBytes16(v) => Some(v.as_slice()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let flat_start_times = match start_col {
+            Column::Flat(f) if f.nulls().is_none() => match f.data() {
+                FlatData::TimestampNs { values, .. } | FlatData::I64(values) => {
+                    Some(values.as_slice())
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let flat_has_roots = match has_root_col {
+            Column::Flat(f) if f.nulls().is_none() => match f.data() {
+                FlatData::Bool(bm) => Some(bm),
+                _ => None,
+            },
+            _ => None,
+        };
+
+        Ok(Self {
+            cols,
+            start_col,
+            has_root_col,
+            root_span_col,
+            trace_id_col,
+            flat_trace_ids,
+            flat_start_times,
+            flat_has_roots,
+        })
+    }
+
+    #[inline]
+    fn read_trace_id(&self, row: usize) -> Result<[u8; 16], QueryError> {
+        if let Some(ids) = self.flat_trace_ids {
+            ids.get(row)
+                .copied()
+                .ok_or_else(|| QueryError::internal("partial trace_id out of bounds"))
+        } else {
+            read_fixed16_at(self.trace_id_col, row)
+                .ok_or_else(|| QueryError::internal("partial trace_id missing"))
+        }
+    }
+
+    #[inline]
+    fn read_start_time(&self, row: usize) -> Result<i64, QueryError> {
+        if let Some(ts) = self.flat_start_times {
+            ts.get(row)
+                .copied()
+                .ok_or_else(|| QueryError::internal("partial start_time out of bounds"))
+        } else {
+            read_ts_at(self.start_col, row)
+                .ok_or_else(|| QueryError::internal("partial start_time missing"))
+        }
+    }
+
+    #[inline]
+    fn read_has_root(&self, row: usize) -> Result<bool, QueryError> {
+        if let Some(bm) = self.flat_has_roots {
+            if row < bm.len() {
+                Ok(bm.get(row))
+            } else {
+                Err(QueryError::internal("partial has_root out of bounds"))
+            }
+        } else {
+            read_bool_at(self.has_root_col, row)
+                .ok_or_else(|| QueryError::internal("partial has_root missing"))
+        }
+    }
+}
+
+fn push_valid_null_bit(nulls: &mut Option<Bitmap>, row_idx: usize, is_valid: bool) {
+    if is_valid {
+        if let Some(bm) = nulls {
+            bm.push(true);
+        }
+    } else {
+        nulls
+            .get_or_insert_with(|| Bitmap::new_ones(row_idx))
+            .push(false);
+    }
+}
+
+fn push_list_item_buf(
+    bytes: &mut Vec<u8>,
+    item_offsets: &mut Vec<u32>,
+    s: &str,
+) -> Result<(), QueryError> {
+    let next_bytes = bytes
+        .len()
+        .checked_add(s.len())
+        .ok_or(ColumnError::Overflow {
+            reason: "list utf8 byte length overflow",
+        })?;
+    let byte_end = u32::try_from(next_bytes).map_err(|_| ColumnError::Overflow {
+        reason: "list utf8 byte length exceeds u32::MAX",
+    })?;
+    let _ = u32::try_from(item_offsets.len()).map_err(|_| ColumnError::Overflow {
+        reason: "list items exceed u32::MAX",
+    })?;
+    bytes.extend_from_slice(s.as_bytes());
+    item_offsets.push(byte_end);
+    Ok(())
+}
+
+fn push_map_entry_buf(
+    key_bytes: &mut Vec<u8>,
+    key_offsets: &mut Vec<u32>,
+    val_bytes: &mut Vec<u8>,
+    val_offsets: &mut Vec<u32>,
+    k: &str,
+    v: &str,
+) -> Result<(), QueryError> {
+    let next_k = key_bytes
+        .len()
+        .checked_add(k.len())
+        .ok_or(ColumnError::Overflow {
+            reason: "map key byte length overflow",
+        })?;
+    let k_end = u32::try_from(next_k).map_err(|_| ColumnError::Overflow {
+        reason: "map key byte length exceeds u32::MAX",
+    })?;
+    let next_v = val_bytes
+        .len()
+        .checked_add(v.len())
+        .ok_or(ColumnError::Overflow {
+            reason: "map value byte length overflow",
+        })?;
+    let v_end = u32::try_from(next_v).map_err(|_| ColumnError::Overflow {
+        reason: "map value byte length exceeds u32::MAX",
+    })?;
+    let _ = u32::try_from(key_offsets.len()).map_err(|_| ColumnError::Overflow {
+        reason: "map entries exceed u32::MAX",
+    })?;
+    key_bytes.extend_from_slice(k.as_bytes());
+    key_offsets.push(k_end);
+    val_bytes.extend_from_slice(v.as_bytes());
+    val_offsets.push(v_end);
+    Ok(())
+}
+
+enum ColBuilder {
+    Fixed16(Vec<[u8; 16]>),
+    Fixed8 {
+        vals: Vec<[u8; 8]>,
+        nulls: Option<Bitmap>,
+    },
+    Bool(Bitmap),
+    TimestampNs {
+        vals: Vec<i64>,
+        nulls: Option<Bitmap>,
+    },
+    I64 {
+        vals: Vec<i64>,
+        nulls: Option<Bitmap>,
+    },
+    F64 {
+        vals: Vec<f64>,
+        nulls: Option<Bitmap>,
+    },
+    Utf8 {
+        offsets: Vec<u32>,
+        bytes: Vec<u8>,
+        nulls: Option<Bitmap>,
+    },
+    ListUtf8 {
+        offsets: Vec<u32>,
+        item_offsets: Vec<u32>,
+        bytes: Vec<u8>,
+    },
+    MapUtf8 {
+        offsets: Vec<u32>,
+        key_offsets: Vec<u32>,
+        key_bytes: Vec<u8>,
+        val_offsets: Vec<u32>,
+        val_bytes: Vec<u8>,
+    },
+}
+
+impl ColBuilder {
+    fn new(col: TraceColumn) -> Self {
+        match col {
+            TraceColumn::TraceId => Self::Fixed16(Vec::new()),
+            TraceColumn::RootSpanId => Self::Fixed8 {
+                vals: Vec::new(),
+                nulls: None,
+            },
+            TraceColumn::HasRoot => Self::Bool(Bitmap::new_zeroed(0)),
+            TraceColumn::StartTime | TraceColumn::EndTime | TraceColumn::LastIngestTime => {
+                Self::TimestampNs {
+                    vals: Vec::new(),
+                    nulls: None,
+                }
+            }
+            TraceColumn::SpanCount
+            | TraceColumn::ErrorCount
+            | TraceColumn::LlmCount
+            | TraceColumn::InputTokens
+            | TraceColumn::OutputTokens
+            | TraceColumn::CacheReadTokens
+            | TraceColumn::CacheWriteTokens
+            | TraceColumn::ReasoningTokens
+            | TraceColumn::TotalTokens
+            | TraceColumn::PartialCount => Self::I64 {
+                vals: Vec::new(),
+                nulls: None,
+            },
+            TraceColumn::CostTotal => Self::F64 {
+                vals: Vec::new(),
+                nulls: None,
+            },
+            TraceColumn::ProjectId
+            | TraceColumn::Name
+            | TraceColumn::Status
+            | TraceColumn::SessionId
+            | TraceColumn::UserId
+            | TraceColumn::Environment
+            | TraceColumn::Release
+            | TraceColumn::InputPreview
+            | TraceColumn::OutputPreview => Self::Utf8 {
+                offsets: Vec::new(),
+                bytes: Vec::new(),
+                nulls: None,
+            },
+            TraceColumn::Tags | TraceColumn::Models | TraceColumn::Prompts => Self::ListUtf8 {
+                offsets: Vec::new(),
+                item_offsets: Vec::new(),
+                bytes: Vec::new(),
+            },
+            TraceColumn::Metadata => Self::MapUtf8 {
+                offsets: Vec::new(),
+                key_offsets: Vec::new(),
+                key_bytes: Vec::new(),
+                val_offsets: Vec::new(),
+                val_bytes: Vec::new(),
+            },
+        }
+    }
+
+    fn clear(&mut self) {
+        match self {
+            Self::Fixed16(v) => *v = Vec::new(),
+            Self::Fixed8 { vals, nulls } => {
+                *vals = Vec::new();
+                *nulls = None;
+            }
+            Self::Bool(bm) => *bm = Bitmap::new_zeroed(0),
+            Self::TimestampNs { vals, nulls } | Self::I64 { vals, nulls } => {
+                *vals = Vec::new();
+                *nulls = None;
+            }
+            Self::F64 { vals, nulls } => {
+                *vals = Vec::new();
+                *nulls = None;
+            }
+            Self::Utf8 {
+                offsets,
+                bytes,
+                nulls,
+            } => {
+                *offsets = Vec::new();
+                *bytes = Vec::new();
+                *nulls = None;
+            }
+            Self::ListUtf8 {
+                offsets,
+                item_offsets,
+                bytes,
+            } => {
+                *offsets = Vec::new();
+                *item_offsets = Vec::new();
+                *bytes = Vec::new();
+            }
+            Self::MapUtf8 {
+                offsets,
+                key_offsets,
+                key_bytes,
+                val_offsets,
+                val_bytes,
+            } => {
+                *offsets = Vec::new();
+                *key_offsets = Vec::new();
+                *key_bytes = Vec::new();
+                *val_offsets = Vec::new();
+                *val_bytes = Vec::new();
+            }
+        }
+    }
+
+    fn memory_bytes(&self) -> usize {
+        match self {
+            Self::Fixed16(v) => v.len() * 16,
+            Self::Fixed8 { vals, nulls } => {
+                vals.len() * 8 + nulls.as_ref().map_or(0, Bitmap::memory_bytes)
+            }
+            Self::Bool(bm) => bm.memory_bytes(),
+            Self::TimestampNs { vals, nulls } | Self::I64 { vals, nulls } => {
+                vals.len() * 8 + nulls.as_ref().map_or(0, Bitmap::memory_bytes)
+            }
+            Self::F64 { vals, nulls } => {
+                vals.len() * 8 + nulls.as_ref().map_or(0, Bitmap::memory_bytes)
+            }
+            Self::Utf8 {
+                offsets,
+                bytes,
+                nulls,
+            } => {
+                if offsets.is_empty() {
+                    0
+                } else {
+                    offsets.len() * 4 + bytes.len() + nulls.as_ref().map_or(0, Bitmap::memory_bytes)
+                }
+            }
+            Self::ListUtf8 {
+                offsets,
+                item_offsets,
+                bytes,
+            } => {
+                if offsets.is_empty() {
+                    0
+                } else {
+                    offsets.len() * 4 + item_offsets.len() * 4 + bytes.len()
+                }
+            }
+            Self::MapUtf8 {
+                offsets,
+                key_offsets,
+                key_bytes,
+                val_offsets,
+                val_bytes,
+            } => {
+                if offsets.is_empty() {
+                    0
+                } else {
+                    offsets.len() * 4
+                        + key_offsets.len() * 4
+                        + key_bytes.len()
+                        + val_offsets.len() * 4
+                        + val_bytes.len()
+                }
+            }
+        }
+    }
+
+    fn push_fixed16(&mut self, val: [u8; 16], cap: usize) -> Result<(), QueryError> {
+        let Self::Fixed16(vals) = self else {
+            return Err(QueryError::internal("builder variant mismatch for fixed16"));
+        };
+        if vals.is_empty() {
+            vals.reserve(cap.min(256));
+        }
+        vals.push(val);
+        Ok(())
+    }
+
+    fn push_fixed8(&mut self, val: Option<[u8; 8]>, cap: usize) -> Result<(), QueryError> {
+        let Self::Fixed8 { vals, nulls } = self else {
+            return Err(QueryError::internal("builder variant mismatch for fixed8"));
+        };
+        let row_idx = vals.len();
+        if vals.is_empty() {
+            vals.reserve(cap.min(256));
+        }
+        match val {
+            Some(b) => {
+                push_valid_null_bit(nulls, row_idx, true);
+                vals.push(b);
+            }
+            None => {
+                push_valid_null_bit(nulls, row_idx, false);
+                vals.push([0u8; 8]);
+            }
+        }
+        Ok(())
+    }
+
+    fn push_bool(&mut self, val: bool) -> Result<(), QueryError> {
+        let Self::Bool(bm) = self else {
+            return Err(QueryError::internal("builder variant mismatch for bool"));
+        };
+        bm.push(val);
+        Ok(())
+    }
+
+    fn push_ts(&mut self, val: Option<i64>, cap: usize) -> Result<(), QueryError> {
+        let Self::TimestampNs { vals, nulls } = self else {
+            return Err(QueryError::internal(
+                "builder variant mismatch for timestamp_ns",
+            ));
+        };
+        let row_idx = vals.len();
+        if vals.is_empty() {
+            vals.reserve(cap.min(256));
+        }
+        match val {
+            Some(v) => {
+                push_valid_null_bit(nulls, row_idx, true);
+                vals.push(v);
+            }
+            None => {
+                push_valid_null_bit(nulls, row_idx, false);
+                vals.push(0);
+            }
+        }
+        Ok(())
+    }
+
+    fn push_i64(&mut self, val: Option<i64>, cap: usize) -> Result<(), QueryError> {
+        let Self::I64 { vals, nulls } = self else {
+            return Err(QueryError::internal("builder variant mismatch for i64"));
+        };
+        let row_idx = vals.len();
+        if vals.is_empty() {
+            vals.reserve(cap.min(256));
+        }
+        match val {
+            Some(v) => {
+                push_valid_null_bit(nulls, row_idx, true);
+                vals.push(v);
+            }
+            None => {
+                push_valid_null_bit(nulls, row_idx, false);
+                vals.push(0);
+            }
+        }
+        Ok(())
+    }
+
+    fn push_f64(&mut self, val: Option<f64>, cap: usize) -> Result<(), QueryError> {
+        let Self::F64 { vals, nulls } = self else {
+            return Err(QueryError::internal("builder variant mismatch for f64"));
+        };
+        let row_idx = vals.len();
+        if vals.is_empty() {
+            vals.reserve(cap.min(256));
+        }
+        match val {
+            Some(v) => {
+                push_valid_null_bit(nulls, row_idx, true);
+                vals.push(v);
+            }
+            None => {
+                push_valid_null_bit(nulls, row_idx, false);
+                vals.push(0.0);
+            }
+        }
+        Ok(())
+    }
+
+    fn push_str(&mut self, val: Option<&str>, cap: usize) -> Result<(), QueryError> {
+        let Self::Utf8 {
+            offsets,
+            bytes,
+            nulls,
+        } = self
+        else {
+            return Err(QueryError::internal("builder variant mismatch for utf8"));
+        };
+        let row_idx = if offsets.is_empty() {
+            let cap = cap.min(256);
+            offsets.reserve(cap + 1);
+            offsets.push(0);
+            0
+        } else {
+            offsets.len() - 1
+        };
+        match val {
+            Some(s) => {
+                let next_len = bytes
+                    .len()
+                    .checked_add(s.len())
+                    .ok_or(ColumnError::Overflow {
+                        reason: "utf8 byte length overflow",
+                    })?;
+                let end = u32::try_from(next_len).map_err(|_| ColumnError::Overflow {
+                    reason: "utf8 byte length exceeds u32::MAX",
+                })?;
+                bytes.extend_from_slice(s.as_bytes());
+                offsets.push(end);
+                push_valid_null_bit(nulls, row_idx, true);
+            }
+            None => {
+                let end = u32::try_from(bytes.len()).map_err(|_| ColumnError::Overflow {
+                    reason: "utf8 byte length exceeds u32::MAX",
+                })?;
+                offsets.push(end);
+                push_valid_null_bit(nulls, row_idx, false);
+            }
+        }
+        Ok(())
+    }
+
+    fn push_list_row_from_set(
+        &mut self,
+        set: Option<&BTreeSet<String>>,
+        cap: usize,
+    ) -> Result<(), QueryError> {
+        let Self::ListUtf8 {
+            offsets,
+            item_offsets,
+            bytes,
+        } = self
+        else {
+            return Err(QueryError::internal("builder variant mismatch for list"));
+        };
+        if offsets.is_empty() {
+            let cap = cap.min(256);
+            offsets.reserve(cap + 1);
+            offsets.push(0);
+            item_offsets.reserve(cap + 1);
+            item_offsets.push(0);
+        }
+        if let Some(items) = set {
+            for s in items {
+                push_list_item_buf(bytes, item_offsets, s.as_str())?;
+            }
+        }
+        let item_count = u32::try_from(item_offsets.len().saturating_sub(1)).map_err(|_| {
+            ColumnError::Overflow {
+                reason: "list items exceed u32::MAX",
+            }
+        })?;
+        offsets.push(item_count);
+        Ok(())
+    }
+
+    fn push_list_row_from_col<'a>(
+        &mut self,
+        col: &'a Column,
+        row: usize,
+        cap: usize,
+        scratch: &mut Vec<&'a str>,
+    ) -> Result<(), QueryError> {
+        let Self::ListUtf8 {
+            offsets,
+            item_offsets,
+            bytes,
+        } = self
+        else {
+            return Err(QueryError::internal("builder variant mismatch for list"));
+        };
+        if offsets.is_empty() {
+            let cap = cap.min(256);
+            offsets.reserve(cap + 1);
+            offsets.push(0);
+            item_offsets.reserve(cap + 1);
+            item_offsets.push(0);
+        }
+        let cp_bytes = bytes.len();
+        let cp_items = item_offsets.len();
+        let mut prev_range: Option<(usize, usize)> = None;
+        let mut unordered = false;
+        let mut overflow_err: Option<QueryError> = None;
+
+        let non_null = visit_str_list(col, row, |s| {
+            if unordered || overflow_err.is_some() {
+                return;
+            }
+            if let Some((ps, pe)) = prev_range
+                && &bytes[ps..pe] >= s.as_bytes()
+            {
+                unordered = true;
+                return;
+            }
+            let start = bytes.len();
+            if let Err(err) = push_list_item_buf(bytes, item_offsets, s) {
+                overflow_err = Some(err);
+                return;
+            }
+            prev_range = Some((start, bytes.len()));
+        })?;
+        if let Some(err) = overflow_err {
+            bytes.truncate(cp_bytes);
+            item_offsets.truncate(cp_items);
+            return Err(err);
+        }
+        if non_null && unordered {
+            bytes.truncate(cp_bytes);
+            item_offsets.truncate(cp_items);
+            scratch.clear();
+            let _ = visit_str_list(col, row, |s| scratch.push(s))?;
+            scratch.sort_unstable();
+            scratch.dedup();
+            for &s in scratch.iter() {
+                push_list_item_buf(bytes, item_offsets, s)?;
+            }
+        }
+        let item_count = u32::try_from(item_offsets.len().saturating_sub(1)).map_err(|_| {
+            ColumnError::Overflow {
+                reason: "list items exceed u32::MAX",
+            }
+        })?;
+        offsets.push(item_count);
+        Ok(())
+    }
+
+    fn push_map_row_from_map(
+        &mut self,
+        map: Option<&BTreeMap<String, Ranked<String>>>,
+        cap: usize,
+    ) -> Result<(), QueryError> {
+        let Self::MapUtf8 {
+            offsets,
+            key_offsets,
+            key_bytes,
+            val_offsets,
+            val_bytes,
+        } = self
+        else {
+            return Err(QueryError::internal("builder variant mismatch for map"));
+        };
+        if offsets.is_empty() {
+            let cap = cap.min(256);
+            offsets.reserve(cap + 1);
+            offsets.push(0);
+            key_offsets.reserve(cap + 1);
+            key_offsets.push(0);
+            val_offsets.reserve(cap + 1);
+            val_offsets.push(0);
+        }
+        if let Some(entries) = map {
+            for (k, r) in entries {
+                push_map_entry_buf(
+                    key_bytes,
+                    key_offsets,
+                    val_bytes,
+                    val_offsets,
+                    k.as_str(),
+                    r.value.as_str(),
+                )?;
+            }
+        }
+        let entry_count = u32::try_from(key_offsets.len().saturating_sub(1)).map_err(|_| {
+            ColumnError::Overflow {
+                reason: "map entries exceed u32::MAX",
+            }
+        })?;
+        offsets.push(entry_count);
+        Ok(())
+    }
+
+    fn push_map_row_from_col<'a>(
+        &mut self,
+        col: &'a Column,
+        row: usize,
+        cap: usize,
+        scratch: &mut Vec<(&'a str, &'a str)>,
+    ) -> Result<(), QueryError> {
+        let Self::MapUtf8 {
+            offsets,
+            key_offsets,
+            key_bytes,
+            val_offsets,
+            val_bytes,
+        } = self
+        else {
+            return Err(QueryError::internal("builder variant mismatch for map"));
+        };
+        if offsets.is_empty() {
+            let cap = cap.min(256);
+            offsets.reserve(cap + 1);
+            offsets.push(0);
+            key_offsets.reserve(cap + 1);
+            key_offsets.push(0);
+            val_offsets.reserve(cap + 1);
+            val_offsets.push(0);
+        }
+        let cp_k_bytes = key_bytes.len();
+        let cp_k_off = key_offsets.len();
+        let cp_v_bytes = val_bytes.len();
+        let cp_v_off = val_offsets.len();
+        let mut prev_key_range: Option<(usize, usize)> = None;
+        let mut unordered = false;
+        let mut overflow_err: Option<QueryError> = None;
+
+        let non_null = visit_str_map(col, row, |k, v| {
+            if unordered || overflow_err.is_some() {
+                return;
+            }
+            if let Some((ps, pe)) = prev_key_range
+                && &key_bytes[ps..pe] >= k.as_bytes()
+            {
+                unordered = true;
+                return;
+            }
+            let start = key_bytes.len();
+            if let Err(err) =
+                push_map_entry_buf(key_bytes, key_offsets, val_bytes, val_offsets, k, v)
+            {
+                overflow_err = Some(err);
+                return;
+            }
+            prev_key_range = Some((start, key_bytes.len()));
+        })?;
+        if let Some(err) = overflow_err {
+            key_bytes.truncate(cp_k_bytes);
+            key_offsets.truncate(cp_k_off);
+            val_bytes.truncate(cp_v_bytes);
+            val_offsets.truncate(cp_v_off);
+            return Err(err);
+        }
+        if non_null && unordered {
+            key_bytes.truncate(cp_k_bytes);
+            key_offsets.truncate(cp_k_off);
+            val_bytes.truncate(cp_v_bytes);
+            val_offsets.truncate(cp_v_off);
+            scratch.clear();
+            let _ = visit_str_map(col, row, |k, v| scratch.push((k, v)))?;
+            scratch.sort_unstable();
+            scratch.dedup_by(|a, b| a.0 == b.0);
+            for &(k, v) in scratch.iter() {
+                push_map_entry_buf(key_bytes, key_offsets, val_bytes, val_offsets, k, v)?;
+            }
+        }
+        let entry_count = u32::try_from(key_offsets.len().saturating_sub(1)).map_err(|_| {
+            ColumnError::Overflow {
+                reason: "map entries exceed u32::MAX",
+            }
+        })?;
+        offsets.push(entry_count);
+        Ok(())
+    }
+
+    fn take_column(&mut self) -> Result<Column, QueryError> {
+        match self {
+            Self::Fixed16(vals) => {
+                let vals = std::mem::take(vals);
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::FixedBytes16(vals),
+                    None,
+                )?))
+            }
+            Self::Fixed8 { vals, nulls } => {
+                let vals = std::mem::take(vals);
+                let nulls = nulls.take();
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::FixedBytes8(vals),
+                    nulls,
+                )?))
+            }
+            Self::Bool(bm) => {
+                let bm = std::mem::replace(bm, Bitmap::new_zeroed(0));
+                Ok(Column::Flat(FlatColumn::try_new(FlatData::Bool(bm), None)?))
+            }
+            Self::TimestampNs { vals, nulls } => {
+                let vals = std::mem::take(vals);
+                let nulls = nulls.take();
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::TimestampNs {
+                        values: vals,
+                        utc: true,
+                    },
+                    nulls,
+                )?))
+            }
+            Self::I64 { vals, nulls } => {
+                let vals = std::mem::take(vals);
+                let nulls = nulls.take();
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::I64(vals),
+                    nulls,
+                )?))
+            }
+            Self::F64 { vals, nulls } => {
+                let vals = std::mem::take(vals);
+                let nulls = nulls.take();
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::F64(vals),
+                    nulls,
+                )?))
+            }
+            Self::Utf8 {
+                offsets,
+                bytes,
+                nulls,
+            } => {
+                if offsets.is_empty() {
+                    return Ok(Column::Flat(FlatColumn::empty(&DataType::Utf8)));
+                }
+                let offsets = std::mem::take(offsets);
+                let bytes = std::mem::take(bytes);
+                let nulls = nulls.take();
+                let data = Utf8Data::try_new(offsets, bytes)?;
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::Utf8(data),
+                    nulls,
+                )?))
+            }
+            Self::ListUtf8 {
+                offsets,
+                item_offsets,
+                bytes,
+            } => {
+                if offsets.is_empty() {
+                    return Ok(Column::Flat(FlatColumn::empty(&DataType::List(Box::new(
+                        DataType::Utf8,
+                    )))));
+                }
+                let offsets = std::mem::take(offsets);
+                let item_offsets = std::mem::take(item_offsets);
+                let bytes = std::mem::take(bytes);
+                let child = FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_new(item_offsets, bytes)?),
+                    None,
+                )?;
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::List {
+                        item_type: DataType::Utf8,
+                        offsets,
+                        values: Box::new(Column::Flat(child)),
+                    },
+                    None,
+                )?))
+            }
+            Self::MapUtf8 {
+                offsets,
+                key_offsets,
+                key_bytes,
+                val_offsets,
+                val_bytes,
+            } => {
+                if offsets.is_empty() {
+                    return Ok(Column::Flat(FlatColumn::empty(&DataType::MapUtf8)));
+                }
+                let offsets = std::mem::take(offsets);
+                let key_offsets = std::mem::take(key_offsets);
+                let key_bytes = std::mem::take(key_bytes);
+                let val_offsets = std::mem::take(val_offsets);
+                let val_bytes = std::mem::take(val_bytes);
+                let keys_data = Utf8Data::try_new(key_offsets, key_bytes)?;
+                let vals_data = Utf8Data::try_new(val_offsets, val_bytes)?;
+                let map_data = MapData::try_new(offsets, keys_data, vals_data, None)?;
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::MapUtf8(Box::new(map_data)),
+                    None,
+                )?))
+            }
+        }
+    }
+}
+
+struct FastScratch<'a> {
+    strs: Vec<&'a str>,
+    map: Vec<(&'a str, &'a str)>,
+}
+
+impl<'a> FastScratch<'a> {
+    fn new() -> Self {
+        Self {
+            strs: Vec::new(),
+            map: Vec::new(),
+        }
+    }
+}
+
+struct ChunkBudget<'a, 'b> {
+    budget_bytes: usize,
+    max_traces: usize,
+    merger_res: &'a mut Reservation,
+    reconcile_threshold: usize,
+    cancel: &'b CancelToken,
+}
+
+/// Streaming columnar trace partial merger for `trace_id ASC` sorted input,
+/// matching `partials.rs` accumulation rules.
+pub(crate) struct SortedTraceMerger {
     input_cols: Vec<TraceColumn>,
     output_cols: Vec<TraceColumn>,
     slot_of: [Option<usize>; TraceColumn::COUNT],
     output_schema: Arc<Schema>,
-    traces: BTreeMap<[u8; 16], TraceAcc>,
-    size: usize,
+    builders: Vec<ColBuilder>,
+    row_count: usize,
+    builders_bytes: usize,
+    pending_id: Option<[u8; 16]>,
+    pending_acc: TraceAcc,
+    pending_size: usize,
+    last_flushed_id: Option<[u8; 16]>,
+    bounds: TimeBounds,
+    initial_cap: usize,
 }
 
-impl std::fmt::Debug for NativeTraceMerger {
+impl std::fmt::Debug for SortedTraceMerger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NativeTraceMerger")
+        f.debug_struct("SortedTraceMerger")
             .field("input_cols", &self.input_cols.len())
             .field("output_cols", &self.output_cols.len())
-            .field("trace_count", &self.traces.len())
-            .field("size_bytes", &self.size)
+            .field("row_count", &self.row_count)
+            .field("has_pending", &self.pending_id.is_some())
+            .field("size_bytes", &self.size())
             .finish()
     }
 }
 
-impl NativeTraceMerger {
-    /// Creates a [`NativeTraceMerger`] for `columns` against the 30-column `full_schema`.
+impl SortedTraceMerger {
+    /// Creates a [`SortedTraceMerger`] for `columns` against the 30-column `full_schema`.
     pub(crate) fn new(columns: &MergeColumns, full_schema: &Schema) -> Result<Self, QueryError> {
         let input_names = columns.input();
         let output_names = columns.output();
@@ -2058,41 +2940,453 @@ impl NativeTraceMerger {
         }
 
         let mut output_cols = Vec::with_capacity(output_names.len());
+        let mut builders = Vec::with_capacity(output_names.len());
         for name in &output_names {
             let col = TraceColumn::from_name(name)
                 .ok_or_else(|| QueryError::internal(format!("unknown trace column {name}")))?;
             output_cols.push(col);
+            builders.push(ColBuilder::new(col));
         }
         let output_indices = indices_of_names(full_schema, &output_names)?;
         let output_schema = Arc::new(full_schema.project(&output_indices)?);
+        let pending_acc = TraceAcc::new(input_cols.len());
 
         Ok(Self {
             input_cols,
             output_cols,
             slot_of,
             output_schema,
-            traces: BTreeMap::new(),
-            size: 0,
+            builders,
+            row_count: 0,
+            builders_bytes: 0,
+            pending_id: None,
+            pending_acc,
+            pending_size: 0,
+            last_flushed_id: None,
+            bounds: TimeBounds::open(),
+            initial_cap: 256,
         })
     }
 
-    /// Number of distinct traces currently accumulated.
+    pub(crate) fn with_bounds(mut self, bounds: TimeBounds) -> Self {
+        self.bounds = bounds;
+        self
+    }
+
+    pub(crate) fn with_initial_cap(mut self, cap: usize) -> Self {
+        self.initial_cap = cap.clamp(1, 256);
+        self
+    }
+
+    /// Number of distinct traces currently accumulated (flushed + pending).
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.traces.len()
+        self.row_count + usize::from(self.pending_id.is_some())
     }
 
-    /// True when no traces have been pushed.
+    /// Number of completed traces currently materialized in output builders.
+    fn flushed_rows(&self) -> usize {
+        self.row_count
+    }
+
+    /// True when no traces have been pushed (neither flushed nor pending).
     pub(crate) fn is_empty(&self) -> bool {
-        self.traces.is_empty()
+        self.row_count == 0 && self.pending_id.is_none()
     }
 
-    /// Tracked heap byte size of accumulated trace states.
+    /// Tracked logical byte size of output builders + pending accumulator state.
     pub(crate) fn size(&self) -> usize {
-        self.size
+        self.builders_bytes + self.pending_size
     }
 
-    /// Folds rows in `start..end` of `partials` (`Selection::All`) into the trace
-    /// accumulators without copying column buffers.
+    fn clear(&mut self) {
+        for builder in &mut self.builders {
+            builder.clear();
+        }
+        self.row_count = 0;
+        self.builders_bytes = 0;
+        self.pending_id = None;
+        self.pending_acc.reset();
+        self.pending_size = 0;
+        self.last_flushed_id = None;
+    }
+
+    fn fold_pending_row(&mut self, acc: &BatchAccessors<'_>, row: usize) -> Result<(), QueryError> {
+        let start_time = acc.read_start_time(row)?;
+        let root = acc.read_has_root(row)?;
+        let tie = if acc.root_span_col.is_null(row) {
+            None
+        } else {
+            Some(
+                read_fixed8_at(acc.root_span_col, row)
+                    .ok_or_else(|| QueryError::internal("root_span_id column type mismatch"))?,
+            )
+        };
+        let ctx = RowCtx {
+            rank: Rank {
+                root: u8::from(!root),
+                start_time,
+                tie,
+            },
+            root,
+            preview: true,
+        };
+        for (slot_idx, &col_kind) in self.input_cols.iter().enumerate() {
+            let col = acc.cols[col_kind as usize]
+                .ok_or_else(|| QueryError::internal("missing input column accessor"))?;
+            self.pending_acc.update_from_col(
+                slot_idx,
+                col_kind,
+                col,
+                row,
+                &ctx,
+                &mut self.pending_size,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn push_single_row<'a>(
+        &mut self,
+        acc: &BatchAccessors<'a>,
+        row: usize,
+        run_id: [u8; 16],
+        start_time: i64,
+        has_root: bool,
+        scratch: &mut FastScratch<'a>,
+    ) -> Result<(), QueryError> {
+        let cap = self.initial_cap;
+        for (&col_kind, builder) in self.output_cols.iter().zip(self.builders.iter_mut()) {
+            match col_kind {
+                TraceColumn::TraceId => builder.push_fixed16(run_id, cap)?,
+                TraceColumn::StartTime => builder.push_ts(Some(start_time), cap)?,
+                TraceColumn::HasRoot => builder.push_bool(has_root)?,
+                TraceColumn::Status => {
+                    let err_col = acc.cols[TraceColumn::ErrorCount as usize];
+                    let errors = match err_col {
+                        Some(c) if !c.is_null(row) => read_i64_at(c, row).ok_or_else(|| {
+                            QueryError::internal("error_count column type mismatch")
+                        })?,
+                        _ => 0,
+                    };
+                    if errors > 0 {
+                        builder.push_str(Some(SpanStatus::Error.as_str()), cap)?;
+                    } else if has_root
+                        && let Some(status_col) = acc.cols[TraceColumn::Status as usize]
+                        && !status_col.is_null(row)
+                    {
+                        let text = read_str_at(status_col, row)
+                            .ok_or_else(|| QueryError::internal("status column type mismatch"))?;
+                        builder.push_str(Some(text), cap)?;
+                    } else {
+                        builder.push_str(Some(SpanStatus::Unset.as_str()), cap)?;
+                    }
+                }
+                TraceColumn::RootSpanId => {
+                    let col = acc.cols[TraceColumn::RootSpanId as usize]
+                        .ok_or_else(|| QueryError::internal("missing root_span_id accessor"))?;
+                    if has_root && !col.is_null(row) {
+                        let bytes = read_fixed8_at(col, row).ok_or_else(|| {
+                            QueryError::internal("root_span_id column type mismatch")
+                        })?;
+                        builder.push_fixed8(Some(bytes), cap)?;
+                    } else {
+                        builder.push_fixed8(None, cap)?;
+                    }
+                }
+                TraceColumn::ProjectId
+                | TraceColumn::Name
+                | TraceColumn::SessionId
+                | TraceColumn::UserId
+                | TraceColumn::Environment
+                | TraceColumn::Release
+                | TraceColumn::InputPreview
+                | TraceColumn::OutputPreview => {
+                    let col = acc.cols[col_kind as usize]
+                        .ok_or_else(|| QueryError::internal("missing string column accessor"))?;
+                    if col.is_null(row) {
+                        builder.push_str(None, cap)?;
+                    } else {
+                        let text = read_str_at(col, row)
+                            .ok_or_else(|| QueryError::internal("string column type mismatch"))?;
+                        builder.push_str(Some(text), cap)?;
+                    }
+                }
+                TraceColumn::EndTime | TraceColumn::LastIngestTime => {
+                    let col = acc.cols[col_kind as usize]
+                        .ok_or_else(|| QueryError::internal("missing timestamp column accessor"))?;
+                    if col.is_null(row) {
+                        builder.push_ts(None, cap)?;
+                    } else {
+                        let ts = read_ts_at(col, row).ok_or_else(|| {
+                            QueryError::internal("timestamp column type mismatch")
+                        })?;
+                        builder.push_ts(Some(ts), cap)?;
+                    }
+                }
+                TraceColumn::SpanCount
+                | TraceColumn::ErrorCount
+                | TraceColumn::LlmCount
+                | TraceColumn::InputTokens
+                | TraceColumn::OutputTokens
+                | TraceColumn::CacheReadTokens
+                | TraceColumn::CacheWriteTokens
+                | TraceColumn::ReasoningTokens
+                | TraceColumn::TotalTokens
+                | TraceColumn::PartialCount => {
+                    let col = acc.cols[col_kind as usize]
+                        .ok_or_else(|| QueryError::internal("missing integer column accessor"))?;
+                    if col.is_null(row) {
+                        builder.push_i64(None, cap)?;
+                    } else {
+                        let val = read_i64_at(col, row)
+                            .ok_or_else(|| QueryError::internal("integer column type mismatch"))?;
+                        builder.push_i64(Some(val), cap)?;
+                    }
+                }
+                TraceColumn::CostTotal => {
+                    let col = acc.cols[col_kind as usize]
+                        .ok_or_else(|| QueryError::internal("missing cost_total accessor"))?;
+                    if col.is_null(row) {
+                        builder.push_f64(None, cap)?;
+                    } else {
+                        let val = read_f64_at(col, row).ok_or_else(|| {
+                            QueryError::internal("cost_total column type mismatch")
+                        })?;
+                        builder.push_f64(Some(usd_from_units(usd_units(val))), cap)?;
+                    }
+                }
+                TraceColumn::Tags | TraceColumn::Models | TraceColumn::Prompts => {
+                    let col = acc.cols[col_kind as usize]
+                        .ok_or_else(|| QueryError::internal("missing list column accessor"))?;
+                    builder.push_list_row_from_col(col, row, cap, &mut scratch.strs)?;
+                }
+                TraceColumn::Metadata => {
+                    let col = acc.cols[col_kind as usize]
+                        .ok_or_else(|| QueryError::internal("missing metadata column accessor"))?;
+                    builder.push_map_row_from_col(col, row, cap, &mut scratch.map)?;
+                }
+            }
+        }
+        self.row_count += 1;
+        self.builders_bytes = self.builders.iter().map(ColBuilder::memory_bytes).sum();
+        Ok(())
+    }
+
+    fn flush_pending(&mut self) -> Result<(), QueryError> {
+        let Some(id) = self.pending_id.take() else {
+            return Ok(());
+        };
+        let start_slot = self.slot_of[TraceColumn::StartTime as usize]
+            .ok_or_else(|| QueryError::internal("missing start_time slot in SortedTraceMerger"))?;
+        let Some(Acc::I64(start_time)) = self.pending_acc.slots[start_slot] else {
+            self.pending_acc.reset();
+            self.pending_size = 0;
+            return Err(QueryError::internal(
+                "missing pending start_time in SortedTraceMerger",
+            ));
+        };
+
+        if self.bounds.contains(start_time) {
+            let cap = self.initial_cap;
+            let error_slot = self.slot_of[TraceColumn::ErrorCount as usize];
+            let status_slot = self.slot_of[TraceColumn::Status as usize];
+
+            for (&col_kind, builder) in self.output_cols.iter().zip(self.builders.iter_mut()) {
+                if col_kind == TraceColumn::Status {
+                    let errors = error_slot
+                        .and_then(|s| self.pending_acc.slots[s].as_ref())
+                        .and_then(|a| match a {
+                            Acc::I64(v) => Some(*v),
+                            _ => None,
+                        })
+                        .unwrap_or(0);
+                    if errors > 0 {
+                        builder.push_str(Some(SpanStatus::Error.as_str()), cap)?;
+                    } else if let Some(Acc::RankedStr(r)) =
+                        status_slot.and_then(|s| self.pending_acc.slots[s].as_ref())
+                    {
+                        builder.push_str(Some(r.value.as_str()), cap)?;
+                    } else {
+                        builder.push_str(Some(SpanStatus::Unset.as_str()), cap)?;
+                    }
+                    continue;
+                }
+
+                let slot_idx = self.slot_of[col_kind as usize].ok_or_else(|| {
+                    QueryError::internal(format!("missing slot for {}", col_kind.name()))
+                })?;
+                let slot = &self.pending_acc.slots[slot_idx];
+                match col_kind {
+                    TraceColumn::TraceId => {
+                        let Some(Acc::Fixed16(tid)) = slot else {
+                            return Err(QueryError::internal("missing trace_id in merger"));
+                        };
+                        builder.push_fixed16(*tid, cap)?;
+                    }
+                    TraceColumn::ProjectId
+                    | TraceColumn::Name
+                    | TraceColumn::SessionId
+                    | TraceColumn::UserId
+                    | TraceColumn::Environment
+                    | TraceColumn::Release
+                    | TraceColumn::InputPreview
+                    | TraceColumn::OutputPreview => match slot {
+                        Some(Acc::RankedStr(r)) => {
+                            builder.push_str(Some(r.value.as_str()), cap)?;
+                        }
+                        _ => builder.push_str(None, cap)?,
+                    },
+                    TraceColumn::RootSpanId => match slot {
+                        Some(Acc::RankedFixed8(r)) => builder.push_fixed8(Some(r.value), cap)?,
+                        _ => builder.push_fixed8(None, cap)?,
+                    },
+                    TraceColumn::HasRoot => {
+                        builder.push_bool(matches!(slot, Some(Acc::Bool(true))))?;
+                    }
+                    TraceColumn::StartTime | TraceColumn::EndTime | TraceColumn::LastIngestTime => {
+                        match slot {
+                            Some(Acc::I64(v)) => builder.push_ts(Some(*v), cap)?,
+                            _ => builder.push_ts(None, cap)?,
+                        }
+                    }
+                    TraceColumn::SpanCount
+                    | TraceColumn::ErrorCount
+                    | TraceColumn::LlmCount
+                    | TraceColumn::InputTokens
+                    | TraceColumn::OutputTokens
+                    | TraceColumn::CacheReadTokens
+                    | TraceColumn::CacheWriteTokens
+                    | TraceColumn::ReasoningTokens
+                    | TraceColumn::TotalTokens
+                    | TraceColumn::PartialCount => match slot {
+                        Some(Acc::I64(v)) => builder.push_i64(Some(*v), cap)?,
+                        _ => builder.push_i64(None, cap)?,
+                    },
+                    TraceColumn::CostTotal => match slot {
+                        Some(Acc::Usd(units)) => {
+                            builder.push_f64(Some(usd_from_units(*units)), cap)?;
+                        }
+                        _ => builder.push_f64(None, cap)?,
+                    },
+                    TraceColumn::Tags | TraceColumn::Models | TraceColumn::Prompts => {
+                        let set = match slot {
+                            Some(Acc::StrSet(set)) => Some(set),
+                            _ => None,
+                        };
+                        builder.push_list_row_from_set(set, cap)?;
+                    }
+                    TraceColumn::Metadata => {
+                        let map = match slot {
+                            Some(Acc::StrMap(map)) => Some(map),
+                            _ => None,
+                        };
+                        builder.push_map_row_from_map(map, cap)?;
+                    }
+                    TraceColumn::Status => unreachable!("handled above"),
+                }
+            }
+            self.row_count += 1;
+            self.builders_bytes = self.builders.iter().map(ColBuilder::memory_bytes).sum();
+        }
+
+        self.last_flushed_id = Some(id);
+        self.pending_acc.reset();
+        self.pending_size = 0;
+        Ok(())
+    }
+
+    fn consume_batch_chunk(
+        &mut self,
+        partials: &Batch,
+        offset: &mut usize,
+        end: usize,
+        mut chunk_limit: Option<ChunkBudget<'_, '_>>,
+    ) -> Result<bool, QueryError> {
+        let acc = BatchAccessors::resolve(partials, &self.input_cols)?;
+        let mut scratch = FastScratch::new();
+
+        while *offset < end {
+            if let Some(ref cb) = chunk_limit
+                && cb.cancel.is_cancelled()
+            {
+                return Err(QueryError::Cancelled);
+            }
+            let run_id = acc.read_trace_id(*offset)?;
+            let mut run_end = *offset + 1;
+            if let Some(ids) = acc.flat_trace_ids {
+                while run_end < end && ids[run_end] == run_id {
+                    run_end += 1;
+                }
+            } else {
+                while run_end < end && read_fixed16_at(acc.trace_id_col, run_end) == Some(run_id) {
+                    run_end += 1;
+                }
+            }
+
+            if let Some(prev_id) = self.pending_id
+                && prev_id != run_id
+            {
+                self.flush_pending()?;
+            }
+
+            if self.pending_id.is_none() {
+                if let Some(prev_flushed) = self.last_flushed_id
+                    && run_id <= prev_flushed
+                {
+                    return Err(QueryError::internal(
+                        "unsorted trace_id in SortedTraceMerger",
+                    ));
+                }
+                if let Some(ref cb) = chunk_limit
+                    && self.row_count > 0
+                    && (self.size() >= cb.budget_bytes || self.row_count >= cb.max_traces)
+                {
+                    return Ok(true);
+                }
+            }
+
+            if self.pending_id.is_none() && run_end == *offset + 1 && run_end < end {
+                let start_time = acc.read_start_time(*offset)?;
+                let has_root = acc.read_has_root(*offset)?;
+                if self.bounds.contains(start_time) {
+                    self.push_single_row(
+                        &acc,
+                        *offset,
+                        run_id,
+                        start_time,
+                        has_root,
+                        &mut scratch,
+                    )?;
+                }
+                self.last_flushed_id = Some(run_id);
+            } else {
+                if self.pending_id.is_none() {
+                    self.pending_id = Some(run_id);
+                    self.pending_size = self.input_cols.len() * size_of::<Option<Acc>>();
+                }
+                for row in *offset..run_end {
+                    self.fold_pending_row(&acc, row)?;
+                }
+                if run_end < end {
+                    self.flush_pending()?;
+                }
+            }
+
+            *offset = run_end;
+
+            if let Some(ref mut cb) = chunk_limit
+                && self.size().abs_diff(cb.merger_res.size()) >= cb.reconcile_threshold
+            {
+                reconcile_res(Some(cb.merger_res), 0, self.size())?;
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Folds `trace_id`-sorted rows in `start..end` of `partials` (`Selection::All`).
+    #[cfg(test)]
     pub(crate) fn push_range(
         &mut self,
         partials: &Batch,
@@ -2102,304 +3396,40 @@ impl NativeTraceMerger {
         if start >= end || partials.is_empty() {
             return Ok(());
         }
-        if end > partials.raw_len() || !partials.selection().is_all(partials.raw_len()) {
+        if end > partials.raw_len() {
             return Err(ColumnError::InvalidBatch {
-                reason: "push_range requires Selection::All and valid start..end bounds",
+                reason: "push_range requires valid start..end bounds",
             }
             .into());
         }
-        let mut col_refs: Vec<(usize, TraceColumn, &Column)> =
-            Vec::with_capacity(self.input_cols.len());
-        for (slot_idx, &col_kind) in self.input_cols.iter().enumerate() {
-            let name = col_kind.name();
-            let col = partials.column_by_name(name).ok_or_else(|| {
-                QueryError::internal(format!("partial batch missing column {name}"))
-            })?;
-            col_refs.push((slot_idx, col_kind, col));
-        }
-
-        let start_col = partials
-            .column_by_name(traces::START_TIME)
-            .ok_or_else(|| QueryError::internal("partial batch missing start_time"))?;
-        let has_root_col = partials
-            .column_by_name(traces::HAS_ROOT)
-            .ok_or_else(|| QueryError::internal("partial batch missing has_root"))?;
-        let root_span_col = partials
-            .column_by_name(traces::ROOT_SPAN_ID)
-            .ok_or_else(|| QueryError::internal("partial batch missing root_span_id"))?;
-        let trace_id_col = partials
-            .column_by_name(traces::TRACE_ID)
-            .ok_or_else(|| QueryError::internal("partial batch missing trace_id"))?;
-
-        let slot_count = self.input_cols.len();
-        let traces = &mut self.traces;
-        let size = &mut self.size;
-
-        for row in start..end {
-            let start_time = read_ts_at(start_col, row)
-                .ok_or_else(|| QueryError::internal("partial start_time missing"))?;
-            let root = read_bool_at(has_root_col, row)
-                .ok_or_else(|| QueryError::internal("partial has_root missing"))?;
-            let tie = read_fixed8_at(root_span_col, row).map(|b| b.to_vec());
-            let trace_id = read_fixed16_at(trace_id_col, row)
-                .ok_or_else(|| QueryError::internal("partial trace_id missing"))?;
-
-            let ctx = RowCtx {
-                rank: Rank {
-                    root: u8::from(!root),
-                    start_time,
-                    tie,
-                },
-                root,
-                preview: true,
-            };
-
-            let fresh = !traces.contains_key(&trace_id);
-            let acc = traces
-                .entry(trace_id)
-                .or_insert_with(|| TraceAcc::new(slot_count));
-            if fresh {
-                *size += size_of::<TraceAcc>() + slot_count * size_of::<Option<Acc>>() + 16 + 32;
-            }
-            for &(slot_idx, col_kind, col) in &col_refs {
-                *size += acc.update_from_col(slot_idx, col_kind, col, row, &ctx)?;
-            }
-        }
+        let mut offset = start;
+        let _ = self.consume_batch_chunk(partials, &mut offset, end, None)?;
         Ok(())
     }
 
-    /// Finalizes all accumulated traces into a compacted `cetra_column::Batch`.
-    pub(crate) fn finish(self) -> Result<Batch, QueryError> {
-        let row_count = self.traces.len();
+    fn take_batch(&mut self) -> Result<Batch, QueryError> {
+        let row_count = self.row_count;
         if row_count == 0 {
-            return Ok(Batch::empty(self.output_schema));
+            return Ok(Batch::empty(Arc::clone(&self.output_schema)));
         }
-        let rows: Vec<&TraceAcc> = self.traces.values().collect();
-        let mut columns = Vec::with_capacity(self.output_cols.len());
-        for &col_kind in &self.output_cols {
-            columns.push(build_merged_column(col_kind, &self.slot_of, &rows)?);
+        let mut columns = Vec::with_capacity(self.builders.len());
+        for builder in &mut self.builders {
+            columns.push(builder.take_column()?);
         }
-        Ok(Batch::try_new_all(self.output_schema, columns, row_count)?)
-    }
-}
-
-fn build_merged_column(
-    col_kind: TraceColumn,
-    slot_of: &[Option<usize>; TraceColumn::COUNT],
-    rows: &[&TraceAcc],
-) -> Result<Column, QueryError> {
-    let n = rows.len();
-    if col_kind == TraceColumn::Status {
-        let error_slot = slot_of[TraceColumn::ErrorCount as usize];
-        let status_slot = slot_of[TraceColumn::Status as usize];
-        let mut strs = Vec::with_capacity(n);
-        for acc in rows {
-            let errors = error_slot
-                .and_then(|s| acc.slots[s].as_ref())
-                .and_then(|a| match a {
-                    Acc::I64(v) => Some(*v),
-                    _ => None,
-                })
-                .unwrap_or(0);
-            if errors > 0 {
-                strs.push(SpanStatus::Error.as_str());
-            } else if let Some(Acc::RankedStr(r)) = status_slot.and_then(|s| acc.slots[s].as_ref())
-            {
-                strs.push(r.value.as_str());
-            } else {
-                strs.push(SpanStatus::Unset.as_str());
-            }
-        }
-        let data = Utf8Data::try_from_slices(strs)?;
-        return Ok(Column::Flat(FlatColumn::try_new(
-            FlatData::Utf8(data),
-            None,
-        )?));
+        self.row_count = 0;
+        self.builders_bytes = 0;
+        Ok(Batch::try_new_all(
+            Arc::clone(&self.output_schema),
+            columns,
+            row_count,
+        )?)
     }
 
-    let slot_idx = slot_of[col_kind as usize]
-        .ok_or_else(|| QueryError::internal(format!("missing slot for {}", col_kind.name())))?;
-
-    match col_kind {
-        TraceColumn::TraceId => {
-            let mut vals = Vec::with_capacity(n);
-            for acc in rows {
-                let Some(Acc::Fixed16(id)) = &acc.slots[slot_idx] else {
-                    return Err(QueryError::internal("missing trace_id in merger"));
-                };
-                vals.push(*id);
-            }
-            Ok(Column::Flat(FlatColumn::try_new(
-                FlatData::FixedBytes16(vals),
-                None,
-            )?))
-        }
-        TraceColumn::ProjectId
-        | TraceColumn::Name
-        | TraceColumn::SessionId
-        | TraceColumn::UserId
-        | TraceColumn::Environment
-        | TraceColumn::Release
-        | TraceColumn::InputPreview
-        | TraceColumn::OutputPreview => {
-            let mut nulls = Bitmap::new_ones(n);
-            let mut vals = Vec::with_capacity(n);
-            for (i, acc) in rows.iter().enumerate() {
-                match &acc.slots[slot_idx] {
-                    Some(Acc::RankedStr(r)) => vals.push(r.value.as_str()),
-                    _ => {
-                        let _ = nulls.set(i, false);
-                        vals.push("");
-                    }
-                }
-            }
-            let data = Utf8Data::try_from_slices(vals)?;
-            Ok(Column::Flat(FlatColumn::try_new(
-                FlatData::Utf8(data),
-                Some(nulls),
-            )?))
-        }
-        TraceColumn::RootSpanId => {
-            let mut nulls = Bitmap::new_ones(n);
-            let mut vals = Vec::with_capacity(n);
-            for (i, acc) in rows.iter().enumerate() {
-                match &acc.slots[slot_idx] {
-                    Some(Acc::RankedFixed8(r)) => vals.push(r.value),
-                    _ => {
-                        let _ = nulls.set(i, false);
-                        vals.push([0u8; 8]);
-                    }
-                }
-            }
-            Ok(Column::Flat(FlatColumn::try_new(
-                FlatData::FixedBytes8(vals),
-                Some(nulls),
-            )?))
-        }
-        TraceColumn::HasRoot => {
-            let mut bm = Bitmap::new_zeroed(n);
-            for (i, acc) in rows.iter().enumerate() {
-                if let Some(Acc::Bool(true)) = &acc.slots[slot_idx] {
-                    let _ = bm.set(i, true);
-                }
-            }
-            Ok(Column::Flat(FlatColumn::try_new(FlatData::Bool(bm), None)?))
-        }
-        TraceColumn::StartTime | TraceColumn::EndTime | TraceColumn::LastIngestTime => {
-            let mut nulls = Bitmap::new_ones(n);
-            let mut vals = Vec::with_capacity(n);
-            for (i, acc) in rows.iter().enumerate() {
-                match &acc.slots[slot_idx] {
-                    Some(Acc::I64(v)) => vals.push(*v),
-                    _ => {
-                        let _ = nulls.set(i, false);
-                        vals.push(0);
-                    }
-                }
-            }
-            Ok(Column::Flat(FlatColumn::try_new(
-                FlatData::TimestampNs {
-                    values: vals,
-                    utc: true,
-                },
-                Some(nulls),
-            )?))
-        }
-        TraceColumn::SpanCount
-        | TraceColumn::ErrorCount
-        | TraceColumn::LlmCount
-        | TraceColumn::InputTokens
-        | TraceColumn::OutputTokens
-        | TraceColumn::CacheReadTokens
-        | TraceColumn::CacheWriteTokens
-        | TraceColumn::ReasoningTokens
-        | TraceColumn::TotalTokens
-        | TraceColumn::PartialCount => {
-            let mut nulls = Bitmap::new_ones(n);
-            let mut vals = Vec::with_capacity(n);
-            for (i, acc) in rows.iter().enumerate() {
-                match &acc.slots[slot_idx] {
-                    Some(Acc::I64(v)) => vals.push(*v),
-                    _ => {
-                        let _ = nulls.set(i, false);
-                        vals.push(0);
-                    }
-                }
-            }
-            Ok(Column::Flat(FlatColumn::try_new(
-                FlatData::I64(vals),
-                Some(nulls),
-            )?))
-        }
-        TraceColumn::CostTotal => {
-            let mut nulls = Bitmap::new_ones(n);
-            let mut vals = Vec::with_capacity(n);
-            for (i, acc) in rows.iter().enumerate() {
-                match &acc.slots[slot_idx] {
-                    Some(Acc::Usd(units)) => vals.push(usd_from_units(*units)),
-                    _ => {
-                        let _ = nulls.set(i, false);
-                        vals.push(0.0);
-                    }
-                }
-            }
-            Ok(Column::Flat(FlatColumn::try_new(
-                FlatData::F64(vals),
-                Some(nulls),
-            )?))
-        }
-        TraceColumn::Tags | TraceColumn::Models | TraceColumn::Prompts => {
-            let mut offsets = Vec::with_capacity(n + 1);
-            offsets.push(0);
-            let mut items: Vec<&str> = Vec::new();
-            for acc in rows {
-                if let Some(Acc::StrSet(set)) = &acc.slots[slot_idx] {
-                    for s in set {
-                        items.push(s.as_str());
-                    }
-                }
-                let end = u32::try_from(items.len()).map_err(|_| ColumnError::Overflow {
-                    reason: "list items exceed u32::MAX",
-                })?;
-                offsets.push(end);
-            }
-            let child =
-                FlatColumn::try_new(FlatData::Utf8(Utf8Data::try_from_slices(items)?), None)?;
-            Ok(Column::Flat(FlatColumn::try_new(
-                FlatData::List {
-                    item_type: DataType::Utf8,
-                    offsets,
-                    values: Box::new(Column::Flat(child)),
-                },
-                None,
-            )?))
-        }
-        TraceColumn::Metadata => {
-            let mut offsets = Vec::with_capacity(n + 1);
-            offsets.push(0);
-            let mut keys: Vec<&str> = Vec::new();
-            let mut vals: Vec<&str> = Vec::new();
-            for acc in rows {
-                if let Some(Acc::StrMap(map)) = &acc.slots[slot_idx] {
-                    for (k, r) in map {
-                        keys.push(k.as_str());
-                        vals.push(r.value.as_str());
-                    }
-                }
-                let end = u32::try_from(keys.len()).map_err(|_| ColumnError::Overflow {
-                    reason: "map entries exceed u32::MAX",
-                })?;
-                offsets.push(end);
-            }
-            let keys_data = Utf8Data::try_from_slices(keys)?;
-            let vals_data = Utf8Data::try_from_slices(vals)?;
-            let map_data = MapData::try_new(offsets, keys_data, vals_data, None)?;
-            Ok(Column::Flat(FlatColumn::try_new(
-                FlatData::MapUtf8(Box::new(map_data)),
-                None,
-            )?))
-        }
-        TraceColumn::Status => unreachable!("handled above"),
+    /// Flushes any trailing pending trace and returns the finalized `Batch`.
+    #[cfg(test)]
+    pub(crate) fn finish(mut self) -> Result<Batch, QueryError> {
+        self.flush_pending()?;
+        self.take_batch()
     }
 }
 
@@ -2944,158 +3974,183 @@ fn read_fixed8_at(col: &Column, row: usize) -> Option<[u8; 8]> {
     }
 }
 
-fn read_str_list_at(col: &Column, row: usize) -> Option<Vec<String>> {
+fn visit_flat_str_list<'a>(
+    flat: &'a FlatColumn,
+    idx: usize,
+    mut f: impl FnMut(&'a str),
+) -> Result<bool, QueryError> {
+    if idx >= flat.len() {
+        return Err(QueryError::internal("string list row out of bounds"));
+    }
+    match flat.data() {
+        FlatData::List {
+            offsets, values, ..
+        } => {
+            let start = *offsets
+                .get(idx)
+                .ok_or_else(|| QueryError::internal("string list start offset out of bounds"))?
+                as usize;
+            let end = *offsets
+                .get(idx + 1)
+                .ok_or_else(|| QueryError::internal("string list end offset out of bounds"))?
+                as usize;
+            if let Column::Flat(vf) = values.as_ref()
+                && vf.nulls().is_none()
+                && let FlatData::Utf8(u) = vf.data()
+            {
+                for i in start..end {
+                    let s = u.get(i).ok_or_else(|| {
+                        QueryError::internal("string list item out of bounds or invalid utf8")
+                    })?;
+                    f(s);
+                }
+            } else {
+                for i in start..end {
+                    if i >= values.len() {
+                        return Err(QueryError::internal("string list item index out of bounds"));
+                    }
+                    if !values.is_null(i) {
+                        let s = read_str_at(values, i).ok_or_else(|| {
+                            QueryError::internal("string list item type mismatch")
+                        })?;
+                        f(s);
+                    }
+                }
+            }
+            Ok(true)
+        }
+        _ => Err(QueryError::internal("string list column type mismatch")),
+    }
+}
+
+fn visit_str_list<'a>(
+    col: &'a Column,
+    row: usize,
+    mut f: impl FnMut(&'a str),
+) -> Result<bool, QueryError> {
+    if row >= col.len() {
+        return Err(QueryError::internal("string list row out of bounds"));
+    }
+    if col.is_null(row) {
+        return Ok(false);
+    }
     match col {
-        Column::Flat(f) => {
-            if f.is_null(row) {
-                return None;
-            }
-            match f.data() {
-                FlatData::List {
-                    offsets, values, ..
-                } => {
-                    let start = *offsets.get(row)? as usize;
-                    let end = *offsets.get(row + 1)? as usize;
-                    let mut out = Vec::with_capacity(end.saturating_sub(start));
-                    for idx in start..end {
-                        if let Some(s) = read_str_at(values, idx) {
-                            out.push(s.to_owned());
+        Column::Flat(flat) => visit_flat_str_list(flat, row, f),
+        Column::Const { value, .. } => match value {
+            ScalarValue::List { values, .. } => {
+                for v in values {
+                    match v {
+                        ScalarValue::Utf8(s) => f(s.as_str()),
+                        ScalarValue::Null(_) => {}
+                        _ => {
+                            return Err(QueryError::internal("string list item type mismatch"));
                         }
                     }
-                    Some(out)
                 }
-                _ => None,
+                Ok(true)
             }
-        }
-        Column::Const { value, len } => {
-            if row >= *len {
-                return None;
-            }
-            match value {
-                ScalarValue::List { values, .. } => {
-                    let mut out = Vec::new();
-                    for v in values {
-                        if let ScalarValue::Utf8(s) = v {
-                            out.push(s.clone());
-                        }
-                    }
-                    Some(out)
-                }
-                _ => None,
-            }
-        }
+            _ => Err(QueryError::internal("string list column type mismatch")),
+        },
         Column::Dict(d) => {
-            if d.is_null(row) {
-                return None;
-            }
-            let code = *d.codes().get(row)? as usize;
-            if d.values().is_null(code) {
-                return None;
-            }
-            match d.values().data() {
-                FlatData::List {
-                    offsets, values, ..
-                } => {
-                    let start = *offsets.get(code)? as usize;
-                    let end = *offsets.get(code + 1)? as usize;
-                    let mut out = Vec::with_capacity(end.saturating_sub(start));
-                    for idx in start..end {
-                        if let Some(s) = read_str_at(values, idx) {
-                            out.push(s.to_owned());
-                        }
-                    }
-                    Some(out)
-                }
-                _ => None,
-            }
+            let code = *d
+                .codes()
+                .get(row)
+                .ok_or_else(|| QueryError::internal("string list dict code out of bounds"))?
+                as usize;
+            visit_flat_str_list(d.values(), code, f)
         }
         Column::Rle(r) => {
-            if row >= r.len() {
-                return None;
-            }
             let phys = r.run_ends().partition_point(|&e| (e as usize) <= row);
-            if r.values().is_null(phys) {
-                return None;
-            }
-            match r.values().data() {
-                FlatData::List {
-                    offsets, values, ..
-                } => {
-                    let start = *offsets.get(phys)? as usize;
-                    let end = *offsets.get(phys + 1)? as usize;
-                    let mut out = Vec::with_capacity(end.saturating_sub(start));
-                    for idx in start..end {
-                        if let Some(s) = read_str_at(values, idx) {
-                            out.push(s.to_owned());
-                        }
-                    }
-                    Some(out)
-                }
-                _ => None,
-            }
+            visit_flat_str_list(r.values(), phys, f)
         }
     }
 }
 
-fn read_str_map_at(col: &Column, row: usize) -> Option<Vec<(String, String)>> {
-    let entries = match col {
-        Column::Flat(f) => {
-            if f.is_null(row) {
-                return None;
+fn visit_flat_str_map<'a>(
+    flat: &'a FlatColumn,
+    idx: usize,
+    mut f: impl FnMut(&'a str, &'a str),
+) -> Result<bool, QueryError> {
+    if idx >= flat.len() {
+        return Err(QueryError::internal("metadata map row out of bounds"));
+    }
+    match flat.data() {
+        FlatData::MapUtf8(m) => {
+            let offsets = m.offsets();
+            let start = *offsets
+                .get(idx)
+                .ok_or_else(|| QueryError::internal("metadata map start offset out of bounds"))?
+                as usize;
+            let end = *offsets
+                .get(idx + 1)
+                .ok_or_else(|| QueryError::internal("metadata map end offset out of bounds"))?
+                as usize;
+            let keys = m.keys();
+            let values = m.values();
+            let val_nulls = m.value_nulls();
+            for i in start..end {
+                if val_nulls.is_some_and(|bm| !bm.get(i)) {
+                    continue;
+                }
+                let k = keys.get(i).ok_or_else(|| {
+                    QueryError::internal("metadata map key out of bounds or invalid utf8")
+                })?;
+                let v = values.get(i).ok_or_else(|| {
+                    QueryError::internal("metadata map value out of bounds or invalid utf8")
+                })?;
+                f(k, v);
             }
-            match f.data() {
-                FlatData::MapUtf8(m) => m.get(row)?,
-                _ => return None,
-            }
+            Ok(true)
         }
-        Column::Const { value, len } => {
-            if row >= *len {
-                return None;
+        _ => Err(QueryError::internal("metadata map column type mismatch")),
+    }
+}
+
+fn visit_str_map<'a>(
+    col: &'a Column,
+    row: usize,
+    mut f: impl FnMut(&'a str, &'a str),
+) -> Result<bool, QueryError> {
+    if row >= col.len() {
+        return Err(QueryError::internal("metadata map row out of bounds"));
+    }
+    if col.is_null(row) {
+        return Ok(false);
+    }
+    match col {
+        Column::Flat(flat) => visit_flat_str_map(flat, row, f),
+        Column::Const { value, .. } => match value {
+            ScalarValue::MapUtf8(entries) => {
+                for (k, v) in entries {
+                    if let Some(val) = v {
+                        f(k.as_str(), val.as_str());
+                    }
+                }
+                Ok(true)
             }
-            match value {
-                ScalarValue::MapUtf8(entries) => entries.clone(),
-                _ => return None,
-            }
-        }
+            _ => Err(QueryError::internal("metadata map column type mismatch")),
+        },
         Column::Dict(d) => {
-            if d.is_null(row) {
-                return None;
-            }
-            let code = *d.codes().get(row)? as usize;
-            if d.values().is_null(code) {
-                return None;
-            }
-            match d.values().data() {
-                FlatData::MapUtf8(m) => m.get(code)?,
-                _ => return None,
-            }
+            let code = *d
+                .codes()
+                .get(row)
+                .ok_or_else(|| QueryError::internal("metadata map dict code out of bounds"))?
+                as usize;
+            visit_flat_str_map(d.values(), code, f)
         }
         Column::Rle(r) => {
-            if row >= r.len() {
-                return None;
-            }
             let phys = r.run_ends().partition_point(|&e| (e as usize) <= row);
-            if r.values().is_null(phys) {
-                return None;
-            }
-            match r.values().data() {
-                FlatData::MapUtf8(m) => m.get(phys)?,
-                _ => return None,
-            }
+            visit_flat_str_map(r.values(), phys, f)
         }
-    };
-    Some(
-        entries
-            .into_iter()
-            .filter_map(|(k, v)| v.map(|val| (k, val)))
-            .collect(),
-    )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cetra_column::GlobalPool;
+    use cetra_column::{DictColumn, Field, GlobalPool, RleColumn};
+    use cetra_core::schema::traces_schema;
+    use proptest::prelude::*;
 
     struct VecBatchesStream {
         batches: VecDeque<Batch>,
@@ -3117,6 +4172,361 @@ mod tests {
             Ok(Some(batch))
         }
     }
+
+    /// Simple `BTreeMap`-backed reference oracle for verifying `SortedTraceMerger` bit-for-bit.
+    struct OracleTraceMerger {
+        input_cols: Vec<TraceColumn>,
+        output_cols: Vec<TraceColumn>,
+        slot_of: [Option<usize>; TraceColumn::COUNT],
+        output_schema: Arc<Schema>,
+        traces: BTreeMap<[u8; 16], TraceAcc>,
+    }
+
+    impl OracleTraceMerger {
+        fn new(columns: &MergeColumns, full_schema: &Schema) -> Result<Self, QueryError> {
+            let input_names = columns.input();
+            let output_names = columns.output();
+            let mut input_cols = Vec::with_capacity(input_names.len());
+            let mut slot_of = [None; TraceColumn::COUNT];
+            for (slot_idx, name) in input_names.iter().enumerate() {
+                let col = TraceColumn::from_name(name)
+                    .ok_or_else(|| QueryError::internal(format!("unknown trace column {name}")))?;
+                slot_of[col as usize] = Some(slot_idx);
+                input_cols.push(col);
+            }
+            let mut output_cols = Vec::with_capacity(output_names.len());
+            for name in &output_names {
+                let col = TraceColumn::from_name(name)
+                    .ok_or_else(|| QueryError::internal(format!("unknown trace column {name}")))?;
+                output_cols.push(col);
+            }
+            let output_indices = indices_of_names(full_schema, &output_names)?;
+            let output_schema = Arc::new(full_schema.project(&output_indices)?);
+            Ok(Self {
+                input_cols,
+                output_cols,
+                slot_of,
+                output_schema,
+                traces: BTreeMap::new(),
+            })
+        }
+
+        fn push_batch(&mut self, partials: &Batch) -> Result<(), QueryError> {
+            if partials.is_empty() {
+                return Ok(());
+            }
+            let acc = BatchAccessors::resolve(partials, &self.input_cols)?;
+            let slot_count = self.input_cols.len();
+            for row in 0..partials.raw_len() {
+                let start_time = acc.read_start_time(row)?;
+                let root = acc.read_has_root(row)?;
+                let tie = if acc.root_span_col.is_null(row) {
+                    None
+                } else {
+                    Some(
+                        read_fixed8_at(acc.root_span_col, row)
+                            .ok_or_else(|| QueryError::internal("root_span_id mismatch"))?,
+                    )
+                };
+                let trace_id = acc.read_trace_id(row)?;
+                let ctx = RowCtx {
+                    rank: Rank {
+                        root: u8::from(!root),
+                        start_time,
+                        tie,
+                    },
+                    root,
+                    preview: true,
+                };
+                let trace_acc = self
+                    .traces
+                    .entry(trace_id)
+                    .or_insert_with(|| TraceAcc::new(slot_count));
+                let mut dummy_size = 0usize;
+                for (slot_idx, &col_kind) in self.input_cols.iter().enumerate() {
+                    let col = acc.cols[col_kind as usize].unwrap();
+                    trace_acc.update_from_col(
+                        slot_idx,
+                        col_kind,
+                        col,
+                        row,
+                        &ctx,
+                        &mut dummy_size,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+
+        fn finish(self, bounds: TimeBounds) -> Result<Batch, QueryError> {
+            let start_slot = self.slot_of[TraceColumn::StartTime as usize].unwrap();
+            let rows: Vec<&TraceAcc> = self
+                .traces
+                .values()
+                .filter(|acc| match acc.slots[start_slot] {
+                    Some(Acc::I64(ts)) => bounds.contains(ts),
+                    _ => false,
+                })
+                .collect();
+            let row_count = rows.len();
+            if row_count == 0 {
+                return Ok(Batch::empty(self.output_schema));
+            }
+            let mut columns = Vec::with_capacity(self.output_cols.len());
+            for &col_kind in &self.output_cols {
+                columns.push(oracle_build_column(col_kind, &self.slot_of, &rows)?);
+            }
+            Ok(Batch::try_new_all(self.output_schema, columns, row_count)?)
+        }
+    }
+
+    fn oracle_build_column(
+        col_kind: TraceColumn,
+        slot_of: &[Option<usize>; TraceColumn::COUNT],
+        rows: &[&TraceAcc],
+    ) -> Result<Column, QueryError> {
+        let n = rows.len();
+        if col_kind == TraceColumn::Status {
+            let error_slot = slot_of[TraceColumn::ErrorCount as usize];
+            let status_slot = slot_of[TraceColumn::Status as usize];
+            let mut strs = Vec::with_capacity(n);
+            for acc in rows {
+                let errors = error_slot
+                    .and_then(|s| acc.slots[s].as_ref())
+                    .and_then(|a| match a {
+                        Acc::I64(v) => Some(*v),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                if errors > 0 {
+                    strs.push(SpanStatus::Error.as_str());
+                } else if let Some(Acc::RankedStr(r)) =
+                    status_slot.and_then(|s| acc.slots[s].as_ref())
+                {
+                    strs.push(r.value.as_str());
+                } else {
+                    strs.push(SpanStatus::Unset.as_str());
+                }
+            }
+            let data = Utf8Data::try_from_slices(strs)?;
+            return Ok(Column::Flat(FlatColumn::try_new(
+                FlatData::Utf8(data),
+                None,
+            )?));
+        }
+
+        let slot_idx = slot_of[col_kind as usize].unwrap();
+        match col_kind {
+            TraceColumn::TraceId => {
+                let vals = rows
+                    .iter()
+                    .map(|acc| match acc.slots[slot_idx] {
+                        Some(Acc::Fixed16(id)) => id,
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::FixedBytes16(vals),
+                    None,
+                )?))
+            }
+            TraceColumn::ProjectId
+            | TraceColumn::Name
+            | TraceColumn::SessionId
+            | TraceColumn::UserId
+            | TraceColumn::Environment
+            | TraceColumn::Release
+            | TraceColumn::InputPreview
+            | TraceColumn::OutputPreview => {
+                let mut nulls = Bitmap::new_ones(n);
+                let mut vals = Vec::with_capacity(n);
+                for (i, acc) in rows.iter().enumerate() {
+                    match &acc.slots[slot_idx] {
+                        Some(Acc::RankedStr(r)) => vals.push(r.value.as_str()),
+                        _ => {
+                            let _ = nulls.set(i, false);
+                            vals.push("");
+                        }
+                    }
+                }
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(vals)?),
+                    Some(nulls),
+                )?))
+            }
+            TraceColumn::RootSpanId => {
+                let mut nulls = Bitmap::new_ones(n);
+                let mut vals = Vec::with_capacity(n);
+                for (i, acc) in rows.iter().enumerate() {
+                    match &acc.slots[slot_idx] {
+                        Some(Acc::RankedFixed8(r)) => vals.push(r.value),
+                        _ => {
+                            let _ = nulls.set(i, false);
+                            vals.push([0u8; 8]);
+                        }
+                    }
+                }
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::FixedBytes8(vals),
+                    Some(nulls),
+                )?))
+            }
+            TraceColumn::HasRoot => {
+                let mut bm = Bitmap::new_zeroed(n);
+                for (i, acc) in rows.iter().enumerate() {
+                    if let Some(Acc::Bool(true)) = &acc.slots[slot_idx] {
+                        let _ = bm.set(i, true);
+                    }
+                }
+                Ok(Column::Flat(FlatColumn::try_new(FlatData::Bool(bm), None)?))
+            }
+            TraceColumn::StartTime | TraceColumn::EndTime | TraceColumn::LastIngestTime => {
+                let mut nulls = Bitmap::new_ones(n);
+                let mut vals = Vec::with_capacity(n);
+                for (i, acc) in rows.iter().enumerate() {
+                    match &acc.slots[slot_idx] {
+                        Some(Acc::I64(v)) => vals.push(*v),
+                        _ => {
+                            let _ = nulls.set(i, false);
+                            vals.push(0);
+                        }
+                    }
+                }
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::TimestampNs {
+                        values: vals,
+                        utc: true,
+                    },
+                    Some(nulls),
+                )?))
+            }
+            TraceColumn::SpanCount
+            | TraceColumn::ErrorCount
+            | TraceColumn::LlmCount
+            | TraceColumn::InputTokens
+            | TraceColumn::OutputTokens
+            | TraceColumn::CacheReadTokens
+            | TraceColumn::CacheWriteTokens
+            | TraceColumn::ReasoningTokens
+            | TraceColumn::TotalTokens
+            | TraceColumn::PartialCount => {
+                let mut nulls = Bitmap::new_ones(n);
+                let mut vals = Vec::with_capacity(n);
+                for (i, acc) in rows.iter().enumerate() {
+                    match &acc.slots[slot_idx] {
+                        Some(Acc::I64(v)) => vals.push(*v),
+                        _ => {
+                            let _ = nulls.set(i, false);
+                            vals.push(0);
+                        }
+                    }
+                }
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::I64(vals),
+                    Some(nulls),
+                )?))
+            }
+            TraceColumn::CostTotal => {
+                let mut nulls = Bitmap::new_ones(n);
+                let mut vals = Vec::with_capacity(n);
+                for (i, acc) in rows.iter().enumerate() {
+                    match &acc.slots[slot_idx] {
+                        Some(Acc::Usd(u)) => vals.push(usd_from_units(*u)),
+                        _ => {
+                            let _ = nulls.set(i, false);
+                            vals.push(0.0);
+                        }
+                    }
+                }
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::F64(vals),
+                    Some(nulls),
+                )?))
+            }
+            TraceColumn::Tags | TraceColumn::Models | TraceColumn::Prompts => {
+                let mut offsets = Vec::with_capacity(n + 1);
+                offsets.push(0u32);
+                let mut items: Vec<&str> = Vec::new();
+                for acc in rows {
+                    if let Some(Acc::StrSet(set)) = &acc.slots[slot_idx] {
+                        for s in set {
+                            items.push(s.as_str());
+                        }
+                    }
+                    offsets.push(items.len() as u32);
+                }
+                let child =
+                    FlatColumn::try_new(FlatData::Utf8(Utf8Data::try_from_slices(items)?), None)?;
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::List {
+                        item_type: DataType::Utf8,
+                        offsets,
+                        values: Box::new(Column::Flat(child)),
+                    },
+                    None,
+                )?))
+            }
+            TraceColumn::Metadata => {
+                let mut offsets = Vec::with_capacity(n + 1);
+                offsets.push(0u32);
+                let mut keys = Vec::new();
+                let mut vals = Vec::new();
+                for acc in rows {
+                    if let Some(Acc::StrMap(map)) = &acc.slots[slot_idx] {
+                        for (k, r) in map {
+                            keys.push(k.as_str());
+                            vals.push(r.value.as_str());
+                        }
+                    }
+                    offsets.push(keys.len() as u32);
+                }
+                let map_data = MapData::try_new(
+                    offsets,
+                    Utf8Data::try_from_slices(keys)?,
+                    Utf8Data::try_from_slices(vals)?,
+                    None,
+                )?;
+                Ok(Column::Flat(FlatColumn::try_new(
+                    FlatData::MapUtf8(Box::new(map_data)),
+                    None,
+                )?))
+            }
+            TraceColumn::Status => unreachable!(),
+        }
+    }
+
+    const ALL_TRACE_COLUMNS: [TraceColumn; TraceColumn::COUNT] = [
+        TraceColumn::ProjectId,
+        TraceColumn::TraceId,
+        TraceColumn::StartTime,
+        TraceColumn::EndTime,
+        TraceColumn::Name,
+        TraceColumn::RootSpanId,
+        TraceColumn::HasRoot,
+        TraceColumn::Status,
+        TraceColumn::SessionId,
+        TraceColumn::UserId,
+        TraceColumn::Environment,
+        TraceColumn::Release,
+        TraceColumn::Tags,
+        TraceColumn::Metadata,
+        TraceColumn::InputPreview,
+        TraceColumn::OutputPreview,
+        TraceColumn::SpanCount,
+        TraceColumn::ErrorCount,
+        TraceColumn::LlmCount,
+        TraceColumn::InputTokens,
+        TraceColumn::OutputTokens,
+        TraceColumn::CacheReadTokens,
+        TraceColumn::CacheWriteTokens,
+        TraceColumn::ReasoningTokens,
+        TraceColumn::TotalTokens,
+        TraceColumn::CostTotal,
+        TraceColumn::Models,
+        TraceColumn::Prompts,
+        TraceColumn::LastIngestTime,
+        TraceColumn::PartialCount,
+    ];
 
     fn make_minimal_partial_batch(schema: &Arc<Schema>, rows: &[([u8; 16], i64)]) -> Batch {
         let mut trace_ids = Vec::with_capacity(rows.len());
@@ -3157,17 +4567,336 @@ mod tests {
         .unwrap()
     }
 
+    fn tid(n: u32) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[12..16].copy_from_slice(&n.to_be_bytes());
+        out
+    }
+
+    fn sid(n: u32) -> [u8; 8] {
+        let mut out = [0u8; 8];
+        out[4..8].copy_from_slice(&n.to_be_bytes());
+        out
+    }
+
+    fn assert_batches_bit_identical(actual: &Batch, expected: &Batch) {
+        assert_eq!(actual.schema(), expected.schema(), "schema mismatch");
+        assert_eq!(actual.num_rows(), expected.num_rows(), "row count mismatch");
+        for (col_idx, field) in actual.schema().fields().iter().enumerate() {
+            let ac = actual.column(col_idx).unwrap();
+            let ec = expected.column(col_idx).unwrap();
+            for row in 0..actual.num_rows() {
+                let av = ac.get_scalar(row).unwrap();
+                let ev = ec.get_scalar(row).unwrap();
+                match (&av, &ev) {
+                    (ScalarValue::F64(a), ScalarValue::F64(b)) => {
+                        assert_eq!(
+                            a.to_bits(),
+                            b.to_bits(),
+                            "f64 bit mismatch at col {} row {row}: {a} vs {b}",
+                            field.name
+                        );
+                    }
+                    _ => assert_eq!(av, ev, "value mismatch at col {} row {row}", field.name),
+                }
+            }
+        }
+    }
+
+    fn encode_col_variant(col: &Column, mode: u8) -> Column {
+        let n = col.len();
+        if n == 0 {
+            return col.clone();
+        }
+        match mode % 4 {
+            0 => col.clone(),
+            1 => {
+                // Const if all rows have identical scalar value.
+                let first = col.get_scalar(0).unwrap();
+                if (1..n).all(|r| col.get_scalar(r).unwrap().semantic_eq(&first)) {
+                    Column::try_new_const(first, n).unwrap()
+                } else {
+                    col.clone()
+                }
+            }
+            2 => {
+                // Dict encoding over the flat values.
+                if let Column::Flat(flat) = col {
+                    let codes: Vec<u32> = (0..n as u32).collect();
+                    Column::Dict(DictColumn::try_new(flat.clone(), codes, None).unwrap())
+                } else {
+                    col.clone()
+                }
+            }
+            _ => {
+                // Rle encoding with 1-row runs.
+                if let Column::Flat(flat) = col {
+                    let run_ends: Vec<u32> = (1..=n as u32).collect();
+                    Column::Rle(RleColumn::try_new(flat.clone(), run_ends).unwrap())
+                } else {
+                    col.clone()
+                }
+            }
+        }
+    }
+
+    fn build_full_partial_batch(rows: &[PartialRowSpec], enc_seed: &[u8]) -> Batch {
+        let schema = traces_schema();
+        let n = rows.len();
+        let mut columns = Vec::with_capacity(TraceColumn::COUNT);
+
+        let str_col = |extract: fn(&PartialRowSpec) -> Option<&str>| -> Column {
+            let mut nulls = Bitmap::new_ones(n);
+            let mut vals = Vec::with_capacity(n);
+            for (i, r) in rows.iter().enumerate() {
+                match extract(r) {
+                    Some(s) => vals.push(s),
+                    None => {
+                        let _ = nulls.set(i, false);
+                        vals.push("");
+                    }
+                }
+            }
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(vals).unwrap()),
+                    Some(nulls),
+                )
+                .unwrap(),
+            )
+        };
+
+        let opt_i64_col = |extract: fn(&PartialRowSpec) -> Option<i64>| -> Column {
+            let mut nulls = Bitmap::new_ones(n);
+            let mut vals = Vec::with_capacity(n);
+            for (i, r) in rows.iter().enumerate() {
+                match extract(r) {
+                    Some(v) => vals.push(v),
+                    None => {
+                        let _ = nulls.set(i, false);
+                        vals.push(0);
+                    }
+                }
+            }
+            Column::Flat(FlatColumn::try_new(FlatData::I64(vals), Some(nulls)).unwrap())
+        };
+
+        for (c_idx, &kind) in ALL_TRACE_COLUMNS.iter().enumerate() {
+            let flat = match kind {
+                TraceColumn::ProjectId => str_col(|r| Some(r.project.as_str())),
+                TraceColumn::TraceId => Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::FixedBytes16(rows.iter().map(|r| r.trace_id).collect()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                TraceColumn::StartTime => Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: rows.iter().map(|r| r.start_time).collect(),
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                TraceColumn::EndTime => Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: rows.iter().map(|r| r.end_time).collect(),
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                TraceColumn::Name => str_col(|r| Some(r.name.as_str())),
+                TraceColumn::RootSpanId => {
+                    let mut nulls = Bitmap::new_ones(n);
+                    let mut vals = Vec::with_capacity(n);
+                    for (i, r) in rows.iter().enumerate() {
+                        match r.root_span_id {
+                            Some(b) => vals.push(b),
+                            None => {
+                                let _ = nulls.set(i, false);
+                                vals.push([0u8; 8]);
+                            }
+                        }
+                    }
+                    Column::Flat(
+                        FlatColumn::try_new(FlatData::FixedBytes8(vals), Some(nulls)).unwrap(),
+                    )
+                }
+                TraceColumn::HasRoot => Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Bool(Bitmap::from_bools(
+                            &rows.iter().map(|r| r.has_root).collect::<Vec<_>>(),
+                        )),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                TraceColumn::Status => str_col(|r| Some(r.status.as_str())),
+                TraceColumn::SessionId => str_col(|r| r.session_id.as_deref()),
+                TraceColumn::UserId => str_col(|r| r.user_id.as_deref()),
+                TraceColumn::Environment => str_col(|r| r.environment.as_deref()),
+                TraceColumn::Release => str_col(|r| r.release.as_deref()),
+                TraceColumn::Tags => list_col(rows.iter().map(|r| r.tags.as_slice())),
+                TraceColumn::Metadata => {
+                    let mut offsets = Vec::with_capacity(n + 1);
+                    offsets.push(0u32);
+                    let mut keys = Vec::new();
+                    let mut vals = Vec::new();
+                    let mut val_nulls =
+                        Bitmap::new_ones(rows.iter().map(|r| r.metadata.len()).sum());
+                    let mut entry_idx = 0usize;
+                    for r in rows {
+                        for (k, v) in &r.metadata {
+                            keys.push(k.as_str());
+                            match v {
+                                Some(s) => vals.push(s.as_str()),
+                                None => {
+                                    let _ = val_nulls.set(entry_idx, false);
+                                    vals.push("");
+                                }
+                            }
+                            entry_idx += 1;
+                        }
+                        offsets.push(keys.len() as u32);
+                    }
+                    let map = MapData::try_new(
+                        offsets,
+                        Utf8Data::try_from_slices(keys).unwrap(),
+                        Utf8Data::try_from_slices(vals).unwrap(),
+                        Some(val_nulls),
+                    )
+                    .unwrap();
+                    Column::Flat(
+                        FlatColumn::try_new(FlatData::MapUtf8(Box::new(map)), None).unwrap(),
+                    )
+                }
+                TraceColumn::InputPreview => str_col(|r| r.input_preview.as_deref()),
+                TraceColumn::OutputPreview => str_col(|r| r.output_preview.as_deref()),
+                TraceColumn::SpanCount => opt_i64_col(|r| Some(r.span_count)),
+                TraceColumn::ErrorCount => opt_i64_col(|r| Some(r.error_count)),
+                TraceColumn::LlmCount => opt_i64_col(|r| Some(r.llm_count)),
+                TraceColumn::InputTokens => opt_i64_col(|r| r.input_tokens),
+                TraceColumn::OutputTokens => opt_i64_col(|r| r.output_tokens),
+                TraceColumn::CacheReadTokens => opt_i64_col(|r| r.cache_read_tokens),
+                TraceColumn::CacheWriteTokens => opt_i64_col(|r| r.cache_write_tokens),
+                TraceColumn::ReasoningTokens => opt_i64_col(|r| r.reasoning_tokens),
+                TraceColumn::TotalTokens => opt_i64_col(|r| r.total_tokens),
+                TraceColumn::CostTotal => {
+                    let mut nulls = Bitmap::new_ones(n);
+                    let mut vals = Vec::with_capacity(n);
+                    for (i, r) in rows.iter().enumerate() {
+                        match r.cost_total {
+                            Some(v) => vals.push(v),
+                            None => {
+                                let _ = nulls.set(i, false);
+                                vals.push(0.0);
+                            }
+                        }
+                    }
+                    Column::Flat(FlatColumn::try_new(FlatData::F64(vals), Some(nulls)).unwrap())
+                }
+                TraceColumn::Models => list_col(rows.iter().map(|r| r.models.as_slice())),
+                TraceColumn::Prompts => list_col(rows.iter().map(|r| r.prompts.as_slice())),
+                TraceColumn::LastIngestTime => Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: rows.iter().map(|r| r.last_ingest_time).collect(),
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                TraceColumn::PartialCount => opt_i64_col(|r| Some(r.partial_count)),
+            };
+            let mode = enc_seed
+                .get(c_idx % enc_seed.len().max(1))
+                .copied()
+                .unwrap_or(0);
+            columns.push(encode_col_variant(&flat, mode));
+        }
+
+        Batch::try_new_all(schema, columns, n).unwrap()
+    }
+
+    fn list_col<'a>(iter: impl Iterator<Item = &'a [String]>) -> Column {
+        let mut offsets = vec![0u32];
+        let mut items: Vec<&str> = Vec::new();
+        for list in iter {
+            for s in list {
+                items.push(s.as_str());
+            }
+            offsets.push(items.len() as u32);
+        }
+        let child = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(items).unwrap()),
+            None,
+        )
+        .unwrap();
+        Column::Flat(
+            FlatColumn::try_new(
+                FlatData::List {
+                    item_type: DataType::Utf8,
+                    offsets,
+                    values: Box::new(Column::Flat(child)),
+                },
+                None,
+            )
+            .unwrap(),
+        )
+    }
+
+    #[derive(Clone)]
+    struct PartialRowSpec {
+        project: String,
+        trace_id: [u8; 16],
+        start_time: i64,
+        end_time: i64,
+        name: String,
+        root_span_id: Option<[u8; 8]>,
+        has_root: bool,
+        status: String,
+        session_id: Option<String>,
+        user_id: Option<String>,
+        environment: Option<String>,
+        release: Option<String>,
+        tags: Vec<String>,
+        metadata: Vec<(String, Option<String>)>,
+        input_preview: Option<String>,
+        output_preview: Option<String>,
+        span_count: i64,
+        error_count: i64,
+        llm_count: i64,
+        input_tokens: Option<i64>,
+        output_tokens: Option<i64>,
+        cache_read_tokens: Option<i64>,
+        cache_write_tokens: Option<i64>,
+        reasoning_tokens: Option<i64>,
+        total_tokens: Option<i64>,
+        cost_total: Option<f64>,
+        models: Vec<String>,
+        prompts: Vec<String>,
+        last_ingest_time: i64,
+        partial_count: i64,
+    }
+
     #[test]
     fn pass26_native_trace_merge_stream_batched_reconcile_parity_and_tight_oom() {
         let full_schema = Schema::try_new_arc(vec![
-            cetra_column::Field::new(traces::TRACE_ID, DataType::FixedBytes16, false),
-            cetra_column::Field::new(
+            Field::new(traces::TRACE_ID, DataType::FixedBytes16, false),
+            Field::new(
                 traces::START_TIME,
                 DataType::TimestampNs { utc: true },
                 false,
             ),
-            cetra_column::Field::new(traces::HAS_ROOT, DataType::Bool, false),
-            cetra_column::Field::new(traces::ROOT_SPAN_ID, DataType::FixedBytes8, true),
+            Field::new(traces::HAS_ROOT, DataType::Bool, false),
+            Field::new(traces::ROOT_SPAN_ID, DataType::FixedBytes8, true),
         ])
         .unwrap();
         let merge_columns = MergeColumns::new(&[traces::TRACE_ID, traces::START_TIME]);
@@ -3175,11 +4904,9 @@ mod tests {
         let make_rows = |count: usize, base: u32| -> Vec<([u8; 16], i64)> {
             let mut out = Vec::with_capacity(count * 2);
             for i in 0..count {
-                let mut tid = [0u8; 16];
-                tid[12..16].copy_from_slice(&(base + i as u32).to_be_bytes());
-                // Two partial rows per trace_id with different start_time -> merged min(start_time).
-                out.push((tid, 1_000 + (i as i64) * 10 + 5));
-                out.push((tid, 1_000 + (i as i64) * 10));
+                let t = tid(base + i as u32);
+                out.push((t, 1_000 + (i as i64) * 10 + 5));
+                out.push((t, 1_000 + (i as i64) * 10));
             }
             out
         };
@@ -3196,19 +4923,14 @@ mod tests {
                 batches: VecDeque::from([b1, b2]),
             }),
             input_res: pool.register("in", false),
-            merger: NativeTraceMerger::new(&merge_columns, &full_schema).unwrap(),
+            merger: SortedTraceMerger::new(&merge_columns, &full_schema).unwrap(),
             merger_res: pool.register("merger", false),
             scratch_res: pool.register("scratch", false),
-            merge_columns: merge_columns.clone(),
-            full_schema: Arc::clone(&full_schema),
-            merged_start_idx: 1,
-            bounds: TimeBounds::default(),
             post_filters: Vec::new(),
             projection: None,
             remaining: None,
             eval: EvalContext::new(0, cancel.clone()),
             active_input: None,
-            current_trace_id: None,
             budget_bytes: 256 * 1024,
             max_traces_per_chunk: 500,
             done: false,
@@ -3228,8 +4950,8 @@ mod tests {
         assert_eq!(global.used(), 0);
 
         // 2. Tight-budget OOM test: pool cap allows reading one small input batch (~4 KiB)
-        //    but cannot fit the merger's post-loop exact reconciliation -> must return
-        //    TooLarge and release ALL reservations cleanly (global.used() == 0).
+        //    but cannot fit the merger's reconciliation -> must return TooLarge and
+        //    release ALL reservations cleanly (global.used() == 0).
         let small_batch = make_minimal_partial_batch(&full_schema, &make_rows(80, 0));
         let batch_mem = small_batch.memory_bytes();
         let tight_global = GlobalPool::new(batch_mem + 256);
@@ -3239,19 +4961,14 @@ mod tests {
                 batches: VecDeque::from([small_batch]),
             }),
             input_res: tight_pool.register("in", false),
-            merger: NativeTraceMerger::new(&merge_columns, &full_schema).unwrap(),
+            merger: SortedTraceMerger::new(&merge_columns, &full_schema).unwrap(),
             merger_res: tight_pool.register("merger", false),
             scratch_res: tight_pool.register("scratch", false),
-            merge_columns,
-            full_schema: Arc::clone(&full_schema),
-            merged_start_idx: 1,
-            bounds: TimeBounds::default(),
             post_filters: Vec::new(),
             projection: None,
             remaining: None,
             eval: EvalContext::new(0, cancel.clone()),
             active_input: None,
-            current_trace_id: None,
             budget_bytes: 256 * 1024,
             max_traces_per_chunk: 500,
             done: false,
@@ -3268,6 +4985,859 @@ mod tests {
         assert_eq!(tight_stream.merger_res.size(), 0);
         assert_eq!(tight_stream.input_res.size(), 0);
         assert_eq!(tight_stream.scratch_res.size(), 0);
+        assert!(tight_stream.active_input.is_none());
+        assert!(tight_stream.merger.is_empty());
         assert_eq!(tight_global.used(), 0);
+    }
+
+    #[test]
+    fn sorted_trace_merger_cross_batch_split_and_single_trace_eof() {
+        let full_schema = traces_schema();
+        let merge_columns = MergeColumns::all();
+        let base_row = |t: u32, start: i64, has_root: bool, span: u32, cost: f64| PartialRowSpec {
+            project: "proj".to_owned(),
+            trace_id: tid(t),
+            start_time: start,
+            end_time: start + 50,
+            name: format!("n-{t}-{start}"),
+            root_span_id: has_root.then(|| sid(span)),
+            has_root,
+            status: if has_root { "ok" } else { "unset" }.to_owned(),
+            session_id: Some(format!("s-{start}")),
+            user_id: Some("u1".to_owned()),
+            environment: Some("prod".to_owned()),
+            release: Some("r1".to_owned()),
+            tags: vec![format!("tag-{start}")],
+            metadata: vec![("k".to_owned(), Some(format!("v-{start}")))],
+            input_preview: Some(format!("in-{start}")),
+            output_preview: None,
+            span_count: 1,
+            error_count: 0,
+            llm_count: 1,
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: Some(30),
+            cost_total: Some(cost),
+            models: vec![format!("m-{start}")],
+            prompts: vec![format!("p@{t}")],
+            last_ingest_time: start + 10,
+            partial_count: 1,
+        };
+
+        // Case A: Trace 2 spans 3 batches (trailing row of B1 + all of B2 + leading row of B3),
+        // followed by trailing single-row Trace 3 at EOF.
+        let b1 = build_full_partial_batch(
+            &[
+                base_row(1, 100, true, 1, 0.1),
+                base_row(2, 200, false, 2, 0.2),
+            ],
+            &[0],
+        );
+        let b2 = build_full_partial_batch(
+            &[
+                base_row(2, 150, true, 3, 0.3),
+                base_row(2, 250, true, 4, 0.4),
+            ],
+            &[2],
+        );
+        let b3 = build_full_partial_batch(
+            &[
+                base_row(2, 180, false, 5, 0.5),
+                base_row(3, 300, true, 6, 0.6),
+            ],
+            &[3],
+        );
+
+        let mut oracle = OracleTraceMerger::new(&merge_columns, &full_schema).unwrap();
+        oracle.push_batch(&b1).unwrap();
+        oracle.push_batch(&b2).unwrap();
+        oracle.push_batch(&b3).unwrap();
+        let expected = oracle.finish(TimeBounds::open()).unwrap();
+
+        let global = GlobalPool::new(16 * 1024 * 1024);
+        let pool = global.try_admit(0, 16 * 1024 * 1024).unwrap();
+        let cancel = CancelToken::new();
+        let mut stream = NativeTraceMergeStream {
+            input: Box::new(VecBatchesStream {
+                batches: VecDeque::from([b1, b2, b3]),
+            }),
+            input_res: pool.register("in", false),
+            merger: SortedTraceMerger::new(&merge_columns, &full_schema)
+                .unwrap()
+                .with_initial_cap(1),
+            merger_res: pool.register("merger", false),
+            scratch_res: pool.register("scratch", false),
+            post_filters: Vec::new(),
+            projection: None,
+            remaining: None,
+            eval: EvalContext::new(0, cancel.clone()),
+            active_input: None,
+            budget_bytes: 128,
+            max_traces_per_chunk: 1,
+            done: false,
+        };
+        let mut out_batches = Vec::new();
+        let mut out_res = pool.register("out", false);
+        while let Some(batch) = stream.next_batch(&cancel, Some(&mut out_res)).unwrap() {
+            assert_eq!(out_res.size(), batch.memory_bytes());
+            out_batches.push(batch);
+            out_res.free();
+        }
+        assert!(out_batches.len() >= 2, "expected chunked emissions");
+        let refs: Vec<&Batch> = out_batches.iter().collect();
+        let actual = Batch::concat(Arc::clone(&full_schema), &refs, None).unwrap();
+        assert_batches_bit_identical(&actual, &expected);
+        assert_eq!(global.used(), 0);
+
+        // Case B: Single-trace-only stream (1 batch, 1 row -> must NOT be dropped on EOF!).
+        let single_b = build_full_partial_batch(&[base_row(7, 500, true, 7, 0.25)], &[0]);
+        let mut merger = SortedTraceMerger::new(&merge_columns, &full_schema).unwrap();
+        merger.push_range(&single_b, 0, single_b.raw_len()).unwrap();
+        assert!(!merger.is_empty());
+        assert_eq!(merger.len(), 1);
+        assert!(merger.size() > 0);
+        let merged_single = merger.finish().unwrap();
+        assert_eq!(merged_single.num_rows(), 1);
+
+        let mut single_stream = NativeTraceMergeStream {
+            input: Box::new(VecBatchesStream {
+                batches: VecDeque::from([single_b]),
+            }),
+            input_res: pool.register("in", false),
+            merger: SortedTraceMerger::new(&merge_columns, &full_schema).unwrap(),
+            merger_res: pool.register("merger", false),
+            scratch_res: pool.register("scratch", false),
+            post_filters: Vec::new(),
+            projection: None,
+            remaining: None,
+            eval: EvalContext::new(0, cancel.clone()),
+            active_input: None,
+            budget_bytes: 64 * 1024,
+            max_traces_per_chunk: 100,
+            done: false,
+        };
+        let only = single_stream
+            .next_batch(&cancel, Some(&mut out_res))
+            .unwrap()
+            .unwrap();
+        assert_batches_bit_identical(&only, &merged_single);
+        drop(only);
+        out_res.free();
+        assert!(
+            single_stream
+                .next_batch(&cancel, Some(&mut out_res))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(global.used(), 0);
+    }
+
+    #[test]
+    fn sorted_trace_merger_unsorted_duplicate_tags_and_metadata_single_row() {
+        let full_schema = traces_schema();
+        let merge_columns = MergeColumns::all();
+        let mk = |t: u32, tags: Vec<&str>, meta: Vec<(&str, Option<&str>)>| PartialRowSpec {
+            project: "proj".to_owned(),
+            trace_id: tid(t),
+            start_time: 1_000 + i64::from(t),
+            end_time: 1_100 + i64::from(t),
+            name: format!("t-{t}"),
+            root_span_id: Some(sid(t)),
+            has_root: true,
+            status: "ok".to_owned(),
+            session_id: None,
+            user_id: None,
+            environment: None,
+            release: None,
+            tags: tags.into_iter().map(str::to_owned).collect(),
+            metadata: meta
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.map(str::to_owned)))
+                .collect(),
+            input_preview: None,
+            output_preview: None,
+            span_count: 1,
+            error_count: 0,
+            llm_count: 0,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: None,
+            cost_total: None,
+            models: vec![
+                "z-model".to_owned(),
+                "a-model".to_owned(),
+                "z-model".to_owned(),
+            ],
+            prompts: vec!["p@2".to_owned(), "p@1".to_owned(), "p@1".to_owned()],
+            last_ingest_time: 2_000,
+            partial_count: 1,
+        };
+
+        // Row 1 (trace 2) is an interior single-row run (`run_end == offset + 1 && run_end < total`),
+        // so it exercises the streaming fast path's checkpoint-and-sort fallback.
+        let batch = build_full_partial_batch(
+            &[
+                mk(1, vec!["a"], vec![("k", Some("v"))]),
+                mk(
+                    2,
+                    vec!["z", "a", "z", "m", "a"],
+                    vec![
+                        ("b", Some("2")),
+                        ("a", Some("z")),
+                        ("c", None),
+                        ("a", Some("a")),
+                        ("b", Some("1")),
+                    ],
+                ),
+                mk(3, vec!["b"], vec![("x", Some("y"))]),
+            ],
+            &[0],
+        );
+
+        let mut oracle = OracleTraceMerger::new(&merge_columns, &full_schema).unwrap();
+        oracle.push_batch(&batch).unwrap();
+        let expected = oracle.finish(TimeBounds::open()).unwrap();
+
+        let mut merger = SortedTraceMerger::new(&merge_columns, &full_schema).unwrap();
+        merger.push_range(&batch, 0, batch.raw_len()).unwrap();
+        let actual = merger.finish().unwrap();
+
+        assert_batches_bit_identical(&actual, &expected);
+        assert_eq!(
+            actual
+                .column_by_name(traces::TAGS)
+                .unwrap()
+                .get_scalar(1)
+                .unwrap(),
+            ScalarValue::List {
+                item_type: DataType::Utf8,
+                values: vec![
+                    ScalarValue::Utf8("a".to_owned()),
+                    ScalarValue::Utf8("m".to_owned()),
+                    ScalarValue::Utf8("z".to_owned()),
+                ],
+            }
+        );
+        assert_eq!(
+            actual
+                .column_by_name(traces::METADATA)
+                .unwrap()
+                .get_scalar(1)
+                .unwrap(),
+            ScalarValue::MapUtf8(vec![
+                ("a".to_owned(), Some("a".to_owned())),
+                ("b".to_owned(), Some("1".to_owned())),
+            ])
+        );
+
+        // Also check DataType::I64 timestamps and DataType::Null on nullable/list/map columns.
+        let null_typed_schema = Schema::try_new_arc(vec![
+            Field::new(traces::TRACE_ID, DataType::FixedBytes16, false),
+            Field::new(traces::START_TIME, DataType::I64, false),
+            Field::new(traces::HAS_ROOT, DataType::Bool, false),
+            Field::new(traces::ROOT_SPAN_ID, DataType::Null, true),
+            Field::new(traces::SESSION_ID, DataType::Null, true),
+            Field::new(traces::TAGS, DataType::Null, true),
+            Field::new(traces::METADATA, DataType::Null, true),
+        ])
+        .unwrap();
+        let cols_subset = MergeColumns::new(&[
+            traces::TRACE_ID,
+            traces::START_TIME,
+            traces::SESSION_ID,
+            traces::TAGS,
+            traces::METADATA,
+        ]);
+        let null_batch = Batch::try_new_all(
+            Arc::clone(&null_typed_schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::FixedBytes16(vec![tid(1), tid(2)]), None)
+                        .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![100, 200]), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::Bool(Bitmap::from_bools(&[false, true])), None)
+                        .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::Null(2), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::Null(2), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::Null(2), None).unwrap()),
+                Column::Flat(FlatColumn::try_new(FlatData::Null(2), None).unwrap()),
+            ],
+            2,
+        )
+        .unwrap();
+        let mut null_merger = SortedTraceMerger::new(&cols_subset, &full_schema).unwrap();
+        null_merger
+            .push_range(&null_batch, 0, null_batch.raw_len())
+            .unwrap();
+        let null_out = null_merger.finish().unwrap();
+        assert_eq!(null_out.num_rows(), 2);
+        assert!(
+            null_out
+                .column_by_name(traces::SESSION_ID)
+                .unwrap()
+                .is_null(0)
+        );
+        assert_eq!(
+            null_out
+                .column_by_name(traces::TAGS)
+                .unwrap()
+                .get_scalar(0)
+                .unwrap(),
+            ScalarValue::List {
+                item_type: DataType::Utf8,
+                values: vec![],
+            }
+        );
+        assert_eq!(
+            null_out
+                .column_by_name(traces::METADATA)
+                .unwrap()
+                .get_scalar(0)
+                .unwrap(),
+            ScalarValue::MapUtf8(vec![])
+        );
+    }
+
+    #[test]
+    fn sorted_trace_merger_rejects_unsorted_trace_id() {
+        let full_schema = Schema::try_new_arc(vec![
+            Field::new(traces::TRACE_ID, DataType::FixedBytes16, false),
+            Field::new(
+                traces::START_TIME,
+                DataType::TimestampNs { utc: true },
+                false,
+            ),
+            Field::new(traces::HAS_ROOT, DataType::Bool, false),
+            Field::new(traces::ROOT_SPAN_ID, DataType::FixedBytes8, true),
+        ])
+        .unwrap();
+        let merge_columns = MergeColumns::new(&[traces::TRACE_ID, traces::START_TIME]);
+
+        // 1. Descending within a batch.
+        let desc_batch = make_minimal_partial_batch(&full_schema, &[(tid(2), 10), (tid(1), 20)]);
+        let mut merger = SortedTraceMerger::new(&merge_columns, &full_schema).unwrap();
+        let err = merger
+            .push_range(&desc_batch, 0, desc_batch.raw_len())
+            .unwrap_err();
+        assert!(matches!(err, QueryError::Internal { .. }));
+
+        // 2. Non-contiguous duplicate trace_id (`A, B, A`).
+        let split_dup =
+            make_minimal_partial_batch(&full_schema, &[(tid(1), 10), (tid(2), 20), (tid(1), 30)]);
+        let mut merger2 = SortedTraceMerger::new(&merge_columns, &full_schema).unwrap();
+        let err2 = merger2
+            .push_range(&split_dup, 0, split_dup.raw_len())
+            .unwrap_err();
+        assert!(matches!(err2, QueryError::Internal { .. }));
+
+        // 3. Descending across batch boundary via NativeTraceMergeStream cleans up reservations.
+        let global = GlobalPool::new(1024 * 1024);
+        let pool = global.try_admit(0, 1024 * 1024).unwrap();
+        let cancel = CancelToken::new();
+        let b1 = make_minimal_partial_batch(&full_schema, &[(tid(5), 10)]);
+        let b2 = make_minimal_partial_batch(&full_schema, &[(tid(3), 20)]);
+        let mut stream = NativeTraceMergeStream {
+            input: Box::new(VecBatchesStream {
+                batches: VecDeque::from([b1, b2]),
+            }),
+            input_res: pool.register("in", false),
+            merger: SortedTraceMerger::new(&merge_columns, &full_schema).unwrap(),
+            merger_res: pool.register("merger", false),
+            scratch_res: pool.register("scratch", false),
+            post_filters: Vec::new(),
+            projection: None,
+            remaining: None,
+            eval: EvalContext::new(0, cancel.clone()),
+            active_input: None,
+            budget_bytes: 1024 * 1024,
+            max_traces_per_chunk: 500,
+            done: false,
+        };
+        let mut out_res = pool.register("out", false);
+        let err3 = stream.next_batch(&cancel, Some(&mut out_res)).unwrap_err();
+        assert!(matches!(err3, QueryError::Internal { .. }));
+        assert_eq!(out_res.size(), 0);
+        assert_eq!(stream.merger_res.size(), 0);
+        assert_eq!(stream.input_res.size(), 0);
+        assert_eq!(stream.scratch_res.size(), 0);
+        assert!(stream.active_input.is_none());
+        assert_eq!(global.used(), 0);
+    }
+
+    #[test]
+    fn sorted_trace_merger_tight_pool_and_cancel_cleanup() {
+        let full_schema = Schema::try_new_arc(vec![
+            Field::new(traces::TRACE_ID, DataType::FixedBytes16, false),
+            Field::new(
+                traces::START_TIME,
+                DataType::TimestampNs { utc: true },
+                false,
+            ),
+            Field::new(traces::HAS_ROOT, DataType::Bool, false),
+            Field::new(traces::ROOT_SPAN_ID, DataType::FixedBytes8, true),
+        ])
+        .unwrap();
+        let merge_columns = MergeColumns::new(&[traces::TRACE_ID, traces::START_TIME]);
+
+        let rows: Vec<([u8; 16], i64)> = (0..30).map(|i| (tid(i), 100 + i64::from(i))).collect();
+        let b1 = make_minimal_partial_batch(&full_schema, &rows[..15]);
+        let b2 = make_minimal_partial_batch(&full_schema, &rows[15..]);
+
+        // 1. Mid-stream cancel after emitting first chunk (while `active_input` is populated).
+        let global = GlobalPool::new(1024 * 1024);
+        let pool = global.try_admit(0, 1024 * 1024).unwrap();
+        let cancel = CancelToken::new();
+        let mut stream = NativeTraceMergeStream {
+            input: Box::new(VecBatchesStream {
+                batches: VecDeque::from([b1.clone(), b2.clone()]),
+            }),
+            input_res: pool.register("in", false),
+            merger: SortedTraceMerger::new(&merge_columns, &full_schema).unwrap(),
+            merger_res: pool.register("merger", false),
+            scratch_res: pool.register("scratch", false),
+            post_filters: Vec::new(),
+            projection: None,
+            remaining: None,
+            eval: EvalContext::new(0, cancel.clone()),
+            active_input: None,
+            budget_bytes: 1024 * 1024,
+            max_traces_per_chunk: 5,
+            done: false,
+        };
+        let mut out_res = pool.register("out", false);
+        let first = stream
+            .next_batch(&cancel, Some(&mut out_res))
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.num_rows(), 5);
+        assert!(stream.active_input.is_some());
+        drop(first);
+        out_res.free();
+
+        cancel.cancel();
+        let err = stream.next_batch(&cancel, Some(&mut out_res)).unwrap_err();
+        assert!(matches!(err, QueryError::Cancelled));
+        assert_eq!(out_res.size(), 0);
+        assert_eq!(stream.merger_res.size(), 0);
+        assert_eq!(stream.input_res.size(), 0);
+        assert_eq!(stream.scratch_res.size(), 0);
+        assert!(stream.active_input.is_none());
+        assert!(stream.merger.is_empty());
+        assert_eq!(global.used(), 0);
+
+        // 2. Tight-pool TooLarge during mid-batch chunking (`active_input.is_some()` path).
+        let tight_cap = b1.memory_bytes() + 48;
+        let tight_global = GlobalPool::new(tight_cap);
+        let tight_pool = tight_global.try_admit(0, tight_cap).unwrap();
+        let fresh_cancel = CancelToken::new();
+        let mut tight_stream = NativeTraceMergeStream {
+            input: Box::new(VecBatchesStream {
+                batches: VecDeque::from([b1, b2]),
+            }),
+            input_res: tight_pool.register("in", false),
+            merger: SortedTraceMerger::new(&merge_columns, &full_schema).unwrap(),
+            merger_res: tight_pool.register("merger", false),
+            scratch_res: tight_pool.register("scratch", false),
+            post_filters: Vec::new(),
+            projection: None,
+            remaining: None,
+            eval: EvalContext::new(0, fresh_cancel.clone()),
+            active_input: None,
+            budget_bytes: 256,
+            max_traces_per_chunk: 8,
+            done: false,
+        };
+        let mut tight_out = tight_pool.register("out", false);
+        let err2 = tight_stream
+            .next_batch(&fresh_cancel, Some(&mut tight_out))
+            .unwrap_err();
+        assert!(matches!(err2, QueryError::TooLarge));
+        assert_eq!(tight_out.size(), 0);
+        assert_eq!(tight_stream.merger_res.size(), 0);
+        assert_eq!(tight_stream.input_res.size(), 0);
+        assert_eq!(tight_stream.scratch_res.size(), 0);
+        assert!(tight_stream.active_input.is_none());
+        assert!(tight_stream.merger.is_empty());
+        assert_eq!(tight_global.used(), 0);
+    }
+
+    #[test]
+    fn native_trace_merge_stream_limit_filter_projection_and_limit_1_unsorted() {
+        let full_schema = traces_schema();
+        let merge_columns =
+            MergeColumns::new(&[traces::TRACE_ID, traces::START_TIME, traces::SPAN_COUNT]);
+        let input_indices = indices_of_names(&full_schema, &merge_columns.input()).unwrap();
+        let output_indices = indices_of_names(&full_schema, &merge_columns.output()).unwrap();
+        let merged_schema = Arc::new(full_schema.project(&output_indices).unwrap());
+        let trace_id_idx = merged_schema.index_of(traces::TRACE_ID).unwrap();
+        let span_count_idx = merged_schema.index_of(traces::SPAN_COUNT).unwrap();
+        let projection = vec![trace_id_idx, span_count_idx];
+        let projected_schema = Arc::new(merged_schema.project(&projection).unwrap());
+
+        let mk_row = |t: u32, span_count: i64| PartialRowSpec {
+            project: "proj".to_owned(),
+            trace_id: tid(t),
+            start_time: 1_000 + i64::from(t) * 10,
+            end_time: 1_100 + i64::from(t) * 10,
+            name: format!("t-{t}"),
+            root_span_id: Some(sid(t)),
+            has_root: true,
+            status: "ok".to_owned(),
+            session_id: None,
+            user_id: None,
+            environment: None,
+            release: None,
+            tags: Vec::new(),
+            metadata: Vec::new(),
+            input_preview: None,
+            output_preview: None,
+            span_count,
+            error_count: 0,
+            llm_count: 0,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: None,
+            cost_total: None,
+            models: Vec::new(),
+            prompts: Vec::new(),
+            last_ingest_time: 2_000,
+            partial_count: 1,
+        };
+
+        // (a) Chunk 1 (traces 1..=2) filters completely to empty (`span_count < 2`);
+        //     Chunk 2 (traces 3..=4) emits 2 projected rows;
+        //     Chunk 3 (traces 5..=6, stopped at trace 7) exhausts `LIMIT 3` mid-chunk at trace 5;
+        //     queued batch `b2` is never read and all reservations return to 0.
+        let b1 = build_full_partial_batch(
+            &[
+                mk_row(1, 1),
+                mk_row(2, 1),
+                mk_row(3, 2),
+                mk_row(4, 2),
+                mk_row(5, 3),
+                mk_row(6, 4),
+                mk_row(7, 5),
+            ],
+            &[0],
+        )
+        .project(&input_indices)
+        .unwrap();
+        let b2 = build_full_partial_batch(&[mk_row(8, 6)], &[0])
+            .project(&input_indices)
+            .unwrap();
+
+        let post_filters = vec![Expr::Binary {
+            left: Box::new(Expr::Column {
+                index: span_count_idx,
+                name: traces::SPAN_COUNT.to_owned(),
+                data_type: DataType::I64,
+            }),
+            op: BinaryOp::GtEq,
+            right: Box::new(Expr::Literal(ScalarValue::I64(2))),
+            data_type: DataType::Bool,
+        }];
+
+        let global = GlobalPool::new(1024 * 1024);
+        let pool = global.try_admit(0, 1024 * 1024).unwrap();
+        let cancel = CancelToken::new();
+        let mut stream = NativeTraceMergeStream {
+            input: Box::new(VecBatchesStream {
+                batches: VecDeque::from([b1, b2]),
+            }),
+            input_res: pool.register("in", false),
+            merger: SortedTraceMerger::new(&merge_columns, &full_schema)
+                .unwrap()
+                .with_initial_cap(2),
+            merger_res: pool.register("merger", false),
+            scratch_res: pool.register("scratch", false),
+            post_filters,
+            projection: Some(projection),
+            remaining: Some(Arc::new(AtomicUsize::new(3))),
+            eval: EvalContext::new(0, cancel.clone()),
+            active_input: None,
+            budget_bytes: 1024 * 1024,
+            max_traces_per_chunk: 2,
+            done: false,
+        };
+
+        let mut out_batches = Vec::new();
+        let mut out_res = pool.register("out", false);
+        while let Some(batch) = stream.next_batch(&cancel, Some(&mut out_res)).unwrap() {
+            assert_eq!(out_res.size(), batch.memory_bytes());
+            out_batches.push(batch);
+            out_res.free();
+        }
+        assert_eq!(out_res.size(), 0);
+        assert_eq!(stream.merger_res.size(), 0);
+        assert_eq!(stream.input_res.size(), 0);
+        assert_eq!(stream.scratch_res.size(), 0);
+        assert!(stream.active_input.is_none());
+        assert!(stream.merger.is_empty());
+        assert_eq!(global.used(), 0);
+
+        assert_eq!(out_batches.len(), 2);
+        let refs: Vec<&Batch> = out_batches.iter().collect();
+        let actual = Batch::concat(projected_schema, &refs, None).unwrap();
+        assert_eq!(actual.num_rows(), 3);
+        let expected_rows = [(tid(3), 2i64), (tid(4), 2i64), (tid(5), 3i64)];
+        for (row, (exp_tid, exp_spans)) in expected_rows.into_iter().enumerate() {
+            assert_eq!(
+                actual.column(0).unwrap().get_scalar(row).unwrap(),
+                ScalarValue::FixedBytes16(exp_tid)
+            );
+            assert_eq!(
+                actual.column(1).unwrap().get_scalar(row).unwrap(),
+                ScalarValue::I64(exp_spans)
+            );
+        }
+
+        // (b) Unsorted `trace_id` immediately following a 1-trace `max_traces_per_chunk == 1` /
+        //     `remaining: Some(1)` boundary must return `Err(QueryError::Internal { .. })`
+        //     immediately instead of emitting the 1-row limit and ignoring the unsorted row.
+        let min_schema = Schema::try_new_arc(vec![
+            Field::new(traces::TRACE_ID, DataType::FixedBytes16, false),
+            Field::new(
+                traces::START_TIME,
+                DataType::TimestampNs { utc: true },
+                false,
+            ),
+            Field::new(traces::HAS_ROOT, DataType::Bool, false),
+            Field::new(traces::ROOT_SPAN_ID, DataType::FixedBytes8, true),
+        ])
+        .unwrap();
+        let min_cols = MergeColumns::new(&[traces::TRACE_ID, traces::START_TIME]);
+
+        for rows in [
+            vec![(tid(2), 100), (tid(1), 200)],
+            vec![(tid(2), 100), (tid(2), 110), (tid(1), 200)],
+        ] {
+            let unsorted = make_minimal_partial_batch(&min_schema, &rows);
+            let mut bad_stream = NativeTraceMergeStream {
+                input: Box::new(VecBatchesStream {
+                    batches: VecDeque::from([unsorted]),
+                }),
+                input_res: pool.register("in", false),
+                merger: SortedTraceMerger::new(&min_cols, &min_schema).unwrap(),
+                merger_res: pool.register("merger", false),
+                scratch_res: pool.register("scratch", false),
+                post_filters: Vec::new(),
+                projection: None,
+                remaining: Some(Arc::new(AtomicUsize::new(1))),
+                eval: EvalContext::new(0, cancel.clone()),
+                active_input: None,
+                budget_bytes: 1024 * 1024,
+                max_traces_per_chunk: 1,
+                done: false,
+            };
+            let err = bad_stream
+                .next_batch(&cancel, Some(&mut out_res))
+                .unwrap_err();
+            assert!(matches!(err, QueryError::Internal { .. }));
+            assert_eq!(out_res.size(), 0);
+            assert_eq!(bad_stream.merger_res.size(), 0);
+            assert_eq!(bad_stream.input_res.size(), 0);
+            assert_eq!(bad_stream.scratch_res.size(), 0);
+            assert!(bad_stream.active_input.is_none());
+            assert!(bad_stream.merger.is_empty());
+            assert_eq!(global.used(), 0);
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn sorted_trace_merger_matches_oracle(
+            seed in prop::collection::vec(any::<u8>(), 48..256),
+            col_picks in prop::collection::vec(0..TraceColumn::COUNT, 0..16),
+            lo_pick in 0..8usize,
+            hi_pick in 0..8usize,
+            has_lo in any::<bool>(),
+            has_hi in any::<bool>(),
+            budget_pick in 0..4usize,
+            chunk_rows_pick in 1..4usize,
+        ) {
+            let mut at = 0usize;
+            let mut next_u8 = || -> u8 {
+                let b = seed[at % seed.len()];
+                at += 1;
+                b
+            };
+
+            let trace_count = 1 + usize::from(next_u8() % 6);
+            let mut all_rows: Vec<PartialRowSpec> = Vec::new();
+            let words = ["alpha", "beta", "gamma", "delta"];
+
+            for t_idx in 1..=trace_count {
+                let partial_count = 1 + usize::from(next_u8() % 4);
+                for _ in 0..partial_count {
+                    let start_time = 1_000 + i64::from(next_u8() % 6) * 10;
+                    let has_root = next_u8().is_multiple_of(2);
+                    let root_span_id = if next_u8().is_multiple_of(3) {
+                        None
+                    } else {
+                        Some(sid(1 + u32::from(next_u8() % 8)))
+                    };
+                    let status = match next_u8() % 3 {
+                        0 => "unset",
+                        1 => "ok",
+                        _ => "error",
+                    }
+                    .to_owned();
+                    let opt_str = |b: u8| -> Option<String> {
+                        b.is_multiple_of(2).then(|| words[usize::from(b) % words.len()].to_owned())
+                    };
+                    let opt_i64 = |b: u8| -> Option<i64> {
+                        b.is_multiple_of(2).then(|| i64::from(b))
+                    };
+                    let tag_n = usize::from(next_u8() % 4);
+                    let tags: Vec<String> = (0..tag_n)
+                        .map(|_| words[usize::from(next_u8()) % words.len()].to_owned())
+                        .collect();
+                    let meta_n = usize::from(next_u8() % 4);
+                    let metadata: Vec<(String, Option<String>)> = (0..meta_n)
+                        .map(|_| {
+                            let k = format!("k{}", next_u8() % 3);
+                            let v = opt_str(next_u8());
+                            (k, v)
+                        })
+                        .collect();
+                    let cost_total = if next_u8().is_multiple_of(2) {
+                        Some(f64::from(next_u8()) / 16.0)
+                    } else {
+                        None
+                    };
+                    let models = (0..usize::from(next_u8() % 3))
+                        .map(|_| words[usize::from(next_u8()) % words.len()].to_owned())
+                        .collect();
+                    let prompts = (0..usize::from(next_u8() % 3))
+                        .map(|_| format!("p@{}", next_u8() % 3))
+                        .collect();
+
+                    all_rows.push(PartialRowSpec {
+                        project: "p1".to_owned(),
+                        trace_id: tid(t_idx as u32),
+                        start_time,
+                        end_time: start_time + i64::from(next_u8() % 20),
+                        name: words[usize::from(next_u8()) % words.len()].to_owned(),
+                        root_span_id,
+                        has_root,
+                        status,
+                        session_id: opt_str(next_u8()),
+                        user_id: opt_str(next_u8()),
+                        environment: opt_str(next_u8()),
+                        release: opt_str(next_u8()),
+                        tags,
+                        metadata,
+                        input_preview: opt_str(next_u8()),
+                        output_preview: opt_str(next_u8()),
+                        span_count: 1 + i64::from(next_u8() % 3),
+                        error_count: i64::from(next_u8() % 2),
+                        llm_count: i64::from(next_u8() % 2),
+                        input_tokens: opt_i64(next_u8()),
+                        output_tokens: opt_i64(next_u8()),
+                        cache_read_tokens: opt_i64(next_u8()),
+                        cache_write_tokens: opt_i64(next_u8()),
+                        reasoning_tokens: opt_i64(next_u8()),
+                        total_tokens: opt_i64(next_u8()),
+                        cost_total,
+                        models,
+                        prompts,
+                        last_ingest_time: start_time + 5,
+                        partial_count: 1,
+                    });
+                }
+            }
+
+            let full_schema = traces_schema();
+            let requested: Vec<&str> = col_picks
+                .iter()
+                .map(|&i| ALL_TRACE_COLUMNS[i].name())
+                .collect();
+            let merge_columns = MergeColumns::new(&requested);
+            let input_indices = indices_of_names(&full_schema, &merge_columns.input()).unwrap();
+            let output_indices = indices_of_names(&full_schema, &merge_columns.output()).unwrap();
+            let output_schema = Arc::new(full_schema.project(&output_indices).unwrap());
+
+            let bounds = TimeBounds {
+                min: has_lo.then(|| 1_000 + (lo_pick as i64) * 10),
+                max: has_hi.then(|| 1_000 + (hi_pick as i64) * 10),
+            };
+
+            // Split `all_rows` across arbitrary batch boundaries with varied encodings.
+            let mut batches = Vec::new();
+            let mut pos = 0usize;
+            while pos < all_rows.len() {
+                let take = (1 + usize::from(next_u8() % 4)).min(all_rows.len() - pos);
+                let full_b = build_full_partial_batch(&all_rows[pos..pos + take], &seed[pos % seed.len()..]);
+                batches.push(full_b.project(&input_indices).unwrap());
+                pos += take;
+            }
+
+            let mut oracle = OracleTraceMerger::new(&merge_columns, &full_schema).unwrap();
+            for b in &batches {
+                oracle.push_batch(b).unwrap();
+            }
+            let expected = oracle.finish(bounds).unwrap();
+
+            let budgets = [64usize, 256, 1024, 64 * 1024];
+            let budget_bytes = budgets[budget_pick];
+            let global = GlobalPool::new(16 * 1024 * 1024);
+            let pool = global.try_admit(0, 16 * 1024 * 1024).unwrap();
+            let cancel = CancelToken::new();
+            let mut stream = NativeTraceMergeStream {
+                input: Box::new(VecBatchesStream {
+                    batches: VecDeque::from(batches),
+                }),
+                input_res: pool.register("in", false),
+                merger: SortedTraceMerger::new(&merge_columns, &full_schema)
+                    .unwrap()
+                    .with_bounds(bounds)
+                    .with_initial_cap(chunk_rows_pick),
+                merger_res: pool.register("merger", false),
+                scratch_res: pool.register("scratch", false),
+                post_filters: Vec::new(),
+                projection: None,
+                remaining: None,
+                eval: EvalContext::new(0, cancel.clone()),
+                active_input: None,
+                budget_bytes,
+                max_traces_per_chunk: chunk_rows_pick,
+                done: false,
+            };
+
+            let mut out_batches = Vec::new();
+            let mut out_res = pool.register("out", false);
+            while let Some(batch) = stream.next_batch(&cancel, Some(&mut out_res)).unwrap() {
+                prop_assert_eq!(out_res.size(), batch.memory_bytes());
+                out_batches.push(batch);
+                out_res.free();
+            }
+            prop_assert_eq!(stream.merger_res.size(), 0);
+            prop_assert_eq!(stream.input_res.size(), 0);
+            prop_assert_eq!(stream.scratch_res.size(), 0);
+            prop_assert!(stream.active_input.is_none());
+            prop_assert_eq!(global.used(), 0);
+
+            let actual = if out_batches.is_empty() {
+                Batch::empty(output_schema)
+            } else {
+                let refs: Vec<&Batch> = out_batches.iter().collect();
+                Batch::concat(output_schema, &refs, None).unwrap()
+            };
+            assert_batches_bit_identical(&actual, &expected);
+        }
     }
 }
