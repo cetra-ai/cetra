@@ -66,17 +66,13 @@ async fn wait_for_catalog(storage: &Storage, table: Table, rows: u64) {
 
 /// Rows of the `spans` view, counted through the query path (and so the read
 /// cache).
-async fn span_count(storage: &Storage) -> Result<usize, datafusion::error::DataFusionError> {
-    use datafusion::execution::context::SessionContext;
-    use datafusion::prelude::SessionConfig;
+async fn span_count(storage: &Storage) -> Result<usize, crate::RunError> {
     let query = storage
         .query(project(), crate::QueryOptions::new(None, None))
         .await
         .unwrap();
-    let ctx = SessionContext::new_with_config_rt(SessionConfig::new(), Arc::clone(&query.runtime));
-    ctx.register_table("spans_t", query.spans)?;
-    let batches = ctx.sql("SELECT name FROM spans_t").await?.collect().await?;
-    Ok(batches.iter().map(|batch| batch.num_rows()).sum())
+    let batches = query.collect_raw_spans().await?;
+    Ok(batches.iter().map(cetra_column::Batch::num_rows).sum())
 }
 
 /// A read-only handle on `catalog.db`.
@@ -130,7 +126,7 @@ async fn open_fails_on_a_store_error_and_a_later_open_succeeds() {
         "the open did not reach the store"
     );
     assert!(
-        matches!(error, OpenError::Anchor(AnchorError::Parquet(_))),
+        matches!(error, OpenError::Anchor(AnchorError::Statam(_))),
         "{error:?}"
     );
 

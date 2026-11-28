@@ -247,12 +247,14 @@ fn media_part(
         MediaKind::Blob => Part::Blob {
             modality,
             mime_type,
+            transcript: None,
             content: payload,
             extra: map,
         },
         MediaKind::Uri => Part::Uri {
             modality,
             mime_type,
+            transcript: None,
             uri: payload,
             extra: map,
         },

@@ -1,0 +1,25 @@
+model_list:
+  - model_name: gpt-4o-mini
+    litellm_params: {model: openai/gpt-4o-mini, api_base: "os.environ/FAKE_BASE", api_key: sk-fake}
+  - model_name: or-claude
+    litellm_params: {model: openrouter/anthropic/claude-3.5-sonnet, api_base: "os.environ/FAKE_BASE", api_key: sk-fake}
+  - model_name: groq-llama
+    litellm_params: {model: groq/llama-3.3-70b-versatile, api_base: "os.environ/FAKE_BASE", api_key: sk-fake}
+  - model_name: ds
+    litellm_params: {model: deepseek/deepseek-chat, api_base: "os.environ/FAKE_BASE", api_key: sk-fake}
+  - model_name: tg
+    litellm_params: {model: together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo, api_base: "os.environ/FAKE_BASE", api_key: sk-fake}
+  - model_name: az
+    litellm_params: {model: azure/gpt-4o-mini, api_base: "os.environ/FAKE_BASE", api_key: sk-fake, api_version: "2024-10-21"}
+  - model_name: mistral
+    litellm_params: {model: mistral/mistral-small-latest, api_base: "os.environ/FAKE_BASE", api_key: sk-fake}
+  - model_name: fw
+    litellm_params: {model: fireworks_ai/accounts/fireworks/models/llama-v3p3-70b-instruct, api_base: "os.environ/FAKE_BASE", api_key: sk-fake}
+  - model_name: vllm
+    litellm_params: {model: hosted_vllm/qwen, api_base: "os.environ/FAKE_BASE", api_key: sk-fake}
+  - model_name: emb
+    litellm_params: {model: openai/text-embedding-3-small, api_base: "os.environ/FAKE_BASE", api_key: sk-fake}
+litellm_settings:
+  callbacks: ["otel"]
+  turn_off_message_logging: false
+general_settings: {master_key: "sk-spike-master-key-1234567890abcdef"}

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use cetra_core::time_serde;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 /// What a rule measures (D-K-2).
@@ -603,4 +603,50 @@ pub struct AlertEvent {
     pub created_at: i64,
     /// One per channel the rule had then.
     pub deliveries: Vec<AlertDelivery>,
+}
+
+/// Query parameters of `GET …/alert-rules/issue-preview` (D-K-22). Spec 09 § Evaluation & alerts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct IssueAlertPreviewParams {
+    /// The issue counted, with its merge target and the issues merged into that target.
+    /// Exactly one of `issue_id` and `source_id`.
+    #[serde(default)]
+    pub issue_id: Option<Uuid>,
+    /// The source whose issues are counted, except the ignored and merged ones (with the issues
+    /// merged into each). Exactly one of `issue_id` and `source_id`.
+    #[serde(default)]
+    pub source_id: Option<Uuid>,
+    /// The rule's window: `15m`, `1h`, `6h` or `24h`. It is the bucket width.
+    pub window: AlertWindow,
+}
+
+/// Occurrence counts of an `issue_occurrences` rule, per bucket as wide as its window (D-K-22).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct IssueAlertPreview {
+    /// Start of the range, inclusive: the start of the window-wide bucket that holds `to` minus
+    /// the preview span (24 hours, 3 days or 14 days). JSON is RFC 3339.
+    #[serde(with = "time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub from: i64,
+    /// End of the range, exclusive (the request time).
+    #[serde(with = "time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub to: i64,
+    /// The window, which is the bucket width.
+    pub window: AlertWindow,
+    /// One per bucket from `from` to the last one that starts before `to`, oldest first, with no
+    /// gap; only the last one is partial.
+    pub points: Vec<IssueAlertPoint>,
+}
+
+/// One bucket of an [`IssueAlertPreview`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct IssueAlertPoint {
+    /// Start of the bucket: a multiple of the window since the Unix epoch. JSON is RFC 3339.
+    #[serde(with = "time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub time: i64,
+    /// Live occurrences created in the bucket (before `to` for the last one); 0 when none.
+    pub count: u64,
 }

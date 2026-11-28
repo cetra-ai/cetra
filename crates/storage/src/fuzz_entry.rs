@@ -2,7 +2,6 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)] // harness setup, not input-dependent
 
 use std::collections::HashSet;
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
@@ -13,8 +12,6 @@ use bytes::Bytes;
 use cetra_core::ids::ProjectId;
 use cetra_core::schema::{scores, spans};
 use chrono::NaiveDate;
-use datafusion::execution::object_store::ObjectStoreUrl;
-use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use object_store::memory::InMemory;
 use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload};
@@ -31,19 +28,19 @@ use crate::compaction::plan::{Policy, plan};
 use crate::compaction::slice::time_values;
 use crate::config::{CompactionConfig, WalConfig};
 use crate::disk::Disk;
-use crate::filter::FilterView;
 use crate::hooks::Hooks;
 use crate::memtable::Memtable;
-use crate::objects::OBJECT_STORE_URL;
+use crate::objects::StorageIo;
 use crate::read_cache::{BLOCK, CacheStore, ReadCache};
 use crate::read_state::ReadState;
 use crate::verify::{VerifyQueue, verify_file};
 use crate::wal::segment::segment_header;
 use crate::wal::{Decoded, Table, decode_next, encode, push_framed, read_batch, segment_name};
 use crate::{
-    ListScope, QueryContext, QueryOptions, ScoreListRequest, SortOrder, SpanListRequest, SpanSort,
-    TimeWindow, TraceListRequest, TraceSort, ViewName, project_query, recover_table, replay_batch,
-    score_list, span_list, trace_detail, trace_list,
+    EngineContext, ListScope, ProjectQuery, QeRuntime, QueryContext, QueryOptions,
+    ScoreListRequest, SessionListRequest, SessionSort, SortOrder, SpanListRequest, SpanSort,
+    TimeWindow, TraceListRequest, TraceSort, ViewName, recover_table, replay_batch, score_list,
+    session_list, span_list, trace_detail, trace_list, validate_filter,
 };
 
 /// Reads a fuzz input's header. Missing bytes read as zero, so every input is valid.
@@ -93,18 +90,6 @@ impl<'a> Cursor<'a> {
 }
 
 /// A scratch directory under the system temp dir, removed on drop.
-/// A disk manager that spills under `dir`, as the query runtime's does.
-fn spill_manager(dir: &Path) -> Arc<datafusion::execution::disk_manager::DiskManager> {
-    use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
-    Arc::new(
-        DiskManagerBuilder::default()
-            .with_mode(DiskManagerMode::Directories(vec![dir.to_path_buf()]))
-            .build()
-            // Harness setup, not input-dependent.
-            .expect("build the spill manager"),
-    )
-}
-
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -307,12 +292,7 @@ fn seed_midnight() -> i64 {
         .expect("the seed day is in range")
 }
 
-fn two() -> NonZeroUsize {
-    // Harness setup, not input-dependent.
-    NonZeroUsize::new(2).expect("2 is not zero")
-}
-
-/// The catalog row of the one file a Parquet entry reads, at its fixed path.
+/// The catalog row of the one file a Statam entry reads, at its fixed path.
 pub(crate) fn parquet_meta(table: FileTable, size: u64, footer_size: u64) -> FileMeta {
     FileMeta {
         id: FileId(Uuid::from_u128(1)),
@@ -320,10 +300,10 @@ pub(crate) fn parquet_meta(table: FileTable, size: u64, footer_size: u64) -> Fil
         project: project(),
         day: seed_day(),
         level: 0,
-        path: format!("tables/{}/fuzz.parquet", table.as_str()),
+        path: format!("tables/{}/fuzz.statam", table.as_str()),
         size,
         footer_size,
-        rows: 0,
+        rows: 1,
         // Every row falls inside the file's range, so no pruning skips the file.
         min_time: i64::MIN,
         max_time: i64::MAX,
@@ -331,7 +311,13 @@ pub(crate) fn parquet_meta(table: FileTable, size: u64, footer_size: u64) -> Fil
         max_ingest_time: i64::MAX,
         fully_merged: false,
         deletions_applied_seq: 0,
+        pack: None,
     }
+}
+
+fn fuzz_qe_runtime() -> Arc<QeRuntime> {
+    static FUZZ_RUNTIME: OnceLock<Arc<QeRuntime>> = OnceLock::new();
+    Arc::clone(FUZZ_RUNTIME.get_or_init(|| QeRuntime::for_test_with_cache(0)))
 }
 
 /// The read state over one file and the query context a read runs in. `store` must
@@ -343,11 +329,7 @@ pub(crate) fn parquet_query(
 ) -> (QueryContext, Arc<VerifyQueue>) {
     let edit = CatalogEdit {
         add: vec![meta.clone()],
-        remove: Vec::new(),
-        flushed_seq: None,
-        sources: Vec::new(),
-        raise: Vec::new(),
-        quarantine: Vec::new(),
+        ..CatalogEdit::default()
     };
     let (catalog, _, _) = Catalog::empty()
         .apply(&edit)
@@ -356,23 +338,20 @@ pub(crate) fn parquet_query(
         catalog: Arc::new(catalog),
         ..ReadState::empty()
     };
-    let runtime_env = RuntimeEnvBuilder::new()
-        .build_arc()
-        .expect("build the query runtime");
-    let url = ObjectStoreUrl::parse(OBJECT_STORE_URL).expect("the object store URL parses");
-    runtime_env.register_object_store(url.as_ref(), store);
     let verify = Arc::new(VerifyQueue::default());
-    let query = project_query(
+    let engine = EngineContext::from_state(
         &state,
+        store,
         project(),
-        QueryOptions::new(None, None),
-        &runtime_env,
-        two(),
+        &QueryOptions::new(None, None),
+        fuzz_qe_runtime(),
         DAY_NS,
         &verify,
+        runtime().handle().clone(),
     )
     .expect("a query over one file plans");
-    let ctx = QueryContext::new(query, None).expect("the query context builds");
+    let ctx = QueryContext::new(ProjectQuery::from_engine(engine), None)
+        .expect("the query context builds");
     (ctx, verify)
 }
 
@@ -504,34 +483,22 @@ pub fn parquet_file(data: &[u8]) {
             },
         )
         .await;
-        let _ = verify_file(&store, &meta).await;
+        let io = StorageIo::from_store(Arc::clone(&store));
+        let _ = verify_file(&io, &meta).await;
         match table {
             FileTable::Traces => {
-                let _ = Anchors::new(DAY_NS)
-                    .rebuild_file(&meta, Arc::clone(&store), bound)
-                    .await;
+                let _ = Anchors::new(DAY_NS).rebuild_file(&meta, io, bound).await;
             }
             FileTable::Spans => {
                 let files = [Arc::new(meta.clone())];
-                let _ = time_values(Arc::clone(&store), &files, spans::START_TIME).await;
+                let _ = time_values(io, &files, spans::START_TIME).await;
             }
             FileTable::Scores => {
                 let files = [Arc::new(meta.clone())];
-                let _ = time_values(Arc::clone(&store), &files, scores::CREATED_AT).await;
+                let _ = time_values(io, &files, scores::CREATED_AT).await;
             }
         }
     });
-}
-
-/// The view a filter view compiles against, by its table name.
-fn view_table(view: FilterView) -> &'static str {
-    match view {
-        FilterView::Traces => ViewName::Traces,
-        FilterView::Spans => ViewName::Spans,
-        FilterView::Sessions => ViewName::Sessions,
-        FilterView::Scores => ViewName::Scores,
-    }
-    .as_str()
 }
 
 /// Parses arbitrary text as a filter over one view and runs it (track R M3). Layout:
@@ -545,13 +512,13 @@ pub fn filter_dsl(data: &[u8]) {
         return;
     };
     let view = match view % 4 {
-        0 => FilterView::Traces,
-        1 => FilterView::Spans,
-        2 => FilterView::Sessions,
-        _ => FilterView::Scores,
+        0 => ViewName::Traces,
+        1 => ViewName::Spans,
+        2 => ViewName::Sessions,
+        _ => ViewName::Scores,
     };
     let text = text.to_owned();
-    // A tokio worker's stack size: the server parses filters on one (`filter/mod.rs` tests it).
+    // A tokio worker's stack size: the server parses filters on one.
     let worker = std::thread::Builder::new()
         .stack_size(2 * 1024 * 1024)
         .spawn(move || run_filter(view, &text))
@@ -563,37 +530,83 @@ pub fn filter_dsl(data: &[u8]) {
 }
 
 /// Parses and applies one filter over empty tables.
-fn run_filter(view: FilterView, text: &str) {
+fn run_filter(view: ViewName, text: &str) {
     let verify = Arc::new(VerifyQueue::default());
-    let runtime_env = RuntimeEnvBuilder::new()
-        .build_arc()
-        // Harness setup, not input-dependent.
-        .expect("build the query runtime");
-    let query = project_query(
+    let engine = EngineContext::from_state(
         &ReadState::empty(),
+        Arc::new(InMemory::new()),
         project(),
-        QueryOptions::new(None, None),
-        &runtime_env,
-        two(),
+        &QueryOptions::new(None, None),
+        fuzz_qe_runtime(),
         DAY_NS,
         &verify,
+        runtime().handle().clone(),
     )
     // Harness setup, not input-dependent.
     .expect("a query over empty tables plans");
-    let ctx = QueryContext::new(query, None)
+    let ctx = QueryContext::new(ProjectQuery::from_engine(engine), None)
         // Harness setup, not input-dependent.
         .expect("the query context builds");
-    let Ok(filter) = ctx.parse_filter(view, text) else {
+    if validate_filter(&ctx, view, text).is_err() {
         return;
-    };
+    }
     runtime().block_on(async {
-        let Ok(frame) = ctx.session().table(view_table(view)).await else {
-            return;
-        };
-        let Ok(frame) = filter.apply(frame, &ctx).await else {
-            return;
-        };
-        let _ = frame.collect().await;
+        let timeout = Duration::from_secs(5);
+        match view {
+            ViewName::Traces => {
+                let _ = trace_list(
+                    &ctx,
+                    TraceListRequest {
+                        filter: Some(text),
+                        search: None,
+                        scope: scope(None),
+                        strict_exclusions: false,
+                        sort: TraceSort::StartTime,
+                        order: SortOrder::Desc,
+                        limit: 10,
+                        cursor: None,
+                        timeout,
+                    },
+                )
+                .await;
+            }
+            ViewName::Spans => {
+                let _ = span_list(
+                    &ctx,
+                    SpanListRequest {
+                        filter: Some(text),
+                        search: None,
+                        scope: scope(None),
+                        strict_exclusions: false,
+                        sort: SpanSort::StartTime,
+                        order: SortOrder::Desc,
+                        limit: 10,
+                        cursor: None,
+                        timeout,
+                    },
+                )
+                .await;
+            }
+            ViewName::Sessions => {
+                let _ = session_list(
+                    &ctx,
+                    SessionListRequest {
+                        filter: Some(text),
+                        scope: scope(None),
+                        sort: SessionSort::StartTime,
+                        order: SortOrder::Desc,
+                        limit: 10,
+                        cursor: None,
+                        timeout,
+                    },
+                )
+                .await;
+            }
+            ViewName::Scores => {
+                let _ = validate_filter(&ctx, ViewName::Scores, text);
+            }
+            ViewName::ExperimentItems | ViewName::DatasetItems => {}
+        }
     });
 }
 
@@ -711,11 +724,9 @@ fn check_cache(input: &CacheInput) {
         .expect("store the cached object");
 
     for _round in 0..2 {
-        let disk = Arc::new(
-            Disk::open(vec![scratch.0.clone()], 0, spill_manager(&scratch.0))
+        let disk = Arc::new(Disk::open(vec![scratch.0.clone()], 0)
                 // Harness setup, not input-dependent.
-                .expect("open the disk"),
-        );
+                .expect("open the disk"));
         let cache = Arc::new(
             ReadCache::open(cache_dir.clone(), 64 << 20, disk, 0)
                 // Harness setup, not input-dependent.
@@ -800,6 +811,26 @@ impl Text {
     }
 }
 
+/// A `pack_id` blob for catalog fuzzing: either a valid 16-byte UUIDv7 or raw bytes.
+#[derive(Debug, Arbitrary)]
+enum PackIdBlob {
+    Valid(u8),
+    Raw(Vec<u8>),
+}
+
+impl PackIdBlob {
+    fn render(&self) -> Vec<u8> {
+        match self {
+            Self::Valid(n) => {
+                Uuid::from_u128(0x0192_e5a0_7c1a_7000_8000_0000_0000_0000 | u128::from(*n))
+                    .as_bytes()
+                    .to_vec()
+            }
+            Self::Raw(bytes) => bytes.clone(),
+        }
+    }
+}
+
 /// One `data_files` row.
 #[derive(Debug, Arbitrary)]
 struct FileRow {
@@ -819,6 +850,10 @@ struct FileRow {
     fully_merged: i64,
     state: Text,
     applied_seq: i64,
+    pack_id: Option<PackIdBlob>,
+    pack_path: Option<Text>,
+    pack_size: Option<i64>,
+    pack_toc_size: Option<i64>,
 }
 
 /// One pending or applied deletion, with its scope rows.
@@ -856,8 +891,9 @@ async fn insert_rows(connection: &mut SqliteConnection, input: &CatalogInput) {
         let _ = sqlx::query(
             "INSERT INTO data_files (id, table_name, project_id, day, level, path, size_bytes, \
              footer_size, row_count, min_time, max_time, min_ingest_time, max_ingest_time, \
-             fully_merged, state, created_at, deletions_applied_seq) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+             fully_merged, state, created_at, deletions_applied_seq, \
+             pack_id, pack_path, pack_size_bytes, pack_toc_size) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
         )
         .bind(row.id.render())
         .bind(row.table.render())
@@ -875,6 +911,10 @@ async fn insert_rows(connection: &mut SqliteConnection, input: &CatalogInput) {
         .bind(row.fully_merged)
         .bind(row.state.render())
         .bind(row.applied_seq)
+        .bind(row.pack_id.as_ref().map(PackIdBlob::render))
+        .bind(row.pack_path.as_ref().map(Text::render))
+        .bind(row.pack_size)
+        .bind(row.pack_toc_size)
         .execute(&mut *connection)
         .await;
     }
@@ -1000,11 +1040,11 @@ pub fn catalog_rows(data: &[u8]) {
 pub(crate) mod tests {
     use std::path::Path;
 
-    use arrow::array::RecordBatch;
+    use cetra_column::Batch;
     use chrono::DateTime;
 
     use super::*;
-    use crate::parquet::{WrittenFile, write_file};
+    use crate::statam_io::{WrittenFile, write_file_batch};
     use crate::test_support::{dataset_scores, dataset_spans, score_rows, span_rows, trace_batch};
     use crate::wal::{HEADER_LEN, sample_span_batch};
 
@@ -1031,12 +1071,12 @@ pub(crate) mod tests {
 
     /// One written Parquet file of `table`, from the dataset.
     pub(crate) fn parquet_bytes(table: FileTable) -> WrittenFile {
-        let batch: RecordBatch = match table {
+        let batch: Batch = match table {
             FileTable::Spans => span_rows(&dataset_spans()),
             FileTable::Traces => trace_batch(&dataset_spans()),
             FileTable::Scores => score_rows(&dataset_scores()),
         };
-        write_file(table, 0, &[Arc::new(batch)]).expect("write a test file")
+        write_file_batch(table, 0, &[Arc::new(batch)]).expect("write a test file")
     }
 
     /// The entry input for `parquet_file`: the table byte, the footer hint, a zero bound, the file.
@@ -1110,7 +1150,7 @@ pub(crate) mod tests {
         let page = runtime()
             .block_on(span_list(&ctx, request))
             .expect("the seed file reads");
-        let rows: usize = page.batches.iter().map(RecordBatch::num_rows).sum();
+        let rows: usize = page.batches.iter().map(Batch::num_rows).sum();
         assert_eq!(rows, dataset_spans().len());
     }
 
@@ -1150,9 +1190,9 @@ pub(crate) mod tests {
             .join(target)
     }
 
-    /// The IPC payload of one batch of `table`, without its record header.
+    /// The framed batch payload of one batch of `table`, without its outer record header.
     fn ipc_payload(table: Table) -> Vec<u8> {
-        let batch: RecordBatch = match table {
+        let batch: Batch = match table {
             Table::Spans => sample_span_batch(),
             Table::Scores => score_rows(&dataset_scores()),
         };
@@ -1209,6 +1249,21 @@ pub(crate) mod tests {
     #[test]
     fn wal_record_corpus_replays() {
         replay("wal_record", wal_record);
+        let reg_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/regressions/wal_record");
+        for path in sorted_files(&reg_dir) {
+            let data = std::fs::read(&path).expect("read a regression file");
+            for table in [Table::Spans, Table::Scores] {
+                assert!(
+                    matches!(
+                        read_batch(&data, table),
+                        Err(crate::error::WalError::InvalidPayload { .. })
+                    ),
+                    "expected InvalidPayload for legacy regression {}",
+                    path.display()
+                );
+            }
+        }
     }
 
     #[test]
@@ -1273,6 +1328,10 @@ pub(crate) mod tests {
             fully_merged: 0,
             state: Text::State(0),
             applied_seq: 0,
+            pack_id: None,
+            pack_path: None,
+            pack_size: None,
+            pack_toc_size: None,
         };
         let input = CatalogInput {
             // The spans file (index 0) and its traces file (index 1).

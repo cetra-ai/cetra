@@ -1,33 +1,33 @@
-const NUMERIC = /^(U?Int(8|16|32|64)|Float(16|32|64)|Decimal(32|64|128|256)\()/;
+const NUMERIC_TYPES = new Set(["integer", "float", "decimal"]);
 
-/** `Int*`, `UInt*`, `Float*` and `Decimal*(…)` columns. */
+/** `integer`, `float` and `decimal` columns. */
 export function isNumericType(type: string): boolean {
-  return NUMERIC.test(type);
+  return NUMERIC_TYPES.has(type);
 }
 
-/** `Timestamp(…)` columns of any unit and time zone. */
+/** `timestamp` columns. */
 export function isTimestampType(type: string): boolean {
-  return type.startsWith("Timestamp(");
+  return type === "timestamp";
 }
 
-/** `Date32` and `Date64` columns. */
+/** `date` columns. */
 export function isDateType(type: string): boolean {
-  return type === "Date32" || type === "Date64";
+  return type === "date";
 }
 
-/** `Utf8`, `LargeUtf8` and `Utf8View` columns. */
+/** `string` columns. */
 export function isTextType(type: string): boolean {
-  return type === "Utf8" || type === "LargeUtf8" || type === "Utf8View";
+  return type === "string";
 }
 
-/** `Boolean` columns. */
+/** `boolean` columns. */
 export function isBooleanType(type: string): boolean {
-  return type === "Boolean";
+  return type === "boolean";
 }
 
-const NESTED_PREFIXES = ["List(", "LargeList(", "FixedSizeList(", "Struct(", "Map("];
+const NESTED_TYPES = new Set(["string_list", "string_map", "list", "json"]);
 
-/** `List`, `LargeList`, `FixedSizeList`, `Struct` and `Map` columns. */
+/** `string_list`, `string_map`, `list` and `json` columns. */
 export function isNestedType(type: string): boolean {
-  return NESTED_PREFIXES.some((prefix) => type.startsWith(prefix));
+  return NESTED_TYPES.has(type);
 }

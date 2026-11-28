@@ -1,0 +1,510 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          },
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "java"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.62.0"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "org.springframework.boot",
+            "version": "4.1.2",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "7db458315f124a3590ea84ac3cc61e5d",
+              "spanId": "d44f3f1422126604",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 259,
+              "name": "spring_ai chat_client",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590669000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "framework"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "spring_ai"
+                  }
+                },
+                {
+                  "key": "spring.ai.chat.client.advisors",
+                  "value": {
+                    "stringValue": "[\"Tool Calling Advisor\", \"call\"]"
+                  }
+                },
+                {
+                  "key": "spring.ai.chat.client.stream",
+                  "value": {
+                    "stringValue": "false"
+                  }
+                },
+                {
+                  "key": "spring.ai.chat.client.tool.names",
+                  "value": {
+                    "stringValue": "[\"get_weather\"]"
+                  }
+                },
+                {
+                  "key": "spring.ai.kind",
+                  "value": {
+                    "stringValue": "chat_client"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "7db458315f124a3590ea84ac3cc61e5d",
+              "spanId": "22ed9cd3f693c11b",
+              "traceState": "",
+              "parentSpanId": "d44f3f1422126604",
+              "flags": 259,
+              "name": "tool _calling ",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590015000000",
+              "endTimeUnixNano": "1767225590669000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "framework"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "spring_ai"
+                  }
+                },
+                {
+                  "key": "spring.ai.advisor.name",
+                  "value": {
+                    "stringValue": "Tool Calling Advisor"
+                  }
+                },
+                {
+                  "key": "spring.ai.advisor.order",
+                  "value": {
+                    "stringValue": "-2147483348"
+                  }
+                },
+                {
+                  "key": "spring.ai.kind",
+                  "value": {
+                    "stringValue": "advisor"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "7db458315f124a3590ea84ac3cc61e5d",
+              "spanId": "147f61f81298113d",
+              "traceState": "",
+              "parentSpanId": "22ed9cd3f693c11b",
+              "flags": 259,
+              "name": "call",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590016000000",
+              "endTimeUnixNano": "1767225590578000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "framework"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "spring_ai"
+                  }
+                },
+                {
+                  "key": "spring.ai.advisor.name",
+                  "value": {
+                    "stringValue": "call"
+                  }
+                },
+                {
+                  "key": "spring.ai.advisor.order",
+                  "value": {
+                    "stringValue": "2147483647"
+                  }
+                },
+                {
+                  "key": "spring.ai.kind",
+                  "value": {
+                    "stringValue": "advisor"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "7db458315f124a3590ea84ac3cc61e5d",
+              "spanId": "852ab170100275e4",
+              "traceState": "",
+              "parentSpanId": "147f61f81298113d",
+              "flags": 259,
+              "name": "chat gpt-4o-mini",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590063000000",
+              "endTimeUnixNano": "1767225590577000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "stringValue": "[\"TOOL_CALLS\"]"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.id",
+                  "value": {
+                    "stringValue": "chatcmpl-capture-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "stringValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "stringValue": "82"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "stringValue": "17"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.total_tokens",
+                  "value": {
+                    "stringValue": "99"
+                  }
+                },
+                {
+                  "key": "spring.ai.model.request.tool.names",
+                  "value": {
+                    "stringValue": "[\"get_weather\"]"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "7db458315f124a3590ea84ac3cc61e5d",
+              "spanId": "3e2caf9c378ed96b",
+              "traceState": "",
+              "parentSpanId": "22ed9cd3f693c11b",
+              "flags": 259,
+              "name": "execute_tool get_weather",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590581000000",
+              "endTimeUnixNano": "1767225590594000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "spring_ai"
+                  }
+                },
+                {
+                  "key": "spring.ai.kind",
+                  "value": {
+                    "stringValue": "tool_call"
+                  }
+                },
+                {
+                  "key": "spring.ai.tool.call.id",
+                  "value": {
+                    "stringValue": "call_capture_1"
+                  }
+                },
+                {
+                  "key": "spring.ai.tool.definition.description",
+                  "value": {
+                    "stringValue": "Get the current weather for a city"
+                  }
+                },
+                {
+                  "key": "spring.ai.tool.definition.name",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "spring.ai.tool.definition.schema",
+                  "value": {
+                    "stringValue": "{\n  \"$schema\" : \"https://json-schema.org/draft/2020-12/schema\",\n  \"type\" : \"object\",\n  \"properties\" : {\n    \"city\" : {\n      \"type\" : \"string\",\n      \"description\" : \"City name\"\n    }\n  },\n  \"required\" : [ \"city\" ],\n  \"additionalProperties\" : false\n}"
+                  }
+                },
+                {
+                  "key": "spring.ai.tool.type",
+                  "value": {
+                    "stringValue": "function"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "7db458315f124a3590ea84ac3cc61e5d",
+              "spanId": "9d14de6379a0be94",
+              "traceState": "",
+              "parentSpanId": "22ed9cd3f693c11b",
+              "flags": 259,
+              "name": "call",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590595000000",
+              "endTimeUnixNano": "1767225590668000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "framework"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "spring_ai"
+                  }
+                },
+                {
+                  "key": "spring.ai.advisor.name",
+                  "value": {
+                    "stringValue": "call"
+                  }
+                },
+                {
+                  "key": "spring.ai.advisor.order",
+                  "value": {
+                    "stringValue": "2147483647"
+                  }
+                },
+                {
+                  "key": "spring.ai.kind",
+                  "value": {
+                    "stringValue": "advisor"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "7db458315f124a3590ea84ac3cc61e5d",
+              "spanId": "757490d0ec344b79",
+              "traceState": "",
+              "parentSpanId": "9d14de6379a0be94",
+              "flags": 259,
+              "name": "chat gpt-4o-mini",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590598000000",
+              "endTimeUnixNano": "1767225590668000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "stringValue": "[\"STOP\"]"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.id",
+                  "value": {
+                    "stringValue": "chatcmpl-capture-2"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "stringValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "stringValue": "131"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "stringValue": "12"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.total_tokens",
+                  "value": {
+                    "stringValue": "143"
+                  }
+                },
+                {
+                  "key": "spring.ai.model.request.tool.names",
+                  "value": {
+                    "stringValue": "[\"get_weather\"]"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

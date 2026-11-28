@@ -7,7 +7,7 @@
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use cetra_storage::config::ObjectStoreUrl;
@@ -123,6 +123,14 @@ impl BackupError {
 /// `to` must be absolute and absent or an empty directory, outside the data
 /// directory. A backup that does not finish, by an error or because this future is
 /// dropped, removes what it wrote (see [`Partial`]). Runs in a `backup` span.
+///
+/// The backup runs in a task of its own, which is never aborted: dropping a future
+/// does not stop the file writes and SQLite calls it already started on other
+/// threads, so removing the directory from a drop would race them. Dropping this
+/// future sets the cancel flag instead. The task checks it before each step (and the
+/// object copy before each object), stops, and removes the directory once nothing
+/// writes into it any more; then it frees the backup slot. A caller that must see
+/// the directory gone, such as shutdown, waits for the slot.
 pub(crate) async fn run(
     state: &AppState,
     to: &Path,
@@ -154,13 +162,46 @@ pub(crate) async fn run(
 ///
 /// `to` must be absolute and absent or an empty directory, outside the data
 /// directory. A backup that does not finish, by an error or because this future is
-/// dropped, removes what it wrote (see [`Partial`]).
+/// dropped, removes what it wrote (see [`Partial`]). The backup runs in a task of
+/// its own, never aborted: dropping this future sets its cancel flag, and the task
+/// stops and removes the directory once nothing writes into it any more.
 async fn take_backup(
     state: &AppState,
     to: &Path,
     meta_only: bool,
 ) -> Result<BackupReport, BackupError> {
+    let cancel: CopyCancel = Arc::new(Mutex::new(false));
+    let _cancel_on_drop = CancelOnDrop(cancel.clone());
+    let task = tokio::spawn({
+        let (state, to) = (state.clone(), to.to_path_buf());
+        async move { take(&state, &to, meta_only, &cancel).await }
+    });
+    match task.await {
+        Ok(result) => result,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        // Only a runtime shutdown cancels the task.
+        Err(_cancelled) => Err(BackupError::Io(io::Error::other("the backup task stopped"))),
+    }
+}
+
+/// Sets the backup's cancel flag when [`take_backup`]'s future is dropped.
+struct CancelOnDrop(CopyCancel);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    }
+}
+
+/// The body of [`take_backup`], in its own task.
+async fn take(
+    state: &AppState,
+    to: &Path,
+    meta_only: bool,
+    cancel: &CopyCancel,
+) -> Result<BackupReport, BackupError> {
     let started = Instant::now();
+    // Dropped after `partial`, so the slot frees only once a failed backup is removed.
     let _slot = state
         .backup_slot
         .try_lock()
@@ -175,13 +216,14 @@ async fn take_backup(
         (false, false) => BackupMode::Full,
     };
     let target = prepare_target(state, to).await?;
-    let cancel: CopyCancel = Arc::new(Mutex::new(false));
     let mut partial = Partial {
         target,
-        cancel: cancel.clone(),
         armed: true,
     };
     let report = write(state, &partial.target.path, mode, started, cancel).await?;
+    // Under the lock: a cancel that comes first removes the finished backup, and one
+    // that comes after keeps it.
+    let _held = not_cancelled(cancel)?;
     partial.armed = false;
     tracing::info!(
         mode = ?report.mode,
@@ -200,24 +242,39 @@ struct Target {
 }
 
 /// A backup's directory until the backup succeeds. Armed from the moment the target
-/// is claimed, it removes what the backup wrote when dropped: after an error, or when
-/// the `run` future is cancelled, which an abort of the connection does. Cancelling
-/// the future does not stop the object copy, which runs on a blocking thread, so the
-/// drop also sets the copy's cancel flag, under its lock.
+/// is claimed, it removes what the backup wrote when dropped: after an error,
+/// including a cancel. [`take`] has awaited every step it started by then, so
+/// nothing still writes into the directory. Only a runtime shutdown, which drops the
+/// task mid-step, can leave a step running.
 struct Partial {
     target: Target,
-    cancel: CopyCancel,
     armed: bool,
 }
 
 impl Drop for Partial {
     fn drop(&mut self) {
-        if !self.armed {
-            return;
+        if self.armed {
+            undo(&self.target);
         }
-        *self.cancel.lock().unwrap_or_else(PoisonError::into_inner) = true;
-        undo(&self.target);
     }
+}
+
+/// Locks the cancel flag and returns the guard, or an error when [`run`]'s caller
+/// gave up. Nobody receives that error: it only stops [`take`].
+fn not_cancelled(cancel: &CopyCancel) -> Result<MutexGuard<'_, bool>, BackupError> {
+    let guard = cancel.lock().unwrap_or_else(PoisonError::into_inner);
+    if *guard {
+        Err(BackupError::Objects(
+            cetra_storage::CopyObjectsError::Cancelled,
+        ))
+    } else {
+        Ok(guard)
+    }
+}
+
+/// Stops [`take`] before its next step when [`run`]'s caller gave up.
+fn checkpoint(cancel: &CopyCancel) -> Result<(), BackupError> {
+    not_cancelled(cancel).map(drop)
 }
 
 /// Checks `to` and makes it an empty directory with mode `0700` (§ Consistency, step 3).
@@ -326,12 +383,15 @@ async fn write(
     dir: &Path,
     mode: BackupMode,
     started: Instant,
-    cancel: CopyCancel,
+    cancel: &CopyCancel,
 ) -> Result<BackupReport, BackupError> {
+    checkpoint(cancel)?;
     state.storage.flush_now(FLUSH_TIMEOUT).await?;
     let created = Utc::now();
+    checkpoint(cancel)?;
     copy_meta(state, dir).await?;
 
+    checkpoint(cancel)?;
     let snapshot = state
         .storage
         .snapshot_catalog(&dir.join("catalog.db"))
@@ -341,7 +401,7 @@ async fn write(
         BackupMode::Full => {
             state
                 .storage
-                .copy_objects(&snapshot, &dir.join("objects"), cancel)
+                .copy_objects(&snapshot, &dir.join("objects"), cancel.clone())
                 .await?
         }
         BackupMode::MetaOnly => CopyReport {
@@ -357,6 +417,7 @@ async fn write(
     // The objects are linked or listed now. Holding the pin longer only delays deletions.
     drop(snapshot);
 
+    checkpoint(cancel)?;
     let key = copy_key(state, dir).await?;
     let mut files = vec![
         file_record(dir, "meta.db").await?,
@@ -366,6 +427,7 @@ async fn write(
         files.push(file_record(dir, "secret.key").await?);
     }
     let created_at = rfc3339(created);
+    checkpoint(cancel)?;
     let formats = read_formats(dir).await?;
     let manifest = manifest(&ManifestParts {
         created,
@@ -382,6 +444,7 @@ async fn write(
         objects_bytes: copy.bytes,
         formats,
     });
+    checkpoint(cancel)?;
     write_manifest(dir, &manifest).await?;
 
     Ok(BackupReport {
@@ -599,7 +662,7 @@ async fn write_manifest(dir: &Path, manifest: &Value) -> Result<(), BackupError>
 
 #[cfg(test)]
 mod tests {
-    use cetra_core::batch::spans_to_record_batch;
+    use cetra_core::batch::spans_to_batch;
     use cetra_core::ids::ProjectId;
     use cetra_core::span::Span;
 
@@ -620,7 +683,7 @@ mod tests {
                 span
             })
             .collect();
-        let batch = spans_to_record_batch(&spans).unwrap();
+        let batch = spans_to_batch(&spans).unwrap();
         running
             .state()
             .storage
@@ -1082,23 +1145,20 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_partial_backup_removes_its_directory_and_stops_the_copy() {
+    fn a_dropped_partial_backup_removes_its_directory() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("backup");
         std::fs::create_dir_all(path.join("objects")).unwrap();
         std::fs::write(path.join("meta.db"), b"partial").unwrap();
-        let cancel: CopyCancel = Arc::new(Mutex::new(false));
 
         drop(Partial {
             target: Target {
                 path: path.clone(),
                 created: true,
             },
-            cancel: cancel.clone(),
             armed: true,
         });
         assert!(!path.exists(), "the cancelled backup left its directory");
-        assert!(*cancel.lock().unwrap(), "the copy was not told to stop");
     }
 
     #[test]
@@ -1107,18 +1167,41 @@ mod tests {
         let path = root.path().join("backup");
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(path.join("manifest.json"), b"{}").unwrap();
-        let cancel: CopyCancel = Arc::new(Mutex::new(false));
 
         drop(Partial {
             target: Target {
                 path: path.clone(),
                 created: true,
             },
-            cancel: cancel.clone(),
             armed: false,
         });
         assert!(path.join("manifest.json").is_file());
-        assert!(!*cancel.lock().unwrap());
+    }
+
+    /// Each step checks the flag: a backup cancelled before it starts writes nothing
+    /// and frees the slot.
+    #[tokio::test]
+    async fn a_backup_cancelled_before_its_first_step_removes_its_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let running = bind(config(&root.path().join("data")), None).await.unwrap();
+        let state = running.state();
+        let target = root.path().join("backup");
+        let cancel: CopyCancel = Arc::new(Mutex::new(true));
+
+        let error = take(state, &target, false, &cancel).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                BackupError::Objects(cetra_storage::CopyObjectsError::Cancelled)
+            ),
+            "{error}"
+        );
+        assert!(!target.exists(), "the cancelled backup left its directory");
+        assert!(
+            state.backup_slot.try_lock().is_ok(),
+            "the slot is still held"
+        );
+        running.shutdown().await.unwrap();
     }
 
     /// Aborting a running backup leaves no target content, and a retry to the same
@@ -1148,6 +1231,8 @@ mod tests {
             panic!("the backup finished before the abort");
         };
         assert!(aborted.is_cancelled());
+        // The backup's own task removes the directory, then frees the slot.
+        drop(state.backup_slot.lock().await);
         assert!(!target.exists(), "the cancelled backup left its directory");
 
         let report = run(&state, &target, false).await.unwrap();

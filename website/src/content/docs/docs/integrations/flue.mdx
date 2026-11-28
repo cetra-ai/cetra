@@ -1,0 +1,139 @@
+---
+title: Flue
+description: "Trace Flue agents with cetra from TypeScript: agent runs, model calls and tool calls, exported by Flue's OpenTelemetry instrumentation."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces Flue agents from TypeScript. `@flue/opentelemetry` sends the agent, model call and tool spans to cetra as GenAI spans.
+
+<Backing fixtures={["genai/flue-agent-tool"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```bash
+npm install @flue/runtime@2 @flue/opentelemetry@2 @earendil-works/pi-ai@1.4.0 valibot @opentelemetry/sdk-trace-node @opentelemetry/exporter-trace-otlp-proto
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+Flue's instrumentation exports through the OpenTelemetry SDK your app owns: register a tracer provider with an OTLP exporter pointed at cetra, then register the instrumentation. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+{/* untested: calls OpenAI through Flue and needs CETRA_API_KEY and OPENAI_API_KEY */}
+```ts
+import { readFileSync } from "node:fs";
+import { createProvider } from "@earendil-works/pi-ai";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { createOpenTelemetryInstrumentation } from "@flue/opentelemetry";
+import { defineTool, init, instrument, setProvider, useModel, useTool } from "@flue/runtime";
+import { start } from "@flue/runtime/node";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
+import { BatchSpanProcessor, NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
+import * as v from "valibot";
+
+const provider = new NodeTracerProvider({
+  spanProcessors: [
+    new BatchSpanProcessor(
+      new OTLPTraceExporter({
+        url: "http://<HOST>:8080/v1/traces",
+        headers: { Authorization: `Bearer ${process.env.CETRA_API_KEY}` },
+      }),
+    ),
+  ],
+});
+provider.register();
+
+// Registered under the id "openai": the spans then carry the provider name
+// that cetra prices. An id cetra does not know leaves the model calls unpriced.
+const openai = createProvider({
+  id: "openai",
+  auth: {
+    apiKey: {
+      name: "openai",
+      resolve: async () => ({ auth: { apiKey: process.env.OPENAI_API_KEY ?? "" } }),
+    },
+  },
+  models: [
+    {
+      id: "gpt-4o-mini",
+      name: "gpt-4o-mini",
+      api: "openai-completions",
+      provider: "openai",
+      baseUrl: "https://api.openai.com/v1",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128000,
+      maxTokens: 4096,
+    },
+  ],
+  api: openAICompletionsApi(),
+});
+setProvider(openai);
+
+const dispose = instrument(createOpenTelemetryInstrumentation());
+const readFile = defineTool({
+  name: "read_file",
+  description: "Read a text file and return its contents.",
+  input: v.object({ path: v.string() }),
+  run: async ({ data }) => ({ output: readFileSync(data.path, "utf8") }),
+});
+
+function Demo() {
+  useModel("openai/gpt-4o-mini");
+  useTool(readFile);
+  return "You are a helpful assistant. When asked to read a file, call read_file.";
+}
+
+// The provider is registered already, so no provider is passed here.
+const flue = await start({ agents: [Demo], providers: [] });
+try {
+  const agent = init(Demo, { id: "demo-1" });
+  const receipt = await agent.dispatch(
+    "Read hello.txt with the read_file tool and say what it says.",
+  );
+  await agent.read(receipt);
+} finally {
+  // stop drains in-flight work before the instrumentation is detached.
+  await flue.stop();
+  await dispose();
+}
+await provider.shutdown(); // flushes the spans before the script ends
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+With one tool call, a run produces:
+
+- an `agent` span named `invoke_agent Demo` (the agent function's name), with the prompt as its input and the answer as its output;
+- an `llm` span named `chat gpt-4o-mini` for each model call, with the provider `openai`, the request and response models, the token counts, the cost computed from the built-in prices, the messages, and the tool definitions;
+- a `tool` span named `execute_tool read_file`, with the arguments as its input and the result as its output.
+
+Flue's conversation id (`gen_ai.conversation.id`) becomes the trace's session.
+
+## Limits
+
+- Pin `@earendil-works/pi-ai` to 1.4.0: Flue 2.3.0 fails to import with 1.5.x.
+- Content is on by default: the prompts, the completions and the tool arguments and results are sent as soon as you register the instrumentation. Pass `{ content: false }` to `createOpenTelemetryInstrumentation()` to turn it off.
+- Flue adds its built-in `task` tool to the model's tools beside yours, so it appears in the model calls' tool definitions.
+- The fixture was captured with `@flue/runtime` and `@flue/opentelemetry` 2.3.0 on `@earendil-works/pi-ai` 1.4.0.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

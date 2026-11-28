@@ -690,7 +690,7 @@ it("names the resize handle by meta.label when the header is a render function",
     {
       id: "name",
       size: 200,
-      header: () => <span title="Utf8">Name</span>,
+      header: () => <span title="string">Name</span>,
       accessorFn: (row) => row.name,
       meta: { label: "Name" },
       cell: ({ row }) => row.original.name,

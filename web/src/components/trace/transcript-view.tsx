@@ -1,19 +1,20 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "cn";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight, Maximize2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { spanDetailQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { KindIcon } from "@/components/kind-icon";
 import { MessageView } from "@/components/payload/message-view";
-import { ToolCallCard } from "@/components/payload/tool-call-card";
+import { ToolCallLine } from "@/components/payload/tool-call-line";
 import { useProject } from "@/components/shell/project-context";
 import { TreeToolbar } from "@/components/trace/tree-toolbar";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
 import type { TraceMode } from "@/lib/search/traces";
+import { foldedMessage, matchToolSpans, toolArguments, toolLinks } from "@/lib/tool-calls";
 import {
   freshInput,
   messageText,
@@ -32,8 +33,6 @@ function rowEstimate(row: Row | undefined): number {
   return row?.kind === "section" ? 24 : 72;
 }
 
-const NO_LINKS = { callNames: new Map<string, string>(), responseIds: new Set<string>() };
-
 type TurnItem = Extract<TranscriptItem, { kind: "turn" }>;
 type SectionItem = Extract<TranscriptItem, { kind: "section" }>;
 
@@ -49,6 +48,8 @@ export function TranscriptView({
   onSelectSpan,
   mode,
   onMode,
+  wide,
+  onWide,
 }: {
   traceId: string;
   spans: readonly Schema<"TreeSpan">[];
@@ -56,6 +57,9 @@ export function TranscriptView({
   onSelectSpan: (spanId: string) => void;
   mode: TraceMode;
   onMode: (mode: TraceMode) => void;
+  /** Full width: the transcript is shown alone, without the side pane. */
+  wide: boolean;
+  onWide: (on: boolean) => void;
 }) {
   const items = useMemo(() => transcriptSpans(spans), [spans]);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
@@ -101,7 +105,22 @@ export function TranscriptView({
 
   return (
     <section aria-label="Transcript" className="flex min-h-0 flex-1 flex-col">
-      <TreeToolbar mode={mode} onMode={onMode} />
+      <TreeToolbar
+        mode={mode}
+        onMode={onMode}
+        end={
+          <Button
+            type="button"
+            size="xs"
+            variant={wide ? "secondary" : "ghost"}
+            aria-pressed={wide}
+            onClick={() => onWide(!wide)}
+          >
+            <Maximize2 />
+            Full width
+          </Button>
+        }
+      />
       {items.length === 0 ? (
         <p className="p-3 text-caption text-muted-foreground">
           No LLM or tool calls in this trace. Switch to Tree.
@@ -138,6 +157,7 @@ export function TranscriptView({
                       previousLlmId={row.previousLlmId}
                       selected={row.item.span.span.span_id === selectedSpanId}
                       onSelect={() => onSelectSpan(row.item.span.span.span_id)}
+                      spans={spans}
                     />
                   ) : null}
                   {row.kind === "more" ? (
@@ -192,12 +212,14 @@ function TurnRow({
   previousLlmId,
   selected,
   onSelect,
+  spans,
 }: {
   traceId: string;
   item: TurnItem;
   previousLlmId?: string;
   selected: boolean;
   onSelect: () => void;
+  spans: readonly Schema<"TreeSpan">[];
 }) {
   const { org, project, ref } = useProject();
   const client = useQueryClient();
@@ -219,6 +241,7 @@ function TurnRow({
     // biome-ignore lint/a11y/noStaticElementInteractions: the header button is the keyboard equivalent.
     // biome-ignore lint/a11y/useKeyWithClickEvents: the header button is the keyboard equivalent.
     <div
+      data-turn={span.span_id}
       aria-current={selected ? "true" : undefined}
       className={cn(
         "flex cursor-pointer flex-col gap-1 border-b px-2 py-1",
@@ -244,44 +267,63 @@ function TurnRow({
         window.clearTimeout(hoverTimer.current);
       }}
     >
-      <button
-        type="button"
-        className="flex w-full items-center gap-2 text-left text-caption"
-        onClick={onSelect}
-      >
-        <KindIcon kind={span.span_kind} />
-        <span className="min-w-0 truncate font-medium">{span.model ?? span.name}</span>
-        <span className="num shrink-0 text-muted-foreground">
-          {formatDuration(span.duration_ns)}
-        </span>
-        {span.total_tokens !== undefined ? (
-          <span className="num shrink-0 text-muted-foreground">
-            {formatTokens(span.total_tokens)}
-          </span>
-        ) : null}
-        {span.cost_total !== undefined ? (
-          <span className="num shrink-0 text-muted-foreground">{formatCost(span.cost_total)}</span>
-        ) : null}
-      </button>
-      {detail.isError ? (
-        <p className="text-caption">Could not load this span</p>
-      ) : !loaded ||
-        (span.span_kind === "llm" && previousLlmId !== undefined && previous.isPending) ? (
-        <Skeleton className="h-4 w-2/3" />
-      ) : span.span_kind === "tool" ? (
-        <ToolTurn detail={loaded} />
+      {span.span_kind === "tool" ? (
+        <>
+          <ToolCallLine
+            icon={<KindIcon kind={span.span_kind} />}
+            name={span.name}
+            durationNs={span.duration_ns}
+            error={span.status === "error" ? span.status_message || "Failed" : undefined}
+            args={loaded ? { value: toolArguments(loaded.input?.value, span.name) } : undefined}
+            result={loaded?.output !== undefined ? { value: loaded.output.value } : undefined}
+            onClick={onSelect}
+          />
+          {detail.isError ? <p className="text-caption">Could not load this span</p> : null}
+        </>
       ) : (
         <>
-          {previousLlmId !== undefined && previous.isError ? (
-            <p className="text-caption text-muted-foreground">
-              Earlier context could not be loaded
-            </p>
-          ) : null}
-          <LlmTurn
-            detail={loaded}
-            previous={previousLlmId !== undefined ? previous.data : undefined}
-            projectRef={ref}
-          />
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 text-left text-caption"
+            onClick={onSelect}
+          >
+            <KindIcon kind={span.span_kind} />
+            <span className="min-w-0 truncate font-medium">{span.model ?? span.name}</span>
+            <span className="num shrink-0 text-muted-foreground">
+              {formatDuration(span.duration_ns)}
+            </span>
+            {span.total_tokens !== undefined ? (
+              <span className="num shrink-0 text-muted-foreground">
+                {formatTokens(span.total_tokens)}
+              </span>
+            ) : null}
+            {span.cost_total !== undefined ? (
+              <span className="num shrink-0 text-muted-foreground">
+                {formatCost(span.cost_total)}
+              </span>
+            ) : null}
+          </button>
+          {detail.isError ? (
+            <p className="text-caption">Could not load this span</p>
+          ) : !loaded ||
+            (span.span_kind === "llm" && previousLlmId !== undefined && previous.isPending) ? (
+            <Skeleton className="h-4 w-2/3" />
+          ) : (
+            <>
+              {previousLlmId !== undefined && previous.isError ? (
+                <p className="text-caption text-muted-foreground">
+                  Earlier context could not be loaded
+                </p>
+              ) : null}
+              <LlmTurn
+                detail={loaded}
+                previous={previousLlmId !== undefined ? previous.data : undefined}
+                projectRef={ref}
+                llm={span}
+                spans={spans}
+              />
+            </>
+          )}
         </>
       )}
     </div>
@@ -292,56 +334,53 @@ function LlmTurn({
   detail,
   previous,
   projectRef,
+  llm,
+  spans,
 }: {
   detail: Schema<"SpanDetail">;
   previous: Schema<"SpanDetail"> | undefined;
   projectRef: string;
+  llm: Schema<"SpanSummary">;
+  spans: readonly Schema<"TreeSpan">[];
 }) {
-  const seen = previous
-    ? [...payloadMessages(previous.input), ...payloadMessages(previous.output)]
-    : undefined;
-  const input = freshInput(seen, payloadMessages(detail.input));
-  const output = payloadMessages(detail.output);
+  // Matching scans the whole tree, so it runs once per loaded detail, not on every render.
+  const { input, output, links } = useMemo(() => {
+    const seen = previous
+      ? [...payloadMessages(previous.input), ...payloadMessages(previous.output)]
+      : undefined;
+    // All the input matches tool spans, so a call shown on an earlier turn still gets its duration.
+    const inputAll = payloadMessages(detail.input);
+    const input = freshInput(seen, inputAll);
+    const output = payloadMessages(detail.output);
+    const links = toolLinks(
+      [...input, ...output],
+      seen ?? [],
+      matchToolSpans(llm, spans, inputAll, output),
+    );
+    return { input, output, links };
+  }, [detail, previous, llm, spans]);
   return (
     <div className="flex flex-col gap-2">
-      {input.map((message) => (
-        <MessageView
-          key={messageKey(message, "in")}
-          message={message}
-          projectRef={projectRef}
-          links={NO_LINKS}
-        />
-      ))}
-      {output.map((message) => (
-        <MessageView
-          key={messageKey(message, "out")}
-          message={message}
-          projectRef={projectRef}
-          links={NO_LINKS}
-        />
-      ))}
-    </div>
-  );
-}
-
-function ToolTurn({ detail }: { detail: Schema<"SpanDetail"> }) {
-  const callId = `tool-call-${detail.span_id}`;
-  const responseId = `tool-response-${detail.span_id}`;
-  return (
-    <div className="flex flex-col gap-1">
-      <ToolCallCard
-        anchorId={callId}
-        title={detail.name}
-        id={detail.span_id}
-        body={detail.input?.value}
-        forwardTargetId={responseId}
-      />
-      <ToolCallCard
-        anchorId={responseId}
-        title="response"
-        titleTargetId={callId}
-        body={detail.output?.value}
-      />
+      {input
+        .filter((message) => !foldedMessage(message, links))
+        .map((message) => (
+          <MessageView
+            key={messageKey(message, "in")}
+            message={message}
+            projectRef={projectRef}
+            links={links}
+          />
+        ))}
+      {output
+        .filter((message) => !foldedMessage(message, links))
+        .map((message) => (
+          <MessageView
+            key={messageKey(message, "out")}
+            message={message}
+            projectRef={projectRef}
+            links={links}
+          />
+        ))}
     </div>
   );
 }

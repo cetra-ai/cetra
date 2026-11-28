@@ -1,40 +1,45 @@
-//! Compressed and uncompressed sizes of the spans Parquet files, per column
+//! Compressed and uncompressed sizes of the spans Statam files, per column
 //! (track R M7, R7.3). Local object store only.
 
 use std::collections::BTreeMap;
-use std::fs::File;
 use std::path::Path;
 use std::time::Duration;
 
-use parquet::file::reader::FileReader;
-use parquet::file::serialized_reader::SerializedFileReader;
+use cetra_statam::{FileReader, StatamFileMeta};
 use sqlx::ConnectOptions;
 
-/// Bytes of a column chunk: `uncompressed` is the encoded page size before zstd.
+/// Bytes of a column: `uncompressed` is the encoded block size before outer codec.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct Sizes {
     pub(crate) uncompressed: u64,
     pub(crate) compressed: u64,
 }
 
-/// Per level ("L0", "L1"), per leaf column path: sums over every row group of
-/// the given files (paths relative to `objects_dir`).
+/// Per level ("L0", "L1"), per logical column name: sums over every block of
+/// the given `.statam` files (paths relative to `objects_dir`).
 pub(crate) fn column_sizes(
     objects_dir: &Path,
     files: &[(u8, String)],
 ) -> Result<BTreeMap<String, BTreeMap<String, Sizes>>, String> {
     let mut out: BTreeMap<String, BTreeMap<String, Sizes>> = BTreeMap::new();
     for (level, path) in files {
-        let file = File::open(objects_dir.join(path)).map_err(|error| error.to_string())?;
-        let reader = SerializedFileReader::new(file).map_err(|error| error.to_string())?;
+        let reader = FileReader::open(objects_dir.join(path)).map_err(|error| error.to_string())?;
+        let meta = StatamFileMeta::read_from(&reader, None).map_err(|error| error.to_string())?;
         let level_sizes = out.entry(format!("L{level}")).or_default();
-        for row_group in reader.metadata().row_groups() {
-            for column in row_group.columns() {
-                let sizes = level_sizes
-                    .entry(column.column_path().string())
-                    .or_default();
-                sizes.uncompressed += column.uncompressed_size().max(0) as u64;
-                sizes.compressed += column.compressed_size().max(0) as u64;
+        let fields = meta.schema_meta.schema.fields();
+        for col in &meta.col_dir {
+            let name = fields
+                .get(usize::from(col.logical_col_id))
+                .map(|f| f.name.as_str())
+                .unwrap_or("unknown");
+            let sizes = level_sizes.entry(name.to_owned()).or_default();
+            let start = col.first_block_idx as usize;
+            let end = start.saturating_add(col.num_blocks as usize);
+            if let Some(blocks) = meta.block_dir.get(start..end) {
+                for blk in blocks {
+                    sizes.uncompressed += u64::from(blk.raw_len);
+                    sizes.compressed += u64::from(blk.stored_len);
+                }
             }
         }
     }

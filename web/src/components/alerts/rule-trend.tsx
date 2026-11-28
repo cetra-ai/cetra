@@ -1,9 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { widgetQuery } from "@/api/dashboards";
+import { type IssueAlertScope, issueAlertPreviewQuery } from "@/api/queries-alerts";
 import type { Schema } from "@/api/types";
 import { LazyMount } from "@/components/charts/lazy-mount";
-import { formFromRule, previewParams, previewQuery, previewRows } from "@/lib/alerts";
+import {
+  formFromRule,
+  issuePreviewRows,
+  issuePreviewScope,
+  previewParams,
+  previewQuery,
+  previewRows,
+} from "@/lib/alerts";
 import type { WidgetQuery } from "@/lib/dashboards/types";
 
 const WIDTH = 120;
@@ -39,7 +47,22 @@ function TrendChart({
   project: string;
   rule: Schema<"AlertRule">;
 }) {
-  const preview = previewQuery(formFromRule(rule));
+  const form = formFromRule(rule);
+  const issue = issuePreviewScope(form);
+  if (issue !== undefined) {
+    return issue.kind === "ready" ? (
+      <IssueTrend
+        org={org}
+        project={project}
+        rule={rule}
+        scope={issue.scope}
+        window={issue.window}
+      />
+    ) : (
+      <Dash />
+    );
+  }
+  const preview = previewQuery(form);
   if (preview === undefined) {
     return <Dash />;
   }
@@ -83,12 +106,51 @@ function Trend({
   });
 
   if (query.isPending) {
-    return <span aria-hidden="true" className="block" style={{ width: WIDTH, height: HEIGHT }} />;
+    return <Placeholder />;
   }
   if (query.error || !query.data) {
     return <Dash />;
   }
-  const values = previewRows(widget, query.data, divisor).map((row) => row.all ?? null);
+  return (
+    <TrendLine
+      rule={rule}
+      values={previewRows(widget, query.data, divisor).map((row) => row.all ?? null)}
+    />
+  );
+}
+
+/** The occurrences of an issue occurrence rule per window, from the server (D-K-22). */
+function IssueTrend({
+  org,
+  project,
+  rule,
+  scope,
+  window,
+}: {
+  org: string;
+  project: string;
+  rule: Schema<"AlertRule">;
+  scope: IssueAlertScope;
+  window: Schema<"AlertWindow">;
+}) {
+  const query = useQuery({
+    ...issueAlertPreviewQuery(org, project, scope, window),
+    staleTime: 60_000,
+  });
+
+  if (query.isPending) {
+    return <Placeholder />;
+  }
+  if (query.error || !query.data) {
+    return <Dash />;
+  }
+  return (
+    <TrendLine rule={rule} values={issuePreviewRows(query.data).map((row) => row.all ?? null)} />
+  );
+}
+
+function TrendLine({ rule, values }: { rule: Schema<"AlertRule">; values: (number | null)[] }) {
+  const window = rule.condition.window;
   const defined = values.filter((value): value is number => value !== null);
   if (defined.length === 0) {
     return <Dash />;
@@ -131,6 +193,10 @@ function Trend({
       />
     </svg>
   );
+}
+
+function Placeholder() {
+  return <span aria-hidden="true" className="block" style={{ width: WIDTH, height: HEIGHT }} />;
 }
 
 function Dash() {

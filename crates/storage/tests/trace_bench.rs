@@ -33,12 +33,11 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use arrow::array::{Array, Float64Array, RecordBatch, StringArray};
 use bytesize::ByteSize;
-use cetra_core::batch::spans_to_record_batch;
+use cetra_column::{Batch, ScalarValue, Selection};
+use cetra_core::batch::spans_to_batch;
 use cetra_core::enums::{SpanKind, SpanStatus};
 use cetra_core::ids::{ProjectId, SpanId, TraceId};
 use cetra_core::span::Span;
@@ -47,9 +46,9 @@ use cetra_storage::config::{
     WalSync,
 };
 use cetra_storage::{
-    Agg, Bucket, BucketWidth, ListScope, Measure, Page, ProjectQuery, QueryContext, QueryOptions,
-    Shape, SortOrder, TimeWindow, TraceListRequest, TraceSort, WidgetQuery, WidgetRequest,
-    WidgetSource, trace_detail, trace_list, trace_list_plan, widget_query,
+    Agg, Bucket, BucketWidth, ListScope, Measure, Page, QueryContext, QueryOptions, SQL_MAX_ROWS,
+    Shape, SortOrder, SqlRequest, TimeWindow, TraceListRequest, TraceSort, WidgetQuery,
+    WidgetRequest, WidgetSource, trace_detail, trace_list, trace_list_plan, widget_query,
 };
 use chrono::{TimeZone, Utc};
 use common::corpus::{CORPUS_SHA256, Corpus};
@@ -57,7 +56,6 @@ use common::machine::{dir_bytes, machine};
 use common::payload::{Payloads, span_payload_bytes};
 use common::rng::{Rng, mix};
 use common::s3::S3Env;
-use datafusion::physical_optimizer::PhysicalOptimizerRule;
 
 // ---------------------------------------------------------------- constants
 
@@ -535,7 +533,7 @@ fn count_spans_files(dir: &Path) -> usize {
             let p = entry.path();
             if p.is_dir() {
                 walk(&p, count);
-            } else if p.extension().is_some_and(|e| e == "parquet")
+            } else if p.extension().is_some_and(|e| e == "statam")
                 && p.to_string_lossy().contains("tables/spans")
             {
                 *count += 1;
@@ -595,6 +593,17 @@ impl Backend {
     }
 }
 
+fn peak_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmHWM:") {
+            let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+            return Some(kb.saturating_mul(1024));
+        }
+    }
+    None
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CacheMode {
     Cold,
@@ -632,7 +641,7 @@ async fn dataset_files(backend: &Backend) -> (usize, u64) {
                 .iter()
                 .filter(|meta| {
                     let key = meta.location.to_string();
-                    key.contains("tables/spans") && key.ends_with(".parquet")
+                    key.contains("tables/spans") && key.ends_with(".statam")
                 })
                 .count();
             (count, metas.iter().map(|meta| meta.size).sum())
@@ -742,7 +751,7 @@ fn q4_sample(plans: &[TracePlan]) -> Vec<(String, i64)> {
 
 /// Appends a generated batch, waiting out `Backpressure` (the memtable is full
 /// until a flush makes room). Other errors fail the run.
-async fn append_retry(storage: &cetra_storage::Storage, batch: RecordBatch) {
+async fn append_retry(storage: &cetra_storage::Storage, batch: Batch) {
     loop {
         match storage.append_spans(project(), batch.clone()).await {
             Ok(_) => return,
@@ -754,7 +763,7 @@ async fn append_retry(storage: &cetra_storage::Storage, batch: RecordBatch) {
     }
 }
 
-/// Arrow and payload bytes written by one generation.
+/// Column batch and payload bytes written by one generation.
 #[derive(Default)]
 struct Written {
     arrow_bytes: u64,
@@ -762,8 +771,8 @@ struct Written {
 }
 
 async fn append_batch(storage: &cetra_storage::Storage, batch: &[Span], written: &mut Written) {
-    let rb = spans_to_record_batch(batch).unwrap();
-    written.arrow_bytes += rb.get_array_memory_size() as u64;
+    let rb = spans_to_batch(batch).unwrap();
+    written.arrow_bytes += rb.memory_bytes() as u64;
     append_retry(storage, rb).await;
 }
 
@@ -952,17 +961,6 @@ where
     bench(op).await
 }
 
-struct Row {
-    name: String,
-    mode: String,
-    /// SQL to `EXPLAIN ANALYZE` when this target misses.
-    sql: String,
-    stats: Stats,
-    target: f64,
-    rows: usize,
-    differing: usize,
-}
-
 fn request<'a>(
     filter: Option<&'a str>,
     limit: usize,
@@ -985,81 +983,70 @@ fn request<'a>(
     }
 }
 
+fn active_phys_rows(batch: &Batch) -> Vec<usize> {
+    match batch.selection() {
+        Selection::All => (0..batch.raw_len()).collect(),
+        Selection::Mask(mask) => mask.iter_ones().collect(),
+        Selection::Indices(indices) => indices.iter().map(|&idx| idx as usize).collect(),
+    }
+}
+
 fn hex_ids(page: &Page) -> Vec<String> {
     let mut ids = Vec::new();
     for batch in &page.batches {
-        let Some(column) = batch
-            .column_by_name("trace_id")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-        else {
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let Some(col) = batch.column_by_name("trace_id") else {
             continue;
         };
-        for row in 0..column.len() {
-            ids.push(column.value(row).to_owned());
+        for phys in active_phys_rows(batch) {
+            if let Ok(ScalarValue::Utf8(id)) = col.get_scalar(phys) {
+                ids.push(id);
+            }
         }
     }
     ids
 }
 
-fn differing(a: &[String], b: &[String]) -> usize {
-    (0..a.len().max(b.len()))
-        .filter(|i| a.get(*i) != b.get(*i))
-        .count()
-}
-
-fn no_rule(query: &ProjectQuery) -> QueryContext {
-    let source = ProjectQuery {
-        spans: Arc::clone(&query.spans),
-        traces: Arc::clone(&query.traces),
-        scores: Arc::clone(&query.scores),
-        runtime: Arc::clone(&query.runtime),
-        target_partitions: query.target_partitions,
-        optimizer_rules: Vec::<Arc<dyn PhysicalOptimizerRule + Send + Sync>>::new(),
-        suspects: query.suspects.clone(),
-        visible_from: None,
-    };
-    QueryContext::new(source, None).unwrap()
-}
-
-fn ts_string(ns: i64) -> String {
-    let secs = ns.div_euclid(NS);
-    let nanos = ns.rem_euclid(NS);
-    Utc.timestamp_opt(secs, nanos as u32)
-        .unwrap()
-        .format("%Y-%m-%dT%H:%M:%S%.fZ")
-        .to_string()
-}
-
-/// Q2r threshold: the 50th-largest `cost_total` among traces started within
-/// `lookback` of the range end, from an untimed range-mode query (spec 06 §
-/// Queries). With `cost_total > t`, matches number ~50 per such a window, so
-/// the 50 newest matches span about `lookback` — S1b's "50th match 2 h / 15 h
-/// back". It comes from the merged data, not from the generator's costs.
 async fn cost_threshold(range: &QueryContext, lookback: i64) -> f64 {
     let cutoff = range_end() - lookback;
-    let sql = format!(
-        "SELECT cost_total FROM traces WHERE start_time >= TIMESTAMP '{}' \
-         ORDER BY cost_total DESC LIMIT 50",
-        ts_string(cutoff)
-    );
-    let batches = range
-        .session()
-        .sql(&sql)
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap();
+    let window = TimeWindow::new(cutoff, range_end() + DAY).unwrap();
+    let req = TraceListRequest {
+        filter: None,
+        search: None,
+        strict_exclusions: false,
+        scope: ListScope {
+            window: Some(window),
+            include_eval: true,
+            include_experiments: true,
+        },
+        sort: TraceSort::CostTotal,
+        order: SortOrder::Desc,
+        limit: 50,
+        cursor: None,
+        timeout: TIMEOUT,
+    };
+    let page = trace_list(range, req).await.unwrap();
     let mut costs = Vec::new();
-    for batch in &batches {
-        if let Some(column) = batch
-            .column_by_name("cost_total")
-            .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
-        {
-            for row in 0..column.len() {
-                if !column.is_null(row) {
-                    costs.push(column.value(row));
+    for batch in &page.batches {
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let col = batch.column_by_name("cost_total").unwrap();
+        for phys in active_phys_rows(batch) {
+            match col.get_scalar(phys).unwrap() {
+                ScalarValue::F64(v) => costs.push(v),
+                ScalarValue::Decimal128 { value, scale, .. } => {
+                    let v = if scale >= 0 {
+                        (value as f64) / 10f64.powi(i32::from(scale))
+                    } else {
+                        (value as f64) * 10f64.powi(-i32::from(scale))
+                    };
+                    costs.push(v);
                 }
+                ScalarValue::Null(_) => {}
+                other => panic!("unexpected cost_total scalar: {other:?}"),
             }
         }
     }
@@ -1067,63 +1054,18 @@ async fn cost_threshold(range: &QueryContext, lookback: i64) -> f64 {
     costs.get(49).copied().unwrap_or(0.05).max(1e-6)
 }
 
-/// The mode of A2's real `trace_list` query for these options, plus SQL for a
-/// possible `EXPLAIN ANALYZE` when its target misses. The mode comes from the
-/// physical plan A2 actually builds (`traces` view + default exclusions +
-/// filter/window + sort + limit), not from hand-written SQL that leaves out the
-/// environment filter.
-async fn plan_info(
-    ctx: &QueryContext,
-    filter: Option<&str>,
-    window: Option<TimeWindow>,
-) -> (String, String) {
+async fn plan_info(ctx: &QueryContext, filter: Option<&str>, window: Option<TimeWindow>) -> String {
     let req = request(filter, 50, window);
-    let mode = match trace_list_plan(ctx, req).await {
+    match trace_list_plan(ctx, req).await {
         Ok(plan) if plan.contains("mode=list") => "list".to_owned(),
         _ => "range".to_owned(),
-    };
-    (mode, list_sql(filter, window))
+    }
 }
 
-/// Equivalent SQL for `EXPLAIN ANALYZE` on a missed target. A2's default list
-/// excludes eval rows, so keep that environment clause in the analysed plan.
-fn list_sql(filter: Option<&str>, window: Option<TimeWindow>) -> String {
-    let mut sql =
-        String::from("SELECT * FROM traces WHERE environment IS DISTINCT FROM 'cetra-eval'");
-    if let Some(w) = window {
-        sql.push_str(&format!(
-            " AND start_time >= TIMESTAMP '{}' AND start_time < TIMESTAMP '{}'",
-            ts_string(w.from()),
-            ts_string(w.to())
-        ));
-    }
-    if let Some(f) = filter {
-        sql.push_str(&format!(" AND ({f})"));
-    }
-    sql.push_str(" ORDER BY start_time DESC, trace_id DESC LIMIT 51");
-    sql
-}
-
-/// For a missed target, the operator that took the time (EXPLAIN ANALYZE).
-async fn explain_analyze(ctx: &QueryContext, sql: &str) -> String {
-    let Ok(frame) = ctx.session().sql(&format!("EXPLAIN ANALYZE {sql}")).await else {
-        return String::new();
-    };
-    let Ok(batches) = frame.collect().await else {
-        return String::new();
-    };
-    let mut text = String::new();
-    for batch in &batches {
-        for column in batch.columns() {
-            if let Some(values) = column.as_any().downcast_ref::<StringArray>() {
-                for i in 0..values.len() {
-                    text.push_str(values.value(i));
-                    text.push('\n');
-                }
-            }
-        }
-    }
-    text
+fn differing(a: &[String], b: &[String]) -> usize {
+    (0..a.len().max(b.len()))
+        .filter(|i| a.get(*i) != b.get(*i))
+        .count()
 }
 
 const Q5_SQL: &str = "SELECT date_bin(INTERVAL '1 hour', start_time, TIMESTAMP '1970-01-01T00:00:00Z') AS bucket, count(*) AS traces, sum(CASE WHEN error_count > 0 THEN 1 ELSE 0 END) AS errors, sum(cost_total) AS cost, approx_percentile_cont(duration_ns, 0.5) AS p50, approx_percentile_cont(duration_ns, 0.95) AS p95, approx_percentile_cont(duration_ns, 0.99) AS p99 FROM traces GROUP BY bucket ORDER BY bucket";
@@ -1160,6 +1102,21 @@ async fn trace_benchmark() {
     let storage = cetra_storage::Storage::open(config(&backend, max_bytes, read_cache))
         .await
         .unwrap();
+
+    run_benchmark(&storage, &backend, &manifest, cache, passes, PARTITIONS).await;
+    drop(storage);
+    drop(tmp);
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_benchmark(
+    storage: &cetra_storage::Storage,
+    backend: &Backend,
+    manifest: &Manifest,
+    cache: Option<CacheMode>,
+    passes: usize,
+    partitions: usize,
+) {
     let ctx = QueryContext::new(
         storage
             .query(project(), QueryOptions::new(None, None))
@@ -1168,26 +1125,46 @@ async fn trace_benchmark() {
         None,
     )
     .unwrap();
-    let range = no_rule(
-        &storage
+    let mut range = QueryContext::new(
+        storage
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap(),
-    );
+        None,
+    )
+    .unwrap();
+    range.set_force_range_mode(true);
 
-    // Confirm A2's real `trace_list` — the `traces` view plus its default
-    // environment / experiment exclusions — is rewritten to list mode. The
-    // mode column below comes from the same real query, not a hand-written
-    // `SELECT` that leaves the environment filter out.
     let default_plan = trace_list_plan(&ctx, request(None, 50, None))
         .await
         .unwrap_or_default();
     assert!(
         default_plan.contains("mode=list"),
-        "A2's real trace_list did not get list mode:\n{default_plan}"
+        "trace_list did not get list mode:\n{default_plan}"
     );
 
-    let mut rows: Vec<Row> = Vec::new();
+    enum MissKind {
+        List {
+            filter: Option<String>,
+            window: Option<TimeWindow>,
+        },
+        Detail {
+            is_q4b: bool,
+        },
+        Sql,
+    }
+
+    struct BenchRow {
+        name: String,
+        mode: String,
+        stats: Stats,
+        target: f64,
+        rows: usize,
+        differing: usize,
+        miss: MissKind,
+    }
+
+    let mut rows: Vec<BenchRow> = Vec::new();
     for pass in 0..passes {
         let untimed = pass + 1 < passes;
         rows.clear();
@@ -1196,36 +1173,38 @@ async fn trace_benchmark() {
             ($name:expr, $target:expr, $filter:expr, $window:expr) => {{
                 let filter: Option<&str> = $filter;
                 let window: Option<TimeWindow> = $window;
-                let (mode, sql) = plan_info(&ctx, filter, window).await;
+                let mode = plan_info(&ctx, filter, window).await;
                 let req = || request(filter, 50, window);
                 let stats = measure(untimed, || async {
                     let page = trace_list(&ctx, req()).await.unwrap();
-                    std::hint::black_box(
-                        page.batches
-                            .iter()
-                            .map(RecordBatch::num_rows)
-                            .sum::<usize>(),
-                    );
+                    std::hint::black_box(page.batches.iter().map(Batch::num_rows).sum::<usize>());
                 })
                 .await;
                 let a = hex_ids(&trace_list(&ctx, req()).await.unwrap());
                 let b = hex_ids(&trace_list(&range, req()).await.unwrap());
-                rows.push(Row {
+                let diff = differing(&a, &b);
+                assert_eq!(
+                    diff, 0,
+                    "{} differing ids against range mode: {diff}",
+                    $name
+                );
+                rows.push(BenchRow {
                     name: $name.to_owned(),
                     mode,
-                    sql,
                     stats,
                     target: $target,
                     rows: a.len(),
-                    differing: differing(&a, &b),
+                    differing: diff,
+                    miss: MissKind::List {
+                        filter: filter.map(str::to_owned),
+                        window,
+                    },
                 });
             }};
         }
 
         list_query!("Q1", 200.0, None, None);
         list_query!("Q2", 2000.0, Some("cost_total > 0.05"), None);
-        // Q2r thresholds come from untimed range-mode queries, as S1b did, so the
-        // 50th newest match is about 2 h / 15 h back — not from generator costs.
         let t2 = format!("cost_total > {:.6}", cost_threshold(&range, 2 * HOUR).await);
         let t15 = format!(
             "cost_total > {:.6}",
@@ -1237,8 +1216,6 @@ async fn trace_benchmark() {
         let window = TimeWindow::new(range_start() + 3 * DAY, range_start() + 4 * DAY).unwrap();
         list_query!("Q6", 200.0, None, Some(window));
 
-        // Q4 — 99 ids (half split). Q4a builds its own context per call, inside the
-        // timing, with `around` = the trace's start. Q4b uses one context.
         for (label, use_around, target) in [("Q4a", true, 100.0), ("Q4b", false, 1000.0)] {
             let mut samples = Vec::with_capacity(manifest.sample.len());
             for (id, start) in &manifest.sample {
@@ -1267,10 +1244,9 @@ async fn trace_benchmark() {
                     .min(samples.len() - 1);
                 samples[idx]
             };
-            rows.push(Row {
+            rows.push(BenchRow {
                 name: label.to_owned(),
                 mode: "lookup".to_owned(),
-                sql: "SELECT * FROM traces WHERE trace_id = ''".to_owned(),
                 stats: Stats {
                     cold: samples.first().copied().unwrap_or(0.0),
                     p50: pick(0.50),
@@ -1280,41 +1256,46 @@ async fn trace_benchmark() {
                 target,
                 rows: manifest.sample.len(),
                 differing: 0,
+                miss: MissKind::Detail {
+                    is_q4b: !use_around,
+                },
             });
         }
 
         // Q5 — SQL dashboard over the 7 days.
+        let empty_params = serde_json::Map::new();
         let stats = measure(untimed, || async {
-            let batches = ctx
-                .session()
-                .sql(Q5_SQL)
-                .await
-                .unwrap()
-                .collect()
+            let res = ctx
+                .sql_json(SqlRequest {
+                    query: Q5_SQL,
+                    params: &empty_params,
+                    limit: SQL_MAX_ROWS,
+                    timeout: TIMEOUT,
+                })
                 .await
                 .unwrap();
-            std::hint::black_box(batches.iter().map(RecordBatch::num_rows).sum::<usize>());
+            std::hint::black_box(res.rows.len());
         })
         .await;
-        let q5_rows: usize = ctx
-            .session()
-            .sql(Q5_SQL)
+        let q5_rows = ctx
+            .sql_json(SqlRequest {
+                query: Q5_SQL,
+                params: &empty_params,
+                limit: SQL_MAX_ROWS,
+                timeout: TIMEOUT,
+            })
             .await
             .unwrap()
-            .collect()
-            .await
-            .unwrap()
-            .iter()
-            .map(RecordBatch::num_rows)
-            .sum();
-        rows.push(Row {
+            .rows
+            .len();
+        rows.push(BenchRow {
             name: "Q5".to_owned(),
             mode: "sql".to_owned(),
-            sql: Q5_SQL.to_owned(),
             stats,
             target: 2000.0,
             rows: q5_rows,
             differing: 0,
+            miss: MissKind::Sql,
         });
 
         println!(
@@ -1324,7 +1305,6 @@ async fn trace_benchmark() {
         );
     }
 
-    // Informational: the dashboard overview's headline measures over the 7 days, no target.
     let window = TimeWindow::new(range_start(), range_end()).unwrap();
     let query = WidgetQuery {
         source: WidgetSource::Traces,
@@ -1384,19 +1364,18 @@ async fn trace_benchmark() {
         info.cold, info.p50, info.p95, info.max
     );
 
-    // Markdown table.
-    let (_, dataset_bytes) = dataset_files(&backend).await;
+    let (_, dataset_bytes) = dataset_files(backend).await;
     let store = match (&backend.s3, cache) {
         (Some(s3), Some(mode)) => {
             format!("S3 {}, read cache {}", s3.describe(S3_PREFIX), mode.name())
         }
         _ => "local disk".to_owned(),
     };
-    println!("\n## M3 implementation\n");
+    println!("\n## Query engine benchmark (cetra-column)\n");
     println!("Store: {store}");
     println!("Machine: {}", machine(&backend.dir));
     println!(
-        "Dataset: {} traces, {} spans files ({}), {} bytes, generated in {:.1} s, target_partitions {PARTITIONS}, {} traces with a 1–3 h late group",
+        "Dataset: {} traces, {} spans files ({}), {} bytes, generated in {:.1} s, target_partitions {partitions}, {} traces with a 1–3 h late group",
         manifest.traces,
         manifest.files.last().copied().unwrap_or(0),
         manifest
@@ -1410,11 +1389,14 @@ async fn trace_benchmark() {
         manifest.late_1_3h,
     );
     println!(
-        "Payloads: {} arrow bytes, {} payload bytes, {} arrow bytes per trace",
+        "Payloads: {} batch bytes, {} payload bytes, {} batch bytes per trace",
         manifest.arrow_bytes,
         manifest.payload_bytes,
         manifest.arrow_bytes / manifest.traces.max(1) as u64,
     );
+    if let Some(rss) = peak_rss_bytes() {
+        println!("Peak RSS (VmHWM): {} ({rss} bytes)", ByteSize::b(rss));
+    }
     println!();
     println!("| query | mode | cold | p50 | p95 | max | target | pass | rows | differing ids |");
     println!("|---|---|---:|---:|---:|---:|---:|---|---:|---:|");
@@ -1439,17 +1421,48 @@ async fn trace_benchmark() {
     }
     for row in &rows {
         if row.stats.p95 > row.target {
-            println!(
-                "\n{} missed; EXPLAIN ANALYZE (operator that took the time):\n{}",
-                row.name,
-                explain_analyze(&ctx, &row.sql).await
-            );
+            match &row.miss {
+                MissKind::Detail { is_q4b } => {
+                    if let Some((id, start)) = manifest.sample.first() {
+                        if *is_q4b {
+                            let _ = trace_detail(&ctx, id, TIMEOUT).await;
+                            if let Some(metrics) = ctx.format_last_metrics() {
+                                println!("\n{} missed; ExecMetrics:\n{}", row.name, metrics);
+                            }
+                        } else {
+                            let q = storage
+                                .query(project(), QueryOptions::new(Some(*start), None))
+                                .await
+                                .unwrap();
+                            let c = QueryContext::new(q, None).unwrap();
+                            let _ = trace_detail(&c, id, TIMEOUT).await;
+                            if let Some(metrics) = c.format_last_metrics() {
+                                println!("\n{} missed; ExecMetrics:\n{}", row.name, metrics);
+                            }
+                        }
+                    }
+                }
+                MissKind::List { filter, window } => {
+                    let _ = trace_list(&ctx, request(filter.as_deref(), 50, *window)).await;
+                    if let Some(metrics) = ctx.format_last_metrics() {
+                        println!("\n{} missed; ExecMetrics:\n{}", row.name, metrics);
+                    }
+                }
+                MissKind::Sql => {
+                    let empty_params = serde_json::Map::new();
+                    let _ = ctx
+                        .sql_json(SqlRequest {
+                            query: Q5_SQL,
+                            params: &empty_params,
+                            limit: SQL_MAX_ROWS,
+                            timeout: TIMEOUT,
+                        })
+                        .await;
+                }
+            }
         }
     }
 
-    // Drop without shutdown so the memtable tail survives for the next run.
     drop(ctx);
     drop(range);
-    drop(storage);
-    drop(tmp);
 }

@@ -6,11 +6,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::{Array, Int64Array, RecordBatch};
 use object_store::ObjectStore;
 use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
-use parquet::file::metadata::ParquetMetaDataReader;
 use sqlx::ConnectOptions;
 use uuid::Uuid;
 
@@ -18,7 +16,7 @@ use crate::catalog::{FileId, FileMeta, FileTable, now_ns};
 use crate::compaction::job::tests::{at, config_in, flush_cycle, project, quiet_compaction};
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::hooks::HookPoint;
-use crate::objects::PutSizes;
+use crate::objects::{PutSizes, StorageIo};
 use crate::test_support::{Call, ChaosStore, rows, span_row, span_rows};
 use crate::verify::{Verdict, verify_file};
 use crate::views::QueryContext;
@@ -27,9 +25,9 @@ use crate::{QueryOptions, Storage};
 /// How a test damages a flushed object in place.
 #[derive(Debug, Clone, Copy)]
 enum Corruption {
-    /// The first data page's header is overwritten: a decode error.
+    /// The first data block is overwritten: a decode error.
     Page,
-    /// The trailing `PAR1` magic is overwritten: a footer error.
+    /// The trailing postscript magic is overwritten: a footer error.
     Footer,
     /// The last byte is cut: the size differs from the catalog.
     Truncate,
@@ -45,20 +43,38 @@ fn corrupt(data_dir: &Path, file: &FileMeta, how: Corruption) {
     let mut bytes = std::fs::read(&path).unwrap();
     match how {
         Corruption::Page => {
-            let data = bytes::Bytes::from(bytes.clone());
-            let mut reader = ParquetMetaDataReader::new();
-            reader.try_parse(&data).unwrap();
-            let metadata = reader.finish().unwrap();
-            let offset =
-                usize::try_from(metadata.row_group(0).column(0).data_page_offset()).unwrap();
-            for byte in &mut bytes[offset..offset + 32] {
-                *byte = 0xFF;
+            let meta = cetra_statam::StatamFileMeta::read_from(
+                &cetra_statam::SliceReader::new(bytes.clone()),
+                None,
+            )
+            .unwrap();
+            // Pick a stored mini-block of a column projected by SQL `SELECT *`
+            // (`project_id` at col 0 is omitted by views, and short 1-row columns may be inline Const).
+            let block = ["span_id", "name", "start_time", "score_id"]
+                .into_iter()
+                .find_map(|col_name| {
+                    let c = meta.schema().index_of(col_name)?;
+                    let cd = meta.col_dir.get(c)?;
+                    let start = cd.first_block_idx as usize;
+                    let end = (cd.first_block_idx + cd.num_blocks) as usize;
+                    meta.block_dir
+                        .get(start..end)?
+                        .iter()
+                        .find(|b| b.stored_len > 0)
+                        .copied()
+                })
+                .or_else(|| meta.block_dir.iter().find(|b| b.stored_len > 0).copied())
+                .expect("at least one stored mini-block");
+            let offset = usize::try_from(block.offset).unwrap();
+            let end = (offset + usize::try_from(block.stored_len).unwrap()).min(bytes.len());
+            for byte in &mut bytes[offset..end] {
+                *byte ^= 0xFF;
             }
         }
         Corruption::Footer => {
             let end = bytes.len();
             for byte in &mut bytes[end - 4..] {
-                *byte = 0xFF;
+                *byte ^= 0xFF;
             }
         }
         Corruption::Truncate => {
@@ -109,13 +125,8 @@ async fn count(storage: &Storage, sql: &str) -> i64 {
         .await
         .unwrap();
     let ctx = QueryContext::new(query, None).unwrap();
-    let batches: Vec<RecordBatch> = rows(&ctx, sql).await;
-    batches[0]
-        .column(0)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap()
-        .value(0)
+    let result = rows(&ctx, sql).await;
+    result[0].values().next().unwrap().as_i64().unwrap()
 }
 
 /// The active spans file whose earliest start is `start` (one row per file).
@@ -132,18 +143,12 @@ fn spans_file_at(storage: &Storage, start: i64) -> Arc<FileMeta> {
 async fn two_files(dir: &Path) -> (Storage, crate::config::StorageConfig) {
     let config = config_in(dir, quiet_compaction(10), Duration::from_secs(3_600));
     let storage = Storage::open(config.clone()).await.unwrap();
-    let storage = flush_cycle(
-        &config,
-        storage,
-        span_rows(&[span_row(0, 1, at(10, 0, 0), at(10, 0, 1))]),
-    )
-    .await;
-    let storage = flush_cycle(
-        &config,
-        storage,
-        span_rows(&[span_row(1, 2, at(10, 1, 0), at(10, 1, 1))]),
-    )
-    .await;
+    let mut s0 = span_row(0, 1, at(10, 0, 0), at(10, 0, 1));
+    s0.name = "span-with-stored-data-block-0".to_owned();
+    let storage = flush_cycle(&config, storage, span_rows(&[s0])).await;
+    let mut s1 = span_row(1, 2, at(10, 1, 0), at(10, 1, 1));
+    s1.name = "span-with-stored-data-block-1".to_owned();
+    let storage = flush_cycle(&config, storage, span_rows(&[s1])).await;
     assert_eq!(storage.catalog_files(FileTable::Spans).len(), 2);
     (storage, config)
 }
@@ -158,7 +163,8 @@ async fn verify_file_sorts_files() {
     let (storage, _) = two_files(dir.path()).await;
     let file = storage.catalog_files(FileTable::Spans)[0].clone();
     let store = local_store(dir.path());
-    assert_eq!(verify_file(&store, &file).await, Verdict::Healthy);
+    let io = StorageIo::from_store(Arc::clone(&store));
+    assert_eq!(verify_file(&io, &file).await, Verdict::Healthy);
 
     let original = std::fs::read(object_path(dir.path(), &file)).unwrap();
     for (how, reason) in [
@@ -168,7 +174,7 @@ async fn verify_file_sorts_files() {
     ] {
         corrupt(dir.path(), &file, how);
         assert_eq!(
-            verify_file(&store, &file).await,
+            verify_file(&io, &file).await,
             Verdict::Corrupt { reason },
             "{how:?}"
         );
@@ -177,7 +183,7 @@ async fn verify_file_sorts_files() {
 
     std::fs::remove_file(object_path(dir.path(), &file)).unwrap();
     assert_eq!(
-        verify_file(&store, &file).await,
+        verify_file(&io, &file).await,
         Verdict::Corrupt {
             reason: "missing object"
         }
@@ -186,11 +192,70 @@ async fn verify_file_sorts_files() {
 
     // A failing store is not corruption.
     let fault = Arc::new(ChaosStore::new(Arc::clone(&store)));
-    let failing: Arc<dyn ObjectStore> = fault.clone();
+    let failing = StorageIo::from_store(fault.clone() as Arc<dyn ObjectStore>);
     fault.hold(&[Call::Get, Call::Head]);
     assert_eq!(verify_file(&failing, &file).await, Verdict::Unavailable);
     fault.release();
     assert_eq!(verify_file(&failing, &file).await, Verdict::Healthy);
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_corrupt_sibling_pack_is_quarantined_with_its_spans_and_traces() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_in(dir.path(), quiet_compaction(2), Duration::from_secs(3_600));
+    let mut storage = Storage::open(config.clone()).await.unwrap();
+
+    for i in 0..2_u16 {
+        let mut s = span_row(i, 1, at(10, i64::from(i), 0), at(10, i64::from(i), 1));
+        s.input = Some(format!("large-payload-span-{i}-").repeat(200));
+        storage = flush_cycle(&config, storage, span_rows(&[s])).await;
+    }
+    let report = storage.compact(at(11, 0, 0)).await.unwrap();
+    assert_eq!((report.jobs, report.failed), (1, 0));
+
+    let spans_files = storage.catalog_files(FileTable::Spans);
+    assert_eq!(spans_files.len(), 1);
+    let victim = Arc::clone(&spans_files[0]);
+    let pack = victim
+        .pack
+        .as_ref()
+        .expect("compacted L1 spans with >1 KiB input owns a sibling .stpk pack");
+    let victim_traces = traces_of(dir.path(), victim.id).await;
+    assert_eq!(victim_traces.len(), 1);
+
+    // Corrupt the sibling `.stpk` pack in place.
+    let pack_disk = dir.path().join("objects").join(&pack.path);
+    let mut pack_bytes = std::fs::read(&pack_disk).unwrap();
+    let len = pack_bytes.len();
+    for b in &mut pack_bytes[len - 16..] {
+        *b ^= 0xFF;
+    }
+    std::fs::write(&pack_disk, pack_bytes).unwrap();
+
+    // Querying `input` reads the corrupt pack, fails, and queues the owning spans file as suspect.
+    let query = storage
+        .query(project(), QueryOptions::new(None, None))
+        .await
+        .unwrap();
+    let ctx = QueryContext::new(query, None).unwrap();
+    let res = ctx
+        .sql_json(crate::sql::SqlRequest {
+            query: "SELECT input FROM spans",
+            params: &serde_json::Map::new(),
+            limit: 10,
+            timeout: Duration::from_secs(10),
+        })
+        .await;
+    assert!(res.is_err(), "reading corrupt .stpk pack must fail query");
+
+    let verify_report = storage.verify_pass().await;
+    assert_eq!(verify_report.quarantined, 1, "{verify_report:?}");
+    assert_eq!(verify_report.failed, 0);
+    assert!(storage.catalog_files(FileTable::Spans).is_empty());
+    assert!(storage.catalog_files(FileTable::Traces).is_empty());
+    assert_eq!(state_of(dir.path(), victim.id).await, "quarantined");
+    assert_eq!(state_of(dir.path(), victim_traces[0]).await, "quarantined");
     storage.shutdown().await.unwrap();
 }
 

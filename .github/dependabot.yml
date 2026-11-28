@@ -25,9 +25,8 @@ updates:
   - package-ecosystem: cargo
     directory: /
     ignore:
-      # DataFusion picks the arrow, parquet and object_store majors. A major of these moves
-      # only with a DataFusion major, and that PR is completed by hand (AGENTS.md
-      # § Dependencies). Arrow 60 renamed the map entry fields to `key`/`value`; see
+      # Keep arrow, parquet and object_store majors aligned (AGENTS.md § Dependencies).
+      # Arrow 60 renamed the map entry fields to `key`/`value`; see
       # docs/plans/maintenance/01-first-dependabot-batch.md before that upgrade.
       - dependency-name: "arrow"
         update-types: ["version-update:semver-major"]
@@ -37,6 +36,9 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "object_store"
         update-types: ["version-update:semver-major"]
+      # x509-cert stays on bergshamra's line (D-SA-11): 0.3 would put two versions in the graph.
+      - dependency-name: "x509-cert"
+        versions: [">=0.3.0"]
     schedule:
       interval: weekly
       day: monday
@@ -51,10 +53,8 @@ updates:
       prefix: deps
     groups:
       # No update-types: majors of this family move together (AGENTS.md).
-      datafusion-family:
+      arrow-parquet-family:
         patterns:
-          - "datafusion"
-          - "datafusion-*"
           - "arrow"
           - "arrow-*"
           - "parquet"

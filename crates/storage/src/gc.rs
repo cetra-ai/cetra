@@ -254,7 +254,22 @@ pub(crate) async fn collect_obsolete(
             let removal = {
                 let _gate = committer.object_gc_gate.read().await;
                 committer
-                    .collect_obsolete_file(file, hooks, || objects.delete_len(&file.path))
+                    .collect_obsolete_file(file, hooks, || async {
+                        if objects.deletes_enabled() {
+                            let mut evict = Vec::with_capacity(2);
+                            if let Some(pack_path) = file.pack_path.as_deref() {
+                                evict.push(pack_path);
+                            }
+                            evict.push(file.path.as_str());
+                            objects.evict_read_cache(&evict).await;
+                        }
+                        let mut total = 0_u64;
+                        if let Some(pack_path) = file.pack_path.as_deref() {
+                            total = total.saturating_add(objects.delete_len(pack_path).await?);
+                        }
+                        total = total.saturating_add(objects.delete_len(&file.path).await?);
+                        Ok(total)
+                    })
                     .await?
             };
             match removal {
@@ -617,6 +632,7 @@ mod tests {
             max_ingest_time: 4,
             fully_merged: false,
             deletions_applied_seq: 0,
+            pack: None,
         }
     }
 
@@ -654,11 +670,8 @@ mod tests {
                 meta(FileTable::Spans, spans_id, spans_path.clone()),
                 meta(FileTable::Traces, traces_id, traces_path.clone()),
             ],
-            remove: Vec::new(),
-            flushed_seq: None,
             sources: vec![(traces_id, spans_id)],
-            raise: Vec::new(),
-            quarantine: Vec::new(),
+            ..CatalogEdit::default()
         };
         f.committer
             .stage(&[spans_path.clone(), traces_path.clone()])
@@ -680,15 +693,11 @@ mod tests {
 
     async fn remove_pair(f: &Fixture, spans_id: FileId, traces_id: FileId) {
         let remove = CatalogEdit {
-            add: Vec::new(),
             remove: vec![
                 (spans_id, FileState::Active),
                 (traces_id, FileState::Active),
             ],
-            flushed_seq: None,
-            sources: Vec::new(),
-            raise: Vec::new(),
-            quarantine: Vec::new(),
+            ..CatalogEdit::default()
         };
         f.committer.commit(&remove, |_| {}).await.unwrap();
     }
@@ -705,11 +714,7 @@ mod tests {
         let (path, id) = Objects::table_file_path(FileTable::Spans, project(), day(), 0);
         let edit = CatalogEdit {
             add: vec![meta(FileTable::Spans, id, path.clone())],
-            remove: Vec::new(),
-            flushed_seq: None,
-            sources: Vec::new(),
-            raise: Vec::new(),
-            quarantine: Vec::new(),
+            ..CatalogEdit::default()
         };
         f.committer
             .stage(std::slice::from_ref(&path))
@@ -723,12 +728,8 @@ mod tests {
                 .unwrap();
         }
         let remove = CatalogEdit {
-            add: Vec::new(),
             remove: vec![(id, FileState::Active)],
-            flushed_seq: None,
-            sources: Vec::new(),
-            raise: Vec::new(),
-            quarantine: Vec::new(),
+            ..CatalogEdit::default()
         };
         f.committer.commit(&remove, |_| {}).await.unwrap();
         (id, path)
@@ -1118,29 +1119,16 @@ mod tests {
         assert!(object_exists(dir.path(), &file_path));
 
         // The old snapshot still reads its one row.
-        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
-            datafusion::execution::context::SessionConfig::new(),
-            Arc::clone(&held.runtime),
+        let ctx = crate::views::QueryContext::new(held, None).unwrap();
+        let counted = crate::test_support::rows(&ctx, "SELECT count(*) AS n FROM spans").await;
+        assert_eq!(
+            counted[0]["n"].as_i64().unwrap(),
+            1,
+            "the pre-raise snapshot reads its row"
         );
-        ctx.register_table("spans_t", held.spans.clone()).unwrap();
-        let counted = ctx
-            .sql("SELECT count(*) FROM spans_t")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-        let total = counted[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap()
-            .value(0);
-        assert_eq!(total, 1, "the pre-raise snapshot reads its row");
 
         // Once the snapshot is gone, every obsolete file goes.
         drop(ctx);
-        drop(held);
         let collected = storage.collect_obsolete(Duration::ZERO).await.unwrap();
         assert!(collected.deleted >= 1, "{collected:?}");
         assert!(!object_exists(dir.path(), &file_path));
@@ -1455,15 +1443,11 @@ mod tests {
             .collect();
         assert!(!files.is_empty());
         let remove = CatalogEdit {
-            add: Vec::new(),
             remove: files
                 .iter()
                 .map(|file| (file.id, FileState::Active))
                 .collect(),
-            flushed_seq: None,
-            sources: Vec::new(),
-            raise: Vec::new(),
-            quarantine: Vec::new(),
+            ..CatalogEdit::default()
         };
         storage.committer.commit(&remove, |_| {}).await.unwrap();
         assert_eq!(storage.staged_paths().await.unwrap(), vec![staged.clone()]);
@@ -1541,5 +1525,270 @@ mod tests {
 
         assert_eq!(report, OrphanReport::default());
         assert!(object_exists(dir.path(), &temp));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn collect_obsolete_deletes_pack_and_evicts_read_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = Hooks::default();
+        let committer = Committer::open(dir.path(), Hooks::default()).await.unwrap();
+        let mem: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let disk = Arc::new(crate::disk::Disk::open(vec![dir.path().to_path_buf()], 0).unwrap());
+        let cache = Arc::new(
+            crate::read_cache::ReadCache::open(dir.path().join("cache"), 64 << 20, disk, 0)
+                .unwrap(),
+        );
+        let objects = Objects::remote_for_test(
+            Arc::clone(&mem),
+            dir.path(),
+            Hooks::default(),
+            crate::objects::PutSizes::S3,
+        )
+        .unwrap()
+        .with_read_cache(Arc::clone(&cache));
+
+        let (spans_path, spans_id) =
+            Objects::table_file_path(FileTable::Spans, project(), day(), 1);
+        let pack_uuid = uuid::Uuid::now_v7();
+        let pack_path = Objects::pack_file_path(project(), day(), 1, pack_uuid);
+        let (traces_path, traces_id) =
+            Objects::table_file_path(FileTable::Traces, project(), day(), 1);
+        let pack_bytes = b"sibling-stpk-payload-bytes";
+
+        let mut spans = meta(FileTable::Spans, spans_id, spans_path.clone());
+        spans.level = 1;
+        spans.size = u64::try_from(SPANS_BYTES.len()).unwrap();
+        spans.pack = Some(crate::catalog::PackMeta {
+            id: *pack_uuid.as_bytes(),
+            path: pack_path.clone(),
+            size: u64::try_from(pack_bytes.len()).unwrap(),
+            toc_size: 112,
+        });
+        let traces = meta(FileTable::Traces, traces_id, traces_path.clone());
+
+        committer
+            .stage(&[spans_path.clone(), pack_path.clone(), traces_path.clone()])
+            .await
+            .unwrap();
+        objects
+            .put_durable(&spans_path, Bytes::from_static(SPANS_BYTES))
+            .await
+            .unwrap();
+        objects
+            .put_durable(&pack_path, Bytes::from_static(pack_bytes))
+            .await
+            .unwrap();
+        objects
+            .put_durable(&traces_path, Bytes::from_static(TRACES_BYTES))
+            .await
+            .unwrap();
+        // Write-through populated the read cache for both the spans file and its pack.
+        let spans_cache_name =
+            crate::read_cache::cached_name(&ObjectPath::from(spans_path.as_str())).unwrap();
+        let pack_cache_name =
+            crate::read_cache::cached_name(&ObjectPath::from(pack_path.as_str())).unwrap();
+        assert!(cache.size(&spans_cache_name).is_some());
+        assert!(cache.size(&pack_cache_name).is_some());
+
+        let add = CatalogEdit {
+            add: vec![spans, traces],
+            sources: vec![(traces_id, spans_id)],
+            ..CatalogEdit::default()
+        };
+        committer.commit(&add, |_| {}).await.unwrap();
+        let remove = CatalogEdit {
+            remove: vec![
+                (spans_id, FileState::Active),
+                (traces_id, FileState::Active),
+            ],
+            ..CatalogEdit::default()
+        };
+        committer.commit(&remove, |_| {}).await.unwrap();
+
+        // Inject GcObsoleteAfterDelete on the first file to verify idempotent retry.
+        hooks.arm_fail(HookPoint::GcObsoleteAfterDelete);
+        let err = collect_obsolete(&committer, &objects, &hooks, now_ns(), Duration::ZERO)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GcError::Fault));
+
+        // Retry completes cleanly and deletes both table files + sibling pack.
+        let report = collect_obsolete(&committer, &objects, &hooks, now_ns(), Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(report.deleted, 2);
+        assert_eq!(
+            report.bytes,
+            u64::try_from(TRACES_BYTES.len()).unwrap(),
+            "first pair's objects were already deleted before the fault; retry deletes traces"
+        );
+        assert!(cache.size(&spans_cache_name).is_none());
+        assert!(cache.size(&pack_cache_name).is_none());
+        assert!(
+            mem.head(&ObjectPath::from(pack_path.as_str()))
+                .await
+                .is_err()
+        );
+        assert!(
+            mem.head(&ObjectPath::from(spans_path.as_str()))
+                .await
+                .is_err()
+        );
+        assert!(
+            mem.head(&ObjectPath::from(traces_path.as_str()))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            scalar(dir.path(), "SELECT COUNT(*) FROM data_files").await,
+            0
+        );
+
+        // Clean (unfaulted) obsolete collection sums both table-file and sibling-pack bytes.
+        let (s2_path, s2_id) = Objects::table_file_path(FileTable::Spans, project(), day(), 1);
+        let p2_uuid = uuid::Uuid::now_v7();
+        let p2_path = Objects::pack_file_path(project(), day(), 1, p2_uuid);
+        let mut s2 = meta(FileTable::Spans, s2_id, s2_path.clone());
+        s2.level = 1;
+        s2.size = u64::try_from(SPANS_BYTES.len()).unwrap();
+        s2.pack = Some(crate::catalog::PackMeta {
+            id: *p2_uuid.as_bytes(),
+            path: p2_path.clone(),
+            size: u64::try_from(pack_bytes.len()).unwrap(),
+            toc_size: 112,
+        });
+        committer
+            .stage(&[s2_path.clone(), p2_path.clone()])
+            .await
+            .unwrap();
+        objects
+            .put_durable(&s2_path, Bytes::from_static(SPANS_BYTES))
+            .await
+            .unwrap();
+        objects
+            .put_durable(&p2_path, Bytes::from_static(pack_bytes))
+            .await
+            .unwrap();
+        committer
+            .commit(
+                &CatalogEdit {
+                    add: vec![s2],
+                    ..CatalogEdit::default()
+                },
+                |_| {},
+            )
+            .await
+            .unwrap();
+        committer
+            .commit(
+                &CatalogEdit {
+                    remove: vec![(s2_id, FileState::Active)],
+                    ..CatalogEdit::default()
+                },
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let clean_report = collect_obsolete(&committer, &objects, &hooks, now_ns(), Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(
+            clean_report,
+            ObsoleteReport {
+                deleted: 1,
+                bytes: u64::try_from(SPANS_BYTES.len() + pack_bytes.len()).unwrap(),
+                in_use: 0,
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn collect_orphans_tracks_active_and_obsolete_pack_paths() {
+        let f = fixture().await;
+        let (spans_path, spans_id) =
+            Objects::table_file_path(FileTable::Spans, project(), day(), 1);
+        let pack_uuid = uuid::Uuid::now_v7();
+        let pack_path = Objects::pack_file_path(project(), day(), 1, pack_uuid);
+        let (traces_path, traces_id) =
+            Objects::table_file_path(FileTable::Traces, project(), day(), 1);
+        let pack_bytes = b"orphan-check-pack";
+
+        let mut spans = meta(FileTable::Spans, spans_id, spans_path.clone());
+        spans.level = 1;
+        spans.size = u64::try_from(SPANS_BYTES.len()).unwrap();
+        spans.pack = Some(crate::catalog::PackMeta {
+            id: *pack_uuid.as_bytes(),
+            path: pack_path.clone(),
+            size: u64::try_from(pack_bytes.len()).unwrap(),
+            toc_size: 112,
+        });
+        let traces = meta(FileTable::Traces, traces_id, traces_path.clone());
+
+        f.committer
+            .stage(&[spans_path.clone(), pack_path.clone(), traces_path.clone()])
+            .await
+            .unwrap();
+        f.objects
+            .put_durable(&spans_path, Bytes::from_static(SPANS_BYTES))
+            .await
+            .unwrap();
+        f.objects
+            .put_durable(&pack_path, Bytes::from_static(pack_bytes))
+            .await
+            .unwrap();
+        f.objects
+            .put_durable(&traces_path, Bytes::from_static(TRACES_BYTES))
+            .await
+            .unwrap();
+        let add = CatalogEdit {
+            add: vec![spans, traces],
+            sources: vec![(traces_id, spans_id)],
+            ..CatalogEdit::default()
+        };
+        f.committer.commit(&add, |_| {}).await.unwrap();
+
+        let needed = f.committer.needed_keys().await.unwrap();
+        let known = f.committer.known_keys().await.unwrap();
+        assert!(needed.contains(&pack_path));
+        assert!(known.contains(&pack_path));
+
+        let report = super::collect_orphans(&f.committer, &f.objects, Duration::ZERO, false)
+            .await
+            .unwrap();
+        assert_eq!(report, OrphanReport::default());
+        assert!(object_exists(f.dir.path(), &pack_path));
+
+        // Deleting only the pack object makes collect_orphans report 1 missing object.
+        f.objects.delete(&pack_path).await.unwrap();
+        let report = super::collect_orphans(&f.committer, &f.objects, Duration::ZERO, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            report,
+            OrphanReport {
+                missing: 1,
+                ..OrphanReport::default()
+            }
+        );
+
+        // Re-create the pack and obsolete the file: known_keys must keep it from being deleted as an orphan.
+        f.objects
+            .put_durable(&pack_path, Bytes::from_static(pack_bytes))
+            .await
+            .unwrap();
+        remove_pair(&f, spans_id, traces_id).await;
+        assert!(
+            !f.committer
+                .needed_keys()
+                .await
+                .unwrap()
+                .contains(&pack_path)
+        );
+        assert!(f.committer.known_keys().await.unwrap().contains(&pack_path));
+        let report = super::collect_orphans(&f.committer, &f.objects, Duration::ZERO, false)
+            .await
+            .unwrap();
+        assert_eq!(report, OrphanReport::default());
+        assert!(object_exists(f.dir.path(), &pack_path));
     }
 }

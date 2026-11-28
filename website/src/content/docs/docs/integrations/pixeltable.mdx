@@ -1,0 +1,43 @@
+---
+title: Pixeltable
+description: "Send Pixeltable's OpenTelemetry spans to cetra through its OpenTelemetry integration. Setup only: the run was not completed, so the span shapes are unverified."
+---
+
+Pixeltable (the `pixeltable` package on PyPI) exports OpenTelemetry spans over OTLP through its OpenTelemetry integration. This page points that export at cetra. It is setup only: the run was not completed, so no Pixeltable span was observed against cetra.
+
+## Install
+
+```bash
+pip install "pixeltable[otel]"
+```
+
+The `otel` extra installs `opentelemetry-instrumentation-pixeltable`, the OTLP exporters and `opentelemetry-instrumentation-fastapi`.
+
+## Set up
+
+In Pixeltable's config file (`config.toml` under `PIXELTABLE_HOME`), point the `[otel]` section at cetra:
+
+```toml
+[otel]
+exporter_otlp_endpoint = "http://localhost:8080"
+exporter_otlp_headers = "Authorization=Bearer sk-cetra-…"
+```
+
+The section's other keys: `exporter_otlp_protocol` (`http/protobuf` by default), `span_level` (`info` by default; `debug` adds row and UDF spans), `logs` (false by default) and `metrics`.
+
+Two alternatives set the endpoint: the `init()` call of `opentelemetry-instrumentation-pixeltable`, which takes `endpoint`, `protocol`, `span_level`, `metrics` and `logs`, appends `/v1/traces` itself (pass the base URL) and must run before your first Pixeltable operation; and the `OTEL_EXPORTER_OTLP_ENDPOINT` variable.
+
+## What you get
+
+Not verified: no Pixeltable run reached cetra for this page. Expected from the package's design: Pixeltable's own spans for table operations and UDF calls, with OpenInference spans for model calls nested under the UDF spans when OpenInference is installed.
+
+## Limits
+
+- Not run: the run for this page could not start Pixeltable's embedded Postgres in its sandbox, and no spans were received.
+- Not checked: whether the header value above is read as written. Check the first trace in cetra's UI.
+- This page was written against pixeltable 0.7.24 and `opentelemetry-instrumentation-pixeltable` 0.2.0.
+
+## Next
+
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.

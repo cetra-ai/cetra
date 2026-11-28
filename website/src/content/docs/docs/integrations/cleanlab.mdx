@@ -1,0 +1,59 @@
+---
+title: Cleanlab
+description: "Send Cleanlab trustworthiness scores to cetra as scores on the trace. Setup only: not run, and it needs a Cleanlab key."
+---
+
+Cleanlab's trustworthiness score is a number from 0 to 1 for a prompt and a response. This page sends that number to cetra as a score on the trace. It is setup only: it was not run, because it needs a Cleanlab key.
+
+## Install
+
+```bash
+pip install cetra-sdk cleanlab-tlm
+```
+
+## Set up
+
+Set your Cleanlab key in the environment for the `cleanlab-tlm` client. The variable name is not given on this page; use the one the `cleanlab-tlm` documentation names.
+
+Score the answer inside a span, so that the score has a trace to attach to:
+
+{/* untested: needs a Cleanlab key and CETRA_API_KEY; the return value is the spike's reading of the package, not a run */}
+```python
+import cetra
+from cleanlab_tlm import TLM
+
+cetra.init()
+
+tlm = TLM()
+prompt = "What is the capital of France?"
+response = "Paris."
+
+with cetra.span("answer", input=prompt) as s:
+    s.set_output(response)
+    trustworthiness = tlm.get_trustworthiness_score(prompt, response)
+    cetra.score(
+        trace_id=cetra.current_trace_id(),
+        name="trustworthiness",
+        value=trustworthiness,
+    )
+
+cetra.flush()
+```
+
+Set `CETRA_API_KEY` to your `sk-cetra-…` key first.
+
+## What you get
+
+- One score named `trustworthiness` on the trace, with a value from 0 to 1, shown with the other scores of the trace.
+- The span `answer`, with the prompt and the response as its input and output.
+
+## Limits
+
+- Not run: no Cleanlab key was used, so the return value is taken from the package's reading, not observed. A batch of inputs returns a list.
+- The score is written only when the span is inside a trace. Outside one, cetra does not queue it.
+- Cleanlab calls its own service, so this page does not say that those calls appear as spans in the trace.
+
+## Next
+
+- [Scores](/docs/evaluation/scores/): the score API and how scores are read.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.

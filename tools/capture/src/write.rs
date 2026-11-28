@@ -24,6 +24,10 @@ pub enum Language {
     Python,
     /// `tools/capture/ts`.
     Typescript,
+    /// `tools/capture/java`.
+    Java,
+    /// `tools/capture/dotnet`.
+    Dotnet,
 }
 
 /// Provenance stored on a captured `case.json`.
@@ -185,6 +189,7 @@ mod tests {
         };
         Scenario {
             description: "A captured chat.".to_owned(),
+            mock_host: "127.0.0.1".to_owned(),
             spec_refs: vec!["02 § Normalization rules".to_owned()],
             notes,
             settings,
@@ -196,9 +201,14 @@ mod tests {
             timing_attributes: Vec::new(),
             span_names: Vec::new(),
             volatile_attributes: Vec::new(),
+            volatile_name_prefixes: Vec::new(),
+            tolerated_probes: Vec::new(),
+            unordered_spans: false,
             turns: vec![Turn {
                 api: Api::OpenaiChat,
                 model: "gpt-test".to_owned(),
+                auxiliary: false,
+                host: None,
                 message: Some(Message {
                     text: Some("Hi".to_owned()),
                     reasoning: None,
@@ -360,6 +370,18 @@ mod tests {
         );
         assert_eq!(case["source"]["language"], "typescript");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_case_serializes_java_and_dotnet() {
+        for (language, serialized) in [(Language::Java, "java"), (Language::Dotnet, "dotnet")] {
+            let dir = temp_dir(serialized);
+            write_case(&dir, &scenario(false), &request("chat"), &source(language)).unwrap();
+            let case: Value =
+                serde_json::from_str(&fs::read_to_string(dir.join("case.json")).unwrap()).unwrap();
+            assert_eq!(case["source"]["language"], serialized);
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

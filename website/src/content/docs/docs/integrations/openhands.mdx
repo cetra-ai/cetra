@@ -1,0 +1,97 @@
+---
+title: OpenHands
+description: "Trace OpenHands SDK agent runs with cetra from Python, through the Laminar SDK's OTLP export: conversations, steps, model calls and tools."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces OpenHands SDK agent runs. The OpenHands SDK sends its spans through the Laminar SDK, which exports them to cetra over OTLP.
+
+<Backing fixtures={["laminar/openhands-agent"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "openhands-sdk==1.62.0"
+```
+
+  </TabItem>
+</Tabs>
+
+The OpenHands SDK installs the `lmnr` package that exports the spans.
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+The Laminar SDK reads its OTLP settings from the environment, so set them before you start the run. Use your `sk-cetra-…` key, and never set `LMNR_PROJECT_API_KEY`: with it, Laminar sends the spans to its own cloud instead of to cetra.
+
+```bash
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:8080/v1/traces
+export OTEL_EXPORTER_OTLP_TRACES_HEADERS="Authorization=Bearer%20$CETRA_API_KEY"
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
+export OTEL_EXPORTER=otlp_http
+export LMNR_FORCE_HTTP=true
+export LITELLM_LOCAL_MODEL_COST_MAP=True
+export OPENHANDS_SUPPRESS_BANNER=1
+```
+
+`LITELLM_LOCAL_MODEL_COST_MAP=True` makes LiteLLM use the cost map in its package instead of downloading one.
+
+{/* untested: calls OpenAI through OpenHands and needs OPENAI_API_KEY; the shape is backed by a hand-written case */}
+```python
+import os
+import tempfile
+
+from lmnr import Laminar
+from openhands.sdk import LLM, Agent, Conversation
+
+llm = LLM(
+    model="openai/gpt-4o-mini",
+    api_key=os.environ["OPENAI_API_KEY"],
+    usage_id="agent",
+)
+agent = Agent(llm=llm, tools=[])
+
+with tempfile.TemporaryDirectory() as workspace:
+    conversation = Conversation(agent=agent, workspace=workspace)
+    conversation.send_message("What is the weather in Paris?")
+    conversation.run()
+
+Laminar.force_flush()
+```
+
+  </TabItem>
+</Tabs>
+
+`tools=[]` leaves only the built-in `finish` tool. Add your own tools with the `openhands-tools` package and your own tool definitions.
+
+## What you get
+
+A run produces these spans, which the fixture holds in the shape the SDK sends:
+
+- a `chain` span named `conversation.run` as the root, with the conversation's ID as the session;
+- a `chain` span named `agent.step` for each step of the agent;
+- a `chain` span named `llm.openai/gpt-4o-mini` that wraps each model call and holds the cost the SDK reports;
+- an `llm` span named `litellm.completion` under it, with the provider `openai`, the model, the token counts, the messages and the cost computed from the built-in prices;
+- a `tool` span for each tool call, such as `FinishAction`, with the action as its input.
+
+The wrapper span is a `chain` span, so the reported cost and the computed cost of the model call are not both counted.
+
+## Limits
+
+- This page is set up only. The OpenHands case in cetra's fixtures was written by hand from a run of the SDK, not captured by the capture program, so the shape is checked but no live run is.
+- The fixture was taken from openhands-sdk 1.62.0, with the Laminar SDK 0.8.8 and LiteLLM 1.105.7.
+- The run uses the SDK's built-in `finish` tool. A call to a tool that the agent does not have is recorded as an `InvalidToolCall` `tool` span.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the key for any OTLP exporter.

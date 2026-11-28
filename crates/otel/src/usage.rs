@@ -23,6 +23,19 @@ use crate::warn::{Warning, Warnings};
 const USAGE_DETAILS: &str = "langfuse.observation.usage_details";
 const NO_CACHE_TOKENS: &str = "ai.usage.inputTokenDetails.noCacheTokens";
 const INPUT_TOKEN_DETAILS: &str = "ai.usage.inputTokenDetails.";
+/// Agent Spec's model-call span name (D-IN-31 item 5). Its spans carry no
+/// instrumentation scope, so the `"null"` rule is gated on the span name.
+const AGENTSPEC_LLM_SPAN: &str = "LlmGenerationSpan";
+/// The token keys Agent Spec writes the string `"null"` into when it does not
+/// know the count (D-IN-31 item 5).
+const AGENTSPEC_NULL_KEYS: &[&str] = &[
+    "llm.token_count.prompt",
+    "llm.token_count.completion",
+    "llm.token_count.total",
+    "llm.token_count.prompt_details.cache_read",
+    "llm.token_count.prompt_details.cache_write",
+    "llm.token_count.completion_details.reasoning",
+];
 
 /// Whether a usage count already contains the related tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,34 +325,47 @@ pub(crate) struct Usage {
 }
 
 /// Resolve token columns. On any other kind the usage attributes stay unread.
+///
+/// `span_name` is the span's name; Agent Spec's `"null"` token counts
+/// (D-IN-31 item 5) are gated on it. `scope_name` is the span's instrumentation
+/// scope name (`""` when absent); Prompt Flow's counts (R-PF-2) are gated on
+/// it. `conventions` is the conventions detected on the span; VoltAgent's
+/// counts (V4) are gated on it.
 pub(crate) fn usage(
     bag: &mut AttrBag<'_>,
     kind: SpanKind,
+    span_name: &str,
     provider: Option<&str>,
+    scope_name: &str,
+    conventions: &[Convention],
     warnings: &mut Warnings,
 ) -> Usage {
     if !matches!(kind, SpanKind::Llm | SpanKind::Embedding) {
         return Usage::default();
     }
+    // Before the first_count calls, so a consumed "null" is never a candidate.
+    let agentspec_null = agentspec_null_tokens(bag, kind, span_name);
     let resource = ResourceView::new(&[]);
     let legacy = vercel_legacy(bag, provider);
-    let mut input = first_count(bag, &resource, INPUT, warnings);
+    let mut input = first_count(bag, &resource, INPUT, warnings, &agentspec_null);
     if input.is_none() && kind == SpanKind::Embedding {
         // Vercel `embed`/`embedMany` report one count, which is the input (D-B1-6).
-        input = first_count(bag, &resource, EMBEDDING_INPUT, warnings);
+        input = first_count(bag, &resource, EMBEDDING_INPUT, warnings, &agentspec_null);
     }
-    let output = first_count(bag, &resource, OUTPUT, warnings);
-    let mut cache_read = match first_count(bag, &resource, CACHE_READ, warnings) {
+    let output = first_count(bag, &resource, OUTPUT, warnings, &agentspec_null);
+    let mut cache_read = match first_count(bag, &resource, CACHE_READ, warnings, &agentspec_null) {
         Some((value, _, _)) => Some(value),
         None => provider_cache_count(bag, ANTHROPIC_CACHE_READ, warnings),
     };
-    let mut cache_write = match first_count(bag, &resource, CACHE_WRITE, warnings) {
+    let mut cache_write = match first_count(bag, &resource, CACHE_WRITE, warnings, &agentspec_null)
+    {
         Some((value, _, _)) => Some(value),
         None => provider_cache_count(bag, ANTHROPIC_CACHE_WRITE, warnings),
     };
-    let mut reasoning = first_count(bag, &resource, REASONING, warnings).map(|(value, _, _)| value);
+    let mut reasoning = first_count(bag, &resource, REASONING, warnings, &agentspec_null)
+        .map(|(value, _, _)| value);
     let mut reported_total =
-        first_count(bag, &resource, TOTAL, warnings).map(|(value, _, _)| value);
+        first_count(bag, &resource, TOTAL, warnings, &agentspec_null).map(|(value, _, _)| value);
     let details = langfuse_usage(bag, warnings);
     let mut from_details = false;
     let input = match input {
@@ -413,6 +439,24 @@ pub(crate) fn usage(
         metadata.as_ref().and_then(|metadata| metadata.total),
     );
 
+    // V4: VoltAgent's own counts, after the generic extraction (D-IN-6), and
+    // Prompt Flow's (R-PF-2). Each key is consumed only when it fills its column.
+    let scoped = scoped_usage(bag, kind, scope_name, conventions, warnings);
+    let input = match input {
+        Some(found) => Some(found),
+        None => take_count(bag, scoped.input).map(|value| (value, Inclusive::Yes, Inclusive::Yes)),
+    };
+    let output = match output {
+        Some(found) => Some(found),
+        None => take_count(bag, scoped.output).map(|value| (value, Inclusive::Yes, Inclusive::Yes)),
+    };
+    if cache_read.is_none() {
+        cache_read = take_count(bag, scoped.cache_read);
+    }
+    if reasoning.is_none() {
+        reasoning = take_count(bag, scoped.reasoning);
+    }
+
     let mut input_tokens = input.map(|(value, _, _)| value);
     let mut input_inclusive = input
         .map(|(_, semantics, _)| input_is_inclusive(semantics, legacy))
@@ -461,6 +505,31 @@ pub(crate) fn usage(
     }
 }
 
+/// D-IN-31 item 5: Agent Spec writes the string `"null"` into every token count
+/// it does not know. Its spans have no instrumentation scope, so the rule is
+/// gated on its model-call span: kind `Llm` and span name `LlmGenerationSpan`.
+/// Each of [`AGENTSPEC_NULL_KEYS`] whose value is exactly `"null"`
+/// (case-sensitive) is consumed — no count, no `invalid_number` (an amendment
+/// to rule 20) — and returned, so [`first_count`] skips exactly what this rule
+/// consumed. Every other span keeps rule 20's behaviour and an empty list.
+fn agentspec_null_tokens(
+    bag: &mut AttrBag<'_>,
+    kind: SpanKind,
+    span_name: &str,
+) -> Vec<&'static str> {
+    if kind != SpanKind::Llm || span_name != AGENTSPEC_LLM_SPAN {
+        return Vec::new();
+    }
+    let mut consumed = Vec::new();
+    for &key in AGENTSPEC_NULL_KEYS {
+        if bag.get(key).and_then(as_str) == Some("null") {
+            bag.take(key);
+            consumed.push(key);
+        }
+    }
+    consumed
+}
+
 struct GeminiUsage {
     input: Option<i64>,
     output: Option<i64>,
@@ -486,14 +555,95 @@ fn gemini_usage(bag: &AttrBag<'_>, warnings: &mut Warnings) -> Option<GeminiUsag
     })
 }
 
+/// Scoped counts (V4, R-PF-2), one per column they may fill. Read, not consumed:
+/// [`take_count`] consumes the key that fills its column.
+#[derive(Debug, Default)]
+struct ScopedUsage {
+    input: Option<Counted>,
+    output: Option<Counted>,
+    cache_read: Option<Counted>,
+    reasoning: Option<Counted>,
+}
+
+/// One count and the key it came from.
+#[derive(Debug, Clone, Copy)]
+struct Counted {
+    key: &'static str,
+    value: i64,
+}
+
+/// V4 (D-IN-6): `llm.usage.*` on `llm` spans of the `voltagent` convention.
+/// R-PF-2: the same keys on `llm` and `embedding` spans of scope `promptflow`,
+/// where Prompt Flow writes them (its `llm.usage.total_tokens` is already a
+/// TOTAL source).
+///
+/// Not rows in the tables above: OpenInference and OpenLLMetry use the `llm.`
+/// namespace too, so only a `voltagent` or `promptflow` span reads these keys
+/// (D-IN-23). The input includes the cache and the output the reasoning, like
+/// the GenAI row of the token table, so nothing is added back. The root agent
+/// span's `usage.*` (the sum of every step) stay in `attributes`: rule 3.
+fn scoped_usage(
+    bag: &AttrBag<'_>,
+    kind: SpanKind,
+    scope_name: &str,
+    conventions: &[Convention],
+    warnings: &mut Warnings,
+) -> ScopedUsage {
+    let scoped = match kind {
+        SpanKind::Llm => conventions.contains(&Convention::Voltagent) || scope_name == "promptflow",
+        SpanKind::Embedding => scope_name == "promptflow",
+        _ => false,
+    };
+    if !scoped {
+        return ScopedUsage::default();
+    }
+    ScopedUsage {
+        input: one_count(bag, "llm.usage.prompt_tokens", warnings),
+        output: one_count(bag, "llm.usage.completion_tokens", warnings),
+        cache_read: one_count(bag, "llm.usage.cached_tokens", warnings),
+        reasoning: one_count(bag, "llm.usage.reasoning_tokens", warnings),
+    }
+}
+
+/// One count from one key, read but not consumed. As for a table source
+/// (rule 20): an empty string is absent, and an unusable number is skipped,
+/// left unread and warned.
+fn one_count(bag: &AttrBag<'_>, key: &'static str, warnings: &mut Warnings) -> Option<Counted> {
+    let value = bag.get(key)?;
+    if as_str(value).is_some_and(str::is_empty) {
+        return None;
+    }
+    match as_i64(value) {
+        Ok(Some(value)) => Some(Counted { key, value }),
+        Ok(None) => None,
+        Err(InvalidNumber) => {
+            warnings.add(Warning::InvalidNumber);
+            None
+        }
+    }
+}
+
+/// The value of a count that fills its column, and consumes its key.
+fn take_count(bag: &mut AttrBag<'_>, count: Option<Counted>) -> Option<i64> {
+    let count = count?;
+    bag.take(count.key);
+    Some(count.value)
+}
+
 /// Time to first token, in nanoseconds, for any span kind.
 ///
 /// `warnings` is not in the plan's sketch; a non-numeric candidate records
 /// `invalid_number` and is skipped, matching rule 20.
+///
+/// `scope_name` is the span's instrumentation scope name (`""` when absent);
+/// the Strands row is gated on it. `_conventions` is the conventions detected
+/// on the span; no row reads it yet.
 pub(crate) fn ttft(
     bag: &mut AttrBag<'_>,
     events: &[Event],
     start_time: i64,
+    scope_name: &str,
+    _conventions: &[Convention],
     warnings: &mut Warnings,
 ) -> Option<i64> {
     if let Some(nanos) = take(bag, attr::TTFT_NS, warnings, read_nanos) {
@@ -515,6 +665,17 @@ pub(crate) fn ttft(
     ) {
         return Some(nanos);
     }
+    // Strands writes milliseconds here (D-IN-5); no other emitter was seen.
+    if scope_name.starts_with("strands")
+        && let Some(nanos) = take(
+            bag,
+            "gen_ai.server.time_to_first_token",
+            warnings,
+            read_millis,
+        )
+    {
+        return Some(nanos);
+    }
     if let Some(nanos) = take(bag, "ai.response.msToFirstChunk", warnings, read_millis) {
         return Some(nanos);
     }
@@ -527,6 +688,9 @@ pub(crate) fn ttft(
         start_time,
         warnings,
     ) {
+        return Some(nanos);
+    }
+    if let Some(nanos) = take_instant(bag, "mastra.completion_start_time", start_time, warnings) {
         return Some(nanos);
     }
     event_ttft(events, start_time)
@@ -667,8 +831,13 @@ fn first_count(
     resource: &ResourceView<'_>,
     table: &[UsageSource],
     warnings: &mut Warnings,
+    agentspec_null: &[&'static str],
 ) -> Option<(i64, Inclusive, Inclusive)> {
     for item in table {
+        // D-IN-31 item 5: a "null" the Agent Spec rule consumed is absent.
+        if agentspec_null.contains(&item.source.key) {
+            continue;
+        }
         if let Some(resolved) = first_i64(bag, resource, &[item.source], warnings) {
             return Some((
                 resolved.value,
@@ -971,7 +1140,7 @@ mod tests {
     ) -> (Usage, Warnings, AttrBag<'a>) {
         let mut warnings = Warnings::default();
         let mut bag = AttrBag::new(attrs, &mut warnings);
-        let usage = usage(&mut bag, kind, provider, &mut warnings);
+        let usage = usage(&mut bag, kind, "generate", provider, "", &[], &mut warnings);
         (usage, warnings, bag)
     }
 
@@ -1261,12 +1430,159 @@ mod tests {
     }
 
     #[test]
+    fn voltagent_counts_fill_their_columns_and_are_consumed() {
+        // V4 (D-IN-6): input includes cache, output includes reasoning, so
+        // nothing is added back.
+        const VOLTAGENT: &[Convention] = &[Convention::Voltagent];
+        let attrs = [
+            int_attr("llm.usage.prompt_tokens", 131),
+            int_attr("llm.usage.completion_tokens", 12),
+            int_attr("llm.usage.cached_tokens", 64),
+            int_attr("llm.usage.reasoning_tokens", 4),
+        ];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let counts = usage(
+            &mut bag,
+            SpanKind::Llm,
+            "",
+            None,
+            "@voltagent/core",
+            VOLTAGENT,
+            &mut warnings,
+        );
+        assert_eq!(counts.input_tokens, Some(131));
+        assert_eq!(counts.output_tokens, Some(12));
+        assert_eq!(counts.cache_read_tokens, Some(64));
+        assert_eq!(counts.reasoning_tokens, Some(4));
+        for key in [
+            "llm.usage.prompt_tokens",
+            "llm.usage.completion_tokens",
+            "llm.usage.cached_tokens",
+            "llm.usage.reasoning_tokens",
+        ] {
+            assert_eq!(bag.state(key), Some(Use::Consumed), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_voltagent_key_that_does_not_fill_its_column_stays_unread() {
+        const VOLTAGENT: &[Convention] = &[Convention::Voltagent];
+        // The generic `gen_ai.usage.input_tokens` wins the input column, so
+        // `llm.usage.prompt_tokens` stays unread.
+        let attrs = [
+            int_attr("gen_ai.usage.input_tokens", 50),
+            int_attr("llm.usage.prompt_tokens", 131),
+            int_attr("llm.usage.completion_tokens", 12),
+        ];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let counts = usage(
+            &mut bag,
+            SpanKind::Llm,
+            "",
+            None,
+            "",
+            VOLTAGENT,
+            &mut warnings,
+        );
+        assert_eq!(counts.input_tokens, Some(50));
+        assert_eq!(counts.output_tokens, Some(12));
+        assert_eq!(bag.state("gen_ai.usage.input_tokens"), Some(Use::Consumed));
+        assert_eq!(bag.state("llm.usage.prompt_tokens"), Some(Use::Unread));
+        assert_eq!(
+            bag.state("llm.usage.completion_tokens"),
+            Some(Use::Consumed)
+        );
+    }
+
+    #[test]
+    fn prompt_flow_counts_read_llm_and_embedding_spans() {
+        let attrs = [int_attr("llm.usage.prompt_tokens", 7)];
+        for (kind, scope, filled) in [
+            (SpanKind::Llm, "promptflow", true),
+            (SpanKind::Embedding, "promptflow", true),
+            (SpanKind::Embedding, "", false),
+            (SpanKind::Chain, "promptflow", false),
+        ] {
+            let mut warnings = Warnings::default();
+            let mut bag = AttrBag::new(&attrs, &mut warnings);
+            let counts = usage(&mut bag, kind, "", None, scope, &[], &mut warnings);
+            let key = "llm.usage.prompt_tokens";
+            if filled {
+                assert_eq!(counts.input_tokens, Some(7), "{kind:?} {scope}");
+                assert_eq!(bag.state(key), Some(Use::Consumed), "{kind:?} {scope}");
+            } else {
+                assert_eq!(counts, Usage::default(), "{kind:?} {scope}");
+                assert_eq!(bag.state(key), Some(Use::Unread), "{kind:?} {scope}");
+            }
+        }
+    }
+
+    #[test]
+    fn voltagent_counts_need_the_convention_and_an_llm_span() {
+        // Without `voltagent` the keys are OpenInference's `llm.` namespace
+        // and stay unread (D-IN-23).
+        let attrs = [
+            int_attr("llm.usage.prompt_tokens", 131),
+            string_attr("llm.usage.completion_tokens", ""),
+        ];
+        for conventions in [&[][..], &[Convention::Openinference][..]] {
+            let mut warnings = Warnings::default();
+            let mut bag = AttrBag::new(&attrs, &mut warnings);
+            let counts = usage(
+                &mut bag,
+                SpanKind::Llm,
+                "",
+                None,
+                "",
+                conventions,
+                &mut warnings,
+            );
+            assert_eq!(counts.input_tokens, None, "{conventions:?}");
+            assert_eq!(bag.state("llm.usage.prompt_tokens"), Some(Use::Unread));
+        }
+        // A VoltAgent agent span reads no counts: its `usage.*` are the sum of
+        // every step (rule 3), and it is not `llm`.
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let counts = usage(
+            &mut bag,
+            SpanKind::Agent,
+            "",
+            None,
+            "@voltagent/core",
+            &[Convention::Voltagent],
+            &mut warnings,
+        );
+        assert_eq!(counts, Usage::default());
+        assert_eq!(bag.state("llm.usage.prompt_tokens"), Some(Use::Unread));
+        // An empty count is absent.
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let counts = usage(
+            &mut bag,
+            SpanKind::Llm,
+            "",
+            None,
+            "@voltagent/core",
+            &[Convention::Voltagent],
+            &mut warnings,
+        );
+        assert_eq!(counts.output_tokens, None);
+        assert_eq!(bag.state("llm.usage.completion_tokens"), Some(Use::Unread));
+    }
+
+    #[test]
     fn ttft_conversions_skip_negative_values() {
         let start = 1_767_225_600_000_000_000;
         let attrs = [double_attr("gen_ai.response.time_to_first_chunk", 0.25)];
         let mut warnings = Warnings::default();
         let mut bag = AttrBag::new(&attrs, &mut warnings);
-        assert_eq!(ttft(&mut bag, &[], start, &mut warnings), Some(250_000_000));
+        assert_eq!(
+            ttft(&mut bag, &[], start, "", &[], &mut warnings),
+            Some(250_000_000)
+        );
         assert_eq!(
             bag.state("gen_ai.response.time_to_first_chunk"),
             Some(Use::Consumed)
@@ -1278,36 +1594,111 @@ mod tests {
         ];
         let mut bag = AttrBag::new(&attrs, &mut warnings);
         assert_eq!(
-            ttft(&mut bag, &[], start, &mut warnings),
+            ttft(&mut bag, &[], start, "", &[], &mut warnings),
             Some(1_500_000_000)
         );
         assert_eq!(bag.state(attr::TTFT_NS), Some(Use::Unread));
 
         let attrs = [int_attr("ai.response.msToFirstChunk", 2)];
         let mut bag = AttrBag::new(&attrs, &mut warnings);
-        assert_eq!(ttft(&mut bag, &[], start, &mut warnings), Some(2_000_000));
+        assert_eq!(
+            ttft(&mut bag, &[], start, "", &[], &mut warnings),
+            Some(2_000_000)
+        );
 
         let attrs = [double_attr("ai.stream.msToFirstChunk", 0.5)];
         let mut bag = AttrBag::new(&attrs, &mut warnings);
-        assert_eq!(ttft(&mut bag, &[], start, &mut warnings), Some(500_000));
+        assert_eq!(
+            ttft(&mut bag, &[], start, "", &[], &mut warnings),
+            Some(500_000)
+        );
 
         let attrs = [string_attr(
             "langfuse.observation.completion_start_time",
             "2026-01-01T00:00:00.250000000Z",
         )];
         let mut bag = AttrBag::new(&attrs, &mut warnings);
-        assert_eq!(ttft(&mut bag, &[], start, &mut warnings), Some(250_000_000));
+        assert_eq!(
+            ttft(&mut bag, &[], start, "", &[], &mut warnings),
+            Some(250_000_000)
+        );
 
         let attrs = [int_attr(
             "langfuse.observation.completion_start_time",
             start - 1,
         )];
         let mut bag = AttrBag::new(&attrs, &mut warnings);
-        assert_eq!(ttft(&mut bag, &[], start, &mut warnings), None);
+        assert_eq!(ttft(&mut bag, &[], start, "", &[], &mut warnings), None);
         assert_eq!(
             bag.state("langfuse.observation.completion_start_time"),
             Some(Use::Unread)
         );
+        assert_eq!(warnings.to_attribute(), None);
+    }
+
+    #[test]
+    fn strands_time_to_first_token_is_milliseconds_under_its_scope() {
+        let start = 1_767_225_600_000_000_000;
+        let attrs = [int_attr("gen_ai.server.time_to_first_token", 350)];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        assert_eq!(
+            ttft(
+                &mut bag,
+                &[],
+                start,
+                "strands.telemetry.tracer",
+                &[],
+                &mut warnings
+            ),
+            Some(350_000_000)
+        );
+        assert_eq!(
+            bag.state("gen_ai.server.time_to_first_token"),
+            Some(Use::Consumed)
+        );
+
+        // Another scope leaves the key unread.
+        for scope in ["", "semantic_kernel.utils.telemetry.agent_diagnostics"] {
+            let mut bag = AttrBag::new(&attrs, &mut warnings);
+            assert_eq!(
+                ttft(&mut bag, &[], start, scope, &[], &mut warnings),
+                None,
+                "{scope}"
+            );
+            assert_eq!(
+                bag.state("gen_ai.server.time_to_first_token"),
+                Some(Use::Unread)
+            );
+        }
+    }
+
+    #[test]
+    fn mastra_completion_start_time_is_an_instant() {
+        let start = 1_767_225_600_000_000_000;
+        let attrs = [string_attr(
+            "mastra.completion_start_time",
+            "2026-01-01T00:00:00.250000000Z",
+        )];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        assert_eq!(
+            ttft(&mut bag, &[], start, "", &[], &mut warnings),
+            Some(250_000_000)
+        );
+        assert_eq!(
+            bag.state("mastra.completion_start_time"),
+            Some(Use::Consumed)
+        );
+
+        // An instant before the span start gives no ttft and stays unread.
+        let attrs = [string_attr(
+            "mastra.completion_start_time",
+            "2025-12-31T23:59:59.750000000Z",
+        )];
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        assert_eq!(ttft(&mut bag, &[], start, "", &[], &mut warnings), None);
+        assert_eq!(bag.state("mastra.completion_start_time"), Some(Use::Unread));
         assert_eq!(warnings.to_attribute(), None);
     }
 
@@ -1325,5 +1716,179 @@ mod tests {
         assert!(!input_is_inclusive(Inclusive::No, false));
         assert!(!input_is_inclusive(Inclusive::VercelLegacy, true));
         assert!(input_is_inclusive(Inclusive::VercelLegacy, false));
+    }
+
+    #[test]
+    fn the_genai_ttft_wins_over_the_langfuse_completion_start() {
+        // A `llm_request`-shaped span: both keys are set, and the GenAI value
+        // (seconds) is the one read, in nanoseconds. The Langfuse key stays unread.
+        let start = 1_767_225_600_000_000_000;
+        let attrs = [
+            double_attr("gen_ai.response.time_to_first_chunk", 0.25),
+            string_attr(
+                "langfuse.observation.completion_start_time",
+                "2026-01-01T00:00:01Z",
+            ),
+        ];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        assert_eq!(
+            ttft(&mut bag, &[], start, "livekit-agents", &[], &mut warnings),
+            Some(250_000_000)
+        );
+        assert_eq!(
+            bag.state("langfuse.observation.completion_start_time"),
+            Some(Use::Unread)
+        );
+    }
+
+    #[test]
+    fn promptflow_llm_counts_fill_their_columns_and_are_consumed() {
+        // R-PF-2: the same keys as VoltAgent's, on an `llm` span of scope `promptflow`.
+        let attrs = [
+            int_attr("llm.usage.prompt_tokens", 131),
+            int_attr("llm.usage.completion_tokens", 12),
+        ];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let counts = usage(
+            &mut bag,
+            SpanKind::Llm,
+            "",
+            None,
+            "promptflow",
+            &[],
+            &mut warnings,
+        );
+        assert_eq!(counts.input_tokens, Some(131));
+        assert_eq!(counts.output_tokens, Some(12));
+        assert_eq!(bag.state("llm.usage.prompt_tokens"), Some(Use::Consumed));
+        assert_eq!(
+            bag.state("llm.usage.completion_tokens"),
+            Some(Use::Consumed)
+        );
+    }
+
+    #[test]
+    fn promptflow_counts_need_an_llm_span_and_its_scope() {
+        let attrs = [
+            int_attr("llm.usage.prompt_tokens", 131),
+            int_attr("llm.usage.completion_tokens", 12),
+        ];
+        // Another scope, and a non-`llm` kind of the same scope, read nothing.
+        for (kind, scope) in [
+            (SpanKind::Llm, "other.scope"),
+            (SpanKind::Span, "promptflow"),
+            (SpanKind::Tool, "promptflow"),
+        ] {
+            let mut warnings = Warnings::default();
+            let mut bag = AttrBag::new(&attrs, &mut warnings);
+            let counts = usage(&mut bag, kind, "", None, scope, &[], &mut warnings);
+            assert_eq!(counts.input_tokens, None, "{kind:?} {scope}");
+            assert_eq!(counts.output_tokens, None, "{kind:?} {scope}");
+            assert_eq!(bag.state("llm.usage.prompt_tokens"), Some(Use::Unread));
+        }
+    }
+
+    #[test]
+    fn agentspec_null_tokens_are_absent_without_warning() {
+        // D-IN-31 item 5: Agent Spec's spans have no scope, so the rule is
+        // gated on its model-call span name. "null" means absent: consumed,
+        // no count, no invalid_number.
+        let attrs = [
+            string_attr("llm.token_count.prompt", "null"),
+            string_attr("llm.token_count.completion", "null"),
+            string_attr("llm.token_count.total", "null"),
+            string_attr("llm.token_count.prompt_details.cache_read", "null"),
+            string_attr("llm.token_count.prompt_details.cache_write", "null"),
+            string_attr("llm.token_count.completion_details.reasoning", "null"),
+        ];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let counts = usage(
+            &mut bag,
+            SpanKind::Llm,
+            AGENTSPEC_LLM_SPAN,
+            None,
+            "",
+            &[],
+            &mut warnings,
+        );
+        assert_eq!(counts, Usage::default());
+        assert_eq!(warnings.to_attribute(), None);
+        for key in AGENTSPEC_NULL_KEYS {
+            assert_eq!(bag.state(key), Some(Use::Consumed), "{key}");
+        }
+    }
+
+    #[test]
+    fn agentspec_numeric_tokens_are_read() {
+        let attrs = [
+            int_attr("llm.token_count.prompt", 82),
+            int_attr("llm.token_count.completion", 17),
+        ];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let counts = usage(
+            &mut bag,
+            SpanKind::Llm,
+            AGENTSPEC_LLM_SPAN,
+            None,
+            "",
+            &[],
+            &mut warnings,
+        );
+        assert_eq!(counts.input_tokens, Some(82));
+        assert_eq!(counts.output_tokens, Some(17));
+        assert_eq!(counts.total_tokens, Some(99));
+        assert_eq!(warnings.to_attribute(), None);
+    }
+
+    #[test]
+    fn null_tokens_on_another_span_still_warn() {
+        // `counted` passes the span name `generate`: rule 20 applies, so the
+        // values stay unread and invalid_number is recorded.
+        let attrs = [
+            string_attr("llm.token_count.prompt", "null"),
+            string_attr("llm.token_count.completion", "null"),
+            string_attr("llm.token_count.total", "null"),
+            string_attr("llm.token_count.prompt_details.cache_read", "null"),
+            string_attr("llm.token_count.prompt_details.cache_write", "null"),
+            string_attr("llm.token_count.completion_details.reasoning", "null"),
+        ];
+        let (counts, warnings, bag) = counted(&attrs, SpanKind::Llm, None);
+        assert_eq!(counts, Usage::default());
+        assert_eq!(
+            warnings.to_attribute().as_deref(),
+            Some("[\"invalid_number\"]")
+        );
+        for key in AGENTSPEC_NULL_KEYS {
+            assert_eq!(bag.state(key), Some(Use::Unread), "{key}");
+        }
+    }
+
+    #[test]
+    fn null_tokens_consumed_earlier_on_another_span_still_warn() {
+        // Another stage consumed `llm.token_count.prompt` before usage ran. The
+        // Agent Spec rule does not run on this span, so rule 20 still applies to
+        // that key: it is an invalid number, not an absent count.
+        let attrs = [string_attr("llm.token_count.prompt", "null")];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        bag.take("llm.token_count.prompt");
+        let counts = usage(
+            &mut bag,
+            SpanKind::Llm,
+            "generate",
+            None,
+            "",
+            &[],
+            &mut warnings,
+        );
+        assert_eq!(counts, Usage::default());
+        assert_eq!(
+            warnings.to_attribute().as_deref(),
+            Some("[\"invalid_number\"]")
+        );
     }
 }

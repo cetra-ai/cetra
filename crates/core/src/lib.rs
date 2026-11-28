@@ -1,6 +1,6 @@
 //! Shared contracts used by more than one crate: identifiers, stored enums,
 //! branded names, the canonical message format, span and score records, media blobs,
-//! their Arrow schemas, and OpenAPI schemas.
+//! their columnar schemas, and OpenAPI schemas.
 //!
 //! See `docs/spec/01-data-model.md` and the conventions in `docs/spec/README.md`.
 

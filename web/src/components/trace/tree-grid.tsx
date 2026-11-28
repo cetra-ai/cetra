@@ -7,7 +7,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "cn";
-import { ChevronDown, ChevronRight } from "lucide-react";
 import {
   type KeyboardEvent,
   type ReactNode,
@@ -35,6 +34,8 @@ import {
   barGeometry,
   clampView,
   panBy,
+  selfTimes,
+  slowSpans,
   type TimeWindow,
   ticks,
   traceWindow,
@@ -47,7 +48,10 @@ import {
   defaultCollapsed,
   filterRows,
   hasChildren,
+  metricColumnWidth,
   subtreeEnds,
+  type TreeGuide,
+  treeGuides,
   visibleRows,
 } from "@/lib/tree";
 import { STORAGE_PREFIX } from "@/product";
@@ -55,12 +59,31 @@ import { STORAGE_PREFIX } from "@/product";
 /** A row must rest under the pointer this long before its span detail is prefetched. */
 const HOVER_PREFETCH_MS = 100;
 const OVERSCAN = 12;
-// Duration, Tokens, Cost and Timeline; the Name column is sized apart (auto or dragged).
-const METRIC_COLUMNS = "72px 64px 72px";
-const OTHER_COLUMNS = `${METRIC_COLUMNS} minmax(160px, 1fr)`;
-const OTHER_COLUMNS_MIN_PX = 72 + 64 + 72 + 160;
-// Tree mode has no time axis: the Name column takes the room the timeline would.
-const TREE_COLUMNS = `minmax(160px, 1fr) ${METRIC_COLUMNS}`;
+// Tree mode: Name, then Duration, Tokens and Cost, each sized to its widest visible value.
+const NAME_FLEX_COLUMN = "minmax(160px, 1fr)";
+// Timeline mode has no metric columns: the bars take the room beside the Name column,
+// which is sized apart (auto or dragged).
+const TIMELINE_MIN_PX = 160;
+// Timeline rows are 4px shorter than the density's, so the bars sit close together.
+const TIMELINE_ROW_INSET_PX = 4;
+// Tree layout: a 4px margin, then 16px per depth. Each row starts with a 16px toggle slot
+// holding an 11px −/+ box 2px from its left; the tree lines run from a box's edges, never
+// through it. An odd box leaves a 9px inside, so the 1px strokes of − and + sit dead centre,
+// and the 1px tree line at x 7 meets the box's centre (7.5).
+const INDENT_BASE_PX = 4;
+const INDENT_PX = 16;
+const TOGGLE_SLOT_PX = 16;
+const TOGGLE_BOX_PX = 11;
+const TOGGLE_BOX_LEFT_PX = 2;
+// The slot is centred in an even-height row, so its top is a whole pixel; 3px down puts the
+// box's centre half a pixel below the row's middle, on the centre of the 1px elbow ticks.
+const TOGGLE_BOX_TOP_PX = 3;
+// The corner where a branch leaves the trunk, for every child (├ and └ alike).
+const ELBOW_RADIUS_PX = 4;
+// The kind icon starts after the slot and the row's 4px gap.
+const ICON_OFFSET_PX = TOGGLE_SLOT_PX + 4;
+// A tick label past this share of the axis sits left of its gridline, so it isn't cut.
+const TICK_FLIP_PCT = 85;
 const NAME_MIN_PX = 140;
 const NAME_MAX_PX = 640;
 const NAME_KEY_STEP_PX = 16;
@@ -125,12 +148,13 @@ export function TreeGrid({
   const scrollRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const rowsRef = useRef<HTMLDivElement>(null);
   const [timelineWidth, setTimelineWidth] = useState(480);
   const [collapsed, setCollapsed] = useState(() => collapsedWithPath(spans, selectedSpanId));
   const [query, setQuery] = useState("");
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [view, setView] = useState<TimeWindow | null>(null);
-  const [needle, setNeedle] = useState<{ x: number; label: string } | null>(null);
+  const [needle, setNeedle] = useState<{ x: number; label: string; height: number } | null>(null);
   const [drag, setDrag] = useState<{ startPct: number; endPct: number } | null>(null);
   const dragRef = useRef<{ startPct: number; endPct: number } | null>(null);
   const { org, project } = useProject();
@@ -184,7 +208,15 @@ export function TreeGrid({
   const ends = useMemo(() => subtreeEnds(spans), [spans]);
   const timeWindow = useMemo(() => traceWindow(trace, spans), [trace, spans]);
   const zoom = view ?? timeWindow;
-  const marks = useMemo(() => ticks(zoom, timelineWidth), [zoom, timelineWidth]);
+  const marks = useMemo(
+    () => ticks(zoom, timeWindow.startNs, timelineWidth),
+    [zoom, timeWindow.startNs, timelineWidth],
+  );
+  const self = useMemo(() => selfTimes(spans), [spans]);
+  const slowIds = useMemo(
+    () => slowSpans(spans, self, timeWindow.endNs - timeWindow.startNs),
+    [spans, self, timeWindow],
+  );
   const selectedIndex = spans.findIndex((row) => row.span.span_id === selectedSpanId);
   const needleQuery = query.trim().toLowerCase();
 
@@ -226,16 +258,45 @@ export function TreeGrid({
     const visible = visibleRows(spans, ends, displayCollapsed);
     return errorSet ? visible.filter((index) => errorSet.has(index)) : visible;
   }, [spans, ends, displayCollapsed, errorSet]);
+  const guides = useMemo(
+    () => treeGuides(rows.map((index) => spans[index]?.depth ?? 0)),
+    [rows, spans],
+  );
 
   // The Name column fits the longest visible name until the user drags it.
   const [userNameWidth, setUserNameWidth] = useState<number | null>(readNameWidth);
   const autoWidth = useMemo(() => autoNameWidth(spans, rows), [spans, rows]);
   const nameWidth = userNameWidth ?? autoWidth;
-  const template = timeline ? `${nameWidth}px ${OTHER_COLUMNS}` : TREE_COLUMNS;
+  const metricWidths = useMemo(() => {
+    const durations: string[] = [];
+    const tokens: string[] = [];
+    const costs: string[] = [];
+    for (const index of rows) {
+      const span = spans[index]?.span;
+      if (!span) {
+        continue;
+      }
+      durations.push(formatDuration(span.duration_ns));
+      if (showsTokens(span.span_kind)) {
+        tokens.push(formatTokens(span.total_tokens));
+      }
+      if (span.cost_total !== undefined) {
+        costs.push(formatCost(span.cost_total));
+      }
+    }
+    return [
+      metricColumnWidth("Duration", durations),
+      metricColumnWidth("Tokens", tokens),
+      metricColumnWidth("Cost", costs),
+    ];
+  }, [spans, rows]);
+  const template = timeline
+    ? `${nameWidth}px minmax(${TIMELINE_MIN_PX}px, 1fr)`
+    : `${NAME_FLEX_COLUMN} ${metricWidths.map((px) => `${px}px`).join(" ")}`;
 
   function clampName(width: number): number {
     const gridWidth = gridRef.current?.clientWidth;
-    const room = gridWidth ? gridWidth - OTHER_COLUMNS_MIN_PX : Number.POSITIVE_INFINITY;
+    const room = gridWidth ? gridWidth - TIMELINE_MIN_PX : Number.POSITIVE_INFINITY;
     return Math.round(Math.max(NAME_MIN_PX, Math.min(NAME_MAX_PX, room, width)));
   }
 
@@ -273,12 +334,17 @@ export function TreeGrid({
     writeNameWidth(next);
   }
 
-  const rowHeight = useRowHeight();
+  // The header row is as tall as the density's row, and sticks at the top of the scroll area,
+  // so the rows start below it and a row scrolled into view isn't left under it.
+  const headerHeight = useRowHeight();
+  const rowHeight = headerHeight - (timeline ? TIMELINE_ROW_INSET_PX : 0);
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => rowHeight,
     overscan: OVERSCAN,
+    scrollMargin: headerHeight,
+    scrollPaddingStart: headerHeight,
   });
 
   // A density change alters every row's height, so the measurements must be redone.
@@ -412,8 +478,26 @@ export function TreeGrid({
       setNeedle(null);
       return;
     }
+    // The line runs from the top of the axis to the last row (or the visible area's bottom),
+    // like the gridlines, and goes away when the pointer is below the rows.
+    const rowsBox = rowsRef.current?.getBoundingClientRect();
+    const scroll = scrollRef.current;
+    if (!rowsBox || !scroll) {
+      setNeedle(null);
+      return;
+    }
+    const visibleBottom = scroll.getBoundingClientRect().top + scroll.clientHeight;
+    const bottom = Math.min(rowsBox.bottom, visibleBottom);
+    if (event.clientY > bottom) {
+      setNeedle(null);
+      return;
+    }
     const offset = zoom.startNs + (pct / 100) * (zoom.endNs - zoom.startNs) - timeWindow.startNs;
-    setNeedle({ x: event.clientX - host.left, label: formatDuration(offset) });
+    setNeedle({
+      x: event.clientX - host.left,
+      label: formatDuration(offset),
+      height: bottom - host.top,
+    });
   }
 
   function onHeaderDown(event: ReactPointerEvent<HTMLDivElement>) {
@@ -499,7 +583,7 @@ export function TreeGrid({
           role="grid"
           aria-label="Trace"
           aria-rowcount={rows.length + 1}
-          aria-colcount={timeline ? 5 : 4}
+          aria-colcount={timeline ? 2 : 4}
           tabIndex={0}
           className="relative flex min-h-0 flex-1 flex-col outline-none focus-visible:outline-2 focus-visible:outline-ring focus-visible:-outline-offset-2 focus-visible:outline-solid"
           onKeyDown={onKeyDown}
@@ -508,8 +592,9 @@ export function TreeGrid({
         >
           {shownNeedle ? (
             <div
-              className="pointer-events-none absolute top-0 bottom-0 z-10 w-px bg-foreground/70"
-              style={{ left: shownNeedle.x }}
+              data-needle
+              className="pointer-events-none absolute top-0 z-30 w-px bg-foreground/70"
+              style={{ left: shownNeedle.x, height: shownNeedle.height }}
             >
               <span className="absolute top-0.5 left-1 text-caption whitespace-nowrap text-foreground normal-case">
                 {shownNeedle.label}
@@ -517,86 +602,96 @@ export function TreeGrid({
             </div>
           ) : null}
           <div
-            role="row"
-            aria-rowindex={1}
-            className="grid h-row shrink-0 items-center border-b bg-background text-caption font-medium text-muted-foreground uppercase"
-            style={{ gridTemplateColumns: template }}
-          >
-            <div role="columnheader" className="relative min-w-0 truncate px-2">
-              Name
-              {timeline ? (
-                <div
-                  role="separator"
-                  aria-orientation="vertical"
-                  aria-label="Resize Name column"
-                  aria-valuemin={NAME_MIN_PX}
-                  aria-valuemax={NAME_MAX_PX}
-                  aria-valuenow={Math.round(nameWidth)}
-                  tabIndex={0}
-                  title="Drag to resize, double-click to reset"
-                  onPointerDown={onNameResizeDown}
-                  onKeyDown={onNameResizeKey}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                  }}
-                  onDoubleClick={() => {
-                    setUserNameWidth(null);
-                    writeNameWidth(null);
-                  }}
-                  className="absolute inset-y-0 -right-1 z-20 w-2 cursor-col-resize touch-none hover:bg-ring/40 focus-visible:bg-ring/60 focus-visible:outline-hidden"
-                />
-              ) : null}
-            </div>
-            <div role="columnheader" className="px-2 text-right">
-              Duration
-            </div>
-            <div role="columnheader" className="px-2 text-right">
-              Tokens
-            </div>
-            <div role="columnheader" className="px-2 text-right">
-              Cost
-            </div>
-            {timeline ? (
-              <div
-                role="columnheader"
-                aria-label="Timeline"
-                className="relative h-full"
-                ref={timelineRef}
-                onPointerDown={onHeaderDown}
-                onPointerMove={onHeaderMove}
-                onPointerUp={onHeaderUp}
-              >
-                <span className="sr-only">Timeline</span>
-                {drag ? (
-                  <span
-                    className="absolute top-0 h-full bg-primary/20"
-                    style={{
-                      left: `${Math.min(drag.startPct, drag.endPct)}%`,
-                      width: `${Math.abs(drag.endPct - drag.startPct)}%`,
-                    }}
-                  />
-                ) : null}
-                {marks.map((mark) => (
-                  <span
-                    key={mark.ns}
-                    aria-hidden="true"
-                    className="absolute top-1/2 -translate-y-1/2 text-caption normal-case"
-                    style={{
-                      left: `${((mark.ns - zoom.startNs) / (zoom.endNs - zoom.startNs)) * 100}%`,
-                    }}
-                  >
-                    {mark.label}
-                  </span>
-                ))}
-              </div>
-            ) : null}
-          </div>
-          <div
             ref={scrollRef}
             data-scroll-container
             className="relative min-h-0 flex-1 overflow-auto"
           >
-            <div className="relative" style={{ height: virtualizer.getTotalSize() }}>
+            <div
+              role="row"
+              aria-rowindex={1}
+              className="sticky top-0 z-20 grid h-row items-center border-b bg-background text-caption font-medium text-muted-foreground uppercase"
+              style={{ gridTemplateColumns: template }}
+            >
+              <div role="columnheader" className="relative min-w-0 truncate px-2">
+                Name
+                {timeline ? (
+                  <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="Resize Name column"
+                    aria-valuemin={NAME_MIN_PX}
+                    aria-valuemax={NAME_MAX_PX}
+                    aria-valuenow={Math.round(nameWidth)}
+                    tabIndex={0}
+                    title="Drag to resize, double-click to reset"
+                    onPointerDown={onNameResizeDown}
+                    onKeyDown={onNameResizeKey}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                    }}
+                    onDoubleClick={() => {
+                      setUserNameWidth(null);
+                      writeNameWidth(null);
+                    }}
+                    className="absolute inset-y-0 -right-1 z-20 w-2 cursor-col-resize touch-none hover:bg-ring/40 focus-visible:bg-ring/60 focus-visible:outline-hidden"
+                  />
+                ) : null}
+              </div>
+              {timeline ? null : (
+                <>
+                  <div role="columnheader" className="px-2 text-right">
+                    Duration
+                  </div>
+                  <div role="columnheader" className="px-2 text-right">
+                    Tokens
+                  </div>
+                  <div role="columnheader" className="px-2 text-right">
+                    Cost
+                  </div>
+                </>
+              )}
+              {timeline ? (
+                <div
+                  role="columnheader"
+                  aria-label="Timeline"
+                  className="relative h-full"
+                  ref={timelineRef}
+                  onPointerDown={onHeaderDown}
+                  onPointerMove={onHeaderMove}
+                  onPointerUp={onHeaderUp}
+                >
+                  <span className="sr-only">Timeline</span>
+                  {drag ? (
+                    <span
+                      className="absolute top-0 h-full bg-primary/20"
+                      style={{
+                        left: `${Math.min(drag.startPct, drag.endPct)}%`,
+                        width: `${Math.abs(drag.endPct - drag.startPct)}%`,
+                      }}
+                    />
+                  ) : null}
+                  {marks.map((mark) => {
+                    const pct = markPct(mark.ns, zoom);
+                    return (
+                      <span
+                        key={mark.ns}
+                        aria-hidden="true"
+                        data-tick
+                        className={cn(
+                          "absolute inset-y-0 flex items-center border-border text-caption whitespace-nowrap normal-case tabular-nums",
+                          pct > TICK_FLIP_PCT ? "-translate-x-full border-r pr-1" : "border-l pl-1",
+                        )}
+                        style={{ left: `${pct}%` }}
+                      >
+                        {mark.label}
+                      </span>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
+
+            <div ref={rowsRef} className="relative" style={{ height: virtualizer.getTotalSize() }}>
               {virtualRows.map((item) => {
                 const spanIndex = rows[item.index];
                 const row = spanIndex === undefined ? undefined : spans[spanIndex];
@@ -604,11 +699,13 @@ export function TreeGrid({
                   return null;
                 }
                 const span = row.span;
+                const guide = guides[item.index];
+                const slow = slowIds.has(span.span_id);
                 const selected = span.span_id === selectedSpanId;
                 const expandable = hasChildren(ends, spanIndex);
                 const isCollapsed = displayCollapsed.has(span.span_id);
                 const bar = timeline ? barGeometry(span, zoom) : undefined;
-                const showTokens = span.span_kind === "llm" || span.span_kind === "embedding";
+                const showTokens = showsTokens(span.span_kind);
                 const isMatch = matchSet.has(spanIndex);
                 const dim = needleQuery.length > 0 && !isMatch;
                 return (
@@ -619,17 +716,25 @@ export function TreeGrid({
                     aria-selected={selected}
                     data-match={isMatch ? "true" : undefined}
                     className={cn(
-                      "absolute top-0 grid w-full items-center border-b",
+                      "absolute top-0 grid w-full items-center",
+                      // Tree rows are separated by an inset line, not a border, so the cell keeps
+                      // the row's even height and the tree lines land on whole pixels. Timeline
+                      // rows have gridlines instead.
                       selected
-                        ? "bg-selection shadow-[inset_2px_0_0_var(--primary)]"
-                        : "hover:bg-muted",
+                        ? timeline
+                          ? "bg-selection shadow-[inset_2px_0_0_var(--primary)]"
+                          : "bg-selection shadow-[inset_2px_0_0_var(--primary),inset_0_-1px_0_var(--border)]"
+                        : cn(
+                            "hover:bg-muted",
+                            !timeline && "shadow-[inset_0_-1px_0_var(--border)]",
+                          ),
                       dim && "opacity-40",
                       isMatch && !selected && "bg-primary/10",
                       highlightedSpanIds?.has(span.span_id) && "live-row",
                     )}
                     style={{
                       height: rowHeight,
-                      transform: `translateY(${item.start}px)`,
+                      transform: `translateY(${item.start - headerHeight}px)`,
                       gridTemplateColumns: template,
                     }}
                     onClick={() => {
@@ -647,10 +752,13 @@ export function TreeGrid({
                       window.clearTimeout(hoverTimer.current);
                     }}
                   >
-                    <div role="gridcell" className="min-w-0">
+                    <div role="gridcell" className="relative h-full min-w-0">
+                      {guide ? (
+                        <TreeGuideLines guide={guide} depth={row.depth} expandable={expandable} />
+                      ) : null}
                       <div
-                        className="flex min-w-0 items-center gap-1 pr-2"
-                        style={{ paddingLeft: row.depth * 12 + 4 }}
+                        className="flex h-full min-w-0 items-center gap-[4px] pr-2"
+                        style={{ paddingLeft: INDENT_BASE_PX + row.depth * INDENT_PX }}
                       >
                         {expandable ? (
                           <button
@@ -658,20 +766,16 @@ export function TreeGrid({
                             tabIndex={-1}
                             aria-expanded={!isCollapsed}
                             aria-label={isCollapsed ? "Expand" : "Collapse"}
-                            className="inline-flex size-4 shrink-0 items-center justify-center"
+                            className="group inline-flex size-[16px] shrink-0 items-start text-muted-foreground hover:text-foreground"
                             onClick={(event) => {
                               event.stopPropagation();
                               toggle(span.span_id);
                             }}
                           >
-                            {isCollapsed ? (
-                              <ChevronRight className="size-3" />
-                            ) : (
-                              <ChevronDown className="size-3" />
-                            )}
+                            <ToggleBox expand={isCollapsed} />
                           </button>
                         ) : (
-                          <span className="inline-block size-4 shrink-0" />
+                          <span className="inline-block size-[16px] shrink-0" />
                         )}
                         <KindIcon kind={span.span_kind} />
                         <span className="min-w-0 truncate">{highlightName(span.name, query)}</span>
@@ -683,17 +787,37 @@ export function TreeGrid({
                         ) : null}
                       </div>
                     </div>
-                    <div role="gridcell" className="num truncate px-2 text-caption">
-                      {formatDuration(span.duration_ns)}
-                    </div>
-                    <div role="gridcell" className="num truncate px-2 text-caption">
-                      {showTokens ? formatTokens(span.total_tokens) : ""}
-                    </div>
-                    <div role="gridcell" className="num truncate px-2 text-caption">
-                      {span.cost_total === undefined ? "" : formatCost(span.cost_total)}
-                    </div>
+                    {timeline ? null : (
+                      <>
+                        <div
+                          role="gridcell"
+                          data-slow={slow ? "true" : undefined}
+                          className={cn(
+                            "num truncate px-2 text-caption",
+                            slow && "font-medium text-status-warn",
+                          )}
+                        >
+                          {formatDuration(span.duration_ns)}
+                        </div>
+                        <div role="gridcell" className="num truncate px-2 text-caption">
+                          {showTokens ? formatTokens(span.total_tokens) : ""}
+                        </div>
+                        <div role="gridcell" className="num truncate px-2 text-caption">
+                          {span.cost_total === undefined ? "" : formatCost(span.cost_total)}
+                        </div>
+                      </>
+                    )}
                     {timeline ? (
                       <div role="gridcell" className="relative h-full">
+                        {marks.map((mark) => (
+                          <span
+                            key={mark.ns}
+                            aria-hidden="true"
+                            data-gridline
+                            className="pointer-events-none absolute inset-y-0 w-px bg-border"
+                            style={{ left: `${markPct(mark.ns, zoom)}%` }}
+                          />
+                        ))}
                         {bar ? (
                           <SpanBar
                             span={span}
@@ -701,6 +825,7 @@ export function TreeGrid({
                             colorClass={BAR[span.span_kind]}
                             timelineWidth={timelineWidth}
                             traceStartNs={timeWindow.startNs}
+                            selfNs={self[spanIndex]}
                             onDoubleClick={() => {
                               setView(zoomToSpan(timeWindow, span));
                             }}
@@ -717,6 +842,124 @@ export function TreeGrid({
       </div>
     </TooltipProvider>
   );
+}
+
+/** Only model spans have tokens worth a cell. */
+function showsTokens(kind: Schema<"SpanKind">): boolean {
+  return kind === "llm" || kind === "embedding";
+}
+
+/**
+ * The −/+ box, drawn as one SVG on whole pixels so the border and the sign can't snap apart:
+ * a 1px square border and 5px strokes through the centre of the 11px box.
+ */
+function ToggleBox({ expand }: { expand: boolean }) {
+  const mid = TOGGLE_BOX_PX / 2;
+  return (
+    <svg
+      aria-hidden="true"
+      width={TOGGLE_BOX_PX}
+      height={TOGGLE_BOX_PX}
+      viewBox={`0 0 ${TOGGLE_BOX_PX} ${TOGGLE_BOX_PX}`}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1}
+      className="shrink-0"
+      style={{ marginLeft: TOGGLE_BOX_LEFT_PX, marginTop: TOGGLE_BOX_TOP_PX }}
+    >
+      <rect
+        x={0.5}
+        y={0.5}
+        width={TOGGLE_BOX_PX - 1}
+        height={TOGGLE_BOX_PX - 1}
+        rx={2}
+        strokeOpacity={0.6}
+      />
+      <path d={`M3 ${mid}H${TOGGLE_BOX_PX - 3}`} />
+      {expand ? <path d={`M${mid} 3V${TOGGLE_BOX_PX - 3}`} /> : null}
+    </svg>
+  );
+}
+
+function markPct(ns: number, zoom: TimeWindow): number {
+  return ((ns - zoom.startNs) / (zoom.endNs - zoom.startNs)) * 100;
+}
+
+/**
+ * The elbow lines in a row's indent: each level's line runs down from its parent's −/+ box.
+ * ├ (a branch curving off the trunk) for a child with later siblings, a rounded └ for the
+ * last child, a full line for each ancestor level that continues, and a line down from an
+ * expanded parent's box.
+ */
+function TreeGuideLines({
+  guide,
+  depth,
+  expandable,
+}: {
+  guide: TreeGuide;
+  depth: number;
+  /** The row has a −/+ box, collapsed or not. */
+  expandable: boolean;
+}) {
+  const slotX = (level: number) => INDENT_BASE_PX + level * INDENT_PX;
+  const lineX = (level: number) =>
+    slotX(level - 1) + TOGGLE_BOX_LEFT_PX + Math.floor(TOGGLE_BOX_PX / 2);
+  const elbowX = lineX(depth);
+  // The tick ends at this row's box, or, for a leaf, runs through the empty slot to its icon.
+  const tickEnd = expandable
+    ? slotX(depth) + TOGGLE_BOX_LEFT_PX
+    : slotX(depth) + ICON_OFFSET_PX - 2;
+  return (
+    <span aria-hidden="true" data-guide={guideShape(guide)} className="pointer-events-none">
+      {guide.through.map((through, offset) =>
+        through ? (
+          <span
+            // biome-ignore lint/suspicious/noArrayIndexKey: the index is the tree level
+            key={offset}
+            className="absolute inset-y-0 w-px bg-border"
+            style={{ left: lineX(offset + 1) }}
+          />
+        ) : null,
+      )}
+      {guide.elbow === "mid" ? (
+        <>
+          <span className="absolute inset-y-0 w-px bg-border" style={{ left: elbowX }} />
+          {/* The branch curves off the trunk with the same 4px corner as the last child's └. */}
+          <span
+            className="absolute rounded-bl-[4px] border-b border-l border-border"
+            style={{
+              left: elbowX,
+              top: `calc(50% - ${ELBOW_RADIUS_PX}px)`,
+              height: ELBOW_RADIUS_PX + 1,
+              width: tickEnd - elbowX,
+            }}
+          />
+        </>
+      ) : null}
+      {guide.elbow === "last" ? (
+        <span
+          className="absolute top-0 h-[calc(50%+1px)] rounded-bl-[4px] border-b border-l border-border"
+          style={{ left: elbowX, width: tickEnd - elbowX }}
+        />
+      ) : null}
+      {guide.down ? (
+        <span
+          className="absolute bottom-0 w-px bg-border"
+          style={{
+            left: lineX(depth + 1),
+            height: `calc(50% - ${TOGGLE_BOX_TOP_PX + TOGGLE_BOX_PX - TOGGLE_SLOT_PX / 2}px)`,
+          }}
+        />
+      ) : null}
+    </span>
+  );
+}
+
+/** A row's guides as text, e.g. "│ ├" or "  └┐", for tests and debugging. */
+function guideShape(guide: TreeGuide): string {
+  const levels = guide.through.map((through) => (through ? "│" : " ")).join(" ");
+  const elbow = guide.elbow === "mid" ? "├" : guide.elbow === "last" ? "└" : "";
+  return `${levels}${levels && elbow ? " " : ""}${elbow}${guide.down ? "┐" : ""}`;
 }
 
 function spanMatches(

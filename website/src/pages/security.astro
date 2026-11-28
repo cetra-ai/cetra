@@ -1,4 +1,5 @@
 ---
+import Button from "../marketing/components/Button.astro";
 import Card from "../marketing/components/Card.astro";
 import Section from "../marketing/components/Section.astro";
 import SectionHeading from "../marketing/components/SectionHeading.astro";
@@ -7,7 +8,7 @@ import { CONTACT_EMAIL } from "../marketing/site";
 
 const protections = [
   "Passwords hashed with Argon2id",
-  "Sign-in with GitHub, Google or your OpenID Connect provider",
+  "Sign-in with GitHub, Google, or your own OpenID Connect or SAML provider",
   "API keys stored as SHA-256 hashes, with optional expiry",
   "Write-only public keys for browser feedback",
   "Roles: owner, admin, member, viewer",
@@ -51,6 +52,30 @@ const protections = [
     </ul>
   </Section>
 
+  <Section tone="raised" divider labelledby="sec-company-title">
+    <SectionHeading
+      eyebrow="For companies"
+      title="Control who gets in, and see what they did."
+      id="sec-company-title"
+      lede="Single sign-on, SCIM provisioning and an audit log come with the self-hosted licence. On cetra Cloud, audit logs and SCIM come with Enterprise, and single sign-on with OpenID Connect with the Teams add-on."
+    />
+    <div class="cards cards--three">
+      <Card title="Single sign-on" href="/docs/platform/sso/">
+        <p>Each org brings its own identity provider, over OpenID Connect or SAML 2.0, and proves its email domains with a DNS record. Enforce single sign-on for those domains: their passwords and personal access tokens stop working at once.</p>
+      </Card>
+      <Card title="SCIM provisioning" href="/docs/platform/scim/">
+        <p>Okta, Entra ID or another identity provider adds and removes members over SCIM 2.0 and sets their roles from its groups. Deprovisioning removes the person from the org and ends their sessions and tokens.</p>
+      </Card>
+      <Card title="Audit log" href="/docs/platform/audit-log/">
+        <p>Sign-ins, members and roles, keys, single sign-on, exports, SQL runs and deletions are recorded on every plan, as ids, never prompts or secrets. Read the log, export it as CSV or NDJSON, or stream it to your SIEM over signed HTTPS.</p>
+      </Card>
+    </div>
+    <div class="actions">
+      <Button href={`mailto:${CONTACT_EMAIL}`}>Talk to us</Button>
+      <Button href="/pricing/#self-hosted" variant="secondary">See pricing</Button>
+    </div>
+  </Section>
+
   <Section tone="teal" divider labelledby="sec-delete-title">
     <SectionHeading title="Deletion and retention" id="sec-delete-title" />
     <div class="prose">
@@ -75,6 +100,15 @@ const protections = [
     gap: var(--space-5);
     margin-top: var(--space-7);
   }
+  .cards--three {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    margin-top: var(--space-6);
+  }
   .protections {
     margin-top: var(--space-7);
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -92,8 +126,14 @@ const protections = [
   .prose a {
     color: var(--accent);
   }
+  @media (max-width: 960px) {
+    .cards--three {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
   @media (max-width: 720px) {
     .cards,
+    .cards--three,
     .protections {
       grid-template-columns: minmax(0, 1fr);
     }

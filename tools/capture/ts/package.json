@@ -26,7 +26,21 @@
     "zod": "4.6.7",
     "@anthropic-ai/claude-code": "2.1.323",
     "@openai/codex": "0.167.2",
-    "@google/gemini-cli": "0.68.0"
+    "@google/gemini-cli": "0.68.0",
+    "@qwen-code/qwen-code": "0.28.0",
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@mastra/core": "1.83.0",
+    "@mastra/observability": "1.24.0",
+    "@mastra/otel-exporter": "1.5.2",
+    "@voltagent/core": "2.11.1",
+    "ai": "6.0.322",
+    "@tanstack/ai": "1.5.0",
+    "@tanstack/ai-openai": "1.1.1",
+    "@arizeai/openinference-tanstack-ai": "0.3.5",
+    "@flue/runtime": "2.3.0",
+    "@flue/opentelemetry": "2.3.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "valibot": "1.5.0"
   },
   "devDependencies": {
     "typescript": "5.9.3",

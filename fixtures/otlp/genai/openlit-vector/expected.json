@@ -1,0 +1,469 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "1ff2d8660aaf77ea2b82441c6f33de30",
+      "span_id": "89c1faa37af363fc",
+      "name": "create_collection unknown",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.012000000Z",
+      "end_time": "2025-12-31T23:59:50.012000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "environment": "default",
+      "operation": "vectordb",
+      "attributes": {
+        "db.client.operation.duration": "0.0002551078796386719",
+        "db.collection.name": "unknown",
+        "db.operation.name": "create_collection",
+        "db.query.summary": "create_collection unknown",
+        "db.query.text": "Collection: unknown",
+        "db.sdk.version": "1.20.0",
+        "db.system.name": "qdrant",
+        "deployment.environment": "default",
+        "gen_ai.operation.name": "vectordb",
+        "server.address": "api.openai.com",
+        "server.port": "6333",
+        "service.name": "capture-app",
+        "telemetry.sdk.name": "openlit"
+      },
+      "resource_attributes": {
+        "deployment.environment": "default",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "openlit",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openlit.instrumentation.qdrant",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "508f7c9cd7520bf248cbc97cd1e4b802",
+      "span_id": "7897b201d9ded284",
+      "name": "INSERT docs",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.005000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "environment": "default",
+      "operation": "vectordb",
+      "attributes": {
+        "db.client.operation.duration": "0.004830837249755859",
+        "db.collection.name": "docs",
+        "db.operation.name": "INSERT",
+        "db.query.summary": "INSERT docs ids=['a', 'b'] documents=['sunny', 'rainy']",
+        "db.query.text": "['a', 'b']",
+        "db.sdk.version": "1.5.9",
+        "db.system.name": "chroma",
+        "db.vector.count": "2",
+        "deployment.environment": "default",
+        "gen_ai.operation.name": "vectordb",
+        "server.address": "api.openai.com",
+        "server.port": "8000",
+        "service.name": "capture-app",
+        "telemetry.sdk.name": "openlit"
+      },
+      "resource_attributes": {
+        "deployment.environment": "default",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "openlit",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openlit.instrumentation.chroma",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "5387dda3a26ef3e637b8916bfb4b7edf",
+      "span_id": "3a14048393dfe1ab",
+      "name": "INSERT unknown",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.692000000Z",
+      "end_time": "2025-12-31T23:59:50.712000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "environment": "default",
+      "operation": "vectordb",
+      "attributes": {
+        "db.client.operation.duration": "0.01993417739868164",
+        "db.collection.name": "unknown",
+        "db.operation.name": "INSERT",
+        "db.query.summary": "INSERT unknown data_count=2",
+        "db.query.text": "[{'id': 1, 'vector': [0.1, 0.2], 'text': 'sunny'}, {'id': 2, 'vector': [0.3, 0.4], 'text': 'rainy'}]",
+        "db.response.returned_rows": "2",
+        "db.sdk.version": "3.0.3",
+        "db.system.name": "milvus",
+        "db.vector.count": "2",
+        "deployment.environment": "default",
+        "gen_ai.operation.name": "vectordb",
+        "server.address": "api.openai.com",
+        "server.port": "19530",
+        "service.name": "capture-app",
+        "telemetry.sdk.name": "openlit"
+      },
+      "resource_attributes": {
+        "deployment.environment": "default",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "openlit",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openlit.instrumentation.milvus",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "5ca88f81264f1daeefbd55937b191255",
+      "span_id": "a3e34e3cbbab535a",
+      "name": "SEARCH unknown",
+      "span_kind": "retriever",
+      "start_time": "2025-12-31T23:59:50.712000000Z",
+      "end_time": "2025-12-31T23:59:50.717000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "environment": "default",
+      "operation": "vectordb",
+      "attributes": {
+        "db.client.operation.duration": "0.004660606384277344",
+        "db.collection.name": "unknown",
+        "db.filter": "",
+        "db.operation.name": "SEARCH",
+        "db.query.summary": "SEARCH unknown data=[[0.15, 0.25]] limit=1",
+        "db.query.text": "[[0.15, 0.25]]",
+        "db.response.returned_rows": "1",
+        "db.sdk.version": "3.0.3",
+        "db.system.name": "milvus",
+        "db.vector.query.top_k": "1",
+        "deployment.environment": "default",
+        "gen_ai.operation.name": "vectordb",
+        "server.address": "api.openai.com",
+        "server.port": "19530",
+        "service.name": "capture-app",
+        "telemetry.sdk.name": "openlit"
+      },
+      "resource_attributes": {
+        "deployment.environment": "default",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "openlit",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openlit.instrumentation.milvus",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "7b2665cced1ac50549611bb03a41cfdd",
+      "span_id": "0d56851613879567",
+      "name": "DELETE unknown",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.013000000Z",
+      "end_time": "2025-12-31T23:59:50.013000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "environment": "default",
+      "operation": "vectordb",
+      "attributes": {
+        "db.client.operation.duration": "0.000019073486328125",
+        "db.collection.name": "unknown",
+        "db.operation.name": "DELETE",
+        "db.operation.status": "completed",
+        "db.query.summary": "DELETE unknown selector=2",
+        "db.query.text": "[1, 2]",
+        "db.sdk.version": "1.20.0",
+        "db.system.name": "qdrant",
+        "db.vector.count": "2",
+        "deployment.environment": "default",
+        "gen_ai.operation.name": "vectordb",
+        "server.address": "api.openai.com",
+        "server.port": "6333",
+        "service.name": "capture-app",
+        "telemetry.sdk.name": "openlit"
+      },
+      "resource_attributes": {
+        "deployment.environment": "default",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "openlit",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openlit.instrumentation.qdrant",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "8ff459c9d10c3072c4830f7e25db879b",
+      "span_id": "d54d6cf21cff9654",
+      "name": "UPSERT unknown",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.012000000Z",
+      "end_time": "2025-12-31T23:59:50.013000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "environment": "default",
+      "operation": "vectordb",
+      "attributes": {
+        "db.client.operation.duration": "0.0002388954162597656",
+        "db.collection.name": "unknown",
+        "db.operation.name": "UPSERT",
+        "db.operation.status": "completed",
+        "db.query.summary": "UPSERT unknown points=2",
+        "db.query.text": "[PointStruct(id=1, vector=[0.1, 0.2], payload={'text': 'sunny'}), PointStruct(id=2, vector=[0.3, 0.4], payload={'text': 'rainy'})]",
+        "db.sdk.version": "1.20.0",
+        "db.system.name": "qdrant",
+        "db.vector.count": "2",
+        "deployment.environment": "default",
+        "gen_ai.operation.name": "vectordb",
+        "server.address": "api.openai.com",
+        "server.port": "6333",
+        "service.name": "capture-app",
+        "telemetry.sdk.name": "openlit"
+      },
+      "resource_attributes": {
+        "deployment.environment": "default",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "openlit",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openlit.instrumentation.qdrant",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "a33568f5d4703d72fd387f69d59a7ade",
+      "span_id": "2fff27f0a242f827",
+      "name": "QUERY unknown",
+      "span_kind": "retriever",
+      "start_time": "2025-12-31T23:59:50.013000000Z",
+      "end_time": "2025-12-31T23:59:50.013000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "environment": "default",
+      "operation": "vectordb",
+      "attributes": {
+        "db.client.operation.duration": "0.0002665519714355469",
+        "db.collection.name": "unknown",
+        "db.operation.name": "QUERY",
+        "db.query.summary": "QUERY unknown query=[0.15, 0.25] limit=1",
+        "db.query.text": "[0.15, 0.25]",
+        "db.sdk.version": "1.20.0",
+        "db.system.name": "qdrant",
+        "db.vector.query.top_k": "1",
+        "deployment.environment": "default",
+        "gen_ai.operation.name": "vectordb",
+        "server.address": "api.openai.com",
+        "server.port": "6333",
+        "service.name": "capture-app",
+        "telemetry.sdk.name": "openlit"
+      },
+      "resource_attributes": {
+        "deployment.environment": "default",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "openlit",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openlit.instrumentation.qdrant",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "a52bd58a3ca7196aedf419f75c82faa6",
+      "span_id": "27dca44850e28918",
+      "name": "create_collection docs",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.186000000Z",
+      "end_time": "2025-12-31T23:59:50.692000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "environment": "default",
+      "operation": "vectordb",
+      "attributes": {
+        "db.client.operation.duration": "0.5059411525726318",
+        "db.collection.dimension": "2",
+        "db.collection.name": "unknown",
+        "db.operation.name": "create_collection",
+        "db.query.summary": "create_collection unknown dimension=2",
+        "db.sdk.version": "3.0.3",
+        "db.system.name": "milvus",
+        "deployment.environment": "default",
+        "gen_ai.operation.name": "vectordb",
+        "server.address": "api.openai.com",
+        "server.port": "19530",
+        "service.name": "capture-app",
+        "telemetry.sdk.name": "openlit"
+      },
+      "resource_attributes": {
+        "deployment.environment": "default",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "openlit",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openlit.instrumentation.milvus",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "c3730255ab3b21afee06f7d944f7769c",
+      "span_id": "8821c4fdfe648ee5",
+      "name": "DELETE unknown",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.717000000Z",
+      "end_time": "2025-12-31T23:59:50.720000000Z",
+      "status": "error",
+      "service_name": "capture-app",
+      "environment": "default",
+      "operation": "vectordb",
+      "attributes": {
+        "db.client.operation.duration": "0.001171112060546875",
+        "db.collection.name": "unknown",
+        "db.filter": "",
+        "db.operation.name": "DELETE",
+        "db.sdk.version": "3.0.3",
+        "db.system.name": "milvus",
+        "deployment.environment": "default",
+        "error.type": "AttributeError",
+        "gen_ai.operation.name": "vectordb",
+        "server.address": "api.openai.com",
+        "server.port": "19530",
+        "service.name": "capture-app",
+        "telemetry.sdk.name": "openlit"
+      },
+      "resource_attributes": {
+        "deployment.environment": "default",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "openlit",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openlit.instrumentation.milvus",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.720000000Z",
+          "name": "exception",
+          "attributes": "{\"exception.type\":\"AttributeError\",\"exception.message\":\"'list' object has no attribute 'get'\",\"exception.stacktrace\":\"Traceback (most recent call last):\\n  File \\\"/capture/tools/capture/envs/openlit/.venv/lib/python3.13/site-packages/openlit/instrumentation/milvus/milvus.py\\\", line 54, in wrapper\\n    response = process_milvus_response(\\n        response,\\n    ...<13 lines>...\\n        **kwargs,\\n    )\\n  File \\\"/capture/tools/capture/envs/openlit/.venv/lib/python3.13/site-packages/openlit/instrumentation/milvus/utils.py\\\", line 366, in process_milvus_response\\n    common_milvus_logic(\\n    ~~~~~~~~~~~~~~~~~~~^\\n        scope,\\n        ^^^^^^\\n    ...<6 lines>...\\n        instance,\\n        ^^^^^^^^^\\n    )\\n    ^\\n  File \\\"/capture/tools/capture/envs/openlit/.venv/lib/python3.13/site-packages/openlit/instrumentation/milvus/utils.py\\\", line 285, in common_milvus_logic\\n    if scope._response and scope._response.get(\\\"delete_count\\\"):\\n                           ^^^^^^^^^^^^^^^^^^^\\nAttributeError: 'list' object has no attribute 'get'\\n\",\"exception.escaped\":\"False\"}"
+        }
+      ],
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "d137cd64ea41add4eb79024400f1c7c5",
+      "span_id": "e0e1b7bcbd232f87",
+      "name": "GET docs",
+      "span_kind": "retriever",
+      "start_time": "2025-12-31T23:59:50.005000000Z",
+      "end_time": "2025-12-31T23:59:50.006000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "environment": "default",
+      "operation": "vectordb",
+      "attributes": {
+        "db.client.operation.duration": "0.001257181167602539",
+        "db.collection.name": "docs",
+        "db.filter": "",
+        "db.operation.name": "GET",
+        "db.query.summary": "GET docs n_results=1 embeddings=1 vectors filter=None",
+        "db.query.text": "embeddings=1 vectors",
+        "db.response.returned_rows": "1",
+        "db.sdk.version": "1.5.9",
+        "db.system.name": "chroma",
+        "db.vector.query.top_k": "1",
+        "deployment.environment": "default",
+        "gen_ai.operation.name": "vectordb",
+        "server.address": "api.openai.com",
+        "server.port": "8000",
+        "service.name": "capture-app",
+        "telemetry.sdk.name": "openlit"
+      },
+      "resource_attributes": {
+        "deployment.environment": "default",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "openlit",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openlit.instrumentation.chroma",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "f7b9af7bc7b36b031bde09459bc04479",
+      "span_id": "65ff92803479851c",
+      "name": "DELETE docs",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.006000000Z",
+      "end_time": "2025-12-31T23:59:50.008000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "environment": "default",
+      "operation": "vectordb",
+      "attributes": {
+        "db.client.operation.duration": "0.0013499259948730469",
+        "db.collection.name": "docs",
+        "db.filter": "",
+        "db.operation.name": "DELETE",
+        "db.query.summary": "DELETE docs ids=['a'] filter=None delete_all=False",
+        "db.query.text": "['a']",
+        "db.sdk.version": "1.5.9",
+        "db.system.name": "chroma",
+        "db.vector.count": "1",
+        "deployment.environment": "default",
+        "gen_ai.operation.name": "vectordb",
+        "server.address": "api.openai.com",
+        "server.port": "8000",
+        "service.name": "capture-app",
+        "telemetry.sdk.name": "openlit"
+      },
+      "resource_attributes": {
+        "deployment.environment": "default",
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "openlit",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openlit.instrumentation.chroma",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

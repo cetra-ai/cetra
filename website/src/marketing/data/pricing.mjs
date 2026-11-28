@@ -1,5 +1,6 @@
-// Cloud plans and the self-hosted licence (D172–D178, D-Q-82). Every price on the site comes
-// from here; pricing.test.mjs checks the numbers against D177 in docs/mvp-decisions.md and the
+// Cloud plans and the self-hosted licence (D172–D178). Every price on the site comes from here.
+// The licence shows no price, like the Cloud Enterprise plan: sales quotes it (D-W-22).
+// pricing.test.mjs checks the numbers against D177 in docs/mvp-decisions.md and the
 // licence features against website/src/content/docs/docs/platform/plans-and-licence.mdx.
 // `projects` and `support` are null where D177 states nothing.
 /**
@@ -106,7 +107,6 @@ export const SELF_HOSTED = {
   ],
   licence: {
     name: "Self-hosted licence",
-    priceYearly: 5_400,
     features: [
       "Single sign-on per org, with verified domains",
       "Enforce single sign-on for your domains",

@@ -26,8 +26,8 @@ bucket.
 - **Datasets and experiments.** Versioned datasets, CSV and JSONL import, and experiment runs you can
   compare side by side.
 - **Alerts** on error rate, latency, cost and scores, sent to Slack, email or a signed webhook.
-- **Storage.** A write-ahead log and Parquet files queried with Apache DataFusion, plus SQLite for
-  metadata. Files and media can live in S3.
+- **Storage.** A write-ahead log and Parquet files queried with cetra's native columnar query
+  engine, plus SQLite for metadata. Files and media can live in S3.
 - **Privacy.** Per-trace deletion that erases the data, and retention limits.
 - **SDKs** for Python and TypeScript, built on OpenTelemetry.
 - **MCP server**, so agents can query your traces.

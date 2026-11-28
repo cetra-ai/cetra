@@ -3,11 +3,14 @@
 //! Spec 02 § Input and output. `AttrBag::indexed` groups each numbered level.
 //! The N10 converter turns the rebuilt array into canonical messages.
 
+use cetra_core::message::{Message, Part, Role};
 use serde_json::{Map, Value as Json};
 
-use crate::bag::AttrBag;
+use crate::bag::{AttrBag, is_decimal_index};
 use crate::conventions::openinference::captured_text;
+use crate::payload::{decode_json_text, parse_tool_arguments};
 use crate::value::as_str;
+use crate::warn::Warnings;
 
 /// OpenAI-shaped messages from `prefix` (`llm.input_messages.` or `llm.output_messages.`).
 ///
@@ -24,6 +27,81 @@ pub(crate) fn flattened_messages(bag: &AttrBag<'_>, prefix: &str) -> Option<Vec<
             .map(|index| message(bag, prefix, index))
             .collect(),
     )
+}
+
+/// R8, in place: every rebuilt message whose index carries `function.M`
+/// entries becomes one `tool` message of `tool_call_response` parts.
+///
+/// `messages` lines up with `bag.indexed(prefix)`'s indexes, the order
+/// [`flattened_messages`] rebuilt them in. AutoGen's instrumentor writes the
+/// entries, which the OpenAI shape cannot express (one `tool_call_id` per
+/// message).
+pub(crate) fn replace_function_messages(
+    bag: &AttrBag<'_>,
+    prefix: &str,
+    messages: &mut [Message],
+    warnings: &mut Warnings,
+) {
+    let indexes: Vec<usize> = bag.indexed(prefix).into_keys().collect();
+    for (message, index) in messages.iter_mut().zip(indexes) {
+        if let Some(tool) = function_message(bag, prefix, index, warnings) {
+            *message = tool;
+        }
+    }
+}
+
+/// One `tool` message from the `function.M` entries under `prefix{index}.`
+/// (AutoGen). `None` when that message is not role `function` without content,
+/// or when no entry parses as a JSON object.
+fn function_message(
+    bag: &AttrBag<'_>,
+    prefix: &str,
+    index: usize,
+    warnings: &mut Warnings,
+) -> Option<Message> {
+    let base = format!("{prefix}{index}.");
+    if string_at(bag, &format!("{base}message.role")).as_deref() != Some("function") {
+        return None;
+    }
+    if string_at(bag, &format!("{base}message.content")).is_some() {
+        return None;
+    }
+    let functions = format!("{base}function.");
+    let mut entries: Vec<usize> = bag
+        .keys_with_prefix(&functions)
+        .filter_map(|key| key.strip_prefix(&functions))
+        .filter(|rest| is_decimal_index(rest))
+        .filter_map(|rest| rest.parse().ok())
+        .collect();
+    entries.sort_unstable();
+    let mut parts = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(value) = bag.get(&format!("{functions}{entry}")) else {
+            continue;
+        };
+        let Some(Json::Object(mut object)) = decode_json_text(value, warnings) else {
+            continue;
+        };
+        let id = object
+            .get("call_id")
+            .and_then(Json::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        let content = object.shift_remove("content").unwrap_or(Json::Null);
+        object.shift_remove("call_id");
+        parts.push(Part::ToolCallResponse {
+            id,
+            response: parse_tool_arguments(content),
+            extra: object,
+        });
+    }
+    (!parts.is_empty()).then(|| Message {
+        role: Role::Tool,
+        name: None,
+        parts,
+        finish_reason: None,
+        extra: Map::new(),
+    })
 }
 
 fn message(bag: &AttrBag<'_>, prefix: &str, index: usize) -> Json {
@@ -192,6 +270,48 @@ mod tests {
             messages_to_json(&messages),
             r#"[{"role":"tool","parts":[{"type":"tool_call_response","id":"call_1","response":{"temp":18}}]}]"#
         );
+    }
+
+    #[test]
+    fn a_function_message_becomes_tool_call_responses() {
+        let attrs = [
+            string_attr("llm.input_messages.0.message.role", "user"),
+            string_attr("llm.input_messages.0.message.content", "hi"),
+            string_attr("llm.input_messages.1.message.role", "function"),
+            string_attr(
+                "llm.input_messages.1.function.0",
+                "{\"name\":\"get_weather\",\"content\":\"{\\\"temp\\\":18}\",\"call_id\":\"call_1\",\"is_error\":false}",
+            ),
+            string_attr(
+                "llm.input_messages.1.function.1",
+                "{\"name\":\"get_time\",\"content\":\"12:00\",\"call_id\":\"call_2\",\"is_error\":true}",
+            ),
+        ];
+        let mut warnings = Warnings::default();
+        let bag = AttrBag::new(&attrs, &mut warnings);
+        let message = super::function_message(&bag, "llm.input_messages.", 1, &mut warnings)
+            .expect("tool message");
+        assert_eq!(
+            messages_to_json(&[message]),
+            concat!(
+                r#"[{"role":"tool","parts":["#,
+                r#"{"type":"tool_call_response","id":"call_1","response":{"temp":18},"name":"get_weather","is_error":false},"#,
+                r#"{"type":"tool_call_response","id":"call_2","response":"12:00","name":"get_time","is_error":true}"#,
+                r#"]}]"#
+            )
+        );
+        // Not a role-`function` message, and one with content, stay as rebuilt.
+        assert!(super::function_message(&bag, "llm.input_messages.", 0, &mut warnings).is_none());
+        let with_content = [
+            string_attr("llm.input_messages.2.message.role", "function"),
+            string_attr("llm.input_messages.2.message.content", "kept"),
+            string_attr("llm.input_messages.2.function.0", "{\"content\":\"x\"}"),
+        ];
+        let bag = AttrBag::new(&with_content, &mut warnings);
+        assert!(super::function_message(&bag, "llm.input_messages.", 2, &mut warnings).is_none());
+        let no_entries = [string_attr("llm.input_messages.3.message.role", "function")];
+        let bag = AttrBag::new(&no_entries, &mut warnings);
+        assert!(super::function_message(&bag, "llm.input_messages.", 3, &mut warnings).is_none());
     }
 
     #[test]

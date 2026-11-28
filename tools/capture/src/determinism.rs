@@ -28,11 +28,13 @@ pub fn deterministic(
     timestamps: &[TimestampAttribute],
     span_names: &[String],
     volatile: &[String],
+    volatile_name_prefixes: &[String],
 ) -> Result<ExportTraceServiceRequest, CaptureError> {
     select(&mut exports, span_names, &case.to_string())?;
     let mut groups = merge(exports);
     remint(&mut groups, &case.to_string());
     revolatile(&mut groups, volatile);
+    rename_volatile(&mut groups, volatile_name_prefixes);
     shift(&mut groups, ingest_time, timestamps)?;
     prune(&mut groups);
     Ok(to_request(groups))
@@ -476,6 +478,29 @@ fn revolatile(groups: &mut [ResourceGroup], keys: &[String]) {
         for attribute in list.iter_mut() {
             if let Some(value) = attribute.value.as_mut() {
                 map_strings(value, &rewrite);
+            }
+        }
+    }
+}
+
+/// Masks the volatile part of span names, where [`revolatile`] mints volatile
+/// attribute values. Koog (`create_agent <session-uuid>`) and Agent Framework
+/// .NET (`invoke_agent <agent>(<32-hex>`) put random ids in their span names,
+/// which `volatile_attributes` cannot reach: a span whose name starts with a
+/// listed prefix has everything after that prefix replaced by `<volatile>`.
+fn rename_volatile(groups: &mut [ResourceGroup], prefixes: &[String]) {
+    if prefixes.is_empty() {
+        return;
+    }
+    for group in groups.iter_mut() {
+        for scope in &mut group.scopes {
+            for span in &mut scope.spans {
+                if let Some(prefix) = prefixes
+                    .iter()
+                    .find(|prefix| span.name.starts_with(prefix.as_str()))
+                {
+                    span.name = format!("{prefix}<volatile>");
+                }
             }
         }
     }
@@ -1087,6 +1112,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         )
         .unwrap();
 
@@ -1104,6 +1130,7 @@ mod tests {
             vec![packaged("api", "genai", vec![early, late])],
             &case(),
             INGEST,
+            &[],
             &[],
             &[],
             &[],
@@ -1135,6 +1162,7 @@ mod tests {
             ],
             &case(),
             INGEST,
+            &[],
             &[],
             &[],
             &[],
@@ -1218,6 +1246,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         )
         .unwrap();
         let spans = &result.resource_spans[0].scope_spans[0].spans;
@@ -1276,6 +1305,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         )
         .unwrap();
         let span = &result.resource_spans[0].scope_spans[0].spans[0];
@@ -1313,12 +1343,14 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         )
         .unwrap();
         let parent_started_first = deterministic(
             vec![packaged("api", "genai", vec![parent_first, child_late])],
             &case(),
             INGEST,
+            &[],
             &[],
             &[],
             &[],
@@ -1363,6 +1395,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         )
         .unwrap();
         let base = INGEST - TEN_SECONDS_NS;
@@ -1393,6 +1426,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         )
         .unwrap_err();
         assert!(
@@ -1413,6 +1447,7 @@ mod tests {
             vec![packaged("api", "genai", vec![sample])],
             &case(),
             INGEST,
+            &[],
             &[],
             &[],
             &[],
@@ -1480,6 +1515,7 @@ mod tests {
             &specs,
             &[],
             &[],
+            &[],
         )
         .unwrap();
         let base = INGEST - TEN_SECONDS_NS;
@@ -1534,6 +1570,7 @@ mod tests {
             &specs,
             &[],
             &[],
+            &[],
         )
         .unwrap();
         let shifted = DateTime::from_timestamp_nanos(INGEST - TEN_SECONDS_NS);
@@ -1567,6 +1604,7 @@ mod tests {
             &case(),
             INGEST,
             &specs,
+            &[],
             &[],
             &[],
         )
@@ -1608,6 +1646,7 @@ mod tests {
             vec![packaged("api", "genai", vec![noisy, kept])],
             &case(),
             INGEST,
+            &[],
             &[],
             &[],
             &[],
@@ -1673,6 +1712,7 @@ mod tests {
             &[],
             &names,
             &[],
+            &[],
         )
         .unwrap();
         let second = deterministic(
@@ -1681,6 +1721,7 @@ mod tests {
             INGEST,
             &[],
             &names,
+            &[],
             &[],
         )
         .unwrap();
@@ -1710,6 +1751,7 @@ mod tests {
             &[],
             &names,
             &[],
+            &[],
         )
         .unwrap_err();
         let CaptureError::CaptureIncomplete { case, reasons } = error else {
@@ -1728,6 +1770,7 @@ mod tests {
             vec![packaged("api", "genai", three_spans(0x01))],
             &case(),
             INGEST,
+            &[],
             &[],
             &[],
             &[],
@@ -1756,6 +1799,7 @@ mod tests {
             &[],
             &[],
             &["session.id".to_owned()],
+            &[],
         )
         .unwrap();
         let spans = &result.resource_spans[0].scope_spans[0].spans;
@@ -1782,6 +1826,7 @@ mod tests {
             &[],
             &[],
             &["session.id".to_owned()],
+            &[],
         )
         .unwrap();
         let attributes = &result.resource_spans[0].scope_spans[0].spans[0].attributes;
@@ -1807,11 +1852,77 @@ mod tests {
             &[],
             &[],
             &["thread.id".to_owned()],
+            &[],
         )
         .unwrap();
         let attributes = &result.resource_spans[0].scope_spans[0].spans[0].attributes;
         assert_eq!(string_of(&attributes[0]), "capture-volatile-1");
         assert_eq!(string_of(&attributes[1]), "port 2026");
+    }
+
+    #[test]
+    fn volatile_name_prefix_masks_the_rest_of_the_name() {
+        let run = |name: &str| {
+            deterministic(
+                vec![packaged(
+                    "api",
+                    "genai",
+                    vec![span(name, MIN_START, MIN_START + 1_000)],
+                )],
+                &case(),
+                INGEST,
+                &[],
+                &[],
+                &[],
+                &["create_agent ".to_owned(), "invoke_agent ".to_owned()],
+            )
+            .unwrap()
+        };
+        let first = run("create_agent 550e8400-e29b-41d4-a716-446655440000");
+        let second = run("create_agent 6ba7b810-9dad-11d1-80b4-00c04fd430c8");
+        let spans = |result: &ExportTraceServiceRequest| -> Vec<String> {
+            result.resource_spans[0].scope_spans[0]
+                .spans
+                .iter()
+                .map(|span| span.name.clone())
+                .collect()
+        };
+        assert_eq!(spans(&first), ["create_agent <volatile>"]);
+        assert_eq!(spans(&second), ["create_agent <volatile>"]);
+        // The prefix itself decides which spans are masked, also mid-list.
+        let mixed = run("invoke_agent weather(0123456789abcdef0123456789abcdef)");
+        assert_eq!(spans(&mixed), ["invoke_agent <volatile>"]);
+    }
+
+    #[test]
+    fn a_name_without_the_prefix_is_unchanged() {
+        let result = deterministic(
+            vec![packaged(
+                "api",
+                "genai",
+                vec![
+                    span("create_agentx 550e8400", MIN_START, MIN_START + 1_000),
+                    span(
+                        "chat gpt-4o-mini",
+                        MIN_START + 2_000_000,
+                        MIN_START + 3_000_000,
+                    ),
+                ],
+            )],
+            &case(),
+            INGEST,
+            &[],
+            &[],
+            &[],
+            &["create_agent ".to_owned()],
+        )
+        .unwrap();
+        let names: Vec<&str> = result.resource_spans[0].scope_spans[0]
+            .spans
+            .iter()
+            .map(|span| span.name.as_str())
+            .collect();
+        assert_eq!(names, ["create_agentx 550e8400", "chat gpt-4o-mini"]);
     }
 
     #[test]
@@ -1831,6 +1942,7 @@ mod tests {
                 &[],
                 &[],
                 &["session.id".to_owned()],
+                &[],
             )
             .unwrap()
         };

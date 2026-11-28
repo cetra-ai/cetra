@@ -1,0 +1,54 @@
+{
+  "description": "OpenLIT's OpenAI instrumentation: one chat with a tool call, the answer, then one embedding call, with an empty local price table.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Cost computation",
+    "02 § Normalization rules"
+  ],
+  "notes": "openlit 1.45.0 in envs/openlit (its own environment: openlit needs openai<3, D-IN-26 item 1). openlit.init is called before any tracer provider exists, so OpenLIT builds its own and exports through otlp_endpoint, the receiver origin: the span exporter prefers the runner's OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, and OpenLIT's events logger posts to <endpoint>/v1/logs, which the receiver accepts and discards. disable_metrics=True keeps the meter off, and disabled_instrumentors turns the HTTP client instrumentors off, which otherwise add a POST span per model call (spike finding 10). pricing.json in the scenario directory holds an empty table, so OpenLIT fetches nothing and no row matches: it reports gen_ai.usage.cost = 0 (spike finding 2). Under Q2 (a) a reported total of exactly 0 on a span with tokens counts as no report (D-IN-26 item 14), so both llm spans and the embedding span are priced from the price table, never from OpenLIT. Expected: llm, llm, embedding. openlit.agent.version_hash changes on every process start (spike finding 9): a placeholder. gen_ai.server.time_to_first_token is measured (written even without streaming): timing.",
+  "instrumentation": "openlit",
+  "libraries": [
+    "openlit",
+    "openai",
+    "opentelemetry-sdk"
+  ],
+  "timing_attributes": [
+    "gen_ai.server.time_to_first_token"
+  ],
+  "volatile_attributes": [
+    "openlit.agent.version_hash"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_weather_1",
+            "name": "get_weather",
+            "arguments": { "city": "Paris" }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": { "input": 82, "output": 17 }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": { "text": "It is 18 °C and sunny in Paris." },
+      "finish": "stop",
+      "usage": { "input": 131, "output": 12 }
+    },
+    {
+      "api": "openai.embeddings",
+      "model": "text-embedding-3-small",
+      "dims": 8,
+      "usage": { "input": 8 }
+    }
+  ]
+}

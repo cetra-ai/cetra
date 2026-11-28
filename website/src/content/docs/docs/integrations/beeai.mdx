@@ -1,0 +1,87 @@
+---
+title: BeeAI Framework
+description: "Trace BeeAI Framework agents with cetra from Python: agent runs, model calls and tools."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace BeeAI Framework agents with cetra from Python: agent runs, model calls and tools.
+
+<Backing fixtures={["openinference/beeai-agent"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[beeai]" beeai-framework
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenAI through BeeAI and needs OPENAI_API_KEY */}
+```python
+import asyncio
+import os
+
+import cetra
+from beeai_framework.adapters.openai import OpenAIChatModel
+from beeai_framework.agents.requirement import RequirementAgent
+from beeai_framework.tools import tool
+
+cetra.init(instrument=["beeai"])
+
+
+@tool
+def get_weather(city: str) -> str:
+    """Look up the weather for a city."""
+    return f"sunny in {city}"
+
+
+async def main() -> None:
+    llm = OpenAIChatModel("gpt-4o-mini", api_key=os.environ["OPENAI_API_KEY"])
+    agent = RequirementAgent(
+        llm=llm,
+        tools=[get_weather],
+        instructions="You are a weather assistant.",
+        name="weather-agent",
+    )
+    await agent.run("What is the weather in Paris?")
+
+
+asyncio.run(main())
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- The run is an `agent` span named after the agent, with the final answer as a second `agent` span and a `tool` span.
+- Each model call is an `llm` span with the messages, the tool definitions and the token counts.
+- Each tool call is a `tool` span with the tool's input and output.
+
+## Limits
+
+- Do not also enable `openai`: each model call would be recorded twice and counted twice.
+- Cost is the one BeeAI reports (through LiteLLM), not cetra's price table. A model LiteLLM cannot price reports a cost of 0.
+- TypeScript is not supported: OpenInference's BeeAI instrumentation only covers 2025 versions of the TypeScript framework.
+- beeai-framework needs Python 3.13 or earlier: it does not support Python 3.14 yet. The `beeai` extra itself needs Python 3.14 or earlier: the OpenInference BeeAI instrumentation does not support Python 3.15 yet.
+- The fixture was captured with beeai-framework 0.1.85 and openinference-instrumentation-beeai 0.1.36.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

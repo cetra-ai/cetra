@@ -403,10 +403,10 @@ impl Default for MemtableConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryConfig {
-    /// DataFusion `target_partitions`. Defaults to the process parallelism.
+    /// Execution `target_partitions`. Defaults to the process parallelism.
     #[serde(default = "default_target_partitions")]
     pub target_partitions: usize,
-    /// Bytes of Parquet footer and page-index metadata DataFusion may cache.
+    /// Bytes of Parquet footer and page-index metadata the query engine may cache.
     ///
     /// Zero is allowed. [`ByteSize`] cannot represent a negative size.
     #[serde(default = "default_metadata_cache_bytes")]

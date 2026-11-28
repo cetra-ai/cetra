@@ -1,11 +1,10 @@
-//! Where flushed Parquet files are stored, and how a local write becomes durable.
+//! Where flushed Statam files are stored, and how a local write becomes durable.
 //!
 //! `LocalFileSystem` in object_store 0.13 does not fsync. It is registered for
 //! reads only. Local `put_durable` writes a temp file, `sync_all`s it, renames
 //! it into place, and fsyncs the directory. Remote writes go through the store.
 //!
-//! `Storage::open` builds one [`Objects`], removes leftover local temp files,
-//! and registers the store on the shared query runtime.
+//! `Storage::open` builds one [`Objects`] and removes leftover local temp files.
 
 #![allow(dead_code)]
 
@@ -19,8 +18,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bytes::Bytes;
 use cetra_core::ids::ProjectId;
 use chrono::NaiveDate;
-use datafusion::execution::object_store::ObjectStoreUrl as RegisteredUrl;
-use datafusion::execution::runtime_env::RuntimeEnv;
 use object_store::aws::AmazonS3Builder;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
@@ -37,13 +34,6 @@ use crate::fs::{self, OpenOptions};
 use crate::hooks::{HookPoint, Hooks};
 use crate::read_cache::{CacheStore, ReadCache, cached_name};
 use tokio::io::AsyncReadExt;
-
-/// DataFusion keys a registered store by scheme, host, and port. The path is
-/// not part of that key, and [`RegisteredUrl::parse`] rejects any path other
-/// than empty or `/`.
-///
-/// File URLs used by the providers are `cetra://objects/tables/...`.
-pub(crate) const OBJECT_STORE_URL: &str = "cetra://objects";
 
 /// The marker [`Objects::probe`] HEADs and, if that fails, writes (D-N-36). Outside
 /// `tables/` and `media/`, so GC, orphan collection and backups never see it.
@@ -75,18 +65,53 @@ impl PutSizes {
     };
 }
 
+/// Read-side I/O handle bundling an object store with optional direct
+/// local-disk access.
+#[derive(Clone, Debug)]
+pub(crate) struct StorageIo {
+    store: Arc<dyn ObjectStore>,
+    local_root: Option<PathBuf>,
+    is_remote: bool,
+}
+
+impl StorageIo {
+    /// Wraps an arbitrary object store with no local-disk bypass (for tests,
+    /// fuzzing, and fault-injected stores such as `ChaosStore` / `PanicStore`).
+    pub(crate) fn from_store(store: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            store,
+            local_root: None,
+            is_remote: false,
+        }
+    }
+
+    /// The underlying object store.
+    pub(crate) fn store(&self) -> &Arc<dyn ObjectStore> {
+        &self.store
+    }
+
+    /// The canonical local object root, when direct local-disk reads are enabled.
+    pub(crate) fn local_root(&self) -> Option<&Path> {
+        self.local_root.as_deref()
+    }
+
+    /// Whether this handle targets a remote store.
+    pub(crate) fn is_remote(&self) -> bool {
+        self.is_remote
+    }
+}
+
 /// Object storage for one opened data directory.
 #[derive(Debug)]
 pub(crate) struct Objects {
     kind: Kind,
     /// The store itself: S3, or a test store standing in for it.
     raw: Arc<dyn ObjectStore>,
-    /// `raw` behind the read cache (spec 03 §6), or `raw` itself. Registered
-    /// with DataFusion, so queries, compaction and GC read through the cache.
+    /// `raw` behind the read cache (spec 03 §6), or `raw` itself. Used by
+    /// queries, compaction and GC so reads go through the cache.
     store: Arc<dyn ObjectStore>,
     /// Set by [`Self::with_read_cache`], remote stores only.
     cache: Option<Arc<ReadCache>>,
-    url: RegisteredUrl,
     /// `<data_dir>/tmp/compaction`, where remote outputs spill before upload.
     spill_dir: PathBuf,
     hooks: Hooks,
@@ -115,7 +140,6 @@ impl Objects {
     /// directory of the chain is fsynced, new or not (see `create_dir_chain`).
     /// Blocking work runs on `spawn_blocking`.
     pub(crate) async fn new(config: &StorageConfig, hooks: Hooks) -> Result<Self, ObjectError> {
-        let url = registered_url()?;
         let spill_dir = config.data_dir.join("tmp").join("compaction");
         match config.object_store_url() {
             ObjectStoreUrl::Local(root) => {
@@ -136,7 +160,6 @@ impl Objects {
                     raw: Arc::clone(&store),
                     store,
                     cache: None,
-                    url,
                     spill_dir,
                     hooks,
                     sync_failed: Arc::new(AtomicBool::new(false)),
@@ -151,7 +174,6 @@ impl Objects {
                     raw: Arc::clone(&store),
                     store,
                     cache: None,
-                    url,
                     spill_dir,
                     hooks,
                     sync_failed: Arc::new(AtomicBool::new(false)),
@@ -199,7 +221,6 @@ impl Objects {
             raw: Arc::clone(&store),
             store,
             cache: None,
-            url: registered_url()?,
             spill_dir: data_dir.join("tmp").join("compaction"),
             hooks,
             sync_failed: Arc::new(AtomicBool::new(false)),
@@ -254,22 +275,32 @@ impl Objects {
         }
     }
 
-    /// Registers `store` under [`OBJECT_STORE_URL`].
-    pub(crate) fn register(&self, runtime: &RuntimeEnv) {
-        runtime.register_object_store(self.url.as_ref(), Arc::clone(&self.store));
-    }
-
-    /// The URL passed to [`Self::register`].
-    pub(crate) fn url(&self) -> &RegisteredUrl {
-        &self.url
-    }
-
-    /// The object store, for async Parquet reads at open.
+    /// The object store, for async Statam reads at open.
     pub(crate) fn store(&self) -> Arc<dyn ObjectStore> {
         Arc::clone(&self.store)
     }
 
-    /// `tables/<table>/project=<project_id>/day=<YYYY-MM-DD>/<level>-<uuidv7>.parquet`.
+    /// Read-side I/O handle backed by the cached object store (or local disk).
+    pub(crate) fn io(&self) -> StorageIo {
+        let local_root = self.local_root().map(Path::to_path_buf);
+        StorageIo {
+            store: self.store(),
+            is_remote: local_root.is_none(),
+            local_root,
+        }
+    }
+
+    /// Read-side I/O handle bypassing the read cache (for verification).
+    pub(crate) fn raw_io(&self) -> StorageIo {
+        let local_root = self.local_root().map(Path::to_path_buf);
+        StorageIo {
+            store: self.raw_store(),
+            is_remote: local_root.is_none(),
+            local_root,
+        }
+    }
+
+    /// `tables/<table>/project=<project_id>/day=<YYYY-MM-DD>/<level>-<uuidv7>.statam`.
     ///
     /// This is the only path formatter. `level` is `0` or `1`.
     pub(crate) fn table_file_path(
@@ -280,11 +311,46 @@ impl Objects {
     ) -> (String, FileId) {
         let id = FileId::new_v7();
         let path = format!(
-            "tables/{}/project={project}/day={}/{level}-{id}.parquet",
+            "tables/{}/project={project}/day={}/{level}-{id}.statam",
             table.as_str(),
             day.format("%Y-%m-%d"),
         );
         (path, id)
+    }
+
+    /// `tables/spans/project=<project_id>/day=<YYYY-MM-DD>/<level>-<pack_id>.stpk`.
+    pub(crate) fn pack_file_path(
+        project: ProjectId,
+        day: NaiveDate,
+        level: u8,
+        pack_id: Uuid,
+    ) -> String {
+        format!(
+            "tables/spans/project={project}/day={}/{level}-{pack_id}.stpk",
+            day.format("%Y-%m-%d"),
+        )
+    }
+
+    /// Evicts cached read-cache blocks for every data-file key in `paths`.
+    /// No-op when no read cache is attached.
+    pub(crate) async fn evict_read_cache(&self, paths: &[&str]) {
+        let Some(cache) = self.cache.as_ref() else {
+            return;
+        };
+        let names: Vec<String> = paths
+            .iter()
+            .filter_map(|path| object_key(path).ok().and_then(|key| cached_name(&key)))
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        let cache = Arc::clone(cache);
+        let _ = tokio::task::spawn_blocking(move || {
+            for name in names {
+                cache.evict_file(&name);
+            }
+        })
+        .await;
     }
 
     /// `media/<project_id>/<sha256 hex>` (spec 03 §9).
@@ -508,7 +574,7 @@ impl Objects {
             }
             Kind::Remote => {
                 // Scratch files: no fsync of the spill directory is needed.
-                let temp = self.spill_dir.join(format!("{}.parquet", Uuid::now_v7()));
+                let temp = self.spill_dir.join(format!("{}.tmp", Uuid::now_v7()));
                 let opened = tokio::task::spawn_blocking({
                     let temp = temp.clone();
                     let spill_dir = self.spill_dir.clone();
@@ -742,10 +808,6 @@ impl OutputTarget {
 #[allow(clippy::clone_on_copy)]
 fn clone_hooks(hooks: &Hooks) -> Hooks {
     hooks.clone()
-}
-
-fn registered_url() -> Result<RegisteredUrl, ObjectError> {
-    RegisteredUrl::parse(OBJECT_STORE_URL).map_err(|_| ObjectError::InvalidPath)
 }
 
 fn prepare_local_root(
@@ -1304,11 +1366,10 @@ mod tests {
     use bytes::Bytes;
     use cetra_core::ids::ProjectId;
     use chrono::NaiveDate;
-    use datafusion::execution::runtime_env::RuntimeEnv;
     use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
 
-    use super::{OBJECT_STORE_URL, PutSizes, is_temp_name, put_multi};
+    use super::{PutSizes, is_temp_name, put_multi};
     use crate::catalog::FileTable;
     use crate::config::{
         FlushConfig, MemtableConfig, ObjectStoreUrl, QueryConfig, S3Config, StorageConfig,
@@ -1369,11 +1430,15 @@ mod tests {
     }
 
     async fn read_registered(objects: &Objects, key: &str) -> Bytes {
-        let runtime = RuntimeEnv::default();
-        objects.register(&runtime);
-        let store = runtime.object_store(objects.url()).unwrap();
         let location = object_store::path::Path::parse(key).unwrap();
-        store.get(&location).await.unwrap().bytes().await.unwrap()
+        objects
+            .store()
+            .get(&location)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
     }
 
     fn temps(root: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -1583,7 +1648,6 @@ mod tests {
         let landed = read_registered(&objects, "tables/spans/f.parquet").await;
         assert_eq!(landed.len(), SIZES.single_max + 1);
         assert_eq!(objects.remove_temp_files().unwrap(), 0);
-        assert_eq!(OBJECT_STORE_URL, "cetra://objects");
     }
 
     #[tokio::test]
@@ -1852,7 +1916,7 @@ mod tests {
         assert_eq!(
             first,
             format!(
-                "tables/spans/project={}/day=2026-11-11/0-{first_id}.parquet",
+                "tables/spans/project={}/day=2026-11-11/0-{first_id}.statam",
                 project()
             )
         );
@@ -1860,14 +1924,14 @@ mod tests {
         assert_eq!(
             scores,
             format!(
-                "tables/scores/project={}/day=2026-11-11/1-{score_id}.parquet",
+                "tables/scores/project={}/day=2026-11-11/1-{score_id}.statam",
                 project()
             )
         );
         // The literal layout: the id is the only part that varies.
         assert_eq!(
             first.replace(&first_id.to_string(), "<id>"),
-            "tables/spans/project=018f6b4e-7c1a-7c1a-8c1a-000000000001/day=2026-11-11/0-<id>.parquet",
+            "tables/spans/project=018f6b4e-7c1a-7c1a-8c1a-000000000001/day=2026-11-11/0-<id>.statam",
             "the object layout is part of the format (spec 03 § 12)"
         );
     }
@@ -2171,5 +2235,87 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, ObjectError::SyncFailed), "{error}");
+    }
+
+    #[tokio::test]
+    async fn pack_file_path_storage_io_remote_spill_and_evict_read_cache() {
+        let pack_id = uuid::Uuid::from_u128(0x0192_e5a0_7c1a_7000_8000_0000_0000_0042);
+        let pack_path = Objects::pack_file_path(project(), day(), 1, pack_id);
+        assert_eq!(
+            pack_path,
+            format!(
+                "tables/spans/project={}/day=2026-11-11/1-{pack_id}.stpk",
+                project()
+            )
+        );
+        assert_eq!(
+            crate::read_cache::cached_name(&object_store::path::Path::from(pack_path.as_str())),
+            Some(format!("1-{pack_id}.stpk"))
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let local = Objects::new(&local_config(dir.path()), Hooks::default())
+            .await
+            .unwrap();
+        assert!(local.io().local_root().is_some());
+        assert!(!local.io().is_remote());
+        assert!(local.raw_io().local_root().is_some());
+        assert!(!local.raw_io().is_remote());
+        // No-op when no read cache is attached.
+        local.evict_read_cache(&[pack_path.as_str()]).await;
+
+        let mem: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let wrapped = super::StorageIo::from_store(Arc::clone(&mem));
+        assert!(wrapped.local_root().is_none());
+        assert!(!wrapped.is_remote());
+        assert!(Arc::ptr_eq(wrapped.store(), &mem));
+
+        let disk = Arc::new(crate::disk::Disk::open(vec![dir.path().to_path_buf()], 0).unwrap());
+        let cache = Arc::new(
+            crate::read_cache::ReadCache::open(dir.path().join("cache"), 64 << 20, disk, 0)
+                .unwrap(),
+        );
+        let remote =
+            Objects::remote_for_test(Arc::clone(&mem), dir.path(), Hooks::default(), SIZES)
+                .unwrap()
+                .with_read_cache(Arc::clone(&cache));
+        assert!(remote.io().local_root().is_none());
+        assert!(remote.io().is_remote());
+        assert!(remote.raw_io().local_root().is_none());
+        assert!(remote.raw_io().is_remote());
+        assert!(Arc::ptr_eq(remote.raw_io().store(), &mem));
+        assert!(!Arc::ptr_eq(remote.io().store(), &mem));
+
+        // Remote spill temp file uses `.tmp` suffix.
+        let (target, file) = remote.create_output(&pack_path).await.unwrap();
+        assert_eq!(
+            target.temp().extension().and_then(|e| e.to_str()),
+            Some("tmp")
+        );
+        drop(file);
+        remote.discard_output(target).await.unwrap();
+
+        // Put two objects through write-through cache, then evict one and verify the other stays.
+        let kept_path = Objects::pack_file_path(project(), day(), 1, uuid::Uuid::now_v7());
+        remote
+            .put_durable(&pack_path, Bytes::from_static(b"evict-me"))
+            .await
+            .unwrap();
+        remote
+            .put_durable(&kept_path, Bytes::from_static(b"keep-me"))
+            .await
+            .unwrap();
+        let evicted_name =
+            crate::read_cache::cached_name(&object_store::path::Path::from(pack_path.as_str()))
+                .unwrap();
+        let kept_name =
+            crate::read_cache::cached_name(&object_store::path::Path::from(kept_path.as_str()))
+                .unwrap();
+        assert!(cache.size(&evicted_name).is_some());
+        assert!(cache.size(&kept_name).is_some());
+
+        remote.evict_read_cache(&[pack_path.as_str()]).await;
+        assert!(cache.size(&evicted_name).is_none());
+        assert!(cache.size(&kept_name).is_some());
     }
 }

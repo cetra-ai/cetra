@@ -32,23 +32,92 @@ dependencies = [
   # 2.14.0 (2026-11-07) is the first release that accepts the pinned 1.45.2.
   "google-adk==2.14.0",
   "openinference-instrumentation-google-adk==1.1.0",
+  # Native SDKs of M2 (track IN, docs/plans/in-integrations/spikes/m2-native-sdks.md) and their
+  # OpenInference instrumentors, each the version the spike found usable at the 7-day cutoff.
+  "groq==1.7.0",
+  "mistralai==3.7.0",
+  "cohere==7.3.1",
+  "ollama==0.6.3",
+  "together==3.1.1",
+  "openinference-instrumentation-groq==0.1.40",
+  "openinference-instrumentation-mistralai==2.3.5",
+  "openinference-instrumentation-cohere==0.1.22",
+  "openinference-instrumentation-ollama==0.1.20",
+  "openinference-instrumentation-together==0.1.20",
+  # The OpenAI client's HTTP layer (openai 3.x is built on httpx2). The harness's real-host
+  # transport subclasses its transport (D-IN-3). Pinned to the version in uv.lock.
+  "httpx2==2.16.0",
+  # The HTTP layer of SDKs built on httpx rather than httpx2. The harness's plain-httpx
+  # transport subclasses its transport (D-IN-3). Pinned to the version in uv.lock.
+  "httpx==0.28.1",
+  # Frameworks of M3 (track IN, docs/plans/in-integrations/spikes/m3-frameworks.md) and their
+  # OpenInference instrumentors, each the version the spike found usable at the 7-day cutoff.
+  "instructor==1.17.0",
+  "openinference-instrumentation-instructor==0.1.35",
+  "agno==3.2.0",
+  "openinference-instrumentation-agno==1.2.0",
+  "smolagents[openai]==1.26.0",
+  "openinference-instrumentation-smolagents==0.1.50",
+  "haystack-ai==3.5.0",
+  "openinference-instrumentation-haystack==0.1.53",
+  "beeai-framework==0.1.85",
+  "openinference-instrumentation-beeai==0.1.36",
+  "guardrails-ai==0.11.0",
+  "deepagents==0.7.32",
+  # Native GenAI frameworks of M4 (track IN, docs/plans/in-integrations/spikes/m4-python-genai.md)
+  # and AutoGen's OpenInference instrumentor, each the version the spike found usable at the
+  # 7-day cutoff.
+  "pydantic-ai-slim[openai]==2.68.0",
+  "semantic-kernel==1.47.0",
+  "strands-agents[openai]==1.65.0",
+  "agent-framework-core==1.26.0",
+  "agent-framework-openai==1.18.2",
+  "ag2[openai,tracing]==1.3.2",
+  "autogen-agentchat==0.7.5",
+  "autogen-ext[openai]==0.7.5",
+  "openinference-instrumentation-autogen-agentchat==0.1.29",
+  "mirascope[openai,ops]==2.8.2",
+  # Temporal with the OpenAI Agents plugin and the pinned dev-server binary (M5, track IN,
+  # docs/plans/in-integrations/spikes/m5-binaries.md).
+  "temporalio==1.36.1",
+  "temporalio-openai-agents[openinference]==2.0.0",
+  # The SDK under test, from this repository (editable), so the harness uses its runtime.
+  "cetra-sdk",
+  # Pipecat (M6 captures A, docs/plans/in-integrations/spikes/m6-apps.md § 5): the newest upload at
+  # the 7-day cutoff. Prompt Flow (envs/promptflow) and LiveKit (envs/livekit) have their own
+  # environments (D-IN-26 item 1): promptflow conflicts with guardrails-ai (pydash), and
+  # livekit-agents with beeai (json-repair).
+  "pipecat-ai[openai]==1.16.0",
+  # The capture harness, a package of its own (tools/capture/harness, module capture_py).
+  "cetra-capture-harness",
 ]
 
 [dependency-groups]
 dev = ["ruff==0.17.3", "mypy==2.4.1"]
 
-[build-system]
-requires = ["uv_build>=0.13.6,<0.14"]
-build-backend = "uv_build"
-
 [tool.uv]
+package = false
 exclude-newer = "7 days" # D74/D117: no release younger than 7 days
 # google-adk 2.14.0 was uploaded on 2026-11-07. The 7-day cutoff excludes it,
 # and 2.13.0 cannot share this project's OpenTelemetry 1.45 pin.
-exclude-newer-package = { google-adk = "2026-11-07T01:04:00Z" }
+# temporalio-openai-agents 2.0.0 was uploaded on 2026-11-17T21:07Z; it is the version for
+# openai-agents 0.24.x (1.1.0 needs 0.22.x) and reaches the 7-day cutoff on 2026-11-24T21:07Z.
+exclude-newer-package = { google-adk = "2026-11-07T01:04:00Z", temporalio-openai-agents = "2026-11-17T22:00:00Z" }
+# instructor 1.17.0 caps jiter<0.15 and guardrails-ai 0.11.0 caps openai<3. Both work with
+# the pins above (spike finding 5).
+# Mirascope 2.8.2's extras cap anthropic, google-genai and the Google GenAI instrumentor below
+# the versions this project pins (M4 spike, § Capture project). The overrides keep the pins.
+override-dependencies = [
+  "jiter>=0.16",
+  "openai==3.45.0",
+  "anthropic==2.4.0",
+  "google-genai==2.34.0",
+  "opentelemetry-instrumentation-google-genai==1.1b1",
+]
 
-[tool.uv.build-backend]
-module-name = "capture_py"
+[tool.uv.sources]
+cetra-sdk = { path = "../../../sdks/python", editable = true }
+cetra-capture-harness = { path = "../harness", editable = true }
 
 [tool.ruff]
 target-version = "py313"
@@ -57,13 +126,20 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PT", "ANN", "S", "BLE", "N"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["capture_py"]
+
 [tool.mypy]
 strict = true
 python_version = "3.13"
-files = ["src", "scenarios"]
-mypy_path = "src"
+files = ["scenarios"]
 # Every scenario entry point is main.py. mypy maps those paths to one module.
 exclude = ["main\\.py$"]
+
+# google-auth types Credentials as untyped; the scenario only builds a mock token.
+[[tool.mypy.overrides]]
+module = "google.oauth2.credentials"
+follow_imports = "skip"
 
 [[tool.mypy.overrides]]
 module = "opentelemetry.instrumentation.openai_v2"
@@ -80,3 +156,44 @@ follow_imports = "skip"
 [[tool.mypy.overrides]]
 module = "opentelemetry.instrumentation.openai_agents"
 follow_imports = "skip"
+
+# mirascope ships no py.typed marker, so its decorators and calls are Any. The scenario
+# module only has to run, not type-check against it.
+[[tool.mypy.overrides]]
+module = "mirascope"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "mirascope_agent_tool"
+disallow_untyped_decorators = false
+warn_return_any = false
+
+# smolagents ships no py.typed marker.
+[[tool.mypy.overrides]]
+module = "smolagents"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "smolagents.*"
+ignore_missing_imports = true
+
+# guardrails-ai ships no py.typed marker.
+[[tool.mypy.overrides]]
+module = "guardrails"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "guardrails.validators"
+ignore_missing_imports = true
+
+# google-genai's contents union is invariant over list[Part] once PIL is installed
+# (smolagents pulls pillow into this lock), which fails the multimodal scenarios.
+# Skipping PIL keeps the union's Image arm Any, as it was before pillow arrived.
+[[tool.mypy.overrides]]
+module = "PIL.*"
+follow_imports = "skip"
+
+# Pipecat 1.16's stop_when_done is unannotated: the scenario only has to run.
+[[tool.mypy.overrides]]
+module = "pipecat_openai_pipeline"
+disallow_untyped_calls = false

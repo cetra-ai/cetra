@@ -1,0 +1,21 @@
+{
+  "description": "Microsoft Agent Framework workflow of two executors joined by one edge, with no model call, traced by the framework's telemetry.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output"
+  ],
+  "notes": "A two-executor workflow, upper then sink, as in the M4 spike (maf/t2.py). It makes no provider request, so turns is empty: the capture harness serves no turns and fails any request. The spans are workflow.build, invoke_workflow, executor.process and edge_group.process (keyed on their attributes, since they carry no gen_ai.operation.name), and message.send. Workflow ids, the builder name, the workflow definition and the edge group ids contain UUIDs that change per run and are volatile.",
+  "instrumentation": "agent-framework-core",
+  "libraries": [
+    "agent-framework-core",
+    "opentelemetry-sdk"
+  ],
+  "volatile_attributes": [
+    "workflow.id",
+    "workflow_builder.name",
+    "workflow.definition",
+    "edge_group.id"
+  ],
+  "turns": []
+}

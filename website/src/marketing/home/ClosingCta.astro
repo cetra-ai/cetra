@@ -3,19 +3,19 @@ import Button from "../components/Button.astro";
 import CopyCommand from "../components/CopyCommand.astro";
 import Section from "../components/Section.astro";
 import SectionHeading from "../components/SectionHeading.astro";
-import { DEMO_URL, INSTALL_COMMANDS } from "../site";
+import { CLOUD, DEMO_URL, INSTALL_COMMANDS } from "../site";
 ---
 
 <Section tone="raised" divider labelledby="cta-title">
   <SectionHeading
     align="center"
-    title="See it on real traces."
+    title="Send your first trace today."
     id="cta-title"
-    lede="Click around the demo, or run cetra on your machine now."
+    lede="Start free in cetra Cloud, click around the demo, or run cetra on your machine now."
   />
   <div class="actions">
-    <Button href={DEMO_URL} size="lg" external>Try the demo</Button>
-    <Button href="/docs/" size="lg" variant="secondary">Read the docs</Button>
+    <Button href={CLOUD.signup} size="lg" external>Start free</Button>
+    <Button href={DEMO_URL} size="lg" variant="secondary" external>Try the demo</Button>
   </div>
   <div class="install">
     <CopyCommand id="cta-install" commands={INSTALL_COMMANDS} />

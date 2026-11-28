@@ -1,0 +1,30 @@
+{
+  "description": "Mistral SDK chat completion, one turn, traced by OpenInference through cetra's SDK.",
+  "spec_refs": [
+    "02 \u00a7 Convention detection",
+    "02 \u00a7 Model, provider, usage",
+    "02 \u00a7 Cost computation"
+  ],
+  "notes": "The Mistral client keeps its default base URL https://api.mistral.ai, and the harness routes the request to the capture mock under that host (D-IN-3). The SDK is imported from mistralai.client, the module the instrumentor uses. The instrumentor writes llm.provider mistralai, which resolves to mistral_ai through the alias list (D-IN-2). Cost is computed, not reported. Token counts are input 14 and output 8.",
+  "instrumentation": "openinference-instrumentation-mistralai",
+  "libraries": [
+    "mistralai",
+    "openinference-instrumentation-mistralai",
+    "opentelemetry-sdk"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "mistral-small-latest",
+      "host": "api.mistral.ai",
+      "message": {
+        "text": "The capital of France is Paris."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 14,
+        "output": 8
+      }
+    }
+  ]
+}

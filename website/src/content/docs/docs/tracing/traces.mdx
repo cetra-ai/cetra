@@ -92,6 +92,8 @@ The list hides evaluation traces and experiment traces until you tick them in th
 - "N loaded" counts the rows loaded so far.
 - **Filters**, the preset chips and the filter bar are in the row below ([Filters and search](/docs/tracing/filters-and-search/)).
 
+The line under the table totals the list: the number of traces, how many failed and their cost, over every trace that matches the time range, filter and search, not only the rows loaded so far. Tick rows to total those instead; the line then reads, for example, "3 of 203 selected · 1 error · $0.42". Traces that arrive or change in live mode are counted after **Refresh**.
+
 Tick the box of one or more rows to see **Add N to dataset**, which adds those traces to a dataset ([Datasets](/docs/evaluation/datasets/)). **Delete matching…** deletes every trace that matches the current filter, search and time range. It shows how many that is before you confirm, and needs the admin role ([Deletion and retention](/docs/platform/deletion-and-retention/)).
 
 Select a row to open the trace in a panel with the list still in place. Use `j` and `k`, or the arrow keys, to move between rows, and `Esc` to close the panel. The layout switcher in the trace header moves the panel: **Drawer** (the default) opens it beside the list, **Bottom** below the list, and **Page** replaces the list with the trace. **Maximize trace** makes the panel fill the page, and **Restore trace** undoes it. **Open full page** opens the trace on its own page.
@@ -104,20 +106,20 @@ A project with no traces shows setup snippets until the first trace arrives.
 
 The left side shows the spans of the trace. A switch above it picks how: **Tree**, **Timeline** or **Transcript**. Press `t` to cycle through them.
 
-- **Tree**: the spans as a tree. Each row has the span's name, kind and status, its duration, tokens and cost. Spans with an error are red. There is no time axis.
-- **Timeline**: the same rows with a bar on a shared time axis. The toolbar shows the zoom level. Select **Fit** or press `0` to fit the whole trace.
+- **Tree**: the spans as a tree, with lines from each parent to its children. Each row has the span's name, kind and status, its duration, tokens and cost. Spans with an error are red. Up to three slow spans show their duration in amber: those whose own time, not counting their children, is more than 20% of the trace. There is no time axis.
+- **Timeline**: the same tree with a bar per span on a shared time axis, in place of the duration, tokens and cost columns. Each bar shows the span's duration and cost, and its tooltip shows the span's own time. The toolbar shows the zoom level. Select **Fit** or press `0` to fit the whole trace.
 
 In Tree and Timeline, the toolbar has a search box with **Previous match** and **Next match**, **Errors only**, **Expand all** and **Collapse**, which folds the tree back to its first level. You can also collapse a single branch.
 
 <Image src={traceView} alt="A trace opened from the trace list: its span tree in the middle, and the root span's input and output on the right." />
 
-**Transcript** shows the model and tool spans in order as one conversation, and has no tree controls. Each model turn shows only the messages that are new since the previous call.
+**Transcript** shows the model and tool spans in order as one conversation, and has no tree controls. Each model turn shows only the messages that are new since the previous call. Each tool call is one line, `name(arguments) → result · duration`. A failed tool call shows its error in red on that line. Select a line to open its arguments and result. Select **Full width** to show the transcript without the panel beside it.
 
 When a trace has just ended, or the list is live, the view updates as spans arrive and shows a **Live** badge with a **Stop** button that stops following.
 
 The right side shows the selected span. The header gives its kind, name, model, provider, duration, time to first token, token counts with cache and reasoning, cost and status. The tabs are:
 
-- **Chat**: for spans with messages. System instructions are collapsed, messages appear as bubbles, tool calls and results as cards, and reasoning is collapsed. Images, audio and PDFs show in place. Tool definitions open in a drawer.
+- **Chat**: for spans with messages. System instructions are collapsed, messages appear as bubbles, and reasoning is collapsed. Each tool call is one line with its result, and the duration of its tool span when cetra can match it. Select a line to open its arguments and result. Images, audio and PDFs show in place. Tool definitions open in a drawer.
 - **Input / Output**: the raw payload as a JSON tree, as text or as raw text, with copy buttons. A badge tells you when a value was truncated.
 - **Attributes**: metadata, attributes, resource attributes, events and links. An exception event shows its stack trace.
 - **Scores**: the scores on the span and on the trace ([Scores](/docs/evaluation/scores/)).

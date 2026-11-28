@@ -1,846 +1,1380 @@
-//! SQL console: validate, plan, bind, run and encode.
+//! SQL console execution: validate, plan, bind, run and encode.
 //!
 //! `{name:Type}` placeholders are bound before planning. [`QueryContext::sql_json`]
 //! runs the plan under a timeout and a row cap. [`QueryContext::sql_export`] streams
 //! the same plan as CSV, NDJSON or Parquet.
 
-#![allow(dead_code)]
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-mod encode;
-mod params;
-mod run;
-mod validate;
-
-pub use run::{
-    EXPORT_MAX_CHUNK_BYTES, EXPORT_MAX_ROWS, ExportFormat, SQL_MAX_RESULT_BYTES, SQL_MAX_ROWS,
-    SqlColumn, SqlJson, SqlRequest,
+use bytes::Bytes;
+use cetra_column::{CancelToken, Schema, ScopedPool};
+pub use cetra_query::encode::{
+    EXPORT_MAX_CHUNK_BYTES, EXPORT_MAX_ROWS, SQL_MAX_RESULT_BYTES, SQL_MAX_ROWS,
 };
-
-use std::collections::HashSet;
-
-use datafusion::logical_expr::LogicalPlan;
-use datafusion::prelude::SQLOptions;
-use datafusion::sql::parser::Statement as DFStatement;
-use datafusion::sql::sqlparser::tokenizer::{Token, TokenWithSpan};
-use params::{bind_parameters, bind_placeholders, param_values};
+use cetra_query::encode::{EXPORT_PIECE_BYTES, encode_csv_header};
+use cetra_query::exec::{
+    BatchSource, DEFAULT_BATCH_SIZE, ExecContext, ExecMetrics, PartitionStream, ScanSource,
+    SpillManager, WorkerPool,
+};
+use cetra_query::sql::run::prepare_sql_plan_with_limit;
+use cetra_query::sql::{
+    LogicalPlan, SqlCatalog, SqlSources, TimeWindow, encode_csv_batch_pieces,
+    encode_ndjson_batch_pieces, execute_plan_json, sql_check as query_sql_check,
+    sql_export_plan_stream,
+};
+use cetra_query::{EvalContext, QueryError};
+use futures::stream::{BoxStream, StreamExt};
 use serde_json::{Map, Value};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
-use crate::query_error::{InvalidQuery, Position, RunError};
-use crate::query_text::{
-    SQL_LIMITS, TextKind, cap_message, expect_end, parse_failure, parser, planning_failure,
-    tokenize,
+use crate::engine::admission::AsyncAdmissionPool;
+use crate::engine::parquet_export::{
+    PARQUET_CHUNK_BYTES, PARQUET_ROW_GROUP_ROWS, ParquetBatchExporter,
 };
+use crate::engine::scores_source::ScoresSource;
+use crate::engine::traces_source::TracesSource;
+use crate::error::EngineError;
+use crate::query_error::{InvalidQuery, Position, RunError};
+use crate::verify::Suspects;
 use crate::views::QueryContext;
-use validate::validate_statement;
 
-/// Plan one console statement that has no parameters.
+const EXPORT_CHANNEL_CAPACITY: usize = 4;
+const DEFAULT_ADMISSION_WAIT: Duration = Duration::from_secs(5);
+const DEFAULT_TARGET_PARTITIONS: usize = 2;
+
+/// One console request.
 ///
-/// `{name:Type}` is rewritten here; values are bound by [`prepare_sql`].
-pub(crate) async fn plan_sql(ctx: &QueryContext, text: &str) -> Result<LogicalPlan, InvalidQuery> {
-    let (tokens, _) = prepared_tokens(text)?;
-    plan_tokens(ctx, text, tokens).await
+/// `limit` is the JSON row cap. [`QueryContext::sql_export`] ignores it; the
+/// server passes [`SQL_MAX_ROWS`] there.
+#[derive(Debug)]
+pub struct SqlRequest<'a> {
+    /// The statement, with `{name:Type}` placeholders.
+    pub query: &'a str,
+    /// JSON values for the placeholders.
+    pub params: &'a Map<String, Value>,
+    /// Maximum rows to return. `1..=SQL_MAX_ROWS`.
+    pub limit: usize,
+    /// How long the query may run. Zero is rejected here; the server checks the
+    /// spec 09 range.
+    pub timeout: Duration,
 }
 
-/// Plan `text`, substituting `{name:Type}` placeholders from `params`.
-pub(crate) async fn prepare_sql(
-    ctx: &QueryContext,
-    text: &str,
-    params: &Map<String, Value>,
-) -> Result<LogicalPlan, RunError> {
-    let (tokens, placeholders) = prepared_tokens(text)?;
-    let plan = plan_tokens(ctx, text, tokens).await?;
-    let values = param_values(&placeholders, params)?;
-    bind_parameters(plan, &placeholders, values)
+/// One output column. `data_type` is the display type name (`D-QE-15`).
+#[derive(Debug)]
+pub struct SqlColumn {
+    /// Output name.
+    pub name: String,
+    /// Display type name.
+    pub data_type: String,
 }
 
-fn prepared_tokens(
-    text: &str,
-) -> Result<(Vec<TokenWithSpan>, Vec<params::Placeholder>), InvalidQuery> {
-    let tokens = tokenize(text, &SQL_LIMITS, TextKind::Sql)?;
-    bind_placeholders(tokens)
+/// JSON result (D98).
+#[derive(Debug)]
+pub struct SqlJson {
+    /// Output columns, in order.
+    pub columns: Vec<SqlColumn>,
+    /// One object per row. Keys follow [`Self::columns`].
+    pub rows: Vec<Map<String, Value>>,
+    /// True when more rows matched than `rows` holds. That is because of `limit`,
+    /// or because the next row would pass the byte cap.
+    pub truncated: bool,
 }
 
-async fn plan_tokens(
-    ctx: &QueryContext,
-    text: &str,
-    tokens: Vec<TokenWithSpan>,
-) -> Result<LogicalPlan, InvalidQuery> {
-    // The parser holds `Rc` state, so it must be gone before the first `.await`:
-    // the console futures must be `Send` to run in an axum handler.
-    let statement = parse_statement(ctx, text, tokens)?;
-    let plan = ctx
-        .session()
-        .state()
-        .statement_to_plan(DFStatement::Statement(Box::new(statement)))
-        .await
-        .map_err(|error| planning_failure(&error))?;
-    SQLOptions::new()
-        .with_allow_ddl(false)
-        .with_allow_dml(false)
-        .with_allow_statements(false)
-        .verify_plan(&plan)
-        .map_err(|_| invalid("only SELECT queries are allowed", None))?;
-    unique_names(&plan)?;
-    Ok(plan)
+/// Byte format of [`QueryContext::sql_export`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportFormat {
+    /// RFC 4180 CSV. The first chunk is the header line.
+    Csv,
+    /// One JSON object per line.
+    Ndjson,
+    /// ZSTD Parquet. Chunks are completed row groups, and the footer is last.
+    Parquet,
 }
 
-/// Parse exactly one statement from `tokens` and check it against the sandbox.
-fn parse_statement(
-    ctx: &QueryContext,
-    text: &str,
-    tokens: Vec<TokenWithSpan>,
-) -> Result<datafusion::sql::sqlparser::ast::Statement, InvalidQuery> {
-    if let Some(pipe) = tokens
-        .iter()
-        .find(|token| token.token == Token::VerticalBarRightAngleBracket)
-    {
-        return Err(invalid(
-            "pipe syntax (`|>`) is not allowed",
-            Some(position(pipe.span.start.line, pipe.span.start.column)),
-        ));
+impl QueryContext {
+    /// Runs `request.query` and encodes at most `request.limit` rows.
+    ///
+    /// # Errors
+    ///
+    /// [`RunError::InvalidRequest`] for a limit outside `1..=SQL_MAX_ROWS` or a
+    /// zero timeout. Planning and parameter errors pass through. Execution
+    /// errors are classified. The time limit yields [`RunError::Timeout`].
+    /// [`RunError::TooLarge`] when the first row alone passes the byte cap, or
+    /// when the encoded output passes it anyway.
+    pub async fn sql_json(&self, request: SqlRequest<'_>) -> Result<SqlJson, RunError> {
+        self.sql_json_within(request, SQL_MAX_RESULT_BYTES).await
     }
-    let mut parsed = parser(tokens);
-    let start = parsed.peek_token();
-    let statement = parsed
-        .parse_statement()
-        .map_err(|error| parse_failure(error, &parsed, text))?;
-    if parsed.consume_token(&Token::SemiColon) {
-        let trailing = parsed.peek_token_ref();
-        if !matches!(trailing.token, Token::EOF) {
-            return Err(invalid(
-                "only one statement is allowed",
-                Some(position(
-                    trailing.span.start.line,
-                    trailing.span.start.column,
-                )),
-            ));
+
+    /// Plans `query` with `params` bound, without running it, and returns its output columns.
+    pub async fn sql_check(
+        &self,
+        query: &str,
+        params: &Map<String, Value>,
+    ) -> Result<Vec<SqlColumn>, RunError> {
+        self.sql_engine()?.sql_check(query, params).await
+    }
+
+    /// Runs `request.query` with an explicit JSON byte budget `max_bytes`.
+    #[doc(hidden)]
+    pub async fn sql_json_within(
+        &self,
+        request: SqlRequest<'_>,
+        max_bytes: usize,
+    ) -> Result<SqlJson, RunError> {
+        self.sql_engine()?.sql_json_within(request, max_bytes).await
+    }
+
+    /// Streams `request.query` in `format` up to [`EXPORT_MAX_ROWS`] data rows.
+    pub async fn sql_export(
+        &self,
+        request: SqlRequest<'_>,
+        format: ExportFormat,
+    ) -> Result<BoxStream<'static, Result<Bytes, RunError>>, RunError> {
+        self.sql_engine()?.sql_export(request, format).await
+    }
+}
+
+/// Self-contained Shape B SQL execution context over storage sources and resource pools.
+///
+/// Manual [`fmt::Debug`] omits row payloads and `extra_tables` contents (`AGENTS.md` § Privacy).
+#[derive(Clone)]
+pub(crate) struct SqlEngineContext {
+    spans: Arc<dyn ScanSource>,
+    traces: Arc<TracesSource>,
+    scores: Arc<ScoresSource>,
+    admission: Arc<AsyncAdmissionPool>,
+    workers: Arc<WorkerPool>,
+    spill: Arc<SpillManager>,
+    visible_from: Option<i64>,
+    window: Option<TimeWindow>,
+    extra_tables: HashMap<String, Arc<BatchSource>>,
+    pool: Option<Arc<ScopedPool>>,
+    suspects: Option<Suspects>,
+    coordinator_slots: Arc<Semaphore>,
+    target_partitions: usize,
+    initial_memory: usize,
+    max_memory: usize,
+    admission_wait: Duration,
+    batch_size: usize,
+}
+
+impl fmt::Debug for SqlEngineContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut extra_names: Vec<&str> = self.extra_tables.keys().map(String::as_str).collect();
+        extra_names.sort_unstable();
+        f.debug_struct("SqlEngineContext")
+            .field("visible_from", &self.visible_from)
+            .field("window", &self.window)
+            .field("extra_tables", &extra_names)
+            .field("has_pool", &self.pool.is_some())
+            .field(
+                "coordinator_slots_available",
+                &self.coordinator_slots.available_permits(),
+            )
+            .field("target_partitions", &self.target_partitions)
+            .field("initial_memory", &self.initial_memory)
+            .field("max_memory", &self.max_memory)
+            .field("admission_used", &self.admission.used())
+            .field("admission_limit", &self.admission.limit())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SqlEngineContext {
+    /// Creates a [`SqlEngineContext`] over storage sources and resource pools.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        spans: Arc<dyn ScanSource>,
+        traces: Arc<TracesSource>,
+        scores: Arc<ScoresSource>,
+        admission: Arc<AsyncAdmissionPool>,
+        workers: Arc<WorkerPool>,
+        spill: Arc<SpillManager>,
+        visible_from: Option<i64>,
+        window: Option<TimeWindow>,
+        extra_tables: HashMap<String, Arc<BatchSource>>,
+    ) -> Self {
+        let max_memory = admission.limit();
+        let target_partitions = DEFAULT_TARGET_PARTITIONS.min(workers.num_workers().max(1));
+        let max_coordinators = workers.num_workers().saturating_mul(4).max(32);
+        Self {
+            spans,
+            traces,
+            scores,
+            admission,
+            workers,
+            spill,
+            visible_from,
+            window,
+            extra_tables,
+            pool: None,
+            suspects: None,
+            coordinator_slots: Arc::new(Semaphore::new(max_coordinators)),
+            target_partitions,
+            initial_memory: 0,
+            max_memory,
+            admission_wait: DEFAULT_ADMISSION_WAIT,
+            batch_size: DEFAULT_BATCH_SIZE,
         }
     }
-    expect_end(&mut parsed, text)?;
-    validate_statement(
-        &statement,
-        &ctx.registered_view_names(),
-        text,
-        Some(position(start.span.start.line, start.span.start.column)),
-    )?;
-    Ok(statement)
+
+    /// Reuses an already-admitted [`ScopedPool`] (for example from [`crate::ProjectQuery`]).
+    pub(crate) fn with_pool(mut self, pool: Option<Arc<ScopedPool>>) -> Self {
+        self.pool = pool;
+        self
+    }
+
+    /// Attaches a [`Suspects`] tracker so corrupt Parquet failures trigger verification.
+    pub(crate) fn with_suspects(mut self, suspects: Suspects) -> Self {
+        self.suspects = Some(suspects);
+        self
+    }
+
+    /// Shares the process-wide coordinator slot semaphore from [`crate::QeRuntime`].
+    pub(crate) fn with_coordinator_slots(mut self, slots: Arc<Semaphore>) -> Self {
+        self.coordinator_slots = slots;
+        self
+    }
+
+    /// Sets admission memory limits `(initial, cap, wait)` for SQL queries without a pre-admitted pool.
+    #[cfg(test)]
+    pub(crate) fn with_memory_limits(
+        mut self,
+        initial_memory: usize,
+        max_memory: usize,
+        admission_wait: Duration,
+    ) -> Self {
+        self.initial_memory = initial_memory;
+        self.max_memory = max_memory;
+        self.admission_wait = admission_wait;
+        self
+    }
+
+    /// Sets `target_partitions` for pipeline scans and execution.
+    pub(crate) fn with_target_partitions(mut self, target_partitions: usize) -> Self {
+        self.target_partitions = target_partitions.max(1);
+        self
+    }
+
+    /// Registers an in-memory [`BatchSource`] view (e.g. `dataset_items`, `experiment_items`).
+    #[cfg(test)]
+    pub(crate) fn register_extra_table(
+        &mut self,
+        name: impl Into<String>,
+        source: Arc<BatchSource>,
+    ) -> Result<(), RunError> {
+        let key = name.into().to_ascii_lowercase();
+        if matches!(key.as_str(), "spans" | "traces" | "scores" | "sessions")
+            || self.extra_tables.contains_key(&key)
+        {
+            return Err(RunError::InvalidRequest(format!(
+                "{key} is already registered"
+            )));
+        }
+        self.extra_tables.insert(key, source);
+        Ok(())
+    }
+
+    fn build_catalog_and_sources(&self) -> Result<(SqlCatalog, SqlSources), RunError> {
+        let mut catalog = SqlCatalog::new(self.window, self.visible_from);
+        let mut sources = SqlSources::new();
+        sources.register("spans", Arc::clone(&self.spans));
+        sources.register("traces", Arc::clone(&self.traces) as Arc<dyn ScanSource>);
+        sources.register("scores", Arc::clone(&self.scores) as Arc<dyn ScanSource>);
+
+        for (name, batch_src) in &self.extra_tables {
+            catalog
+                .register_batch_source(name, Arc::clone(batch_src))
+                .map_err(map_query_error)?;
+            sources.register(name, Arc::clone(batch_src) as Arc<dyn ScanSource>);
+        }
+        Ok((catalog, sources))
+    }
+
+    /// Validates, binds `{name:Type}` parameters, and plans `query` without executing it.
+    ///
+    /// Completes synchronously (dropping any `sqlparser` `Rc` state before any `.await`).
+    pub(crate) async fn sql_check(
+        &self,
+        query: &str,
+        params: &Map<String, Value>,
+    ) -> Result<Vec<SqlColumn>, RunError> {
+        let (catalog, _) = self.build_catalog_and_sources()?;
+        let cols = query_sql_check(&catalog, query, params).map_err(map_query_error)?;
+        Ok(cols
+            .into_iter()
+            .map(|c| SqlColumn {
+                data_type: c.type_name().to_owned(),
+                name: c.name,
+            })
+            .collect())
+    }
+
+    /// Executes `request.query` and encodes at most `request.limit` rows within 32 MiB JSON.
+    #[cfg(test)]
+    pub(crate) async fn sql_json(&self, request: SqlRequest<'_>) -> Result<SqlJson, RunError> {
+        self.sql_json_within(request, SQL_MAX_RESULT_BYTES).await
+    }
+
+    /// Executes `request.query` with an explicit JSON byte budget `max_bytes`.
+    pub(crate) async fn sql_json_within(
+        &self,
+        request: SqlRequest<'_>,
+        max_bytes: usize,
+    ) -> Result<SqlJson, RunError> {
+        if !(1..=SQL_MAX_ROWS).contains(&request.limit) {
+            return Err(RunError::InvalidRequest(
+                "limit must be between 1 and 10000".to_owned(),
+            ));
+        }
+        if request.timeout.is_zero() {
+            return Err(RunError::InvalidRequest(
+                "timeout must be greater than zero".to_owned(),
+            ));
+        }
+
+        let deadline = tokio::time::Instant::now() + request.timeout;
+        // Synchronous parse + validate + param bind + optimize BEFORE any `.await`.
+        let limit = request.limit;
+        let (catalog, sources) = self.build_catalog_and_sources()?;
+        let plan =
+            prepare_sql_plan_with_limit(&catalog, request.query, request.params, Some(limit + 1))
+                .map_err(map_query_error)?;
+
+        let scoped_pool = self.resolve_pool_until(deadline).await?;
+        let permit = self.acquire_coordinator_until(deadline).await?;
+
+        let cancel = CancelToken::new();
+        let _drop_guard = CancelOnDrop::new(cancel.clone());
+        let exec_ctx = self.make_exec_ctx(scoped_pool, cancel.clone());
+
+        let (done_tx, mut done_rx) = oneshot::channel();
+        let join = std::thread::Builder::new()
+            .name("cetra-sql-json".to_owned())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let _permit = permit;
+                let res = execute_plan_json(&plan, &sources, &exec_ctx, limit, max_bytes);
+                drop(exec_ctx);
+                drop(plan);
+                drop(sources);
+                let _ = done_tx.send(res);
+            })
+            .map_err(|_| RunError::Internal(EngineError::internal("spawn sql worker thread")))?;
+
+        match tokio::time::timeout_at(deadline, &mut done_rx).await {
+            Ok(Ok(result)) => result
+                .map(map_json_result)
+                .map_err(|err| map_query_error_and_report(err, self.suspects.as_ref())),
+            Ok(Err(_closed)) => {
+                cancel.cancel();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = join.join();
+                })
+                .await;
+                Err(RunError::Internal(EngineError::internal(
+                    "sql execution thread panicked",
+                )))
+            }
+            Err(_) => {
+                cancel.cancel();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = join.join();
+                })
+                .await;
+                Err(RunError::Timeout)
+            }
+        }
+    }
+
+    /// Streams `request.query` as RFC 4180 CSV up to [`EXPORT_MAX_ROWS`] data rows.
+    #[cfg(test)]
+    pub(crate) async fn sql_export_csv(
+        &self,
+        request: SqlRequest<'_>,
+    ) -> Result<BoxStream<'static, Result<Bytes, RunError>>, RunError> {
+        self.sql_export(request, ExportFormat::Csv).await
+    }
+
+    /// Streams `request.query` in `format` up to [`EXPORT_MAX_ROWS`] data rows.
+    pub(crate) async fn sql_export(
+        &self,
+        request: SqlRequest<'_>,
+        format: ExportFormat,
+    ) -> Result<BoxStream<'static, Result<Bytes, RunError>>, RunError> {
+        self.sql_export_with_limits(
+            request,
+            format,
+            EXPORT_MAX_ROWS,
+            EXPORT_PIECE_BYTES,
+            EXPORT_MAX_CHUNK_BYTES,
+            PARQUET_ROW_GROUP_ROWS,
+            PARQUET_CHUNK_BYTES,
+        )
+        .await
+    }
+
+    /// Streams `request.query` with explicit row/piece/chunk/row-group budgets.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn sql_export_with_limits(
+        &self,
+        request: SqlRequest<'_>,
+        format: ExportFormat,
+        row_cap: usize,
+        piece_bytes: usize,
+        chunk_bytes: usize,
+        parquet_rows: usize,
+        parquet_bytes: usize,
+    ) -> Result<BoxStream<'static, Result<Bytes, RunError>>, RunError> {
+        let deadline = tokio::time::Instant::now() + request.timeout;
+        // Synchronous parse + validate + param bind + optimize BEFORE any `.await`.
+        let (catalog, sources) = self.build_catalog_and_sources()?;
+        let plan =
+            prepare_sql_plan_with_limit(&catalog, request.query, request.params, Some(row_cap))
+                .map_err(map_query_error)?;
+
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(timeout_stream());
+        }
+
+        let scoped_pool = match self.resolve_pool_until(deadline).await {
+            Ok(pool) => pool,
+            Err(RunError::Timeout) => return Ok(timeout_stream()),
+            Err(err) => return Err(err),
+        };
+        let permit = match self.acquire_coordinator_until(deadline).await {
+            Ok(permit) => permit,
+            Err(RunError::Timeout) => return Ok(timeout_stream()),
+            Err(err) => return Err(err),
+        };
+
+        let cancel = CancelToken::new();
+        let mut init_guard = CancelOnDrop::new(cancel.clone());
+        let stream_pool = Arc::clone(&scoped_pool);
+        let exec_ctx = self.make_exec_ctx(scoped_pool, cancel.clone());
+        let (tx, rx) = mpsc::channel::<Result<Bytes, RunError>>(EXPORT_CHANNEL_CAPACITY);
+        let (init_tx, init_rx) = oneshot::channel::<Result<(), RunError>>();
+
+        let cfg = ExportJobConfig {
+            plan,
+            sources,
+            exec_ctx,
+            suspects: self.suspects.clone(),
+            format,
+            row_cap,
+            piece_bytes,
+            chunk_bytes,
+            parquet_rows,
+            parquet_bytes,
+        };
+        let (done_tx, done_rx) = oneshot::channel::<()>();
+        let join = std::thread::Builder::new()
+            .name("cetra-sql-export".to_owned())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let _permit = permit;
+                run_export_producer(&cfg, init_tx, &tx);
+                drop(cfg);
+                let _ = done_tx.send(());
+                drop(tx);
+            })
+            .map_err(|_| RunError::Internal(EngineError::internal("spawn sql export thread")))?;
+
+        match tokio::time::timeout_at(deadline, init_rx).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(err))) => {
+                cancel.cancel();
+                let _ = done_rx.await;
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = join.join();
+                })
+                .await;
+                drop(stream_pool);
+                return Err(err);
+            }
+            Ok(Err(_closed)) => {
+                cancel.cancel();
+                let _ = done_rx.await;
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = join.join();
+                })
+                .await;
+                drop(stream_pool);
+                return Err(RunError::Internal(EngineError::internal(
+                    "export initialization channel closed",
+                )));
+            }
+            Err(_) => {
+                cancel.cancel();
+                let _ = done_rx.await;
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = join.join();
+                })
+                .await;
+                drop(stream_pool);
+                return Ok(timeout_stream());
+            }
+        }
+
+        let state = ExportStreamState {
+            rx,
+            cancel,
+            done_rx: Some(done_rx),
+            join: Some(join),
+            _pool: Some(stream_pool),
+            deadline,
+            done: false,
+        };
+        init_guard.disarm();
+
+        Ok(futures::stream::unfold(state, |mut state| async move {
+            if state.done {
+                return None;
+            }
+            if tokio::time::Instant::now() >= state.deadline {
+                state.drain_on_abort().await;
+                return Some((Err(RunError::Timeout), state));
+            }
+
+            enum Step {
+                Timeout,
+                Item(Option<Result<Bytes, RunError>>),
+            }
+
+            let step = tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(state.deadline) => Step::Timeout,
+                item = state.rx.recv() => Step::Item(item),
+            };
+
+            match step {
+                Step::Timeout => {
+                    state.drain_on_abort().await;
+                    Some((Err(RunError::Timeout), state))
+                }
+                Step::Item(Some(Ok(bytes))) => Some((Ok(bytes), state)),
+                Step::Item(Some(Err(err))) => {
+                    state.drain_on_abort().await;
+                    Some((Err(err), state))
+                }
+                Step::Item(None) => match state.finish_on_eof().await {
+                    Ok(()) => None,
+                    Err(err) => Some((Err(err), state)),
+                },
+            }
+        })
+        .boxed())
+    }
+
+    async fn resolve_pool_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<Arc<ScopedPool>, RunError> {
+        if let Some(pool) = &self.pool {
+            return Ok(Arc::clone(pool));
+        }
+        self.admit_until(deadline).await
+    }
+
+    async fn admit_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<Arc<ScopedPool>, RunError> {
+        let now = tokio::time::Instant::now();
+        if deadline <= now {
+            return Err(RunError::Timeout);
+        }
+        match tokio::time::timeout_at(
+            deadline,
+            self.admission
+                .admit(self.initial_memory, self.max_memory, self.admission_wait),
+        )
+        .await
+        {
+            Ok(Ok(pool)) => Ok(pool),
+            Ok(Err(err)) => Err(map_query_error(err)),
+            Err(_) => Err(RunError::Timeout),
+        }
+    }
+
+    async fn acquire_coordinator_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<OwnedSemaphorePermit, RunError> {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(RunError::Timeout);
+        }
+        match tokio::time::timeout_at(
+            deadline,
+            Arc::clone(&self.coordinator_slots).acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => Ok(permit),
+            Ok(Err(_closed)) => Err(RunError::Internal(EngineError::internal(
+                "sql coordinator semaphore closed",
+            ))),
+            Err(_) => Err(RunError::Timeout),
+        }
+    }
+
+    fn make_exec_ctx(&self, pool: Arc<ScopedPool>, cancel: CancelToken) -> ExecContext {
+        ExecContext {
+            pool,
+            eval: EvalContext::new(current_time_ns(), cancel),
+            spill: Arc::clone(&self.spill),
+            workers: Arc::clone(&self.workers),
+            batch_size: self.batch_size,
+            target_partitions: self.target_partitions,
+            metrics: ExecMetrics::default(),
+        }
+    }
 }
 
-fn unique_names(plan: &LogicalPlan) -> Result<(), InvalidQuery> {
-    let mut seen = HashSet::new();
-    for field in plan.schema().fields() {
-        if !seen.insert(field.name().to_owned()) {
-            return Err(invalid(
-                format!(
-                    "column name `{}` appears twice; rename one with AS",
-                    field.name()
-                ),
-                None,
-            ));
+struct ExportJobConfig {
+    plan: LogicalPlan,
+    sources: SqlSources,
+    exec_ctx: ExecContext,
+    suspects: Option<Suspects>,
+    format: ExportFormat,
+    row_cap: usize,
+    piece_bytes: usize,
+    chunk_bytes: usize,
+    parquet_rows: usize,
+    parquet_bytes: usize,
+}
+
+struct ExportStreamState {
+    rx: mpsc::Receiver<Result<Bytes, RunError>>,
+    cancel: CancelToken,
+    done_rx: Option<oneshot::Receiver<()>>,
+    join: Option<std::thread::JoinHandle<()>>,
+    _pool: Option<Arc<ScopedPool>>,
+    deadline: tokio::time::Instant,
+    done: bool,
+}
+
+impl ExportStreamState {
+    async fn drain_on_abort(&mut self) {
+        self.done = true;
+        self.cancel.cancel();
+        // Close the receiver first so a producer blocked in `blocking_send` wakes immediately.
+        self.rx.close();
+        if let Some(done_rx) = self.done_rx.take() {
+            let _ = done_rx.await;
+        }
+        if let Some(j) = self.join.take() {
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = j.join();
+            })
+            .await;
+        }
+        let _ = self._pool.take();
+    }
+
+    async fn finish_on_eof(&mut self) -> Result<(), RunError> {
+        self.done = true;
+        self.rx.close();
+        let mut panicked = false;
+        if let Some(done_rx) = self.done_rx.take()
+            && done_rx.await.is_err()
+        {
+            panicked = true;
+        }
+        if let Some(j) = self.join.take() {
+            match tokio::task::spawn_blocking(move || j.join()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => {
+                    panicked = true;
+                }
+            }
+        }
+        let _ = self._pool.take();
+        if panicked {
+            Err(RunError::Internal(EngineError::internal(
+                "sql export thread panicked",
+            )))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for ExportStreamState {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.rx.close();
+    }
+}
+
+struct CancelOnDrop(Option<CancelToken>);
+
+impl CancelOnDrop {
+    fn new(cancel: CancelToken) -> Self {
+        Self(Some(cancel))
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(cancel) = &self.0 {
+            cancel.cancel();
+        }
+    }
+}
+
+fn map_json_result(result: cetra_query::encode::SqlJsonResult) -> SqlJson {
+    SqlJson {
+        columns: result
+            .columns
+            .into_iter()
+            .map(|c| SqlColumn {
+                data_type: c.type_name().to_owned(),
+                name: c.name,
+            })
+            .collect(),
+        rows: result.rows,
+        truncated: result.truncated,
+    }
+}
+
+fn run_export_producer(
+    cfg: &ExportJobConfig,
+    init_tx: oneshot::Sender<Result<(), RunError>>,
+    tx: &mpsc::Sender<Result<Bytes, RunError>>,
+) {
+    let compiled = match sql_export_plan_stream(&cfg.plan, &cfg.sources, &cfg.exec_ctx, cfg.row_cap)
+    {
+        Ok(pair) => pair,
+        Err(err) => {
+            let _ = init_tx.send(Err(map_query_error_and_report(err, cfg.suspects.as_ref())));
+            return;
+        }
+    };
+    let (schema, mut stream) = compiled;
+
+    let mut parquet_exporter = if cfg.format == ExportFormat::Parquet {
+        match ParquetBatchExporter::with_row_group_limits(
+            Arc::clone(&schema),
+            &cfg.exec_ctx.pool,
+            cfg.parquet_rows,
+            cfg.parquet_bytes,
+        ) {
+            Ok(exp) => Some(exp.with_chunk_bytes(cfg.chunk_bytes)),
+            Err(err) => {
+                drop(stream);
+                let _ = init_tx.send(Err(map_query_error_and_report(err, cfg.suspects.as_ref())));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    if init_tx.send(Ok(())).is_err() {
+        drop(parquet_exporter);
+        drop(stream);
+        return;
+    }
+
+    if cfg.format == ExportFormat::Csv {
+        match encode_csv_header(&schema) {
+            Ok(header) => {
+                if tx.blocking_send(Ok(Bytes::from(header))).is_err() {
+                    drop(stream);
+                    return;
+                }
+            }
+            Err(err) => {
+                drop(stream);
+                let _ =
+                    tx.blocking_send(Err(map_query_error_and_report(err, cfg.suspects.as_ref())));
+                return;
+            }
+        }
+    }
+
+    let res = drive_export_loop(cfg, &schema, stream.as_mut(), parquet_exporter.take(), tx);
+    drop(stream);
+    if let Err(err) = res {
+        let _ = tx.blocking_send(Err(map_query_error_and_report(err, cfg.suspects.as_ref())));
+    }
+}
+
+fn drive_export_loop(
+    cfg: &ExportJobConfig,
+    _schema: &Schema,
+    stream: &mut dyn PartitionStream,
+    mut parquet_exporter: Option<ParquetBatchExporter>,
+    tx: &mpsc::Sender<Result<Bytes, RunError>>,
+) -> Result<(), QueryError> {
+    let mut pull_res = cfg.exec_ctx.pool.register("sql_export_pull", false);
+    let cancel = &cfg.exec_ctx.eval.cancel;
+
+    loop {
+        if cancel.is_cancelled() {
+            pull_res.free();
+            drop(parquet_exporter);
+            return Err(QueryError::Cancelled);
+        }
+        let next = stream.next_batch(cancel, Some(&mut pull_res));
+        let Some(batch) = (match next {
+            Ok(b) => b,
+            Err(err) => {
+                pull_res.free();
+                drop(parquet_exporter);
+                return Err(err);
+            }
+        }) else {
+            pull_res.free();
+            break;
+        };
+
+        if batch.is_empty() {
+            pull_res.free();
+            continue;
+        }
+
+        let send_res: Result<bool, QueryError> = match cfg.format {
+            ExportFormat::Csv => {
+                let r = encode_csv_batch_pieces(
+                    &batch,
+                    cfg.piece_bytes,
+                    cfg.chunk_bytes,
+                    &cfg.exec_ctx.pool,
+                    |chunk| {
+                        if cancel.is_cancelled()
+                            || tx.blocking_send(Ok(Bytes::from(chunk))).is_err()
+                        {
+                            return Err(QueryError::Cancelled);
+                        }
+                        Ok(())
+                    },
+                );
+                drop(batch);
+                pull_res.free();
+                r.map(|()| false)
+            }
+            ExportFormat::Ndjson => {
+                let r = encode_ndjson_batch_pieces(
+                    &batch,
+                    cfg.piece_bytes,
+                    cfg.chunk_bytes,
+                    &cfg.exec_ctx.pool,
+                    |chunk| {
+                        if cancel.is_cancelled()
+                            || tx.blocking_send(Ok(Bytes::from(chunk))).is_err()
+                        {
+                            return Err(QueryError::Cancelled);
+                        }
+                        Ok(())
+                    },
+                );
+                drop(batch);
+                pull_res.free();
+                r.map(|()| false)
+            }
+            ExportFormat::Parquet => {
+                let Some(exp) = parquet_exporter.as_mut() else {
+                    drop(batch);
+                    pull_res.free();
+                    return Err(QueryError::internal("missing parquet exporter"));
+                };
+                // Transfer batch memory ownership into ParquetBatchExporter, then release pull_res.
+                let pushed = exp.push_batch(batch, Some(&mut pull_res));
+                pull_res.free();
+                match pushed {
+                    Ok(chunks) => {
+                        let mut closed = false;
+                        for chunk in chunks {
+                            if !chunk.is_empty()
+                                && (cancel.is_cancelled() || tx.blocking_send(Ok(chunk)).is_err())
+                            {
+                                closed = true;
+                                break;
+                            }
+                        }
+                        Ok(closed)
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+        };
+
+        match send_res {
+            Ok(true) => {
+                drop(parquet_exporter);
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(err) => {
+                drop(parquet_exporter);
+                return Err(err);
+            }
+        }
+    }
+
+    if let Some(exp) = parquet_exporter {
+        for chunk in exp.finish()? {
+            if !chunk.is_empty() && (cancel.is_cancelled() || tx.blocking_send(Ok(chunk)).is_err())
+            {
+                break;
+            }
         }
     }
     Ok(())
 }
 
-fn invalid(message: impl AsRef<str>, position: Option<Position>) -> InvalidQuery {
-    InvalidQuery {
-        message: cap_message(message.as_ref()),
-        position,
-    }
+fn timeout_stream() -> BoxStream<'static, Result<Bytes, RunError>> {
+    futures::stream::once(async { Err(RunError::Timeout) }).boxed()
 }
 
-fn position(line: u64, column: u64) -> Position {
-    Position {
-        line: u32::try_from(line).unwrap_or(u32::MAX),
-        column: u32::try_from(column).unwrap_or(u32::MAX),
+fn current_time_ns() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
+}
+
+/// Maps [`QueryError`] from `cetra-query` into storage's [`RunError`] cleanly.
+fn map_query_error_and_report(err: QueryError, suspects: Option<&Suspects>) -> RunError {
+    let run_err = map_query_error(err);
+    if let (Some(suspects), RunError::Internal(engine)) = (suspects, &run_err) {
+        suspects.report(engine);
+    }
+    run_err
+}
+
+pub(crate) fn map_query_error(err: QueryError) -> RunError {
+    match err {
+        QueryError::InvalidRequest(msg) => RunError::InvalidRequest(msg),
+        QueryError::Invalid(inv) => RunError::Invalid(InvalidQuery {
+            message: inv.message,
+            position: inv.position.map(|p| Position {
+                line: p.line,
+                column: p.column,
+            }),
+        }),
+        QueryError::TooLarge => RunError::TooLarge,
+        QueryError::Cancelled => RunError::Timeout,
+        QueryError::Busy => RunError::Busy,
+        QueryError::Failed(msg) => RunError::Failed(msg),
+        err @ (QueryError::Column(_)
+        | QueryError::CorruptData(_)
+        | QueryError::StorageIo(_)
+        | QueryError::Internal(_)) => RunError::Internal(EngineError::from_query(&err)),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
+
+    use cetra_column::{Batch, Column, DataType, Field, FlatColumn, FlatData, Schema};
+    use cetra_core::ids::ProjectId;
+    use object_store::memory::InMemory;
 
     use super::*;
-    use crate::query_error::RunError;
-    use crate::test_support::example_query;
-    use crate::views::SqliteView;
-    use datafusion::arrow::array::Int64Array;
-    use datafusion::arrow::datatypes::{DataType, Field, Schema};
-    use datafusion::arrow::record_batch::RecordBatch;
-    use datafusion::datasource::memory::MemTable;
+    use crate::deletion::ProjectMemSnapshot;
+    use crate::engine::metadata_cache::MetadataCache;
+    use crate::memtable::Memtable;
+    use crate::verify::VerifyQueue;
+    use crate::wal::Table;
+
+    fn empty_engine_ctx(pool_bytes: usize) -> (SqlEngineContext, tempfile::TempDir) {
+        let rt = tokio::runtime::Handle::current();
+        let store = Arc::new(InMemory::new());
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap();
+        let cache = Arc::new(MetadataCache::new(0));
+        let suspects = Suspects::new(Arc::new(VerifyQueue::default()));
+        let spans_mt = Memtable::new(Table::Spans).snapshot();
+
+        let spans = Arc::new(
+            crate::engine::mem_source::MemtableSource::new(
+                Table::Spans,
+                project,
+                None,
+                Arc::clone(&spans_mt),
+                Arc::from([]),
+            )
+            .unwrap(),
+        );
+        let io = crate::objects::StorageIo::from_store(store);
+        let traces = Arc::new(
+            TracesSource::new(
+                io.clone(),
+                project,
+                Vec::new(),
+                ProjectMemSnapshot::empty(),
+                0,
+                Arc::from([]),
+                Arc::clone(&cache),
+                suspects.clone(),
+                rt.clone(),
+            )
+            .unwrap(),
+        );
+        let scores = Arc::new(
+            ScoresSource::new(
+                io,
+                project,
+                Vec::new(),
+                ProjectMemSnapshot::empty(),
+                Arc::from([]),
+                cache,
+                suspects,
+                rt,
+            )
+            .unwrap(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let admission = Arc::new(AsyncAdmissionPool::new(pool_bytes));
+        let workers = Arc::new(WorkerPool::new(2).unwrap());
+        let spill = Arc::new(SpillManager::with_fixed_cap(
+            dir.path().to_path_buf(),
+            16 * 1024 * 1024,
+        ));
+        let ctx = SqlEngineContext::new(
+            spans,
+            traces,
+            scores,
+            admission,
+            workers,
+            spill,
+            None,
+            None,
+            HashMap::new(),
+        );
+        (ctx, dir)
+    }
 
     fn assert_send<T: Send>(_: &T) {}
 
-    /// The console entry points run inside axum handlers, so their futures must be `Send`.
-    #[test]
-    fn console_futures_are_send() {
-        let ctx = context();
-        let params = Map::new();
-        let request = SqlRequest {
-            query: "SELECT 1",
-            params: &params,
-            limit: 1,
-            timeout: std::time::Duration::from_secs(1),
-        };
-        assert_send(&plan_sql(&ctx, "SELECT 1"));
-        assert_send(&ctx.sql_json(request));
-        let request = SqlRequest {
-            query: "SELECT 1",
-            params: &params,
-            limit: 1,
-            timeout: std::time::Duration::from_secs(1),
-        };
-        assert_send(&ctx.sql_export(request, ExportFormat::Csv));
-    }
-
-    const TABLES: &str =
-        "the query reads more than 32 tables (each INTERSECT or EXCEPT counts as one)";
-
-    fn context() -> QueryContext {
-        QueryContext::new(example_query(), None).expect("example project")
-    }
-
-    fn at(line: u32, column: u32) -> Option<Position> {
-        Some(Position { line, column })
-    }
-
-    async fn expect_plan(text: &str) -> LogicalPlan {
-        plan_sql(&context(), text)
-            .await
-            .unwrap_or_else(|error| panic!("{text}: {error} at {:?}", error.position))
-    }
-
     #[tokio::test]
-    async fn read_queries_plan() {
-        let queries = [
-            "SELECT * FROM spans",
-            "SELECT model, sum(cost_total) FROM spans GROUP BY model",
-            "WITH s AS (SELECT span_id FROM spans) SELECT * FROM s UNION ALL SELECT * FROM s",
-            "VALUES (1), (2)",
-            "SELECT * FROM (SELECT span_id FROM spans) t",
-            "SELECT t.trace_id, s.span_id FROM traces t JOIN spans s ON t.trace_id = s.trace_id",
-            "SELECT row_number() OVER (PARTITION BY trace_id ORDER BY start_time) FROM spans",
-            "SELECT unnest(tags) FROM traces",
-            "EXPLAIN SELECT name FROM spans",
-            "WITH spans AS (SELECT 1 AS n) SELECT n FROM spans",
-        ];
-        for text in queries {
-            expect_plan(text).await;
-        }
-        let explained = expect_plan("EXPLAIN SELECT name FROM spans").await;
-        let names: Vec<&str> = explained
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().as_str())
-            .collect();
-        assert_eq!(names, ["plan_type", "plan"]);
-    }
-
-    #[tokio::test]
-    async fn duplicate_output_names_are_rejected() {
-        let error = plan_sql(
-            &context(),
-            "SELECT a.name, b.name FROM spans a JOIN spans b ON a.span_id = b.span_id",
-        )
-        .await
-        .expect_err("duplicate");
-        assert_eq!(
-            error.message,
-            "column name `name` appears twice; rename one with AS"
-        );
-        assert_eq!(error.position, None);
-    }
-
-    #[tokio::test]
-    async fn an_unknown_column_keeps_the_planner_position() {
-        let error = plan_sql(&context(), "SELECT nme FROM spans")
-            .await
-            .expect_err("column");
-        assert_eq!(error.position, at(1, 8));
-        assert!(error.message.contains("nme"), "{}", error.message);
-    }
-
-    #[tokio::test]
-    async fn text_limits_apply_to_the_query() {
-        let over = "a".repeat(65 * 1024);
-        let error = plan_sql(&context(), &over).await.expect_err("bytes");
-        assert_eq!(error.message, "the query is longer than 65536 bytes");
-        assert_eq!(error.position, None);
-
-        let mut text = String::from("SELECT name FROM spans WHERE true");
-        for _ in 0..512 {
-            text.push_str(" OR true");
-        }
-        plan_sql(&context(), &text).await.expect("512 operators");
-        let column = text.len() as u32 + 2;
-        text.push_str(" OR true");
-        let error = plan_sql(&context(), &text).await.expect_err("513");
-        assert_eq!(error.message, "the query has more than 512 operators");
-        assert_eq!(error.position, at(1, column));
-    }
-
-    #[derive(Clone, Copy)]
-    enum OnStack {
-        /// Plan, build the physical plan and run it.
-        Run,
-        /// Plan and build the physical plan only.
-        Plan,
-        /// `plan_sql` must return an error (and not abort).
-        Reject,
-        /// `plan_sql` succeeds and `create_physical_plan` must return an error
-        /// (and not abort). It runs the analyzer first, so that walk is part of
-        /// the test too.
-        RejectPhysical,
-    }
-
-    fn on_two_megabytes(sql: String, mode: OnStack) {
-        let joined = std::thread::Builder::new()
-            .stack_size(2 * 1024 * 1024)
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("runtime");
-                runtime.block_on(async move {
-                    let ctx = context();
-                    let planned = plan_sql(&ctx, &sql).await;
-                    if matches!(mode, OnStack::Reject) {
-                        planned.expect_err("rejected");
-                        return;
-                    }
-                    let plan = planned.expect("plan");
-                    let frame = ctx
-                        .session()
-                        .execute_logical_plan(plan)
-                        .await
-                        .expect("execute");
-                    let physical = frame.create_physical_plan().await;
-                    if matches!(mode, OnStack::RejectPhysical) {
-                        physical.expect_err("rejected by create_physical_plan");
-                        return;
-                    }
-                    physical.expect("physical");
-                    if matches!(mode, OnStack::Run) {
-                        frame.collect().await.expect("run");
-                    }
-                });
-            })
-            .expect("thread")
-            .join();
-        if let Err(payload) = joined {
-            std::panic::resume_unwind(payload);
-        }
-    }
-
-    #[test]
-    fn a_full_size_query_runs_on_a_two_megabyte_stack() {
-        let mut expr = String::from("true");
-        for _ in 0..512 {
-            expr.push_str(" OR true");
-        }
-        let expr = format!("{}{expr}{}", "(".repeat(45), ")".repeat(45));
-        let sql = format!("SELECT name FROM spans WHERE {expr}");
-        on_two_megabytes(sql, OnStack::Run);
-    }
-
-    #[test]
-    fn full_size_set_operations_run_on_a_two_megabyte_stack() {
-        let mut sql = String::from("SELECT 1 AS a");
-        for _ in 0..512 {
-            sql.push_str(" UNION ALL SELECT 1");
-        }
-        on_two_megabytes(sql, OnStack::Run);
-    }
-
-    #[test]
-    fn full_size_intersections_run_on_a_two_megabyte_stack() {
-        // Each INTERSECT runs as a join; 384 of them overflow 2 MiB when run.
-        let mut sql = String::from("SELECT 1 AS a");
-        for _ in 0..32 {
-            sql.push_str(" INTERSECT SELECT 1");
-        }
-        on_two_megabytes(sql.clone(), OnStack::Run);
-        for _ in 32..512 {
-            sql.push_str(" INTERSECT SELECT 1");
-        }
-        on_two_megabytes(sql, OnStack::Reject);
-    }
-
-    #[test]
-    fn full_size_time_zone_chains_run_on_a_two_megabyte_stack() {
-        let mut sql = String::from("SELECT now()");
-        for _ in 0..512 {
-            sql.push_str(" AT TIME ZONE 'UTC'");
-        }
-        sql.push_str(" AS t");
-        on_two_megabytes(sql, OnStack::Run);
-    }
-
-    #[test]
-    fn full_size_like_chains_are_rejected_on_a_two_megabyte_stack() {
-        // From the second operator on, the left operand is Boolean, so the
-        // type coercion analyzer rejects the chain after recursing through
-        // all 512 levels. The optimizer and the physical planner never see it.
-        for operator in ["~~", "~~*", "!~~", "!~~*"] {
-            let mut sql = String::from("SELECT 'a' AS a WHERE 'a'");
-            for _ in 0..512 {
-                sql.push_str(&format!(" {operator} 'a'"));
-            }
-            on_two_megabytes(sql, OnStack::RejectPhysical);
-        }
-    }
-
-    #[test]
-    fn full_size_like_predicates_run_on_a_two_megabyte_stack() {
-        // 256 LIKE predicates on a column, joined by OR: 511 operators, a
-        // left-deep tree 255 ORs deep. The column is not a constant and the
-        // patterns differ, so the optimizer keeps every OR (it does not fold
-        // them or merge them into an IN list), and the physical planner walks
-        // the whole tree. A chain of `= true` would not do: the simplifier
-        // removes those comparisons, so the planner would see none of them.
-        let mut sql = String::from("SELECT name FROM spans WHERE name ~~ 'p0'");
-        for index in 1..256 {
-            sql.push_str(&format!(" OR name ~~ 'p{index}'"));
-        }
-        on_two_megabytes(sql, OnStack::Run);
-    }
-
-    #[test]
-    fn full_size_subscripts_are_rejected_on_a_two_megabyte_stack() {
-        let mut sql = String::from("SELECT metadata");
-        for _ in 0..512 {
-            sql.push_str("['k']");
-        }
-        sql.push_str(" AS x FROM spans");
-        on_two_megabytes(sql, OnStack::Reject);
-    }
-
-    #[test]
-    fn full_size_joins_plan_on_a_two_megabyte_stack() {
-        let mut sql = String::from("SELECT 1 AS a FROM scores s0");
-        for i in 1..32 {
-            sql.push_str(&format!(" CROSS JOIN scores s{i}"));
-        }
-        sql.push_str(" WHERE true");
-        for _ in 0..479 {
-            sql.push_str(" OR true");
-        }
-        on_two_megabytes(sql, OnStack::Plan);
-    }
-
-    #[tokio::test]
-    async fn set_operations_count_toward_the_operator_limit() {
-        let mut text = String::from("SELECT 1 AS a");
-        for _ in 0..512 {
-            text.push_str(" UNION ALL SELECT 1");
-        }
-        plan_sql(&context(), &text).await.expect("512 operators");
-        let column = text.len() as u32 + 2;
-        text.push_str(" UNION ALL SELECT 1");
-        let error = plan_sql(&context(), &text).await.expect_err("513");
-        assert_eq!(error.message, "the query has more than 512 operators");
-        assert_eq!(error.position, at(1, column));
-    }
-
-    #[tokio::test]
-    async fn the_table_cap_counts_every_table_factor() {
-        let mut text = String::from("SELECT 1 AS a FROM scores s0");
-        for i in 1..32 {
-            text.push_str(&format!(" CROSS JOIN scores s{i}"));
-        }
-        plan_sql(&context(), &text).await.expect("32 tables");
-        let column = text.len() as u32 + 13;
-        text.push_str(" CROSS JOIN scores s32");
-        let error = plan_sql(&context(), &text).await.expect_err("33 tables");
-        assert_eq!(error.message, TABLES);
-        assert_eq!(error.position, at(1, column));
-
-        let mut text = String::from("SELECT 1 AS a FROM scores s0");
-        for i in 1..32 {
-            text.push_str(&format!(", scores s{i}"));
-        }
-        plan_sql(&context(), &text)
-            .await
-            .expect("32 comma-joined tables");
-        let column = text.len() as u32 + 3;
-        text.push_str(", scores s32");
-        let error = plan_sql(&context(), &text).await.expect_err("33 tables");
-        assert_eq!(error.message, TABLES);
-        assert_eq!(error.position, at(1, column));
-
-        let mut text = String::from("WITH c AS (SELECT 1 AS a) SELECT 1 AS a FROM c c0");
-        for i in 1..32 {
-            text.push_str(&format!(", c c{i}"));
-        }
-        plan_sql(&context(), &text)
-            .await
-            .expect("32 CTE references");
-        let column = text.len() as u32 + 3;
-        text.push_str(", c c32");
-        let error = plan_sql(&context(), &text)
-            .await
-            .expect_err("33 references");
-        assert_eq!(error.message, TABLES);
-        assert_eq!(error.position, at(1, column));
-    }
-
-    #[tokio::test]
-    async fn intersections_and_exceptions_count_as_tables() {
-        for operator in ["INTERSECT", "EXCEPT"] {
-            let mut text = String::from("SELECT 1 AS a");
-            for _ in 0..32 {
-                text.push_str(&format!(" {operator} SELECT 1"));
-            }
-            plan_sql(&context(), &text)
-                .await
-                .expect("32 set operations");
-            let column = (text.len() + operator.len()) as u32 + 3;
-            text.push_str(&format!(" {operator} SELECT 1"));
-            let error = plan_sql(&context(), &text).await.expect_err("33");
-            assert_eq!(error.message, TABLES, "{operator}");
-            assert_eq!(error.position, at(1, column), "{operator}");
-        }
-
-        let mut text = String::from("SELECT 1 AS a FROM scores s0");
-        for i in 1..32 {
-            text.push_str(&format!(" INTERSECT SELECT 1 AS a FROM scores s{i}"));
-        }
-        let error = plan_sql(&context(), &text).await.expect_err("63 tables");
-        assert_eq!(error.message, TABLES);
-
-        let mut text = String::from("SELECT 1 AS a");
-        for _ in 0..100 {
-            text.push_str(" UNION SELECT 1");
-        }
-        plan_sql(&context(), &text)
-            .await
-            .expect("UNION runs as a union, not a join");
-    }
-
-    #[tokio::test]
-    async fn pipe_syntax_is_rejected() {
-        let error = plan_sql(&context(), "SELECT 1 AS a |> WHERE true")
-            .await
-            .expect_err("pipe");
-        assert_eq!(error.message, "pipe syntax (`|>`) is not allowed");
-        assert_eq!(error.position, at(1, 15));
-    }
-
-    #[tokio::test]
-    async fn sqlite_views_register_once() {
-        let ctx = context();
-        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(Int64Array::from(vec![1_i64]))],
-        )
-        .expect("batch");
-        let table = MemTable::try_new(schema, vec![vec![batch]]).expect("table");
-        ctx.register_sqlite_view(SqliteView::ExperimentItems, Arc::new(table))
-            .expect("register");
-        let plan = plan_sql(&ctx, "SELECT * FROM experiment_items")
-            .await
-            .expect("plan");
-        let frame = ctx
-            .session()
-            .execute_logical_plan(plan)
-            .await
-            .expect("execute");
-        let rows = frame.collect().await.expect("collect");
-        assert_eq!(rows.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
-
-        let again = Arc::new(
-            MemTable::try_new(
-                Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, true)])),
-                vec![vec![]],
+    async fn futures_are_send_and_debug_is_privacy_safe() {
+        let (mut ctx, _dir) = empty_engine_ctx(8 * 1024 * 1024);
+        let schema = Schema::try_new_arc(vec![Field::new("s", DataType::Utf8, false)]).unwrap();
+        let col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    cetra_column::Utf8Data::try_from_slices(["top-secret-row-payload"]).unwrap(),
+                ),
+                None,
             )
-            .expect("empty"),
+            .unwrap(),
         );
-        match ctx.register_sqlite_view(SqliteView::ExperimentItems, again) {
-            Err(RunError::InvalidRequest(message)) => {
-                assert_eq!(message, "experiment_items is already registered");
-            }
-            other => panic!("expected a second registration to fail, got {other:?}"),
-        }
-    }
+        let batch = Batch::try_new_all(Arc::clone(&schema), vec![col], 1).unwrap();
+        ctx.register_extra_table(
+            "dataset_items",
+            Arc::new(BatchSource::new(schema, vec![batch]).unwrap()),
+        )
+        .unwrap();
 
-    fn json_params(value: &Value) -> Map<String, Value> {
-        value.as_object().expect("json object").clone()
-    }
+        let dbg = format!("{ctx:?}");
+        assert!(dbg.contains("SqlEngineContext"));
+        assert!(dbg.contains("dataset_items"));
+        assert!(!dbg.contains("top-secret-row-payload"), "leaked in {dbg}");
 
-    async fn column(text: &str, params: &Map<String, Value>, name: &str) -> Vec<String> {
-        let ctx = context();
-        let plan = prepare_sql(&ctx, text, params)
-            .await
-            .unwrap_or_else(|error| panic!("{text}: {error}"));
-        let frame = ctx
-            .session()
-            .execute_logical_plan(plan)
-            .await
-            .unwrap_or_else(|error| panic!("{text}: {error}"));
-        let batches = frame
-            .collect()
-            .await
-            .unwrap_or_else(|error| panic!("{text}: {error}"));
-        let mut values = Vec::new();
-        for batch in batches {
-            let array = batch
-                .column_by_name(name)
-                .unwrap_or_else(|| panic!("{text}: no column {name}"));
-            for row in 0..array.len() {
-                values.push(cell(array, row));
-            }
-        }
-        values
-    }
-
-    fn cell(array: &dyn arrow::array::Array, row: usize) -> String {
-        use arrow::array::{Int64Array, StringArray};
-        if array.is_null(row) {
-            return "NULL".to_string();
-        }
-        if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
-            return values.value(row).to_string();
-        }
-        if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
-            return values.value(row).to_string();
-        }
-        panic!("column type {}", array.data_type());
-    }
-
-    async fn same(parameterized: &str, params: Value, literal: &str, name: &str) {
-        let mut bound = column(parameterized, &json_params(&params), name).await;
-        let mut plain = column(literal, &Map::new(), name).await;
-        bound.sort();
-        plain.sort();
-        assert_eq!(bound, plain, "{parameterized} vs {literal}");
-        assert!(!bound.is_empty(), "{parameterized} matched no rows");
+        let params = Map::new();
+        assert_send(&ctx.sql_check("SELECT 1", &params));
+        let req = SqlRequest {
+            query: "SELECT 1",
+            params: &params,
+            limit: 10,
+            timeout: Duration::from_secs(1),
+        };
+        assert_send(&ctx.sql_json(req));
+        let req_exp = SqlRequest {
+            query: "SELECT 1",
+            params: &params,
+            limit: 10,
+            timeout: Duration::from_secs(1),
+        };
+        assert_send(&ctx.sql_export_csv(req_exp));
     }
 
     #[tokio::test]
-    async fn each_parameter_kind_filters_rows() {
-        same(
-            "SELECT span_id FROM spans WHERE name = {n:String}",
-            serde_json::json!({"n": "support-agent"}),
-            "SELECT span_id FROM spans WHERE name = 'support-agent'",
-            "span_id",
+    async fn timeout_drains_worker_and_releases_all_memory() {
+        let (mut ctx, _dir) = empty_engine_ctx(64 * 1024 * 1024);
+        let schema = Schema::try_new_arc(vec![Field::new("v", DataType::I64, false)]).unwrap();
+        let values: Vec<i64> = (0..20_000).collect();
+        let col = Column::Flat(FlatColumn::try_new(FlatData::I64(values), None).unwrap());
+        let batch = Batch::try_new_all(Arc::clone(&schema), vec![col], 20_000).unwrap();
+        ctx.register_extra_table(
+            "experiment_items",
+            Arc::new(BatchSource::new(schema, vec![batch]).unwrap()),
         )
-        .await;
-        same(
-            "SELECT trace_id FROM traces WHERE span_count >= {c:Int}",
-            serde_json::json!({"c": 2}),
-            "SELECT trace_id FROM traces WHERE span_count >= 2",
-            "trace_id",
-        )
-        .await;
-        same(
-            "SELECT trace_id FROM traces WHERE cost_total > {c:Float}",
-            serde_json::json!({"c": 0}),
-            "SELECT trace_id FROM traces WHERE cost_total > 0",
-            "trace_id",
-        )
-        .await;
-        same(
-            "SELECT trace_id FROM traces WHERE has_root = {r:Bool}",
-            serde_json::json!({"r": true}),
-            "SELECT trace_id FROM traces WHERE has_root = true",
-            "trace_id",
-        )
-        .await;
+        .unwrap();
 
-        let instant = "2026-01-01T10:05:00Z";
-        let millis = chrono::DateTime::parse_from_rfc3339(instant)
-            .unwrap_or_else(|error| panic!("{instant}: {error}"))
-            .timestamp_millis();
-        let mut from_text = column(
-            "SELECT trace_id FROM traces WHERE start_time >= {t:Timestamp}",
-            &json_params(&serde_json::json!({"t": instant})),
-            "trace_id",
-        )
-        .await;
-        let mut from_millis = column(
-            "SELECT trace_id FROM traces WHERE start_time >= {t:Timestamp}",
-            &json_params(&serde_json::json!({"t": millis})),
-            "trace_id",
-        )
-        .await;
-        from_text.sort();
-        from_millis.sort();
-        assert_eq!(from_text, from_millis);
-        let all = column("SELECT trace_id FROM traces", &Map::new(), "trace_id").await;
-        assert!(!from_text.is_empty());
-        assert!(from_text.len() < all.len());
-    }
-
-    #[tokio::test]
-    async fn a_repeated_name_binds_once_and_two_types_fail() {
-        same(
-            "SELECT span_id FROM spans WHERE name = {n:String} OR name = {n:String}",
-            serde_json::json!({"n": "support-agent"}),
-            "SELECT span_id FROM spans WHERE name = 'support-agent'",
-            "span_id",
-        )
-        .await;
-        let plan = plan_sql(
-            &context(),
-            "SELECT span_id FROM spans WHERE name = {n:String} OR name = {n:String}",
-        )
-        .await
-        .expect("plan");
-        assert_eq!(plan.get_parameter_types().expect("types").len(), 1);
-
-        let error = prepare_sql(&context(), "SELECT {n:String}, {n:Int}", &Map::new())
+        let params = Map::new();
+        let err = ctx
+            .sql_json(SqlRequest {
+                query: "SELECT sum(a.v + b.v) FROM experiment_items a CROSS JOIN experiment_items b",
+                params: &params,
+                limit: 10,
+                timeout: Duration::from_millis(50),
+            })
             .await
-            .expect_err("two types");
-        match error {
-            RunError::Invalid(error) => {
-                assert_eq!(error.message, "parameter `n` is declared with two types");
-            }
-            other => panic!("expected invalid query, got {other:?}"),
-        }
+            .unwrap_err();
+        assert!(matches!(err, RunError::Timeout), "{err:?}");
+        assert_eq!(ctx.admission.used(), 0);
+        assert_eq!(ctx.spill.spilled_bytes(), 0);
     }
 
     #[tokio::test]
-    async fn bad_parameter_values_are_rejected() {
-        let cases = [
-            (
-                "SELECT name FROM spans WHERE name = {n:String}",
-                serde_json::json!({}),
-                "missing value for parameter n",
-            ),
-            (
-                "SELECT 1",
-                serde_json::json!({"n": 1}),
-                "unknown parameter n",
-            ),
-            (
-                "SELECT {c:Int} AS v",
-                serde_json::json!({"c": 1.5}),
-                "parameter c must be an integer",
-            ),
-            (
-                "SELECT {c:Int} AS v",
-                serde_json::json!({"c": "1"}),
-                "parameter c must be an integer",
-            ),
-            (
-                "SELECT {t:Timestamp} AS v",
-                serde_json::json!({"t": i64::MAX}),
-                "parameter t is out of range",
-            ),
-        ];
-        let mut mismatches = String::new();
-        for (text, params, message) in cases {
-            match prepare_sql(&context(), text, &json_params(&params)).await {
-                Err(RunError::InvalidRequest(actual)) if actual == message => {}
-                Err(error) => mismatches.push_str(&format!("{text}: {error}\n")),
-                Ok(_) => mismatches.push_str(&format!("{text}: planned\n")),
-            }
-        }
-        assert!(mismatches.is_empty(), "{mismatches}");
-    }
+    async fn export_timeout_and_early_drop_release_all_memory() {
+        let (mut ctx, _dir) = empty_engine_ctx(64 * 1024 * 1024);
+        let schema = Schema::try_new_arc(vec![Field::new("v", DataType::I64, false)]).unwrap();
+        let values: Vec<i64> = (0..20_000).collect();
+        let col = Column::Flat(FlatColumn::try_new(FlatData::I64(values), None).unwrap());
+        let batch = Batch::try_new_all(Arc::clone(&schema), vec![col], 20_000).unwrap();
+        ctx.register_extra_table(
+            "experiment_items",
+            Arc::new(BatchSource::new(schema, vec![batch]).unwrap()),
+        )
+        .unwrap();
 
-    #[tokio::test]
-    async fn an_unknown_parameter_type_points_at_the_type() {
-        let error = prepare_sql(&context(), "SELECT {x:Date}", &Map::new())
+        let params = Map::new();
+        // 1. Timeout drains producer and frees pool
+        let mut stream = ctx
+            .sql_export_csv(SqlRequest {
+                query: "SELECT sum(a.v + b.v) AS total FROM experiment_items a CROSS JOIN experiment_items b",
+                params: &params,
+                limit: SQL_MAX_ROWS,
+                timeout: Duration::from_millis(50),
+            })
             .await
-            .expect_err("date");
-        match error {
-            RunError::Invalid(error) => {
-                assert_eq!(
-                    error.message,
-                    "unknown parameter type `Date`; use String, Int, Float, Bool or Timestamp"
-                );
-                assert_eq!(error.position, at(1, 11));
+            .unwrap();
+        let mut got_timeout = false;
+        while let Some(item) = stream.next().await {
+            if matches!(item, Err(RunError::Timeout)) {
+                got_timeout = true;
+                break;
             }
-            other => panic!("expected invalid query, got {other:?}"),
         }
+        assert!(got_timeout);
+        assert!(stream.next().await.is_none());
+        drop(stream);
+        assert_eq!(ctx.admission.used(), 0);
+
+        // 2. Early stream drop frees pool once producer exits
+        let mut stream2 = ctx
+            .sql_export_csv(SqlRequest {
+                query: "SELECT a.v AS a_v, b.v AS b_v FROM experiment_items a CROSS JOIN experiment_items b",
+                params: &params,
+                limit: SQL_MAX_ROWS,
+                timeout: Duration::from_secs(30),
+            })
+            .await
+            .unwrap();
+        let first = stream2.next().await.unwrap().unwrap();
+        assert!(!first.is_empty());
+        drop(stream2);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while ctx.admission.used() > 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(ctx.admission.used(), 0);
     }
 
     #[tokio::test]
-    async fn raw_placeholders_are_rejected() {
-        for text in ["SELECT $1", "SELECT ?"] {
-            let error = prepare_sql(&context(), text, &Map::new())
-                .await
-                .expect_err(text);
-            match error {
-                RunError::Invalid(error) => {
-                    assert_eq!(error.message, "write parameters as {name:Type}");
-                    assert_eq!(error.position, at(1, 8), "{text}");
+    async fn admission_deadline_returns_timeout_and_busy_is_opaque() {
+        let (ctx, _dir) = empty_engine_ctx(1024);
+        let ctx = ctx.with_memory_limits(1024, 1024, Duration::from_secs(5));
+        let held = ctx
+            .admission
+            .admit(1024, 1024, Duration::from_millis(100))
+            .await
+            .unwrap();
+
+        let params = Map::new();
+        let err = ctx
+            .sql_json(SqlRequest {
+                query: "SELECT 1",
+                params: &params,
+                limit: 10,
+                timeout: Duration::from_millis(30),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::Timeout), "{err:?}");
+
+        let mut exp_stream = ctx
+            .sql_export_csv(SqlRequest {
+                query: "SELECT 1",
+                params: &params,
+                limit: 10,
+                timeout: Duration::from_millis(30),
+            })
+            .await
+            .unwrap();
+        let first = exp_stream.next().await.unwrap().unwrap_err();
+        assert!(matches!(first, RunError::Timeout), "{first:?}");
+        drop(held);
+
+        let mapped = map_query_error(QueryError::Busy);
+        assert!(matches!(mapped, RunError::Busy), "{mapped:?}");
+        assert!(EngineError::from_query(&QueryError::Busy).is_busy());
+    }
+
+    #[tokio::test]
+    async fn sql_json_happy_path_releases_memory_and_export_drop_during_init_drains() {
+        let (ctx, _dir) = empty_engine_ctx(64 * 1024 * 1024);
+        let ctx = ctx.with_memory_limits(1024 * 1024, 64 * 1024 * 1024, Duration::from_secs(5));
+        let schema = Schema::try_new_arc(vec![Field::new("v", DataType::I64, false)]).unwrap();
+        let values: Vec<i64> = (0..10_000).collect();
+        let col = Column::Flat(FlatColumn::try_new(FlatData::I64(values), None).unwrap());
+        let batch = Batch::try_new_all(Arc::clone(&schema), vec![col], 10_000).unwrap();
+        let mut ctx = ctx;
+        ctx.register_extra_table(
+            "experiment_items",
+            Arc::new(BatchSource::new(schema, vec![batch]).unwrap()),
+        )
+        .unwrap();
+
+        let params = Map::new();
+        let res = ctx
+            .sql_json(SqlRequest {
+                query: "SELECT v FROM experiment_items ORDER BY v DESC",
+                params: &params,
+                limit: 5,
+                timeout: Duration::from_secs(5),
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.rows.len(), 5);
+        assert!(res.truncated);
+        assert_eq!(ctx.admission.used(), 0);
+
+        // Dropping an export future before init completes cancels and releases admission.
+        let fut = ctx.sql_export_csv(SqlRequest {
+            query: "SELECT sum(a.v + b.v) AS total FROM experiment_items a CROSS JOIN experiment_items b",
+            params: &params,
+            limit: SQL_MAX_ROWS,
+            timeout: Duration::from_secs(30),
+        });
+        let _ = tokio::time::timeout(Duration::from_millis(5), fut).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while ctx.admission.used() > 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(ctx.admission.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn sql_export_surfaces_producer_thread_panic_as_internal_error() {
+        #[derive(Debug)]
+        struct PanicAfterFirstBatchSource {
+            schema: Arc<Schema>,
+        }
+
+        struct PanicAfterFirstBatchStream {
+            first: Option<Batch>,
+        }
+
+        impl PartitionStream for PanicAfterFirstBatchStream {
+            fn next_batch(
+                &mut self,
+                _cancel: &CancelToken,
+                _res: Option<&mut cetra_column::Reservation>,
+            ) -> Result<Option<Batch>, QueryError> {
+                if let Some(batch) = self.first.take() {
+                    Ok(Some(batch))
+                } else {
+                    panic!("simulated sql export producer panic");
                 }
-                other => panic!("{text}: {other:?}"),
             }
         }
-    }
 
-    #[tokio::test]
-    async fn a_string_literal_is_not_a_parameter() {
-        let values = column("SELECT '{n:String}' AS s", &Map::new(), "s").await;
-        assert_eq!(values, ["{n:String}"]);
-        match prepare_sql(
-            &context(),
-            "SELECT '{n:String}' AS s",
-            &json_params(&serde_json::json!({"n": "x"})),
-        )
-        .await
-        {
-            Err(RunError::InvalidRequest(message)) => {
-                assert_eq!(message, "unknown parameter n");
+        impl ScanSource for PanicAfterFirstBatchSource {
+            fn schema(&self) -> Arc<Schema> {
+                Arc::clone(&self.schema)
             }
-            other => panic!("expected an unknown parameter, got {other:?}"),
-        }
-    }
 
-    #[tokio::test]
-    async fn a_bare_parameter_keeps_its_declared_type() {
-        let values = column(
-            "SELECT {x:Int} AS v",
-            &json_params(&serde_json::json!({"x": 3})),
-            "v",
-        )
-        .await;
-        assert_eq!(values, ["3"]);
-    }
-
-    #[tokio::test]
-    async fn a_string_parameter_casts_to_the_column_type() {
-        same(
-            "SELECT trace_id FROM traces WHERE span_count = {s:String}",
-            serde_json::json!({"s": "2"}),
-            "SELECT trace_id FROM traces WHERE span_count = 2",
-            "trace_id",
-        )
-        .await;
-        match prepare_sql(
-            &context(),
-            "SELECT trace_id FROM traces WHERE span_count = {s:String}",
-            &json_params(&serde_json::json!({"s": "abc"})),
-        )
-        .await
-        {
-            Err(RunError::InvalidRequest(message)) => {
-                assert_eq!(message, "parameter s does not fit where it is used (Int64)");
+            fn projected_schema(
+                &self,
+                spec: &cetra_query::exec::ScanSpec,
+            ) -> Result<Arc<Schema>, QueryError> {
+                match &spec.projection {
+                    Some(indices) => Ok(Arc::new(self.schema.project(indices)?)),
+                    None => Ok(Arc::clone(&self.schema)),
+                }
             }
-            other => panic!("expected a cast failure, got {other:?}"),
-        }
-    }
 
-    #[tokio::test]
-    async fn limit_accepts_an_integer_parameter() {
-        let values = column(
-            "SELECT name FROM spans ORDER BY name LIMIT {n:Int}",
-            &json_params(&serde_json::json!({"n": 2})),
-            "name",
-        )
-        .await;
-        let expected = column(
-            "SELECT name FROM spans ORDER BY name LIMIT 2",
-            &Map::new(),
-            "name",
-        )
-        .await;
-        assert_eq!(values, expected);
-        assert_eq!(values.len(), 2);
+            fn open_partitions(
+                &self,
+                spec: &cetra_query::exec::ScanSpec,
+                _ctx: &ExecContext,
+            ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+                let proj_schema = self.projected_schema(spec)?;
+                let cols = proj_schema
+                    .fields()
+                    .iter()
+                    .map(|f| match &f.data_type {
+                        DataType::Utf8 => Column::try_new_const(
+                            cetra_column::ScalarValue::Utf8("row".to_owned()),
+                            2,
+                        ),
+                        DataType::TimestampNs { utc } => Column::try_new_const(
+                            cetra_column::ScalarValue::TimestampNs {
+                                value: 1_700_000_000_000_000_000,
+                                utc: *utc,
+                            },
+                            2,
+                        ),
+                        dt => Column::try_new_const(cetra_column::ScalarValue::Null(dt.clone()), 2),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let first = Batch::try_new_all(proj_schema, cols, 2)?;
+                Ok(vec![Box::new(PanicAfterFirstBatchStream {
+                    first: Some(first),
+                })])
+            }
+
+            fn explain_summary(&self, _spec: &cetra_query::exec::ScanSpec) -> String {
+                "PanicAfterFirstBatchSource".to_owned()
+            }
+        }
+
+        let (mut ctx, _dir) = empty_engine_ctx(64 * 1024 * 1024);
+        ctx.spans = Arc::new(PanicAfterFirstBatchSource {
+            schema: cetra_core::schema::spans_schema(),
+        });
+
+        let params = Map::new();
+        let mut stream = ctx
+            .sql_export_csv(SqlRequest {
+                query: "SELECT name FROM spans",
+                params: &params,
+                limit: 100,
+                timeout: Duration::from_secs(5),
+            })
+            .await
+            .unwrap();
+
+        let mut saw_panic_err = false;
+        while let Some(item) = stream.next().await {
+            if let Err(err) = item {
+                assert!(
+                    matches!(err, RunError::Internal(_)),
+                    "unexpected error: {err:?}"
+                );
+                saw_panic_err = true;
+                break;
+            }
+        }
+        assert!(
+            saw_panic_err,
+            "export stream must yield RunError::Internal on producer panic instead of silent EOF"
+        );
+        assert!(stream.next().await.is_none());
+        assert_eq!(ctx.admission.used(), 0);
     }
 }

@@ -12,7 +12,7 @@
       "opentelemetry-sdk": "1.45.2",
       "opentelemetry-semantic-conventions-ai": "0.5.1"
     },
-    "captured_at": "2026-11-16T08:54:42Z"
+    "captured_at": "2026-11-23T17:11:46Z"
   },
   "spec_refs": [
     "02 § Convention detection",

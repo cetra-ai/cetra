@@ -1,0 +1,1306 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "python"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "openlit"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.45.2"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          },
+          {
+            "key": "deployment.environment",
+            "value": {
+              "stringValue": "default"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "openlit.instrumentation.chroma",
+            "version": "",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "508f7c9cd7520bf248cbc97cd1e4b802",
+              "spanId": "7897b201d9ded284",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "INSERT docs",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590005000000",
+              "attributes": [
+                {
+                  "key": "telemetry.sdk.name",
+                  "value": {
+                    "stringValue": "openlit"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "vectordb"
+                  }
+                },
+                {
+                  "key": "db.system.name",
+                  "value": {
+                    "stringValue": "chroma"
+                  }
+                },
+                {
+                  "key": "server.address",
+                  "value": {
+                    "stringValue": "api.openai.com"
+                  }
+                },
+                {
+                  "key": "server.port",
+                  "value": {
+                    "intValue": "8000"
+                  }
+                },
+                {
+                  "key": "deployment.environment",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "capture-app"
+                  }
+                },
+                {
+                  "key": "db.sdk.version",
+                  "value": {
+                    "stringValue": "1.5.9"
+                  }
+                },
+                {
+                  "key": "db.operation.name",
+                  "value": {
+                    "stringValue": "INSERT"
+                  }
+                },
+                {
+                  "key": "db.client.operation.duration",
+                  "value": {
+                    "doubleValue": 0.004830837249755859
+                  }
+                },
+                {
+                  "key": "db.query.text",
+                  "value": {
+                    "stringValue": "['a', 'b']"
+                  }
+                },
+                {
+                  "key": "db.collection.name",
+                  "value": {
+                    "stringValue": "docs"
+                  }
+                },
+                {
+                  "key": "db.vector.count",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "db.query.summary",
+                  "value": {
+                    "stringValue": "INSERT docs ids=['a', 'b'] documents=['sunny', 'rainy']"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "d137cd64ea41add4eb79024400f1c7c5",
+              "spanId": "e0e1b7bcbd232f87",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "GET docs",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590005000000",
+              "endTimeUnixNano": "1767225590006000000",
+              "attributes": [
+                {
+                  "key": "telemetry.sdk.name",
+                  "value": {
+                    "stringValue": "openlit"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "vectordb"
+                  }
+                },
+                {
+                  "key": "db.system.name",
+                  "value": {
+                    "stringValue": "chroma"
+                  }
+                },
+                {
+                  "key": "server.address",
+                  "value": {
+                    "stringValue": "api.openai.com"
+                  }
+                },
+                {
+                  "key": "server.port",
+                  "value": {
+                    "intValue": "8000"
+                  }
+                },
+                {
+                  "key": "deployment.environment",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "capture-app"
+                  }
+                },
+                {
+                  "key": "db.sdk.version",
+                  "value": {
+                    "stringValue": "1.5.9"
+                  }
+                },
+                {
+                  "key": "db.operation.name",
+                  "value": {
+                    "stringValue": "GET"
+                  }
+                },
+                {
+                  "key": "db.client.operation.duration",
+                  "value": {
+                    "doubleValue": 0.001257181167602539
+                  }
+                },
+                {
+                  "key": "db.query.text",
+                  "value": {
+                    "stringValue": "embeddings=1 vectors"
+                  }
+                },
+                {
+                  "key": "db.collection.name",
+                  "value": {
+                    "stringValue": "docs"
+                  }
+                },
+                {
+                  "key": "db.vector.query.top_k",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "db.filter",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "db.response.returned_rows",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "db.query.summary",
+                  "value": {
+                    "stringValue": "GET docs n_results=1 embeddings=1 vectors filter=None"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "f7b9af7bc7b36b031bde09459bc04479",
+              "spanId": "65ff92803479851c",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "DELETE docs",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590006000000",
+              "endTimeUnixNano": "1767225590008000000",
+              "attributes": [
+                {
+                  "key": "telemetry.sdk.name",
+                  "value": {
+                    "stringValue": "openlit"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "vectordb"
+                  }
+                },
+                {
+                  "key": "db.system.name",
+                  "value": {
+                    "stringValue": "chroma"
+                  }
+                },
+                {
+                  "key": "server.address",
+                  "value": {
+                    "stringValue": "api.openai.com"
+                  }
+                },
+                {
+                  "key": "server.port",
+                  "value": {
+                    "intValue": "8000"
+                  }
+                },
+                {
+                  "key": "deployment.environment",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "capture-app"
+                  }
+                },
+                {
+                  "key": "db.sdk.version",
+                  "value": {
+                    "stringValue": "1.5.9"
+                  }
+                },
+                {
+                  "key": "db.operation.name",
+                  "value": {
+                    "stringValue": "DELETE"
+                  }
+                },
+                {
+                  "key": "db.client.operation.duration",
+                  "value": {
+                    "doubleValue": 0.0013499259948730469
+                  }
+                },
+                {
+                  "key": "db.query.text",
+                  "value": {
+                    "stringValue": "['a']"
+                  }
+                },
+                {
+                  "key": "db.collection.name",
+                  "value": {
+                    "stringValue": "docs"
+                  }
+                },
+                {
+                  "key": "db.vector.count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "db.filter",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "db.query.summary",
+                  "value": {
+                    "stringValue": "DELETE docs ids=['a'] filter=None delete_all=False"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            }
+          ],
+          "schemaUrl": ""
+        },
+        {
+          "scope": {
+            "name": "openlit.instrumentation.qdrant",
+            "version": "",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "1ff2d8660aaf77ea2b82441c6f33de30",
+              "spanId": "89c1faa37af363fc",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "create_collection unknown",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590012000000",
+              "endTimeUnixNano": "1767225590012000000",
+              "attributes": [
+                {
+                  "key": "telemetry.sdk.name",
+                  "value": {
+                    "stringValue": "openlit"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "vectordb"
+                  }
+                },
+                {
+                  "key": "db.system.name",
+                  "value": {
+                    "stringValue": "qdrant"
+                  }
+                },
+                {
+                  "key": "server.address",
+                  "value": {
+                    "stringValue": "api.openai.com"
+                  }
+                },
+                {
+                  "key": "server.port",
+                  "value": {
+                    "intValue": "6333"
+                  }
+                },
+                {
+                  "key": "deployment.environment",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "capture-app"
+                  }
+                },
+                {
+                  "key": "db.sdk.version",
+                  "value": {
+                    "stringValue": "1.20.0"
+                  }
+                },
+                {
+                  "key": "db.operation.name",
+                  "value": {
+                    "stringValue": "create_collection"
+                  }
+                },
+                {
+                  "key": "db.client.operation.duration",
+                  "value": {
+                    "doubleValue": 0.0002551078796386719
+                  }
+                },
+                {
+                  "key": "db.collection.name",
+                  "value": {
+                    "stringValue": "unknown"
+                  }
+                },
+                {
+                  "key": "db.query.text",
+                  "value": {
+                    "stringValue": "Collection: unknown"
+                  }
+                },
+                {
+                  "key": "db.query.summary",
+                  "value": {
+                    "stringValue": "create_collection unknown"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "8ff459c9d10c3072c4830f7e25db879b",
+              "spanId": "d54d6cf21cff9654",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "UPSERT unknown",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590012000000",
+              "endTimeUnixNano": "1767225590013000000",
+              "attributes": [
+                {
+                  "key": "telemetry.sdk.name",
+                  "value": {
+                    "stringValue": "openlit"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "vectordb"
+                  }
+                },
+                {
+                  "key": "db.system.name",
+                  "value": {
+                    "stringValue": "qdrant"
+                  }
+                },
+                {
+                  "key": "server.address",
+                  "value": {
+                    "stringValue": "api.openai.com"
+                  }
+                },
+                {
+                  "key": "server.port",
+                  "value": {
+                    "intValue": "6333"
+                  }
+                },
+                {
+                  "key": "deployment.environment",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "capture-app"
+                  }
+                },
+                {
+                  "key": "db.sdk.version",
+                  "value": {
+                    "stringValue": "1.20.0"
+                  }
+                },
+                {
+                  "key": "db.operation.name",
+                  "value": {
+                    "stringValue": "UPSERT"
+                  }
+                },
+                {
+                  "key": "db.client.operation.duration",
+                  "value": {
+                    "doubleValue": 0.0002388954162597656
+                  }
+                },
+                {
+                  "key": "db.collection.name",
+                  "value": {
+                    "stringValue": "unknown"
+                  }
+                },
+                {
+                  "key": "db.query.text",
+                  "value": {
+                    "stringValue": "[PointStruct(id=1, vector=[0.1, 0.2], payload={'text': 'sunny'}), PointStruct(id=2, vector=[0.3, 0.4], payload={'text': 'rainy'})]"
+                  }
+                },
+                {
+                  "key": "db.vector.count",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "db.operation.status",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "db.query.summary",
+                  "value": {
+                    "stringValue": "UPSERT unknown points=2"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "a33568f5d4703d72fd387f69d59a7ade",
+              "spanId": "2fff27f0a242f827",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "QUERY unknown",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590013000000",
+              "endTimeUnixNano": "1767225590013000000",
+              "attributes": [
+                {
+                  "key": "telemetry.sdk.name",
+                  "value": {
+                    "stringValue": "openlit"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "vectordb"
+                  }
+                },
+                {
+                  "key": "db.system.name",
+                  "value": {
+                    "stringValue": "qdrant"
+                  }
+                },
+                {
+                  "key": "server.address",
+                  "value": {
+                    "stringValue": "api.openai.com"
+                  }
+                },
+                {
+                  "key": "server.port",
+                  "value": {
+                    "intValue": "6333"
+                  }
+                },
+                {
+                  "key": "deployment.environment",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "capture-app"
+                  }
+                },
+                {
+                  "key": "db.sdk.version",
+                  "value": {
+                    "stringValue": "1.20.0"
+                  }
+                },
+                {
+                  "key": "db.operation.name",
+                  "value": {
+                    "stringValue": "QUERY"
+                  }
+                },
+                {
+                  "key": "db.client.operation.duration",
+                  "value": {
+                    "doubleValue": 0.0002665519714355469
+                  }
+                },
+                {
+                  "key": "db.collection.name",
+                  "value": {
+                    "stringValue": "unknown"
+                  }
+                },
+                {
+                  "key": "db.query.text",
+                  "value": {
+                    "stringValue": "[0.15, 0.25]"
+                  }
+                },
+                {
+                  "key": "db.vector.query.top_k",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "db.query.summary",
+                  "value": {
+                    "stringValue": "QUERY unknown query=[0.15, 0.25] limit=1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "7b2665cced1ac50549611bb03a41cfdd",
+              "spanId": "0d56851613879567",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "DELETE unknown",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590013000000",
+              "endTimeUnixNano": "1767225590013000000",
+              "attributes": [
+                {
+                  "key": "telemetry.sdk.name",
+                  "value": {
+                    "stringValue": "openlit"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "vectordb"
+                  }
+                },
+                {
+                  "key": "db.system.name",
+                  "value": {
+                    "stringValue": "qdrant"
+                  }
+                },
+                {
+                  "key": "server.address",
+                  "value": {
+                    "stringValue": "api.openai.com"
+                  }
+                },
+                {
+                  "key": "server.port",
+                  "value": {
+                    "intValue": "6333"
+                  }
+                },
+                {
+                  "key": "deployment.environment",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "capture-app"
+                  }
+                },
+                {
+                  "key": "db.sdk.version",
+                  "value": {
+                    "stringValue": "1.20.0"
+                  }
+                },
+                {
+                  "key": "db.operation.name",
+                  "value": {
+                    "stringValue": "DELETE"
+                  }
+                },
+                {
+                  "key": "db.client.operation.duration",
+                  "value": {
+                    "doubleValue": 0.000019073486328125
+                  }
+                },
+                {
+                  "key": "db.collection.name",
+                  "value": {
+                    "stringValue": "unknown"
+                  }
+                },
+                {
+                  "key": "db.query.text",
+                  "value": {
+                    "stringValue": "[1, 2]"
+                  }
+                },
+                {
+                  "key": "db.vector.count",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "db.operation.status",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "db.query.summary",
+                  "value": {
+                    "stringValue": "DELETE unknown selector=2"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            }
+          ],
+          "schemaUrl": ""
+        },
+        {
+          "scope": {
+            "name": "openlit.instrumentation.milvus",
+            "version": "",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "a52bd58a3ca7196aedf419f75c82faa6",
+              "spanId": "27dca44850e28918",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "create_collection docs",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590186000000",
+              "endTimeUnixNano": "1767225590692000000",
+              "attributes": [
+                {
+                  "key": "telemetry.sdk.name",
+                  "value": {
+                    "stringValue": "openlit"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "vectordb"
+                  }
+                },
+                {
+                  "key": "db.system.name",
+                  "value": {
+                    "stringValue": "milvus"
+                  }
+                },
+                {
+                  "key": "server.address",
+                  "value": {
+                    "stringValue": "api.openai.com"
+                  }
+                },
+                {
+                  "key": "server.port",
+                  "value": {
+                    "intValue": "19530"
+                  }
+                },
+                {
+                  "key": "deployment.environment",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "capture-app"
+                  }
+                },
+                {
+                  "key": "db.sdk.version",
+                  "value": {
+                    "stringValue": "3.0.3"
+                  }
+                },
+                {
+                  "key": "db.operation.name",
+                  "value": {
+                    "stringValue": "create_collection"
+                  }
+                },
+                {
+                  "key": "db.client.operation.duration",
+                  "value": {
+                    "doubleValue": 0.5059411525726318
+                  }
+                },
+                {
+                  "key": "db.collection.name",
+                  "value": {
+                    "stringValue": "unknown"
+                  }
+                },
+                {
+                  "key": "db.collection.dimension",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "db.query.summary",
+                  "value": {
+                    "stringValue": "create_collection unknown dimension=2"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "5387dda3a26ef3e637b8916bfb4b7edf",
+              "spanId": "3a14048393dfe1ab",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "INSERT unknown",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590692000000",
+              "endTimeUnixNano": "1767225590712000000",
+              "attributes": [
+                {
+                  "key": "telemetry.sdk.name",
+                  "value": {
+                    "stringValue": "openlit"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "vectordb"
+                  }
+                },
+                {
+                  "key": "db.system.name",
+                  "value": {
+                    "stringValue": "milvus"
+                  }
+                },
+                {
+                  "key": "server.address",
+                  "value": {
+                    "stringValue": "api.openai.com"
+                  }
+                },
+                {
+                  "key": "server.port",
+                  "value": {
+                    "intValue": "19530"
+                  }
+                },
+                {
+                  "key": "deployment.environment",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "capture-app"
+                  }
+                },
+                {
+                  "key": "db.sdk.version",
+                  "value": {
+                    "stringValue": "3.0.3"
+                  }
+                },
+                {
+                  "key": "db.operation.name",
+                  "value": {
+                    "stringValue": "INSERT"
+                  }
+                },
+                {
+                  "key": "db.client.operation.duration",
+                  "value": {
+                    "doubleValue": 0.01993417739868164
+                  }
+                },
+                {
+                  "key": "db.collection.name",
+                  "value": {
+                    "stringValue": "unknown"
+                  }
+                },
+                {
+                  "key": "db.vector.count",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "db.query.text",
+                  "value": {
+                    "stringValue": "[{'id': 1, 'vector': [0.1, 0.2], 'text': 'sunny'}, {'id': 2, 'vector': [0.3, 0.4], 'text': 'rainy'}]"
+                  }
+                },
+                {
+                  "key": "db.response.returned_rows",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "db.query.summary",
+                  "value": {
+                    "stringValue": "INSERT unknown data_count=2"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "5ca88f81264f1daeefbd55937b191255",
+              "spanId": "a3e34e3cbbab535a",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "SEARCH unknown",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590712000000",
+              "endTimeUnixNano": "1767225590717000000",
+              "attributes": [
+                {
+                  "key": "telemetry.sdk.name",
+                  "value": {
+                    "stringValue": "openlit"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "vectordb"
+                  }
+                },
+                {
+                  "key": "db.system.name",
+                  "value": {
+                    "stringValue": "milvus"
+                  }
+                },
+                {
+                  "key": "server.address",
+                  "value": {
+                    "stringValue": "api.openai.com"
+                  }
+                },
+                {
+                  "key": "server.port",
+                  "value": {
+                    "intValue": "19530"
+                  }
+                },
+                {
+                  "key": "deployment.environment",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "capture-app"
+                  }
+                },
+                {
+                  "key": "db.sdk.version",
+                  "value": {
+                    "stringValue": "3.0.3"
+                  }
+                },
+                {
+                  "key": "db.operation.name",
+                  "value": {
+                    "stringValue": "SEARCH"
+                  }
+                },
+                {
+                  "key": "db.client.operation.duration",
+                  "value": {
+                    "doubleValue": 0.004660606384277344
+                  }
+                },
+                {
+                  "key": "db.collection.name",
+                  "value": {
+                    "stringValue": "unknown"
+                  }
+                },
+                {
+                  "key": "db.query.text",
+                  "value": {
+                    "stringValue": "[[0.15, 0.25]]"
+                  }
+                },
+                {
+                  "key": "db.vector.query.top_k",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "db.filter",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "db.response.returned_rows",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "db.query.summary",
+                  "value": {
+                    "stringValue": "SEARCH unknown data=[[0.15, 0.25]] limit=1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "c3730255ab3b21afee06f7d944f7769c",
+              "spanId": "8821c4fdfe648ee5",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "DELETE unknown",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590717000000",
+              "endTimeUnixNano": "1767225590720000000",
+              "attributes": [
+                {
+                  "key": "telemetry.sdk.name",
+                  "value": {
+                    "stringValue": "openlit"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "vectordb"
+                  }
+                },
+                {
+                  "key": "db.system.name",
+                  "value": {
+                    "stringValue": "milvus"
+                  }
+                },
+                {
+                  "key": "server.address",
+                  "value": {
+                    "stringValue": "api.openai.com"
+                  }
+                },
+                {
+                  "key": "server.port",
+                  "value": {
+                    "intValue": "19530"
+                  }
+                },
+                {
+                  "key": "deployment.environment",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "capture-app"
+                  }
+                },
+                {
+                  "key": "db.sdk.version",
+                  "value": {
+                    "stringValue": "3.0.3"
+                  }
+                },
+                {
+                  "key": "db.operation.name",
+                  "value": {
+                    "stringValue": "DELETE"
+                  }
+                },
+                {
+                  "key": "db.client.operation.duration",
+                  "value": {
+                    "doubleValue": 0.001171112060546875
+                  }
+                },
+                {
+                  "key": "db.collection.name",
+                  "value": {
+                    "stringValue": "unknown"
+                  }
+                },
+                {
+                  "key": "db.filter",
+                  "value": {
+                    "stringValue": ""
+                  }
+                },
+                {
+                  "key": "error.type",
+                  "value": {
+                    "stringValue": "AttributeError"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [
+                {
+                  "timeUnixNano": "1767225590720000000",
+                  "name": "exception",
+                  "attributes": [
+                    {
+                      "key": "exception.type",
+                      "value": {
+                        "stringValue": "AttributeError"
+                      }
+                    },
+                    {
+                      "key": "exception.message",
+                      "value": {
+                        "stringValue": "'list' object has no attribute 'get'"
+                      }
+                    },
+                    {
+                      "key": "exception.stacktrace",
+                      "value": {
+                        "stringValue": "Traceback (most recent call last):\n  File \"/capture/tools/capture/envs/openlit/.venv/lib/python3.13/site-packages/openlit/instrumentation/milvus/milvus.py\", line 54, in wrapper\n    response = process_milvus_response(\n        response,\n    ...<13 lines>...\n        **kwargs,\n    )\n  File \"/capture/tools/capture/envs/openlit/.venv/lib/python3.13/site-packages/openlit/instrumentation/milvus/utils.py\", line 366, in process_milvus_response\n    common_milvus_logic(\n    ~~~~~~~~~~~~~~~~~~~^\n        scope,\n        ^^^^^^\n    ...<6 lines>...\n        instance,\n        ^^^^^^^^^\n    )\n    ^\n  File \"/capture/tools/capture/envs/openlit/.venv/lib/python3.13/site-packages/openlit/instrumentation/milvus/utils.py\", line 285, in common_milvus_logic\n    if scope._response and scope._response.get(\"delete_count\"):\n                           ^^^^^^^^^^^^^^^^^^^\nAttributeError: 'list' object has no attribute 'get'\n"
+                      }
+                    },
+                    {
+                      "key": "exception.escaped",
+                      "value": {
+                        "stringValue": "False"
+                      }
+                    }
+                  ],
+                  "droppedAttributesCount": 0
+                }
+              ],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 2
+              }
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

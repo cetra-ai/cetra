@@ -1,0 +1,1 @@
+SELECT model, approx_percentile_cont(duration_ms, 0.5) AS p50, count(*) AS calls FROM spans GROUP BY model ORDER BY calls DESC

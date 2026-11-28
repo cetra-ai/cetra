@@ -1,0 +1,11 @@
+[project]
+name = "cetra-capture-langflow"
+version = "0.0.0"
+requires-python = "==3.13.*"
+dependencies = [
+  "langflow==1.13.2",
+]
+
+[tool.uv]
+package = false
+exclude-newer = "7 days" # D74/D117: no release younger than 7 days

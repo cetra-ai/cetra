@@ -1,0 +1,23 @@
+{
+  "description": "Pipecat's aggregator pipeline with OpenAILLMService, one registered function and built-in tracing (conversation and turn spans).",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "pipecat-ai",
+    "instrumentation_version": "1.16.0",
+    "language": "python",
+    "libraries": {
+      "openai": "3.45.0",
+      "opentelemetry-sdk": "1.45.2",
+      "pipecat-ai": "1.16.0"
+    },
+    "captured_at": "2026-11-24T02:43:24Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Normalization rules"
+  ],
+  "notes": "Pipecat 1.16.0 with its built-in tracing (enable_tracing=True, conversation_id). setup_tracing sets the global provider with an OTLP exporter that reads the runner's environment. The pipeline is user aggregator, OpenAILLMService on the mock, and assistant aggregator, with one get_weather function. LLMRunFrame starts the first model call; the function result starts the second. The tool-call turn has no output, and the function call has no span of its own. PipelineTask and WorkerRunner are Pipecat 1.16's names; the deprecated PipelineRunner is not used. No audio services run, so no STT or TTS spans appear."
+}

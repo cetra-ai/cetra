@@ -1,0 +1,91 @@
+---
+title: Browser Use
+description: "Trace Browser Use 1.0 agent runs with the GenAI spans of Pydantic AI, which Browser Use 1.0 is built on, sent to cetra over OpenTelemetry."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+cetra reads the spans of a Browser Use 1.0 agent: the agent, each model call and each tool call. Browser Use 1.0 is built on Pydantic AI, and its spans are Pydantic AI's.
+
+<Backing fixtures={["genai/browser-use-agent"]} />
+
+## Install
+
+Install Browser Use 1.0, the OpenTelemetry SDK and its OTLP exporter, then the Chromium that Playwright uses. The fixture was captured with Browser Use 1.0.6.
+
+```bash
+pip install browser-use==1.0.6 opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
+playwright install chromium
+```
+
+## Set up
+
+Instrument Pydantic AI before the agent runs, and export the spans over OTLP. Set the exporter variables first.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8080
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <SK_CETRA_KEY>"
+```
+
+Replace `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. See [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+{/* untested: the fixture's program runs one step against a fake model; this sample needs OPENAI_API_KEY, Chromium and a running cetra */}
+```python
+import os
+
+os.environ["ANONYMIZED_TELEMETRY"] = "false"
+os.environ["BROWSER_USE_CLOUD_SYNC"] = "false"
+
+import asyncio  # noqa: E402
+
+from browser_use import Agent, Browser  # noqa: E402
+from browser_use.llm import ChatOpenAI  # noqa: E402
+from opentelemetry import trace  # noqa: E402
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter  # noqa: E402
+from opentelemetry.sdk.trace import TracerProvider  # noqa: E402
+from opentelemetry.sdk.trace.export import BatchSpanProcessor  # noqa: E402
+from pydantic_ai import Agent as PydanticAgent  # noqa: E402
+
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+trace.set_tracer_provider(provider)
+PydanticAgent.instrument_all(True)
+
+
+async def main() -> None:
+    agent = Agent(
+        task="Reply with done.",
+        llm=ChatOpenAI(model="gpt-4o-mini", api_key=os.environ["OPENAI_API_KEY"]),
+        browser=Browser(headless=True),
+        judge=False,
+    )
+    await agent.run(max_steps=1)
+    provider.force_flush()
+
+
+asyncio.run(main())
+```
+
+The two environment lines switch off Browser Use's telemetry and its cloud sync. The fixture's program sets them before it imports Browser Use, and it was captured with both off.
+
+## What you get
+
+One agent run is one trace with three kinds of span:
+
+- an `agent` span for the run, `invoke_agent agent`, with the task as its input and the final answer as its output;
+- an `llm` span for each model call, `chat <model>`, with the provider, the models, the token counts, the cost and the messages;
+- a `tool` span for each tool call, such as `execute_tool on_text`. The final answer is a call to `on_text`, so the last step has this span.
+
+The agent, model and tool spans of a run share one session, which cetra takes from the agent's conversation ID.
+
+## Limits
+
+- This page covers Browser Use 1.0. Browser Use 0.x does not use Pydantic AI. Its spans come from OpenLIT's Browser Use instrumentation, which this page does not cover.
+- The fixture is one step to `done`, against a fake model. Its system instructions and tool descriptions carry a random token for each run, so the fixture replaces those attributes with placeholders.
+- The fixture was captured with Browser Use 1.0.6, Pydantic AI 2.66.0 and `openai` 3.52.0.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.

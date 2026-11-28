@@ -1,0 +1,694 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "1.83.0"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "@mastra/otel-exporter"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.5.2"
+            }
+          },
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "nodejs"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "@mastra/otel-exporter",
+            "version": "1.5.2",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "762f36dcf6b7168e97c79a8bfbc2fe9e",
+              "spanId": "862639dd3891d669",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 257,
+              "name": "invoke_agent weather-agent",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590232000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "mastra.span.type",
+                  "value": {
+                    "stringValue": "agent_run"
+                  }
+                },
+                {
+                  "key": "mastra.agent_run.input",
+                  "value": {
+                    "stringValue": "What's the weather in Paris?"
+                  }
+                },
+                {
+                  "key": "mastra.agent_run.output",
+                  "value": {
+                    "stringValue": "{\"text\":\"It is sunny in Paris.\",\"files\":[]}"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.id",
+                  "value": {
+                    "stringValue": "weather-agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "weather-agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.definitions",
+                  "value": {
+                    "stringValue": "[\"get_weather\"]"
+                  }
+                },
+                {
+                  "key": "gen_ai.system_instructions",
+                  "value": {
+                    "stringValue": "You are a weather assistant."
+                  }
+                },
+                {
+                  "key": "mastra.metadata.runId",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "762f36dcf6b7168e97c79a8bfbc2fe9e",
+              "spanId": "d93f8c27cedaa7e8",
+              "traceState": "",
+              "parentSpanId": "862639dd3891d669",
+              "flags": 257,
+              "name": "generic weather-agent",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590010000000",
+              "endTimeUnixNano": "1767225590017000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "generic"
+                  }
+                },
+                {
+                  "key": "mastra.span.type",
+                  "value": {
+                    "stringValue": "generic"
+                  }
+                },
+                {
+                  "key": "mastra.generic.output",
+                  "value": {
+                    "stringValue": "{\"toolCount\":1}"
+                  }
+                },
+                {
+                  "key": "mastra.metadata.runId",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "762f36dcf6b7168e97c79a8bfbc2fe9e",
+              "spanId": "69d23ce68cbc083f",
+              "traceState": "",
+              "parentSpanId": "862639dd3891d669",
+              "flags": 257,
+              "name": "model_generation gpt-4o-mini",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590024000000",
+              "endTimeUnixNano": "1767225590169000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "model_generation"
+                  }
+                },
+                {
+                  "key": "mastra.span.type",
+                  "value": {
+                    "stringValue": "model_generation"
+                  }
+                },
+                {
+                  "key": "mastra.model_generation.input",
+                  "value": {
+                    "stringValue": "capture-volatile-2"
+                  }
+                },
+                {
+                  "key": "mastra.model_generation.output",
+                  "value": {
+                    "stringValue": "{\"files\":[],\"reasoning\":[],\"sources\":[],\"text\":\"It is sunny in Paris.\",\"warnings\":[],\"toolCalls\":[{\"toolCallId\":\"call_weather_1\",\"toolName\":\"get_weather\",\"args\":{\"city\":\"Paris\"}}]}"
+                  }
+                },
+                {
+                  "key": "mastra.metadata.runId",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "762f36dcf6b7168e97c79a8bfbc2fe9e",
+              "spanId": "d41bcd42936d7a4d",
+              "traceState": "",
+              "parentSpanId": "69d23ce68cbc083f",
+              "flags": 257,
+              "name": "agent_step weather-agent",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590039000000",
+              "endTimeUnixNano": "1767225590124000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "agent_step"
+                  }
+                },
+                {
+                  "key": "mastra.span.type",
+                  "value": {
+                    "stringValue": "model_step"
+                  }
+                },
+                {
+                  "key": "mastra.model_step.input",
+                  "value": {
+                    "stringValue": "[{\"role\":\"system\",\"content\":\"You are a weather assistant.\"},{\"role\":\"user\",\"content\":\"What's the weather in Paris?\"}]"
+                  }
+                },
+                {
+                  "key": "mastra.model_step.output",
+                  "value": {
+                    "stringValue": "{\"text\":\"\",\"toolCalls\":[{\"toolCallId\":\"call_weather_1\",\"toolName\":\"get_weather\",\"args\":{\"city\":\"Paris\"}}]}"
+                  }
+                },
+                {
+                  "key": "mastra.model_step.step_index",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "mastra.model_step.is_continued",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "mastra.metadata.runId",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "mastra.metadata.headers",
+                  "value": {
+                    "stringValue": "capture-volatile-3"
+                  }
+                },
+                {
+                  "key": "mastra.metadata.modelMetadata",
+                  "value": {
+                    "stringValue": "{\"modelId\":\"gpt-4o-mini\",\"modelVersion\":\"v3\",\"modelProvider\":\"openai.chat\"}"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "762f36dcf6b7168e97c79a8bfbc2fe9e",
+              "spanId": "46c3a2daa72d66a2",
+              "traceState": "",
+              "parentSpanId": "d41bcd42936d7a4d",
+              "flags": 257,
+              "name": "chat gpt-4o-mini",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590046000000",
+              "endTimeUnixNano": "1767225590107000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "mastra.span.type",
+                  "value": {
+                    "stringValue": "model_inference"
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a weather assistant.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What's the weather in Paris?\"}]}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_weather_1\",\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}]}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai.chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "82"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "17"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.reasoning_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.id",
+                  "value": {
+                    "stringValue": "weather-agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "weather-agent"
+                  }
+                },
+                {
+                  "key": "mastra.completion_start_time",
+                  "value": {
+                    "stringValue": "2025-12-31T23:59:50.105Z"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "stringValue": "[\"tool-calls\"]"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "mastra.metadata.runId",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "762f36dcf6b7168e97c79a8bfbc2fe9e",
+              "spanId": "c542e45c381a6c0a",
+              "traceState": "",
+              "parentSpanId": "d41bcd42936d7a4d",
+              "flags": 257,
+              "name": "execute_tool get_weather",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590114000000",
+              "endTimeUnixNano": "1767225590116000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "mastra.span.type",
+                  "value": {
+                    "stringValue": "tool_call"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.arguments",
+                  "value": {
+                    "stringValue": "{\"city\":\"Paris\"}"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.result",
+                  "value": {
+                    "stringValue": "{\"temperature_c\":18,\"city\":\"Paris\"}"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "call_weather_1"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.description",
+                  "value": {
+                    "stringValue": "Look up the weather for a city"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.type",
+                  "value": {
+                    "stringValue": "tool"
+                  }
+                },
+                {
+                  "key": "mastra.metadata.runId",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "762f36dcf6b7168e97c79a8bfbc2fe9e",
+              "spanId": "b7731633ab29e530",
+              "traceState": "",
+              "parentSpanId": "69d23ce68cbc083f",
+              "flags": 257,
+              "name": "agent_step weather-agent",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590126000000",
+              "endTimeUnixNano": "1767225590167000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "agent_step"
+                  }
+                },
+                {
+                  "key": "mastra.span.type",
+                  "value": {
+                    "stringValue": "model_step"
+                  }
+                },
+                {
+                  "key": "mastra.model_step.input",
+                  "value": {
+                    "stringValue": "[{\"role\":\"system\",\"content\":\"You are a weather assistant.\"},{\"role\":\"user\",\"content\":\"What's the weather in Paris?\"},{\"role\":\"assistant\",\"content\":\"[tool: get_weather]\"},{\"role\":\"tool\",\"content\":\"[tool-result: get_weather]\"}]"
+                  }
+                },
+                {
+                  "key": "mastra.model_step.output",
+                  "value": {
+                    "stringValue": "{\"text\":\"It is sunny in Paris.\",\"toolCalls\":[]}"
+                  }
+                },
+                {
+                  "key": "mastra.model_step.step_index",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "mastra.model_step.is_continued",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "mastra.metadata.runId",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                },
+                {
+                  "key": "mastra.metadata.headers",
+                  "value": {
+                    "stringValue": "capture-volatile-4"
+                  }
+                },
+                {
+                  "key": "mastra.metadata.modelMetadata",
+                  "value": {
+                    "stringValue": "{\"modelId\":\"gpt-4o-mini\",\"modelVersion\":\"v3\",\"modelProvider\":\"openai.chat\"}"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            },
+            {
+              "traceId": "762f36dcf6b7168e97c79a8bfbc2fe9e",
+              "spanId": "7b315fe68f536ed2",
+              "traceState": "",
+              "parentSpanId": "b7731633ab29e530",
+              "flags": 257,
+              "name": "chat gpt-4o-mini",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590128000000",
+              "endTimeUnixNano": "1767225590163000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "mastra.span.type",
+                  "value": {
+                    "stringValue": "model_inference"
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a weather assistant.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What's the weather in Paris?\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"[tool: get_weather]\"}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"text\",\"content\":\"[tool-result: get_weather]\"}]}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"It is sunny in Paris.\"}]}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openai.chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "131"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "12"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.reasoning_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.id",
+                  "value": {
+                    "stringValue": "weather-agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "weather-agent"
+                  }
+                },
+                {
+                  "key": "mastra.completion_start_time",
+                  "value": {
+                    "stringValue": "2025-12-31T23:59:50.163Z"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "stringValue": "[\"stop\"]"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "gpt-4o-mini-2024-07-18"
+                  }
+                },
+                {
+                  "key": "mastra.metadata.runId",
+                  "value": {
+                    "stringValue": "capture-volatile-1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": {
+                "message": "",
+                "code": 1
+              }
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

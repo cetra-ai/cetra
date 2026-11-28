@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>cetra.capture</groupId>
+  <artifactId>capture-reactor</artifactId>
+  <version>0.0.0</version>
+  <packaging>pom</packaging>
+
+  <!-- One Maven reactor for every Java capture scenario (IN8.1). The harness
+       module holds the shared Capture class; each scenario lives at
+       scenarios/<group>/<case> and is added to <modules> by its own phase.
+       Scenario modules import their framework BOMs in their own
+       dependencyManagement; Spring Boot modules do not use
+       spring-boot-starter-parent. -->
+  <modules>
+    <module>harness</module>
+    <module>scenarios/genai/spring-ai-boot-tool</module>
+    <module>scenarios/openinference/spring-ai-tool</module>
+    <module>scenarios/openinference/langchain4j-tool</module>
+    <module>scenarios/genai/quarkus-langchain4j-tool</module>
+    <module>scenarios/genai/koog-agent-tool</module>
+  </modules>
+
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <!-- Spring's @Tool methods and Quarkus need -parameters. -->
+    <maven.compiler.parameters>true</maven.compiler.parameters>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>cetra.capture</groupId>
+        <artifactId>harness</artifactId>
+        <version>0.0.0</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-compiler-plugin</artifactId>
+          <version>3.16.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-resources-plugin</artifactId>
+          <!-- The version Maven 3.9.16 binds by default, pinned. -->
+          <version>3.4.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-dependency-plugin</artifactId>
+          <version>3.11.0</version>
+          <executions>
+            <execution>
+              <id>capture-classpath</id>
+              <phase>package</phase>
+              <goals>
+                <goal>build-classpath</goal>
+              </goals>
+              <configuration>
+                <outputFile>${project.build.directory}/classpath.txt</outputFile>
+              </configuration>
+            </execution>
+          </executions>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+    <plugins>
+      <!-- Runs the capture-classpath execution above for every module; the
+           build script turns target/classpath.txt into target/capture.args. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>

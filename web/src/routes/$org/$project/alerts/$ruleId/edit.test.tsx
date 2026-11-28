@@ -5,6 +5,7 @@ import { server } from "@/mocks/node";
 import { FIRING_RULE_ID, SLACK_CHANNEL_ID } from "@/test/fixtures";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
+import issuePreviewFixture from "../../../../../../../fixtures/api/static/alert-issue-preview.json";
 import ruleFixture from "../../../../../../../fixtures/api/static/alert-rule.json";
 import issuesFixture from "../../../../../../../fixtures/api/static/issues.json";
 import projectFixture from "../../../../../../../fixtures/api/static/project.json";
@@ -12,6 +13,7 @@ import projectFixture from "../../../../../../../fixtures/api/static/project.jso
 const PAGE = `/acme/support-bot/alerts/${FIRING_RULE_ID}/edit`;
 const RULE = "/api/v1/projects/:project/alert-rules/:id";
 const ISSUES = "/api/v1/projects/:project/issues";
+const ISSUE_PREVIEW = "/api/v1/projects/:project/alert-rules/issue-preview";
 const ISSUE_ID = "01900000-0000-7000-8000-000000001c01";
 const LIST = "/acme/support-bot/alerts";
 
@@ -140,6 +142,8 @@ it("edits the threshold of an issue rule and keeps its issue", async () => {
     },
   };
   server.use(
+    // Before RULE: its `:id` also matches `issue-preview`.
+    http.get(ISSUE_PREVIEW, () => HttpResponse.json(issuePreviewFixture)),
     http.get(RULE, () => HttpResponse.json(issueRule)),
     http.get(ISSUES, () => HttpResponse.json(issuesFixture)),
     http.patch(RULE, async ({ request }) => {

@@ -165,7 +165,7 @@ impl ServerHandler for McpServer {
         // rmcp runs this in a spawned task and cancels `context.ct` when the client disconnects,
         // while the concurrency guard in the axum handler is already
         // released. Racing the tool against the token drops its query instead of letting it run
-        // to completion for a caller that is gone (DataFusion cancels on drop). `biased` with
+        // to completion for a caller that is gone (the query engine cancels on drop). `biased` with
         // the tool first: a tool that already finished is never thrown away. In stateless mode
         // rmcp 3.10 ignores `notifications/cancelled`, so a cancel without a disconnect runs
         // until the tool's own time limit.
@@ -855,7 +855,7 @@ mod tests {
             .await;
         assert_eq!(response.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
 
-        // (d) JSON content type, invalid JSON.
+        // (d) JSON content type, invalid JSON: 400 since rmcp 3.11.
         let response = app
             .request(Method::POST, "/mcp")
             .header("host", "127.0.0.1:8080")
@@ -865,7 +865,7 @@ mod tests {
             .body("{not json")
             .send()
             .await;
-        assert_eq!(response.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
 
         // (e) a body over the limit.
         let big = json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list",
@@ -1766,7 +1766,7 @@ mod tests {
                 .await
         })
         .await;
-        assert_eq!(response.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
         assert!(!logs.contains("CANARY-51b2"), "{logs}");
     }
 

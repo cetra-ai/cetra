@@ -307,11 +307,19 @@ fn costs_match(path: &str, actual: &Value, expected: &Value) -> bool {
     }
 }
 
+/// Captured cases whose `llm` and `embedding` spans may carry cost source `none`: their
+/// provider names the endpoint, not a vendor (Hermes's `custom`), so no snapshot row can
+/// match and those spans are unpriced on purpose (IN7.13, D-IN-29). A span of theirs the
+/// table does price must still be priced.
+const COST_NONE_CASES: &[(&str, &str)] = &[("hermes_agent", "read-file")];
+
 /// Every captured `llm` or `embedding` span with a model and token counts is priced by
 /// the embedded snapshot, the table the server uses. The golden suite prices with
 /// `prices.json`, which has one row per test model, so it cannot see a provider that
 /// no snapshot row carries (D-B1-11). Hand-written cases use invented models and are
-/// not checked here.
+/// not checked here. The cases in [`COST_NONE_CASES`] are checked the other way: a span
+/// the snapshot has no row for must carry cost source `none`, and one it prices must
+/// still carry a computed cost.
 #[test]
 fn captured_llm_spans_are_priced_by_the_builtin_snapshot() {
     let loaded = load_all_cases();
@@ -350,6 +358,7 @@ fn captured_llm_spans_are_priced_by_the_builtin_snapshot() {
                 continue;
             }
         };
+        let expects_none = COST_NONE_CASES.contains(&(case.group.as_str(), case.name.as_str()));
         for span in normalize(
             &request,
             &context,
@@ -359,21 +368,51 @@ fn captured_llm_spans_are_priced_by_the_builtin_snapshot() {
         .spans
         {
             let llm = matches!(span.span_kind, SpanKind::Llm | SpanKind::Embedding);
-            let modelled = span.request_model.is_some() || span.response_model.is_some();
-            let counted = span.input_tokens.is_some() || span.output_tokens.is_some();
-            if !(llm && modelled && counted) {
+            if !llm {
                 continue;
             }
-            checked += 1;
+            let modelled = span.request_model.is_some() || span.response_model.is_some();
+            let counted = span.input_tokens.is_some() || span.output_tokens.is_some();
+            if !(modelled && counted) {
+                continue;
+            }
+            // The same candidates the normalizer prices with: the response model,
+            // then the request model when it is the response with a `vendor/`
+            // prefix stripped (support::price_models mirrors normalize::retry_model).
+            let candidates = support::price_models(&span);
             let priced = span.cost_total.is_some()
                 && matches!(
                     span.cost_source,
                     Some(CostSource::Computed | CostSource::Reported)
                 );
+            let model = candidates.first().copied();
+            if expects_none {
+                // Hermes's `custom` provider names the endpoint, not a vendor, so the
+                // spans it describes carry cost source `none` on purpose (IN7.13, D-IN-29);
+                // a span a row does price must still be priced.
+                checked += 1;
+                let row = candidates.iter().find_map(|model| {
+                    prices.price_for(model, span.provider.as_deref(), span.start_time)
+                });
+                if row.is_some() {
+                    if !priced {
+                        failures.push(format!(
+                            "{label}: model {model:?} provider {:?} has no price",
+                            span.provider
+                        ));
+                    }
+                } else if span.cost_source != Some(CostSource::None) {
+                    failures.push(format!(
+                        "{label}: model {model:?} provider {:?} should carry no cost",
+                        span.provider
+                    ));
+                }
+                continue;
+            }
+            checked += 1;
             if !priced {
                 failures.push(format!(
-                    "{label}: model {:?} provider {:?} has no price",
-                    span.response_model.as_ref().or(span.request_model.as_ref()),
+                    "{label}: model {model:?} provider {:?} has no price",
                     span.provider
                 ));
             }

@@ -394,41 +394,42 @@ fn real_corpus_loads() {
     assert!(corpus.turns() >= 40_000, "turns {}", corpus.turns());
 }
 
-// ---------------------------------------------------------------- parquet (R7.3)
+// ---------------------------------------------------------------- statam (R7.3)
 
 #[test]
-fn column_sizes_reads_parquet_metadata() {
+fn column_sizes_reads_statam_metadata() {
     use std::fs::File;
     use std::sync::Arc;
 
     use crate::common::parquet_stats::column_sizes;
-    use arrow::array::{ArrayRef, RecordBatch, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use parquet::arrow::ArrowWriter;
-    use parquet::basic::{Compression, ZstdLevel};
-    use parquet::file::properties::WriterProperties;
+    use cetra_column::{Batch, Column, DataType, Field, FlatColumn, FlatData, Schema, Utf8Data};
+    use cetra_statam::{StatamWriter, TableKind, WriteOptions, WriteProfile};
 
     let dir = tempfile::tempdir().unwrap();
-    let schema = Arc::new(Schema::new(vec![Field::new("input", DataType::Utf8, true)]));
+    let schema = Schema::try_new_arc(vec![Field::new("input", DataType::Utf8, true)]).unwrap();
     let values: Vec<String> = (0..100)
         .map(|i| format!("message {i} ").repeat(20))
         .collect();
-    let column: ArrayRef = Arc::new(StringArray::from(values));
-    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![column]).unwrap();
-    // zstd, as the spans files are written.
-    let properties = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::default()))
-        .build();
-    let mut writer = ArrowWriter::try_new(
-        File::create(dir.path().join("0.parquet")).unwrap(),
+    let col = Column::Flat(
+        FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(values.iter().map(String::as_str)).unwrap()),
+            None,
+        )
+        .unwrap(),
+    );
+    let batch = Batch::try_new_all(Arc::clone(&schema), vec![col], values.len()).unwrap();
+    let opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+    let mut writer = StatamWriter::new(
+        File::create(dir.path().join("0.statam")).unwrap(),
         schema,
-        Some(properties),
+        opts,
+        None,
     )
     .unwrap();
-    writer.write(&batch).unwrap();
-    writer.close().unwrap();
+    writer.write_batch(&batch).unwrap();
+    writer.finish().unwrap();
 
-    let sizes = column_sizes(dir.path(), &[(1, "0.parquet".to_owned())]).unwrap();
+    let sizes = column_sizes(dir.path(), &[(1, "0.statam".to_owned())]).unwrap();
     let input = sizes["L1"]["input"];
     assert!(
         input.uncompressed > 0,

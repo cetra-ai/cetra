@@ -831,7 +831,7 @@ mod tests {
             result.columns[1],
             SqlColumnInfo {
                 name: "spans".to_owned(),
-                data_type: "Int64".to_owned(),
+                data_type: "integer".to_owned(),
             }
         );
         assert!(!result.truncated);
@@ -1296,10 +1296,19 @@ mod tests {
             seeded.project.id,
             ("cookie", &seeded.cookie),
             None,
-            &json!({"query": "SELECT * FROM traces"}),
+            &json!({
+                "query": "SELECT a.span_id, b.span_id AS b_id, c.span_id AS c_id, d.span_id AS d_id \
+                          FROM spans AS a CROSS JOIN spans AS b CROSS JOIN spans AS c \
+                          CROSS JOIN spans AS d ORDER BY a.span_id"
+            }),
         )
         .await;
-        assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
         assert_eq!(response.problem().code, ProblemCode::QueryTooLarge);
     }
 
@@ -1541,22 +1550,9 @@ mod tests {
         )
     }
 
-    /// The row count and column names of a Parquet file.
-    fn read_parquet(bytes: Bytes) -> (Vec<String>, usize) {
-        use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
-        let names = builder
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().clone())
-            .collect();
-        let rows = builder
-            .build()
-            .unwrap()
-            .map(|batch| batch.unwrap().num_rows())
-            .sum();
-        (names, rows)
+    /// The column names and decoded row cell strings of a Parquet file.
+    fn read_parquet_rows(bytes: Bytes) -> (Vec<String>, Vec<Vec<String>>) {
+        cetra_storage::read_parquet_rows_for_test(bytes).unwrap()
     }
 
     #[test]
@@ -1668,9 +1664,22 @@ mod tests {
         );
         assert!(response.body.starts_with(b"PAR1"));
         assert!(response.body.ends_with(b"PAR1"));
-        let (names, rows) = read_parquet(response.body);
+        let (names, rows) = read_parquet_rows(response.body);
         assert_eq!(names, ["span_kind", "spans", "first_start"]);
-        assert_eq!(rows, 4);
+        assert_eq!(rows.len(), 4);
+        let expected: SqlQueryResult = serde_json::from_str(EXAMPLE_RESULT).unwrap();
+        for (decoded, exp) in rows.iter().zip(&expected.rows) {
+            let exp_kind = exp["span_kind"].as_str().unwrap();
+            let exp_spans = exp["spans"].as_i64().unwrap().to_string();
+            let exp_ts = chrono::DateTime::parse_from_rfc3339(exp["first_start"].as_str().unwrap())
+                .unwrap()
+                .timestamp_nanos_opt()
+                .unwrap()
+                .to_string();
+            assert_eq!(decoded[0], format!("\"{exp_kind}\""));
+            assert_eq!(decoded[1], exp_spans);
+            assert_eq!(decoded[2], exp_ts);
+        }
 
         let response = post_as(
             &app,
@@ -1681,9 +1690,9 @@ mod tests {
         )
         .await;
         assert_eq!(response.status, StatusCode::OK);
-        let (names, rows) = read_parquet(response.body);
+        let (names, rows) = read_parquet_rows(response.body);
         assert_eq!(names, ["span_id"]);
-        assert_eq!(rows, 0);
+        assert!(rows.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

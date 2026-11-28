@@ -22,21 +22,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray};
 use bytesize::ByteSize;
-use cetra_core::batch::spans_to_record_batch;
+use cetra_column::{Column, FlatData, ScalarValue, Selection};
+use cetra_core::batch::spans_to_batch;
 use cetra_core::enums::{SpanKind, SpanStatus};
 use cetra_core::ids::{ProjectId, SpanId, TraceId};
 use cetra_core::span::Span;
+use cetra_statam::{FileReader as StatamFileReader, ScanRequest, StatamReader};
 use cetra_storage::config::{
     CompactionConfig, FlushConfig, GcConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig,
     WalConfig, WalSync,
 };
 use cetra_storage::{ProjectQuery, Storage};
 use chrono::{Datelike, NaiveDate};
-use datafusion::execution::context::{SessionConfig, SessionContext};
-use parquet::arrow::ProjectionMask;
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use sqlx::ConnectOptions;
 use sqlx::sqlite::SqliteConnectOptions;
 
@@ -109,7 +107,7 @@ fn anchor_start() -> i64 {
 /// `(iteration, trace index)` identifies a trace; span ids come from the batch
 /// counter. Each trace's rows are appended in three consecutive batches, far
 /// enough apart that a kill usually splits them across flushes.
-fn span_batch(batch_id: u64, rows: usize) -> arrow::array::RecordBatch {
+fn span_batch(batch_id: u64, rows: usize) -> cetra_column::Batch {
     let project_id = project();
     let sequence = batch_id % 1_000_000;
     let run_id = batch_id / 1_000_000;
@@ -187,7 +185,7 @@ fn span_batch(batch_id: u64, rows: usize) -> arrow::array::RecordBatch {
             }
         })
         .collect();
-    spans_to_record_batch(&spans).unwrap()
+    spans_to_batch(&spans).unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -665,22 +663,14 @@ async fn read_catalog(dir: &Path) -> Result<CatalogView, String> {
 fn anchor_days_are_singular(dir: &Path, catalog: &CatalogView) -> Result<(), String> {
     let mut seen: BTreeMap<Vec<u8>, String> = BTreeMap::new();
     for (path, day) in &catalog.spans_files {
-        let reader = projected_reader(dir, path, &["trace_id"])?;
-        for batch in reader {
-            let batch = batch.map_err(|error| format!("{path}: {error}"))?;
-            let ids = batch
-                .column_by_name("trace_id")
-                .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
-                .ok_or_else(|| format!("{path}: no trace_id column"))?;
-            for row in 0..batch.num_rows() {
-                let id = ids.value(row).to_vec();
-                match seen.get(&id) {
-                    Some(other) if other != day => {
-                        return Err(format!("trace appears in partition days {other} and {day}"));
-                    }
-                    _ => {
-                        seen.insert(id, day.clone());
-                    }
+        let (ids, _) = object_trace_ids(dir, path)?;
+        for id in ids {
+            match seen.get(&id) {
+                Some(other) if other != day => {
+                    return Err(format!("trace appears in partition days {other} and {day}"));
+                }
+                _ => {
+                    seen.insert(id, day.clone());
                 }
             }
         }
@@ -688,62 +678,147 @@ fn anchor_days_are_singular(dir: &Path, catalog: &CatalogView) -> Result<(), Str
     Ok(())
 }
 
-/// The sync Parquet reader over a local object, projected to `columns`.
-fn projected_reader(
+/// Reads the projected columns of one local Statam object.
+fn scan_statam_columns(
     dir: &Path,
     path: &str,
     columns: &[&str],
-) -> Result<ParquetRecordBatchReader, String> {
-    let file = std::fs::File::open(dir.join("objects").join(path))
-        .map_err(|error| format!("{path}: {error}"))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|error| format!("{path}: {error}"))?;
-    let mask = ProjectionMask::columns(builder.parquet_schema(), columns.iter().copied());
-    builder
-        .with_projection(mask)
-        .build()
+) -> Result<Vec<cetra_column::Batch>, String> {
+    let rr = Arc::new(
+        StatamFileReader::open(dir.join("objects").join(path))
+            .map_err(|error| format!("{path}: {error}"))?,
+    );
+    let reader = StatamReader::open(rr, None).map_err(|error| format!("{path}: {error}"))?;
+    let schema = reader.meta().schema();
+    let mut proj = Vec::with_capacity(columns.len());
+    for name in columns {
+        let idx = schema
+            .index_of(name)
+            .ok_or_else(|| format!("{path}: missing column {name}"))?;
+        proj.push(idx);
+    }
+    reader
+        .scan(&ScanRequest {
+            projection: Some(proj),
+            read_threads: 1,
+            ..ScanRequest::default()
+        })
         .map_err(|error| format!("{path}: {error}"))
 }
 
+fn read_fixed16(col: &Column, row: usize) -> Option<[u8; 16]> {
+    match col {
+        Column::Flat(flat) if !flat.is_null(row) => match flat.data() {
+            FlatData::FixedBytes16(vals) => vals.get(row).copied(),
+            _ => None,
+        },
+        Column::Const {
+            value: ScalarValue::FixedBytes16(b),
+            len,
+        } if row < *len => Some(*b),
+        Column::Dict(dict) if !dict.is_null(row) => {
+            let code = *dict.codes().get(row)? as usize;
+            match dict.values().data() {
+                FlatData::FixedBytes16(vals) => vals.get(code).copied(),
+                _ => None,
+            }
+        }
+        Column::Rle(rle) if row < rle.len() => {
+            let run = rle.run_ends().partition_point(|&end| (end as usize) <= row);
+            match rle.values().data() {
+                FlatData::FixedBytes16(vals) => vals.get(run).copied(),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn read_i64(col: &Column, row: usize) -> Option<i64> {
+    match col {
+        Column::Flat(flat) if !flat.is_null(row) => match flat.data() {
+            FlatData::I64(vals) => vals.get(row).copied(),
+            _ => None,
+        },
+        Column::Const {
+            value: ScalarValue::I64(v),
+            len,
+        } if row < *len => Some(*v),
+        Column::Dict(dict) if !dict.is_null(row) => {
+            let code = *dict.codes().get(row)? as usize;
+            match dict.values().data() {
+                FlatData::I64(vals) => vals.get(code).copied(),
+                _ => None,
+            }
+        }
+        Column::Rle(rle) if row < rle.len() => {
+            let run = rle.run_ends().partition_point(|&end| (end as usize) <= row);
+            match rle.values().data() {
+                FlatData::I64(vals) => vals.get(run).copied(),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn for_each_row(batch: &cetra_column::Batch, mut f: impl FnMut(usize)) {
+    match batch.selection() {
+        Selection::All => {
+            for r in 0..batch.raw_len() {
+                f(r);
+            }
+        }
+        Selection::Mask(mask) => {
+            for r in mask.iter_ones() {
+                f(r);
+            }
+        }
+        Selection::Indices(indices) => {
+            for &r in indices {
+                f(r as usize);
+            }
+        }
+    }
+}
+
 fn object_trace_ids(dir: &Path, path: &str) -> Result<(BTreeSet<Vec<u8>>, usize), String> {
-    let reader = projected_reader(dir, path, &["trace_id"])?;
+    let batches = scan_statam_columns(dir, path, &["trace_id"])?;
     let mut ids = BTreeSet::new();
     let mut rows = 0;
-    for batch in reader {
-        let batch = batch.map_err(|error| format!("{path}: {error}"))?;
-        let column = batch
-            .column_by_name("trace_id")
+    for batch in &batches {
+        let col = batch
+            .column(0)
             .ok_or_else(|| format!("{path}: no trace_id column"))?;
-        let ids_column = column
-            .as_any()
-            .downcast_ref::<FixedSizeBinaryArray>()
-            .ok_or_else(|| format!("{path}: trace_id is not fixed-size binary"))?;
-        for index in 0..batch.num_rows() {
-            ids.insert(ids_column.value(index).to_vec());
-        }
+        for_each_row(batch, |r| {
+            if let Some(tid) = read_fixed16(col, r) {
+                ids.insert(tid.to_vec());
+            }
+        });
         rows += batch.num_rows();
     }
     Ok((ids, rows))
 }
 
 fn object_partials(dir: &Path, path: &str) -> Result<(BTreeSet<Vec<u8>>, i64), String> {
-    let reader = projected_reader(dir, path, &["trace_id", "span_count"])?;
+    let batches = scan_statam_columns(dir, path, &["trace_id", "span_count"])?;
     let mut ids = BTreeSet::new();
     let mut total = 0_i64;
-    for batch in reader {
-        let batch = batch.map_err(|error| format!("{path}: {error}"))?;
-        let ids_column = batch
-            .column_by_name("trace_id")
-            .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+    for batch in &batches {
+        let tid_col = batch
+            .column(0)
             .ok_or_else(|| format!("{path}: no trace_id column"))?;
-        let counts = batch
-            .column_by_name("span_count")
-            .and_then(|column| column.as_any().downcast_ref::<Int64Array>())
+        let cnt_col = batch
+            .column(1)
             .ok_or_else(|| format!("{path}: no span_count column"))?;
-        for index in 0..batch.num_rows() {
-            ids.insert(ids_column.value(index).to_vec());
-            total = total.saturating_add(counts.value(index));
-        }
+        for_each_row(batch, |r| {
+            if let Some(tid) = read_fixed16(tid_col, r) {
+                ids.insert(tid.to_vec());
+            }
+            if let Some(cnt) = read_i64(cnt_col, r) {
+                total = total.saturating_add(cnt);
+            }
+        });
     }
     Ok((ids, total))
 }
@@ -926,30 +1001,25 @@ fn parse_batch_name(name: &str) -> Option<(u64, u32)> {
 }
 
 async fn stored_rows(query: &ProjectQuery) -> Vec<(String, Vec<u8>)> {
-    let ctx = SessionContext::new_with_config_rt(SessionConfig::new(), Arc::clone(&query.runtime));
-    ctx.register_table("spans_t", Arc::clone(&query.spans))
-        .unwrap();
-    let batches = ctx
-        .sql("SELECT name, span_id FROM spans_t")
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap();
+    let batches = query.collect_raw_spans().await.unwrap();
     let mut rows = Vec::new();
     for batch in batches {
         let names = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
+            .column_by_name(cetra_core::schema::spans::NAME)
             .unwrap();
         let ids = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<FixedSizeBinaryArray>()
+            .column_by_name(cetra_core::schema::spans::SPAN_ID)
             .unwrap();
         for index in 0..batch.num_rows() {
-            rows.push((names.value(index).to_owned(), ids.value(index).to_vec()));
+            let name = match names.get_scalar(index).unwrap() {
+                ScalarValue::Utf8(s) => s,
+                other => panic!("unexpected name scalar: {other:?}"),
+            };
+            let id = match ids.get_scalar(index).unwrap() {
+                ScalarValue::FixedBytes8(bytes) => bytes.to_vec(),
+                other => panic!("unexpected span_id scalar: {other:?}"),
+            };
+            rows.push((name, id));
         }
     }
     rows

@@ -462,7 +462,7 @@ async fn read_summaries(
         .map_err(|error| {
             tracing::warn!(kind = error.kind(), "a trace stream re-read failed");
             match error {
-                RunError::Timeout | RunError::TooLarge => RefreshError::Retry,
+                RunError::Timeout | RunError::TooLarge | RunError::Busy => RefreshError::Retry,
                 _ => RefreshError::Resync,
             }
         })?;

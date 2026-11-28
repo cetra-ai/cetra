@@ -184,6 +184,7 @@ fn extract_part(part: &mut Part, sink: &mut MediaSink<'_>) {
         Part::Blob {
             content,
             mime_type,
+            transcript,
             extra,
             ..
         } => {
@@ -191,13 +192,18 @@ fn extract_part(part: &mut Part, sink: &mut MediaSink<'_>) {
             let Some(replacement) = sink.extract(content, declared.as_deref()) else {
                 return;
             };
-            *part = uri_part(std::mem::take(extra), replacement);
+            *part = uri_part(std::mem::take(extra), transcript.take(), replacement);
         }
-        Part::Uri { uri, extra, .. } => {
+        Part::Uri {
+            uri,
+            transcript,
+            extra,
+            ..
+        } => {
             if let Some(data) = entire_data_uri(uri)
                 && let Some(replacement) = sink.extract(data.payload, Some(data.mime))
             {
-                *part = uri_part(std::mem::take(extra), replacement);
+                *part = uri_part(std::mem::take(extra), transcript.take(), replacement);
                 return;
             }
             replace_text(uri, sink);
@@ -225,7 +231,11 @@ fn extract_part(part: &mut Part, sink: &mut MediaSink<'_>) {
     }
 }
 
-fn uri_part(mut extra: Map<String, Json>, replacement: Replacement) -> Part {
+fn uri_part(
+    mut extra: Map<String, Json>,
+    transcript: Option<String>,
+    replacement: Replacement,
+) -> Part {
     match replacement {
         Replacement::Extracted {
             uri,
@@ -234,6 +244,7 @@ fn uri_part(mut extra: Map<String, Json>, replacement: Replacement) -> Part {
         } => Part::Uri {
             modality,
             mime_type: Some(mime),
+            transcript,
             uri,
             extra,
         },
@@ -243,6 +254,7 @@ fn uri_part(mut extra: Map<String, Json>, replacement: Replacement) -> Part {
             Part::Uri {
                 modality: None,
                 mime_type: None,
+                transcript,
                 uri: DROPPED_URI.to_owned(),
                 extra,
             }
@@ -727,6 +739,7 @@ mod tests {
             parts: vec![Part::Blob {
                 modality: Some(Modality::Image),
                 mime_type: Some("image/png".to_owned()),
+                transcript: None,
                 content: encode(&png()),
                 extra: Map::new(),
             }],
@@ -748,6 +761,109 @@ mod tests {
     }
 
     #[test]
+    fn an_extracted_blob_keeps_its_transcript() {
+        let limits = limits(1, 64);
+        let mut sink = MediaSink::new(&limits);
+        let mut part = Part::Blob {
+            modality: Some(Modality::Image),
+            mime_type: Some("image/png".to_owned()),
+            transcript: Some("What's my balance?".to_owned()),
+            content: encode(&png()),
+            extra: Map::new(),
+        };
+        extract_part(&mut part, &mut sink);
+        let sha = sink.media_refs().pop().expect("ref");
+        assert_eq!(
+            part,
+            Part::Uri {
+                modality: Some(Modality::Image),
+                mime_type: Some("image/png".to_owned()),
+                transcript: Some("What's my balance?".to_owned()),
+                uri: format!("media://{sha}"),
+                extra: Map::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_dropped_blob_keeps_its_transcript() {
+        let limits = limits(1, 4);
+        let mut part = Part::Blob {
+            modality: Some(Modality::Audio),
+            mime_type: Some("audio/wav".to_owned()),
+            transcript: Some("hello".to_owned()),
+            content: encode(&[0; 6]),
+            extra: Map::new(),
+        };
+        let mut sink = MediaSink::new(&limits);
+        extract_part(&mut part, &mut sink);
+        assert_eq!(
+            part,
+            Part::Uri {
+                modality: None,
+                mime_type: None,
+                transcript: Some("hello".to_owned()),
+                uri: DROPPED_URI.to_owned(),
+                extra: Map::from_iter([
+                    ("reason".to_owned(), json!("too_large")),
+                    ("size".to_owned(), json!(6)),
+                ]),
+            }
+        );
+    }
+
+    #[test]
+    fn an_extracted_data_uri_keeps_its_transcript() {
+        let limits = limits(1, 64);
+        let mut sink = MediaSink::new(&limits);
+        let encoded = encode(&png());
+        let mut part = Part::Uri {
+            modality: Some(Modality::Audio),
+            mime_type: None,
+            transcript: Some("hi there".to_owned()),
+            uri: format!("data:image/png;base64,{encoded}"),
+            extra: Map::new(),
+        };
+        extract_part(&mut part, &mut sink);
+        let sha = sink.media_refs().pop().expect("ref");
+        assert_eq!(
+            part,
+            Part::Uri {
+                modality: Some(Modality::Image),
+                mime_type: Some("image/png".to_owned()),
+                transcript: Some("hi there".to_owned()),
+                uri: format!("media://{sha}"),
+                extra: Map::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_canonical_blob_inside_raw_json_keeps_its_transcript() {
+        let limits = limits(1, 64);
+        let mut sink = MediaSink::new(&limits);
+        let mut value = json!({
+            "type": "blob",
+            "modality": "image",
+            "mime_type": "image/png",
+            "transcript": "hi",
+            "content": encode(&png()),
+        });
+        extract_json(&mut value, &mut sink);
+        let sha = sink.media_refs().pop().expect("ref");
+        assert_eq!(
+            value,
+            json!({
+                "type": "uri",
+                "modality": "image",
+                "mime_type": "image/png",
+                "transcript": "hi",
+                "uri": format!("media://{sha}"),
+            })
+        );
+    }
+
+    #[test]
     fn a_data_uri_in_text_is_replaced_and_a_uri_part_is_rewritten() {
         let limits = limits(1, 64);
         let mut sink = MediaSink::new(&limits);
@@ -760,6 +876,7 @@ mod tests {
         let mut part = Part::Uri {
             modality: None,
             mime_type: None,
+            transcript: None,
             uri: format!("data:image/png;base64,{encoded}"),
             extra: Map::new(),
         };
@@ -769,6 +886,7 @@ mod tests {
             Part::Uri {
                 modality: Some(Modality::Image),
                 mime_type: Some("image/png".to_owned()),
+                transcript: None,
                 uri: format!("media://{sha}"),
                 extra: Map::new(),
             }
@@ -805,6 +923,7 @@ mod tests {
         let mut part = Part::Blob {
             modality: Some(Modality::Image),
             mime_type: Some("image/png".to_owned()),
+            transcript: None,
             content: encoded.clone(),
             extra: Map::new(),
         };
@@ -815,6 +934,7 @@ mod tests {
             Part::Uri {
                 modality: None,
                 mime_type: None,
+                transcript: None,
                 uri: DROPPED_URI.to_owned(),
                 extra: Map::from_iter([
                     ("reason".to_owned(), json!("too_large")),

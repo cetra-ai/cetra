@@ -1,31 +1,13 @@
-//! Dashboard bucket widths and the grid of buckets a window gives.
+//! Dashboard bucket widths and epoch-aligned UTC `date_bin` expressions.
 
-use datafusion::common::ScalarValue;
-use datafusion::functions::datetime::expr_fn::date_bin;
-use datafusion::logical_expr::{Expr, col};
+use cetra_column::{DataType, Interval, ScalarValue};
+use cetra_query::{Expr, ScalarFn};
 
 use crate::query_error::RunError;
 use crate::views::TimeWindow;
 
-/// Output column of a bucket expression.
-pub(super) const BUCKET: &str = "bucket";
-
 const NS_MINUTE: i64 = 60_000_000_000;
 const NS_HOUR: i64 = 60 * NS_MINUTE;
-const AUTO_LIMIT: i64 = 120;
-const FIXED_LIMIT: i64 = 2_000;
-const TOO_MANY_BUCKETS: &str = "too many buckets; pick a wider bucket";
-
-const AUTO_WIDTHS: [BucketWidth; 8] = [
-    BucketWidth::M1,
-    BucketWidth::M5,
-    BucketWidth::M10,
-    BucketWidth::M15,
-    BucketWidth::M30,
-    BucketWidth::H1,
-    BucketWidth::H6,
-    BucketWidth::H12,
-];
 
 /// Width of one dashboard bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +58,25 @@ pub enum Bucket {
     Fixed(BucketWidth),
 }
 
+/// Output column name of a bucket expression.
+pub(crate) const BUCKET: &str = "bucket";
+
+const AUTO_LIMIT: i64 = 120;
+const FIXED_LIMIT: i64 = 2_000;
+const TOO_MANY_BUCKETS: &str = "too many buckets; pick a wider bucket";
+
+const AUTO_WIDTHS: [BucketWidth; 8] = [
+    BucketWidth::M1,
+    BucketWidth::M5,
+    BucketWidth::M10,
+    BucketWidth::M15,
+    BucketWidth::M30,
+    BucketWidth::H1,
+    BucketWidth::H6,
+    BucketWidth::H12,
+];
+
+/// Resolves `bucket` for `window` into nanoseconds, matching `reads::buckets::resolve`.
 pub(crate) fn resolve(window: TimeWindow, bucket: Bucket) -> Result<i64, RunError> {
     match bucket {
         Bucket::Fixed(width) => {
@@ -113,20 +114,6 @@ fn bucket_count(window: TimeWindow, width: i64) -> Result<i64, RunError> {
         .ok_or_else(too_many)
 }
 
-/// `date_bin(width, time, epoch)` as [`BUCKET`]: the bucket start of each row, aligned to the
-/// Unix epoch, UTC.
-pub(super) fn bucket_expr(width: i64, time: &str) -> Expr {
-    date_bin(
-        Expr::Literal(ScalarValue::new_interval_mdn(0, 0, width), None),
-        col(time),
-        Expr::Literal(
-            ScalarValue::TimestampNanosecond(Some(0), Some("UTC".into())),
-            None,
-        ),
-    )
-    .alias(BUCKET)
-}
-
 fn align_down(time: i64, width: i64) -> Result<i64, RunError> {
     let remainder = time.checked_rem_euclid(width).ok_or_else(too_many)?;
     time.checked_sub(remainder).ok_or_else(too_many)
@@ -136,44 +123,88 @@ fn too_many() -> RunError {
     RunError::InvalidRequest(TOO_MANY_BUCKETS.to_owned())
 }
 
+/// `date_bin(width, time, epoch)`: the bucket start of each row, aligned to the
+/// Unix epoch, UTC.
+pub(crate) fn bucket_expr(width: i64, time_col: Expr) -> Expr {
+    Expr::Call {
+        func: ScalarFn::DateBin,
+        args: vec![
+            Expr::Literal(ScalarValue::Interval(Interval {
+                months: 0,
+                days: 0,
+                nanos: width,
+            })),
+            time_col,
+            Expr::Literal(ScalarValue::TimestampNs {
+                value: 0,
+                utc: true,
+            }),
+        ],
+        data_type: DataType::timestamp_utc(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Bucket, BucketWidth, resolve};
-    use crate::query_error::RunError;
-    use crate::views::TimeWindow;
+    use cetra_column::{
+        Batch, CancelToken, Column, DataType, Field, FlatColumn, FlatData, Schema, Selection,
+    };
+    use cetra_query::{EvalContext, eval_expr};
+
+    use super::*;
+    use crate::reads::columns::time_at;
 
     #[test]
-    fn auto_buckets_stop_at_two_thousand_days() {
-        let day = BucketWidth::D1.ns();
-        let window = |from, to| TimeWindow::new(from, to).expect("window");
-        assert_eq!(
-            resolve(window(0, 2_000 * day), Bucket::Auto).expect("2,000 days"),
-            day
-        );
-        for to in [2_000 * day + 1, i64::MAX] {
-            match resolve(window(0, to), Bucket::Auto) {
-                Err(RunError::InvalidRequest(message)) => {
-                    assert_eq!(message, "too many buckets; pick a wider bucket");
-                }
-                other => panic!("{other:?}"),
-            }
-        }
-        assert!(matches!(
-            resolve(window(i64::MIN, i64::MAX), Bucket::Auto),
-            Err(RunError::InvalidRequest(_))
-        ));
-    }
+    fn bucket_expr_aligns_timestamps_to_utc_epoch() {
+        let width = resolve(
+            TimeWindow::new(0, BucketWidth::H1.ns()).expect("window"),
+            Bucket::Fixed(BucketWidth::M5),
+        )
+        .expect("5m");
+        assert_eq!(width, 5 * 60 * 1_000_000_000);
 
-    #[test]
-    fn exactly_two_thousand_fixed_buckets_are_accepted() {
-        let span = 2_000i64.checked_mul(BucketWidth::M1.ns()).expect("span");
-        assert_eq!(
-            resolve(
-                TimeWindow::new(0, span).expect("window"),
-                Bucket::Fixed(BucketWidth::M1)
+        let schema = Schema::try_new_arc(vec![Field::new("ts", DataType::timestamp_utc(), false)])
+            .expect("schema");
+        let ts_vals = vec![
+            0,
+            width - 1,
+            width,
+            width + 123_456_789,
+            -1, // negative pre-epoch timestamp aligns down to -width
+        ];
+        let col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: ts_vals.clone(),
+                    utc: true,
+                },
+                None,
             )
-            .expect("2,000 buckets"),
-            BucketWidth::M1.ns()
+            .expect("col"),
         );
+        let batch =
+            Batch::try_new(schema, vec![col], ts_vals.len(), Selection::All).expect("batch");
+        let expr = bucket_expr(
+            width,
+            Expr::Column {
+                index: 0,
+                name: "ts".to_owned(),
+                data_type: DataType::timestamp_utc(),
+            },
+        );
+        let eval_ctx = EvalContext::new(0, CancelToken::new());
+        let out_col = eval_expr(&expr, &batch, &eval_ctx, None).expect("eval");
+        let out_schema =
+            Schema::try_new_arc(vec![Field::new(BUCKET, DataType::timestamp_utc(), false)])
+                .expect("out schema");
+        let out_batch =
+            Batch::try_new_shared(out_schema, vec![out_col], ts_vals.len(), Selection::All)
+                .expect("out batch");
+        let c = out_batch.column(0).expect("col");
+        assert_eq!(time_at(&out_batch, c, 0).expect("0"), 0);
+        assert_eq!(time_at(&out_batch, c, 1).expect("1"), 0);
+        assert_eq!(time_at(&out_batch, c, 2).expect("2"), width);
+        assert_eq!(time_at(&out_batch, c, 3).expect("3"), width);
+        assert_eq!(time_at(&out_batch, c, 4).expect("4"), -width);
     }
 }

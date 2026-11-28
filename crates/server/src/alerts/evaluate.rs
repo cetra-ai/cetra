@@ -339,6 +339,7 @@ fn run_reason(error: &RunError) -> &'static str {
     match error {
         RunError::Timeout => "query timed out",
         RunError::TooLarge => "query needed more memory or temporary disk space than allowed",
+        RunError::Busy => "storage is busy",
         RunError::Invalid(_) => "the filter is no longer valid",
         _ => "query failed",
     }

@@ -141,7 +141,9 @@ function IssuePage() {
           <section className="flex flex-col gap-3">
             <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">
               <Stat label="Occurrences, 14 days">{occurrences.data ? total : "—"}</Stat>
-              <Stat label="Users, busiest day">{occurrences.data ? busiestUsers : "—"}</Stat>
+              <Stat label="Users, busiest day">
+                {occurrences.data && busiestUsers > 0 ? busiestUsers : "—"}
+              </Stat>
               <Stat label="First seen">
                 <RelativeTime value={issue.first_seen} />
               </Stat>

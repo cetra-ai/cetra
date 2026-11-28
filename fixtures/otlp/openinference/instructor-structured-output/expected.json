@@ -1,0 +1,106 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "9c6cd66f867297e9c35bb6f5f8e7a96a",
+      "span_id": "80b5e0d912701aad",
+      "name": "instructor.create",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.046000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "request_params": "{\"max_retries\":3,\"model\":\"gpt-4o-mini-2024-07-18\"}",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Ada is 36.\"}]}]",
+      "input_format": "messages",
+      "output": "{\"name\":\"Ada\",\"age\":36}",
+      "output_format": "json",
+      "input_preview": "Ada is 36.",
+      "output_preview": "{\"name\":\"Ada\",\"age\":36}",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "instructor.response_model": "User",
+        "llm.invocation_parameters": "{\"max_retries\": 3, \"model\": \"gpt-4o-mini-2024-07-18\"}",
+        "llm.model_name": "gpt-4o-mini-2024-07-18",
+        "llm.provider": "openai",
+        "llm.system": "openai",
+        "openinference.span.kind": "CHAIN",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.instructor",
+      "scope_version": "0.1.35",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "9c6cd66f867297e9c35bb6f5f8e7a96a",
+      "span_id": "c956532ceedbfac5",
+      "parent_span_id": "80b5e0d912701aad",
+      "name": "ChatCompletion",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.005000000Z",
+      "end_time": "2025-12-31T23:59:50.044000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "input_tokens": 30,
+      "output_tokens": 9,
+      "cache_read_tokens": 0,
+      "reasoning_tokens": 0,
+      "total_tokens": 39,
+      "cost_input": 0.00003,
+      "cost_output": 0.000036,
+      "cost_total": 0.000066,
+      "cost_source": "computed",
+      "request_params": "{\"model\":\"gpt-4o-mini-2024-07-18\",\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":\"User\"}}}",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Ada is 36.\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_user_1\",\"name\":\"User\",\"arguments\":{\"name\":\"Ada\",\"age\":36}}]}]",
+      "output_format": "messages",
+      "input_preview": "Ada is 36.",
+      "tool_definitions": "[{\"type\":\"function\",\"function\":{\"name\":\"User\",\"description\":\"The model extracted from the prompt.\",\"parameters\":{\"properties\":{\"name\":{\"title\":\"Name\",\"type\":\"string\"},\"age\":{\"title\":\"Age\",\"type\":\"integer\"}},\"required\":[\"age\",\"name\"],\"type\":\"object\"}}}]",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "llm.finish_reason": "tool_calls",
+        "llm.invocation_parameters": "{\"model\": \"gpt-4o-mini-2024-07-18\", \"tool_choice\": {\"type\": \"function\", \"function\": {\"name\": \"User\"}}}",
+        "llm.model_name": "gpt-4o-mini-2024-07-18",
+        "llm.system": "openai",
+        "llm.token_count.completion": "9",
+        "llm.token_count.completion_details.audio": "0",
+        "llm.token_count.completion_details.reasoning": "0",
+        "llm.token_count.prompt": "30",
+        "llm.token_count.prompt_details.audio": "0",
+        "llm.token_count.prompt_details.cache_read": "0",
+        "llm.token_count.total": "39",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.openai",
+      "scope_version": "0.1.69",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

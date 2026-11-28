@@ -24,12 +24,25 @@ use crate::scrub::{ScrubContext, scrub};
 use crate::write::{Language, Source, write_case};
 
 const DEFAULT_INGEST_TIME: &str = "2026-01-01T00:00:00.000000000Z";
-const PROGRAM_TIMEOUT: Duration = Duration::from_secs(120);
+const PROGRAM_TIMEOUT: Duration = Duration::from_secs(180);
+/// The JDK the Java scenarios run on: Temurin 21.0.13+9, fetched into
+/// `target/capture-tools` by `just capture-tools` (IN8.0).
+const JAVA_HOME_DIR: &str = "target/capture-tools/jdk/21.0.13+9";
+/// The `java` binary of [`JAVA_HOME_DIR`].
+const JAVA_BIN: &str = "target/capture-tools/jdk/21.0.13+9/bin/java";
+/// The .NET SDK the .NET scenarios run on: 10.0.404, fetched into
+/// `target/capture-tools` by `just capture-tools` (IN8.0).
+const DOTNET_ROOT_DIR: &str = "target/capture-tools/dotnet/10.0.404";
+/// The `dotnet` binary of [`DOTNET_ROOT_DIR`].
+const DOTNET_BIN: &str = "target/capture-tools/dotnet/10.0.404/dotnet";
 const QUIET: Duration = Duration::from_millis(300);
 const IDLE_MAX: Duration = Duration::from_secs(5);
 const DIFF_LIMIT: usize = 20;
 const MOCK_KEY: &str = "capture-mock-key";
 const TIME_FIELDS: &[&str] = &["startTimeUnixNano", "endTimeUnixNano", "timeUnixNano"];
+/// Prefix of the label `--check` gives a link whose target is not a span of the request
+/// ([`label_span_ids`]): `external-0`, `external-1`, … by first-seen order.
+const EXTERNAL_SPAN_LABEL_PREFIX: &str = "external-";
 
 /// Command that runs one scenario program.
 ///
@@ -41,11 +54,16 @@ pub struct Program {
 }
 
 impl Program {
-    /// `uv` for Python, or `node` for TypeScript.
-    pub fn for_language(repo_root: &Path, language: Language) -> Self {
+    /// `uv` for Python, `node` for TypeScript, the pinned JDK for Java and the pinned
+    /// .NET SDK for .NET. A Python scenario with an `env` runs in
+    /// `tools/capture/envs/<env>`; without one, in `tools/capture/py`. `env` is ignored
+    /// for TypeScript, Java and .NET.
+    pub fn for_language(repo_root: &Path, language: Language, env: Option<&str>) -> Self {
         match language {
-            Language::Python => Self::python(repo_root),
+            Language::Python => Self::python(repo_root, env),
             Language::Typescript => Self::typescript(),
+            Language::Java => Self::java(repo_root),
+            Language::Dotnet => Self::dotnet(repo_root),
         }
     }
 
@@ -54,16 +72,17 @@ impl Program {
         Self { argv }
     }
 
-    fn python(repo_root: &Path) -> Self {
+    fn python(repo_root: &Path, env: Option<&str>) -> Self {
+        let project = match env {
+            Some(env) => repo_root.join("tools/capture/envs").join(env),
+            None => repo_root.join("tools/capture/py"),
+        };
         Self {
             argv: vec![
                 "uv".to_owned(),
                 "run".to_owned(),
                 "--project".to_owned(),
-                repo_root
-                    .join("tools/capture/py")
-                    .to_string_lossy()
-                    .into_owned(),
+                project.to_string_lossy().into_owned(),
                 "--frozen".to_owned(),
                 "python".to_owned(),
                 "main.py".to_owned(),
@@ -74,6 +93,30 @@ impl Program {
     fn typescript() -> Self {
         Self {
             argv: vec!["node".to_owned(), "main.ts".to_owned()],
+        }
+    }
+
+    /// The JDK with the scenario module's `target/capture.args` argument file, written by
+    /// `just capture-tools` from the Maven build. The scenario directory is the working
+    /// directory, so the file's paths are relative to it.
+    fn java(repo_root: &Path) -> Self {
+        Self {
+            argv: vec![
+                repo_root.join(JAVA_BIN).to_string_lossy().into_owned(),
+                "@target/capture.args".to_owned(),
+            ],
+        }
+    }
+
+    /// The .NET SDK with the scenario project's built `Capture.dll`, written by
+    /// `just capture-tools`. The scenario directory is the working directory, so the
+    /// path is relative to it.
+    fn dotnet(repo_root: &Path) -> Self {
+        Self {
+            argv: vec![
+                repo_root.join(DOTNET_BIN).to_string_lossy().into_owned(),
+                "bin/capture/Capture.dll".to_owned(),
+            ],
         }
     }
 }
@@ -87,27 +130,81 @@ pub struct Outcome {
     pub stale_expected: bool,
 }
 
-/// Scans `tools/capture/{py,ts}/scenarios/*/*/scenario.json`.
+/// A scenario found by [`discover`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discovered {
+    /// `group/case` of the scenario.
+    pub case: CasePath,
+    /// Language of its program.
+    pub language: Language,
+    /// The environment under `tools/capture/envs/`, or `None` for `tools/capture/py`,
+    /// `tools/capture/ts` and every Java and .NET scenario.
+    pub env: Option<String>,
+    /// The scenario directory.
+    pub dir: PathBuf,
+}
+
+/// Scans `tools/capture/{py,ts,java,dotnet}/scenarios/*/*/scenario.json` and
+/// `tools/capture/envs/*/scenarios/*/*/scenario.json`.
 ///
-/// A missing `scenarios` directory is an empty result. The same `group/case`
-/// in both languages fails. The vector is sorted by group, then case.
-pub fn discover(repo_root: &Path) -> Result<Vec<(CasePath, Language, PathBuf)>, CaptureError> {
+/// A missing `scenarios` directory is an empty result. An environment directory
+/// with `scenarios/` but no `pyproject.toml` fails. The same `group/case` in two
+/// roots fails. The vector is sorted by group, then case.
+pub fn discover(repo_root: &Path) -> Result<Vec<Discovered>, CaptureError> {
+    let capture = repo_root.join("tools/capture");
     let mut found = Vec::new();
-    scan(repo_root, Language::Python, &mut found)?;
-    scan(repo_root, Language::Typescript, &mut found)?;
+    scan(
+        &capture.join("py/scenarios"),
+        Language::Python,
+        None,
+        &mut found,
+    )?;
+    scan(
+        &capture.join("ts/scenarios"),
+        Language::Typescript,
+        None,
+        &mut found,
+    )?;
+    scan(
+        &capture.join("java/scenarios"),
+        Language::Java,
+        None,
+        &mut found,
+    )?;
+    scan(
+        &capture.join("dotnet/scenarios"),
+        Language::Dotnet,
+        None,
+        &mut found,
+    )?;
+    for env in environment_dirs(&capture.join("envs"))? {
+        let env_name = entry_name(&env)?;
+        let env_dir = env.path();
+        let scenarios = env_dir.join("scenarios");
+        if !scenarios.is_dir() {
+            continue;
+        }
+        if !env_dir.join("pyproject.toml").is_file() {
+            return Err(CaptureError::ScenarioInvalid {
+                case: env_dir.display().to_string(),
+                reason: "an environment with scenarios/ needs a pyproject.toml".to_owned(),
+            });
+        }
+        scan(&scenarios, Language::Python, Some(&env_name), &mut found)?;
+    }
     let mut seen = HashSet::new();
-    for (case, _, _) in &found {
-        if !seen.insert(case.to_string()) {
+    for scenario in &found {
+        if !seen.insert(scenario.case.to_string()) {
             return Err(CaptureError::DuplicateCase {
-                case: case.to_string(),
+                case: scenario.case.to_string(),
             });
         }
     }
     found.sort_by(|left, right| {
-        left.0
+        left.case
             .group
-            .cmp(&right.0.group)
-            .then(left.0.case.cmp(&right.0.case))
+            .cmp(&right.case.group)
+            .then(left.case.case.cmp(&right.case.case))
     });
     Ok(found)
 }
@@ -115,14 +212,24 @@ pub fn discover(repo_root: &Path) -> Result<Vec<(CasePath, Language, PathBuf)>, 
 /// Environment for one program, built from `parent` rather than the process.
 ///
 /// `PATH`, `HOME`, and every `UV_*` and `XDG_*` variable are copied. The fixed
-/// capture and OTel variables replace anything copied. `scenario.env` is
-/// applied last. Nothing else from `parent` is present.
+/// capture and OTel variables replace anything copied. Java additionally gets
+/// `JAVA_HOME` (the pinned JDK), .NET `DOTNET_ROOT`, `DOTNET_CLI_TELEMETRY_OPTOUT=1`,
+/// `DOTNET_NOLOGO=1` and `DOTNET_CLI_HOME` (the case's `scratch` directory);
+/// Python and TypeScript get none of those. `scenario.env` is applied last, so it
+/// wins. Nothing else from `parent` is present. `CETRA_CAPTURE_TOOLS` names the
+/// pinned binaries' directory.
+// The parameter list is the capture run's whole wiring; a struct would only
+// move the same eight values one hop out.
+#[allow(clippy::too_many_arguments)]
 pub fn program_env(
     parent: &HashMap<String, String>,
     scenario: &Scenario,
+    repo_root: &Path,
     mock_port: u16,
     receiver_port: u16,
     meta_path: &str,
+    language: Language,
+    scratch: &Path,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     for (key, value) in parent {
@@ -136,7 +243,7 @@ pub fn program_env(
     env.insert("PYTHONHASHSEED".to_owned(), "0".to_owned());
     env.insert(
         "CETRA_CAPTURE_MOCK_URL".to_owned(),
-        format!("http://127.0.0.1:{mock_port}"),
+        format!("http://{}:{mock_port}", scenario.mock_host),
     );
     env.insert("CETRA_CAPTURE_OTLP_ENDPOINT".to_owned(), receiver.clone());
     env.insert("CETRA_CAPTURE_META".to_owned(), meta_path.to_owned());
@@ -145,6 +252,13 @@ pub fn program_env(
         scenario.libraries.join(","),
     );
     env.insert("CETRA_CAPTURE_CASE".to_owned(), scenario.case.to_string());
+    env.insert(
+        "CETRA_CAPTURE_TOOLS".to_owned(),
+        repo_root
+            .join("target/capture-tools")
+            .to_string_lossy()
+            .into_owned(),
+    );
     for key in [
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
@@ -164,6 +278,30 @@ pub fn program_env(
     );
     env.insert("OTEL_TRACES_SAMPLER".to_owned(), "always_on".to_owned());
     env.insert("OTEL_SERVICE_NAME".to_owned(), "capture-app".to_owned());
+    match language {
+        Language::Java => {
+            env.insert(
+                "JAVA_HOME".to_owned(),
+                repo_root.join(JAVA_HOME_DIR).to_string_lossy().into_owned(),
+            );
+        }
+        Language::Dotnet => {
+            env.insert(
+                "DOTNET_ROOT".to_owned(),
+                repo_root
+                    .join(DOTNET_ROOT_DIR)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            env.insert("DOTNET_CLI_TELEMETRY_OPTOUT".to_owned(), "1".to_owned());
+            env.insert("DOTNET_NOLOGO".to_owned(), "1".to_owned());
+            env.insert(
+                "DOTNET_CLI_HOME".to_owned(),
+                scratch.to_string_lossy().into_owned(),
+            );
+        }
+        Language::Python | Language::Typescript => {}
+    }
     env.extend(scenario.env.clone());
     env
 }
@@ -181,15 +319,34 @@ pub async fn run_case(
     program: &Program,
 ) -> Result<Outcome, CaptureError> {
     let scenario = Scenario::load(scenario_dir)?;
-    let mock = Mock::new(scenario.turns.clone());
+    // A Java or .NET program runs a toolchain and a build output `just capture-tools`
+    // fetches and builds; a missing one is a setup problem, not a capture failure,
+    // and is reported as such.
+    if matches!(language, Language::Java | Language::Dotnet) {
+        check_tool_present(program, scenario_dir, language)?;
+    }
+    let mock = Mock::new(scenario.turns.clone(), scenario.tolerated_probes.clone());
     let receiver = Receiver::new();
-    let (mock_port, mock_server) = bind(mock.router()).await?;
-    let (receiver_port, receiver_server) = bind(receiver.router()).await?;
+    let (mock_port, mock_server) = bind(mock.router(), &scenario.mock_host).await?;
+    let (receiver_port, receiver_server) = bind(receiver.router(), "127.0.0.1").await?;
     let meta = MetaFile::create(&scenario.case)?;
     let meta_path = utf8_path(meta.path())?;
+    let scratch = ScratchDir::create(&scenario.case)?;
     let parent = std::env::vars().collect();
-    let env = program_env(&parent, &scenario, mock_port, receiver_port, meta_path);
+    let env = program_env(
+        &parent,
+        &scenario,
+        repo_root,
+        mock_port,
+        receiver_port,
+        meta_path,
+        language,
+        scratch.path(),
+    );
     let mut child = spawn_program(program, scenario_dir, &env)?;
+    // Alive until `run_case` returns: it cleans up a group the scenario failed to stop.
+    #[cfg(unix)]
+    let _process_group = child.id().map(|pid| ProcessGroupGuard { pid });
     let lines = forward_output(&mut child, &scenario.case);
     let waited = wait_program(&mut child).await;
     lines.drain().await;
@@ -208,22 +365,52 @@ pub async fn run_case(
     drop(mock_server);
     drop(receiver_server);
     drop(meta);
+    drop(scratch);
     Ok(outcome)
 }
 
-fn scan(
-    repo_root: &Path,
+/// Fails with [`CaptureError::ToolMissing`] when the program's tool binary, or the
+/// scenario's build output, is not on disk: `just capture-tools` has not fetched or
+/// built it. The build output is `target/capture.args` for Java and
+/// `bin/capture/Capture.dll` for .NET, relative to the scenario directory the
+/// program runs in ([`Program::java`] and [`Program::dotnet`]).
+fn check_tool_present(
+    program: &Program,
+    scenario_dir: &Path,
     language: Language,
-    found: &mut Vec<(CasePath, Language, PathBuf)>,
 ) -> Result<(), CaptureError> {
-    let dir = repo_root
-        .join("tools/capture")
-        .join(language_dir(language))
-        .join("scenarios");
+    let Some(tool) = program.argv.first() else {
+        return Err(CaptureError::ProgramCommand);
+    };
+    let tool_path = PathBuf::from(tool);
+    if !tool_path.is_file() {
+        return Err(CaptureError::ToolMissing { path: tool_path });
+    }
+    let output = match language {
+        Language::Java => scenario_dir.join("target/capture.args"),
+        Language::Dotnet => scenario_dir.join("bin/capture/Capture.dll"),
+        // The function is called for Java and .NET only; Python and TypeScript
+        // programs have no build output.
+        Language::Python | Language::Typescript => return Ok(()),
+    };
+    if output.is_file() {
+        Ok(())
+    } else {
+        Err(CaptureError::ToolMissing { path: output })
+    }
+}
+
+/// Adds the scenarios under `dir` (a `scenarios` directory) to `found`.
+fn scan(
+    dir: &Path,
+    language: Language,
+    env: Option<&str>,
+    found: &mut Vec<Discovered>,
+) -> Result<(), CaptureError> {
     if !dir.exists() {
         return Ok(());
     }
-    for group_entry in read_dir(&dir)? {
+    for group_entry in read_dir(dir)? {
         if !group_entry.path().is_dir() {
             continue;
         }
@@ -237,17 +424,26 @@ fn scan(
             }
             let case_name = entry_name(&case_entry)?;
             let case = format!("{group}/{case_name}").parse()?;
-            found.push((case, language, case_entry.path()));
+            found.push(Discovered {
+                case,
+                language,
+                env: env.map(str::to_owned),
+                dir: case_entry.path(),
+            });
         }
     }
     Ok(())
 }
 
-fn language_dir(language: Language) -> &'static str {
-    match language {
-        Language::Python => "py",
-        Language::Typescript => "ts",
+/// The entries of `tools/capture/envs`, or none when the directory does not exist.
+fn environment_dirs(envs: &Path) -> Result<Vec<DirEntry>, CaptureError> {
+    if !envs.is_dir() {
+        return Ok(Vec::new());
     }
+    Ok(read_dir(envs)?
+        .into_iter()
+        .filter(|entry| entry.path().is_dir())
+        .collect())
 }
 
 fn read_dir(path: &Path) -> Result<Vec<DirEntry>, CaptureError> {
@@ -273,14 +469,14 @@ fn entry_name(entry: &DirEntry) -> Result<String, CaptureError> {
         })
 }
 
-async fn bind(router: axum::Router) -> Result<(u16, Server), CaptureError> {
-    let listener =
-        TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|source| CaptureError::Process {
-                step: "bind a loopback port",
-                source,
-            })?;
+/// Binds `host` on a free port and serves `router` there.
+async fn bind(router: axum::Router, host: &str) -> Result<(u16, Server), CaptureError> {
+    let listener = TcpListener::bind((host, 0))
+        .await
+        .map_err(|source| CaptureError::Process {
+            step: "bind a loopback port",
+            source,
+        })?;
     let port = listener
         .local_addr()
         .map_err(|source| CaptureError::Process {
@@ -333,6 +529,33 @@ impl Drop for MetaFile {
     }
 }
 
+/// A per-case scratch directory (the .NET `DOTNET_CLI_HOME`, and any other tool
+/// that must not write to a real home), removed when the case ends.
+struct ScratchDir {
+    path: PathBuf,
+}
+
+impl ScratchDir {
+    fn create(case: &CasePath) -> Result<Self, CaptureError> {
+        let path = unique_temp("cetra-capture-scratch", case);
+        fs::create_dir_all(&path).map_err(|source| CaptureError::Process {
+            step: "prepare the scratch directory",
+            source,
+        })?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
 fn unique_temp(prefix: &str, case: &CasePath) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -357,19 +580,47 @@ fn spawn_program(
     let Some((bin, args)) = program.argv.split_first() else {
         return Err(CaptureError::ProgramCommand);
     };
-    Command::new(bin)
+    let mut command = Command::new(bin);
+    command
         .args(args)
         .current_dir(dir)
         .kill_on_drop(true)
         .env_clear()
         .envs(env)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|source| CaptureError::Process {
-            step: "spawn the program",
-            source,
-        })
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+    command.spawn().map_err(|source| CaptureError::Process {
+        step: "spawn the program",
+        source,
+    })
+}
+
+/// Sends SIGTERM to every process of the group whose leader is `pid`. Errors are ignored:
+/// the group may be gone already. There is no escalation: a process that ignores or
+/// survives SIGTERM is never sent SIGKILL here. The callers kill the child itself.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", "--", &format!("-{pid}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// Kills the program's whole group when dropped, so a gateway the scenario started under
+/// `uv run` does not outlive the runner (`kill_on_drop` kills only the child).
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    pid: u32,
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        kill_process_group(self.pid);
+    }
 }
 
 fn forward_output(child: &mut Child, case: &CasePath) -> Lines {
@@ -422,21 +673,45 @@ impl Drop for Lines {
 }
 
 async fn wait_program(child: &mut Child) -> Result<(), CaptureError> {
-    match tokio::time::timeout(PROGRAM_TIMEOUT, child.wait()).await {
-        Ok(Ok(status)) if status.success() => Ok(()),
-        Ok(Ok(status)) => Err(CaptureError::ProgramFailed {
-            code: status.code(),
-        }),
-        Ok(Err(source)) => Err(CaptureError::Process {
-            step: "wait for the program",
-            source,
-        }),
-        Err(_elapsed) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            Err(CaptureError::ProgramTimeout)
-        }
+    // The program runs in its own process group, so the terminal's Ctrl-C no
+    // longer reaches it: the runner catches it here, kills the program, and
+    // fails the case instead of leaving the group behind.
+    tokio::select! {
+        waited = tokio::time::timeout(PROGRAM_TIMEOUT, child.wait()) => match waited {
+            Ok(Ok(status)) if status.success() => Ok(()),
+            Ok(Ok(status)) => Err(CaptureError::ProgramFailed {
+                code: status.code(),
+            }),
+            Ok(Err(source)) => Err(CaptureError::Process {
+                step: "wait for the program",
+                source,
+            }),
+            Err(_elapsed) => {
+                kill_program(child).await;
+                Err(CaptureError::ProgramTimeout)
+            }
+        },
+        interrupted = tokio::signal::ctrl_c() => match interrupted {
+            Ok(()) => {
+                kill_program(child).await;
+                Err(CaptureError::Interrupted)
+            }
+            Err(source) => Err(CaptureError::Process {
+                step: "listen for Ctrl-C",
+                source,
+            }),
+        },
     }
+}
+
+/// Kills the program's whole group, then the child, and reaps it.
+async fn kill_program(child: &mut Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        kill_process_group(pid);
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 }
 
 fn collect(
@@ -542,11 +817,13 @@ fn process(
         &scenario.timestamp_attributes,
         &scenario.span_names,
         &scenario.volatile_attributes,
+        &scenario.volatile_name_prefixes,
     )?;
     scrub(
         &mut request,
         &ScrubContext {
-            provider: provider(scenario)?,
+            provider: provider(scenario),
+            mock_host: scenario.mock_host.clone(),
             mock_port,
             receiver_port,
             home: home_dir()?,
@@ -557,14 +834,15 @@ fn process(
     Ok(request)
 }
 
-fn provider(scenario: &Scenario) -> Result<Provider, CaptureError> {
-    match scenario.turns.first() {
-        Some(turn) => Ok(turn.api.provider()),
-        None => Err(CaptureError::ScenarioInvalid {
-            case: scenario.case.to_string(),
-            reason: "turns must be non-empty".to_owned(),
-        }),
-    }
+/// Provider whose real host replaces the mock address in the scrub.
+///
+/// A scenario without turns sends no request to the mock, so no mock address can appear
+/// and the fallback host is never written.
+fn provider(scenario: &Scenario) -> Provider {
+    scenario
+        .turns
+        .first()
+        .map_or(Provider::OpenAi, |turn| turn.api.provider())
 }
 
 fn ingest_nanos(scenario: &Scenario) -> Result<i64, CaptureError> {
@@ -783,11 +1061,18 @@ fn json_differences(
     let mut produced_input = produced_input.clone();
     mask_captured_at(&mut committed_case);
     mask_captured_at(&mut produced_case);
-    sort_resource_attributes(&mut committed_input);
-    sort_resource_attributes(&mut produced_input);
+    sort_attribute_arrays(&mut committed_input);
+    sort_attribute_arrays(&mut produced_input);
     let keys = attribute_keys(scenario);
     mask_tree(&mut committed_input, &keys);
     mask_tree(&mut produced_input, &keys);
+    if scenario.unordered_spans {
+        // After masking, so the sort key holds no time or timing value.
+        sort_spans(&mut committed_input);
+        sort_spans(&mut produced_input);
+        label_span_ids(&mut committed_input);
+        label_span_ids(&mut produced_input);
+    }
     let mut paths = Vec::new();
     diff("case.json", "", &committed_case, &produced_case, &mut paths);
     diff(
@@ -818,26 +1103,176 @@ fn mask_captured_at(value: &mut Value) {
     }
 }
 
-/// Sorts each `resourceSpans[*].resource.attributes` array by `key`, so that the
-/// order an exporter writes its resource attributes in is not a difference.
+/// Sorts every `attributes` array by `key` — each resource's, and every span's,
+/// event's and link's — so that the order an exporter writes its attributes in
+/// (Bifrost's Go SDK varies it per run) is not a difference.
 /// The sort is stable, so duplicate keys keep their order.
-fn sort_resource_attributes(value: &mut Value) {
+fn sort_attribute_arrays(value: &mut Value) {
     let Some(resource_spans) = value.get_mut("resourceSpans").and_then(Value::as_array_mut) else {
         return;
     };
     for resource_span in resource_spans {
-        let Some(attributes) = resource_span
+        if let Some(attributes) = resource_span
             .pointer_mut("/resource/attributes")
+            .and_then(Value::as_array_mut)
+        {
+            sort_by_key(attributes);
+        }
+        let Some(scope_spans) = resource_span
+            .pointer_mut("/scopeSpans")
             .and_then(Value::as_array_mut)
         else {
             continue;
         };
-        attributes.sort_by(|left, right| {
-            let left = left.get("key").and_then(Value::as_str);
-            let right = right.get("key").and_then(Value::as_str);
-            left.cmp(&right)
-        });
+        for scope_span in scope_spans {
+            let Some(spans) = scope_span.get_mut("spans").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for span in spans {
+                if let Some(attributes) = span.get_mut("attributes").and_then(Value::as_array_mut) {
+                    sort_by_key(attributes);
+                }
+                for field in ["events", "links"] {
+                    let Some(items) = span.get_mut(field).and_then(Value::as_array_mut) else {
+                        continue;
+                    };
+                    for item in items {
+                        if let Some(attributes) =
+                            item.get_mut("attributes").and_then(Value::as_array_mut)
+                        {
+                            sort_by_key(attributes);
+                        }
+                    }
+                }
+            }
+        }
     }
+}
+
+/// Every span of the document, in document order: resources, then scopes, then spans.
+fn spans_mut(value: &mut Value) -> Vec<&mut Value> {
+    let mut spans = Vec::new();
+    let Some(resource_spans) = value.get_mut("resourceSpans").and_then(Value::as_array_mut) else {
+        return spans;
+    };
+    for resource_span in resource_spans {
+        let Some(scope_spans) = resource_span
+            .pointer_mut("/scopeSpans")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for scope_span in scope_spans {
+            let Some(items) = scope_span.get_mut("spans").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            spans.extend(items.iter_mut());
+        }
+    }
+    spans
+}
+
+/// For a case whose span ids change between runs (`unordered_spans`), replaces each span's
+/// `spanId` with `span-<index>`, its index in [`spans_mut`]'s order after [`sort_spans`]. Each
+/// `parentSpanId` and each link's `spanId` becomes the target's placeholder through the same
+/// map. A span without a parent (absent, null or empty) gets null. A parent id that no span of
+/// the document has stays as it is, so the check still reports it; a link to such an id takes
+/// a numbered external label (`external-0`, `external-1`, …, one per distinct target in
+/// first-seen order), because links point at spans an export can leave out (`span_names`
+/// filters them away), which is not a difference. A re-parented span or a link that changes
+/// target differs.
+fn label_span_ids(value: &mut Value) {
+    let mut spans = spans_mut(value);
+    let labels: HashMap<String, String> = spans
+        .iter()
+        .enumerate()
+        .filter_map(|(index, span)| {
+            let id = span.get("spanId").and_then(Value::as_str)?;
+            Some((id.to_owned(), format!("span-{index}")))
+        })
+        .collect();
+    let mut external_labels: HashMap<String, String> = HashMap::new();
+    for (index, span) in spans.iter_mut().enumerate() {
+        if let Some(id) = span.get_mut("spanId") {
+            *id = Value::String(format!("span-{index}"));
+        }
+        if let Some(parent) = span.get_mut("parentSpanId") {
+            *parent = match parent.as_str() {
+                None | Some("") => Value::Null,
+                Some(id) => labels
+                    .get(id)
+                    .map_or_else(|| parent.clone(), |label| Value::String(label.clone())),
+            };
+        }
+        if let Some(links) = span.get_mut("links").and_then(Value::as_array_mut) {
+            for link in links {
+                if let Some(id) = link.get_mut("spanId") {
+                    *id = match id.as_str() {
+                        None | Some("") => id.clone(),
+                        Some(id) => labels.get(id).map_or_else(
+                            || {
+                                let next = external_labels.len();
+                                Value::String(
+                                    external_labels
+                                        .entry(id.to_owned())
+                                        .or_insert_with(|| {
+                                            format!("{EXTERNAL_SPAN_LABEL_PREFIX}{next}")
+                                        })
+                                        .clone(),
+                                )
+                            },
+                            |label| Value::String(label.clone()),
+                        ),
+                    };
+                }
+            }
+        }
+    }
+}
+
+/// Sorts every scope's `spans` array by name, then by the span's canonical JSON without its
+/// `spanId` and `parentSpanId` (after masking). Spans that run at the same time can end in
+/// either order (Langflow runs two components at once), so the order is not a difference; a
+/// changed span still is.
+fn sort_spans(value: &mut Value) {
+    let Some(resource_spans) = value.get_mut("resourceSpans").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for resource_span in resource_spans {
+        let Some(scope_spans) = resource_span
+            .pointer_mut("/scopeSpans")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for scope_span in scope_spans {
+            let Some(spans) = scope_span.get_mut("spans").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            spans.sort_by_cached_key(|span| {
+                let name = span
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let mut without_ids = span.clone();
+                if let Some(object) = without_ids.as_object_mut() {
+                    object.remove("spanId");
+                    object.remove("parentSpanId");
+                }
+                (name, without_ids.to_string())
+            });
+        }
+    }
+}
+
+/// Sorts one `attributes` array by its entries' `key`.
+fn sort_by_key(attributes: &mut [Value]) {
+    attributes.sort_by(|left, right| {
+        let left = left.get("key").and_then(Value::as_str);
+        let right = right.get("key").and_then(Value::as_str);
+        left.cmp(&right)
+    });
 }
 
 fn mask_tree(value: &mut Value, keys: &HashSet<&str>) {
@@ -970,6 +1405,8 @@ mod tests {
             .join(match language {
                 Language::Python => "py",
                 Language::Typescript => "ts",
+                Language::Java => "java",
+                Language::Dotnet => "dotnet",
             })
             .join("scenarios")
             .join(group)
@@ -1061,7 +1498,7 @@ mod tests {
         let found = discover(&tmp.0).unwrap();
         let labels: Vec<_> = found
             .iter()
-            .map(|(case, language, _)| (case.to_string(), *language))
+            .map(|found| (found.case.to_string(), found.language))
             .collect();
         assert_eq!(
             labels,
@@ -1074,8 +1511,84 @@ mod tests {
         let error = discover(&tmp.0).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "case genai/alpha is in both the Python and TypeScript scenarios"
+            "case genai/alpha is defined in more than one scenario root"
         );
+    }
+
+    fn write_env_scenario(root: &Path, env: &str, group: &str, case: &str, project: bool) {
+        let env_dir = root.join("tools/capture/envs").join(env);
+        let dir = env_dir.join("scenarios").join(group).join(case);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("scenario.json"), "{}\n").unwrap();
+        if project {
+            fs::write(env_dir.join("pyproject.toml"), "[project]\n").unwrap();
+        }
+    }
+
+    #[test]
+    fn discover_finds_environment_scenarios_with_their_environment() {
+        let tmp = Tmp::new("discover-env");
+        write_env_scenario(&tmp.0, "x", "genai", "zeta", true);
+        write_scenario(&tmp.0, Language::Python, "genai", "alpha");
+        write_env_scenario(&tmp.0, "y", "genai", "mid", true);
+        let found = discover(&tmp.0).unwrap();
+        let labels: Vec<_> = found
+            .iter()
+            .map(|found| (found.case.to_string(), found.language, found.env.as_deref()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                ("genai/alpha".to_owned(), Language::Python, None),
+                ("genai/mid".to_owned(), Language::Python, Some("y")),
+                ("genai/zeta".to_owned(), Language::Python, Some("x")),
+            ]
+        );
+        assert_eq!(
+            found[1].dir,
+            tmp.0.join("tools/capture/envs/y/scenarios/genai/mid")
+        );
+    }
+
+    #[test]
+    fn discover_rejects_a_case_in_an_environment_and_the_python_root() {
+        let tmp = Tmp::new("discover-env-dup-py");
+        write_scenario(&tmp.0, Language::Python, "genai", "alpha");
+        write_env_scenario(&tmp.0, "x", "genai", "alpha", true);
+        let error = discover(&tmp.0).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "case genai/alpha is defined in more than one scenario root"
+        );
+    }
+
+    #[test]
+    fn discover_rejects_a_case_in_two_environments() {
+        let tmp = Tmp::new("discover-env-dup-env");
+        write_env_scenario(&tmp.0, "x", "genai", "alpha", true);
+        write_env_scenario(&tmp.0, "y", "genai", "alpha", true);
+        let error = discover(&tmp.0).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "case genai/alpha is defined in more than one scenario root"
+        );
+    }
+
+    #[test]
+    fn discover_rejects_an_environment_without_a_pyproject() {
+        let tmp = Tmp::new("discover-env-project");
+        write_env_scenario(&tmp.0, "x", "genai", "alpha", false);
+        let error = discover(&tmp.0).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("pyproject.toml"), "{text}");
+        assert!(text.contains("envs/x"), "{text}");
+    }
+
+    #[test]
+    fn discover_ignores_an_environment_without_scenarios() {
+        let tmp = Tmp::new("discover-env-bare");
+        fs::create_dir_all(tmp.0.join("tools/capture/envs/bare")).unwrap();
+        assert!(discover(&tmp.0).unwrap().is_empty());
     }
 
     #[test]
@@ -1086,8 +1599,42 @@ mod tests {
         write_scenario(&tmp.0, Language::Typescript, "openinference", "chat-tool");
         let found = discover(&tmp.0).unwrap();
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].1, Language::Typescript);
-        assert_eq!(found[0].0.to_string(), "openinference/chat-tool");
+        assert_eq!(found[0].language, Language::Typescript);
+        assert_eq!(found[0].env, None);
+        assert_eq!(found[0].case.to_string(), "openinference/chat-tool");
+    }
+
+    #[test]
+    fn discover_reads_java_and_dotnet_scenarios() {
+        let tmp = Tmp::new("discover-jvm-dotnet");
+        write_scenario(&tmp.0, Language::Java, "genai", "koog-agent-tool");
+        write_scenario(
+            &tmp.0,
+            Language::Dotnet,
+            "genai",
+            "extensions-ai-dotnet-tool",
+        );
+        let found = discover(&tmp.0).unwrap();
+        let labels: Vec<_> = found
+            .iter()
+            .map(|found| (found.case.to_string(), found.language, found.env.as_deref()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                (
+                    "genai/extensions-ai-dotnet-tool".to_owned(),
+                    Language::Dotnet,
+                    None
+                ),
+                ("genai/koog-agent-tool".to_owned(), Language::Java, None),
+            ]
+        );
+        assert_eq!(
+            found[1].dir,
+            tmp.0
+                .join("tools/capture/java/scenarios/genai/koog-agent-tool")
+        );
     }
 
     #[test]
@@ -1101,7 +1648,7 @@ mod tests {
     #[test]
     fn program_commands_match_the_plan() {
         assert_eq!(
-            Program::python(Path::new("/repo")).argv,
+            Program::python(Path::new("/repo"), None).argv,
             [
                 "uv",
                 "run",
@@ -1114,8 +1661,189 @@ mod tests {
         );
         assert_eq!(Program::typescript().argv, ["node", "main.ts"]);
         assert_eq!(
-            Program::for_language(Path::new("/repo"), Language::Typescript).argv,
+            Program::for_language(Path::new("/repo"), Language::Typescript, None).argv,
             ["node", "main.ts"]
+        );
+        assert_eq!(
+            Program::for_language(Path::new("/repo"), Language::Python, None).argv,
+            [
+                "uv",
+                "run",
+                "--project",
+                "/repo/tools/capture/py",
+                "--frozen",
+                "python",
+                "main.py",
+            ]
+        );
+    }
+
+    #[test]
+    fn program_for_an_environment_runs_in_that_environment() {
+        assert_eq!(
+            Program::for_language(Path::new("/repo"), Language::Python, Some("mcp")).argv,
+            [
+                "uv",
+                "run",
+                "--project",
+                "/repo/tools/capture/envs/mcp",
+                "--frozen",
+                "python",
+                "main.py",
+            ]
+        );
+    }
+
+    #[test]
+    fn java_program_runs_the_args_file() {
+        assert_eq!(
+            Program::for_language(Path::new("/repo"), Language::Java, None).argv,
+            [
+                "/repo/target/capture-tools/jdk/21.0.13+9/bin/java",
+                "@target/capture.args",
+            ]
+        );
+    }
+
+    #[test]
+    fn dotnet_program_runs_the_built_dll() {
+        assert_eq!(
+            Program::for_language(Path::new("/repo"), Language::Dotnet, None).argv,
+            [
+                "/repo/target/capture-tools/dotnet/10.0.404/dotnet",
+                "bin/capture/Capture.dll",
+            ]
+        );
+    }
+
+    #[test]
+    fn check_tool_present_reports_the_missing_toolchain_and_build_output() {
+        let tmp = Tmp::new("tool-present");
+        let dir = tmp.0.join("scenario");
+        fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("dotnet");
+        let java = Program::argv(vec![
+            tool.to_string_lossy().into_owned(),
+            "@target/capture.args".to_owned(),
+        ]);
+        let dotnet = Program::argv(vec![
+            tool.to_string_lossy().into_owned(),
+            "bin/capture/Capture.dll".to_owned(),
+        ]);
+
+        // A missing toolchain comes first.
+        let error = check_tool_present(&java, &dir, Language::Java).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{} is missing: run just capture-tools",
+                dir.join("dotnet").display()
+            )
+        );
+
+        // With the toolchain in place, the missing build output is the failure.
+        fs::write(&tool, b"").unwrap();
+        let error = check_tool_present(&java, &dir, Language::Java).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{} is missing: run just capture-tools",
+                dir.join("target/capture.args").display()
+            )
+        );
+        let error = check_tool_present(&dotnet, &dir, Language::Dotnet).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{} is missing: run just capture-tools",
+                dir.join("bin/capture/Capture.dll").display()
+            )
+        );
+
+        // Both present: no error, for either language.
+        fs::create_dir_all(dir.join("target")).unwrap();
+        fs::write(
+            dir.join("target/capture.args"),
+            b"-cp target/classes capture.Main\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("bin/capture")).unwrap();
+        fs::write(dir.join("bin/capture/Capture.dll"), b"").unwrap();
+        check_tool_present(&java, &dir, Language::Java).unwrap();
+        check_tool_present(&dotnet, &dir, Language::Dotnet).unwrap();
+    }
+
+    /// Spawns `sh -c "sleep 60 & echo $!; wait"` in its own process group and returns the
+    /// child with the grandchild's pid (the first stdout line).
+    #[cfg(unix)]
+    async fn spawn_sleeping_group() -> (Child, u32) {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 60 & echo $!; wait"])
+            .process_group(0)
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut stdout)
+            .read_line(&mut line)
+            .await
+            .unwrap();
+        let grandchild: u32 = line.trim().parse().unwrap();
+        (child, grandchild)
+    }
+
+    /// True once `/proc/<pid>` is gone or its process is a zombie (`Z`): the process died.
+    /// `/proc/<pid>/stat` is `<pid> (<comm>) <state> …`; the state follows the last `)`.
+    #[cfg(target_os = "linux")]
+    async fn gone_within(pid: u32) -> bool {
+        for _ in 0..50 {
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                return true;
+            };
+            if stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.trim_start().chars().next())
+                == Some('Z')
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kill_process_group_stops_grandchildren() {
+        let (mut child, grandchild) = spawn_sleeping_group().await;
+        kill_process_group(child.id().unwrap());
+        let waited = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        assert!(waited.is_ok(), "the group leader did not exit within 5 s");
+        waited.unwrap().unwrap();
+        #[cfg(target_os = "linux")]
+        assert!(
+            gone_within(grandchild).await,
+            "grandchild {grandchild} survived the group kill"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_group_guard_kills_the_group_on_drop() {
+        let (mut child, grandchild) = spawn_sleeping_group().await;
+        drop(ProcessGroupGuard {
+            pid: child.id().unwrap(),
+        });
+        let waited = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        assert!(waited.is_ok(), "the group leader did not exit within 5 s");
+        waited.unwrap().unwrap();
+        #[cfg(target_os = "linux")]
+        assert!(
+            gone_within(grandchild).await,
+            "grandchild {grandchild} survived the guard's drop"
         );
     }
 
@@ -1136,7 +1864,16 @@ mod tests {
         parent.insert("OTEL_TRACES_SAMPLER".to_owned(), "always_off".to_owned());
         parent.insert("UNRELATED".to_owned(), "nope".to_owned());
         let scenario = scenario(json!({"OTEL_SERVICE_NAME": "from-scenario"}), None);
-        let env = program_env(&parent, &scenario, 40123, 40124, "/tmp/meta.json");
+        let env = program_env(
+            &parent,
+            &scenario,
+            Path::new("/repo"),
+            40123,
+            40124,
+            "/tmp/meta.json",
+            Language::Python,
+            Path::new("/tmp/cetra-capture-scratch"),
+        );
         assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
         assert_eq!(
             env.get("HOME").map(String::as_str),
@@ -1153,6 +1890,26 @@ mod tests {
         assert_eq!(
             env.get("CETRA_CAPTURE_MOCK_URL").map(String::as_str),
             Some("http://127.0.0.1:40123")
+        );
+        let mut second = scenario;
+        second.mock_host = "127.0.0.2".to_owned();
+        let env = program_env(
+            &parent,
+            &second,
+            Path::new("/repo"),
+            40123,
+            40124,
+            "/tmp/meta.json",
+            Language::Python,
+            Path::new("/tmp/cetra-capture-scratch"),
+        );
+        assert_eq!(
+            env.get("CETRA_CAPTURE_MOCK_URL").map(String::as_str),
+            Some("http://127.0.0.2:40123")
+        );
+        assert_eq!(
+            env.get("CETRA_CAPTURE_OTLP_ENDPOINT").map(String::as_str),
+            Some("http://127.0.0.1:40124/v1/traces")
         );
         assert_eq!(
             env.get("CETRA_CAPTURE_OTLP_ENDPOINT").map(String::as_str),
@@ -1174,6 +1931,10 @@ mod tests {
         assert_eq!(
             env.get("CETRA_CAPTURE_CASE").map(String::as_str),
             Some("genai/alpha")
+        );
+        assert_eq!(
+            env.get("CETRA_CAPTURE_TOOLS").map(String::as_str),
+            Some("/repo/target/capture-tools")
         );
         for key in [
             "OPENAI_API_KEY",
@@ -1200,13 +1961,92 @@ mod tests {
             env.get("OTEL_SERVICE_NAME").map(String::as_str),
             Some("from-scenario")
         );
-        assert_eq!(env.len(), 21);
+        assert_eq!(env.len(), 22);
         assert!(!env.contains_key("AWS_SECRET_ACCESS_KEY"));
         assert!(!env.contains_key("UNRELATED"));
         let rendered = format!("{env:?}");
         assert!(!rendered.contains("sk-parent-secret"));
         assert!(!rendered.contains("aws-parent-secret"));
         assert!(!rendered.contains("hello"));
+    }
+
+    #[test]
+    fn program_env_sets_the_java_and_dotnet_variables() {
+        let parent = HashMap::new();
+        let scenario = scenario(json!({}), None);
+        let scratch = Path::new("/tmp/cetra-capture-scratch-case");
+        let java = program_env(
+            &parent,
+            &scenario,
+            Path::new("/repo"),
+            40123,
+            40124,
+            "/tmp/meta.json",
+            Language::Java,
+            scratch,
+        );
+        assert_eq!(
+            java.get("JAVA_HOME").map(String::as_str),
+            Some("/repo/target/capture-tools/jdk/21.0.13+9")
+        );
+        for key in [
+            "DOTNET_ROOT",
+            "DOTNET_CLI_TELEMETRY_OPTOUT",
+            "DOTNET_NOLOGO",
+            "DOTNET_CLI_HOME",
+        ] {
+            assert!(!java.contains_key(key), "the java env must not set {key}");
+        }
+        let dotnet = program_env(
+            &parent,
+            &scenario,
+            Path::new("/repo"),
+            40123,
+            40124,
+            "/tmp/meta.json",
+            Language::Dotnet,
+            scratch,
+        );
+        assert_eq!(
+            dotnet.get("DOTNET_ROOT").map(String::as_str),
+            Some("/repo/target/capture-tools/dotnet/10.0.404")
+        );
+        assert_eq!(
+            dotnet
+                .get("DOTNET_CLI_TELEMETRY_OPTOUT")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(dotnet.get("DOTNET_NOLOGO").map(String::as_str), Some("1"));
+        assert_eq!(
+            dotnet.get("DOTNET_CLI_HOME").map(String::as_str),
+            Some("/tmp/cetra-capture-scratch-case")
+        );
+        assert!(!dotnet.contains_key("JAVA_HOME"));
+        for language in [Language::Python, Language::Typescript] {
+            let env = program_env(
+                &parent,
+                &scenario,
+                Path::new("/repo"),
+                40123,
+                40124,
+                "/tmp/meta.json",
+                language,
+                scratch,
+            );
+            for key in [
+                "JAVA_HOME",
+                "DOTNET_ROOT",
+                "DOTNET_CLI_TELEMETRY_OPTOUT",
+                "DOTNET_NOLOGO",
+                "DOTNET_CLI_HOME",
+            ] {
+                assert!(
+                    !env.contains_key(key),
+                    "the {language:?} env must not set {key}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1283,7 +2123,7 @@ mod tests {
             paths,
             vec![
                 "case.json: description".to_owned(),
-                "input.json: resourceSpans[0].scopeSpans[0].spans[0].attributes[1].value.stringValue".to_owned(),
+                "input.json: resourceSpans[0].scopeSpans[0].spans[0].attributes[2].value.stringValue".to_owned(),
                 "input.json: resourceSpans[0].scopeSpans[0].spans[0].name".to_owned(),
             ]
         );
@@ -1321,6 +2161,202 @@ mod tests {
             paths,
             vec![
                 "input.json: resourceSpans[0].resource.attributes[1].value.stringValue".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn check_ignores_span_order() {
+        let default = scenario(json!({}), None);
+        let mut scenario = scenario(json!({}), None);
+        let mut committed_input = input_export("chat", "100", "200", "150", "9", "gpt", "t0");
+        let other = input_export("tool", "300", "400", "350", "2", "gpt", "t1");
+        let other_spans = other["resourceSpans"][0]["scopeSpans"][0]["spans"].clone();
+        committed_input["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array_mut()
+            .expect("spans are an array")
+            .extend(other_spans.as_array().expect("spans are an array").clone());
+        // The same two spans, the other way round: a run that ended the spans in another order.
+        let mut produced_input = committed_input.clone();
+        produced_input["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array_mut()
+            .expect("spans are an array")
+            .reverse();
+        let case = case_file("Two spans.", "2026-01-01T00:00:00Z");
+        // Without unordered_spans the order is a difference.
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &default);
+        assert!(!paths.is_empty(), "span order is checked by default");
+
+        scenario.unordered_spans = true;
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &scenario);
+        assert!(paths.is_empty(), "{paths:?}");
+
+        // A changed span is still reported, wherever it sits after sorting.
+        produced_input["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"][1]["value"]
+            ["stringValue"] = json!("changed");
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &scenario);
+        assert!(!paths.is_empty(), "a changed span must be reported");
+    }
+
+    #[test]
+    fn unordered_spans_mask_span_ids_in_the_check() {
+        let mut scenario = scenario(json!({}), None);
+        let mut committed_input = input_export("chat", "100", "200", "150", "9", "gpt", "t0");
+        committed_input["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["spanId"] = json!("ab");
+        let mut produced_input = committed_input.clone();
+        produced_input["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["spanId"] = json!("9f");
+        let case = case_file("A chat turn.", "2026-01-01T00:00:00Z");
+
+        // Default: a changed span id is a difference.
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &scenario);
+        assert!(
+            !paths.is_empty(),
+            "a changed span id must be reported by default"
+        );
+
+        // unordered_spans: span ids are replaced by placeholders, so the same spans with other ids compare equal.
+        scenario.unordered_spans = true;
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &scenario);
+        assert!(paths.is_empty(), "{paths:?}");
+    }
+
+    #[test]
+    fn unordered_spans_still_report_a_changed_parent() {
+        let mut scenario = scenario(json!({}), None);
+        scenario.unordered_spans = true;
+        let mut committed_input = input_export("chat", "100", "200", "150", "9", "gpt", "t0");
+        let tool = input_export("tool", "300", "400", "350", "2", "gpt", "t1");
+        let tool_span = tool["resourceSpans"][0]["scopeSpans"][0]["spans"][0].clone();
+        committed_input["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array_mut()
+            .expect("spans are an array")
+            .push(tool_span);
+        let spans = |input: &mut Value| {
+            let spans = input["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                .as_array_mut()
+                .expect("spans are an array");
+            spans[0]["spanId"] = json!("aa");
+            spans[1]["spanId"] = json!("bb");
+            spans[1]["parentSpanId"] = json!("aa");
+        };
+        spans(&mut committed_input);
+        let case = case_file("Two spans.", "2026-01-01T00:00:00Z");
+
+        // The same tree with other ids, the spans in the other order: equal.
+        let mut renamed = committed_input.clone();
+        renamed["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array_mut()
+            .expect("spans are an array")
+            .reverse();
+        let renamed_spans = renamed["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array_mut()
+            .expect("spans are an array");
+        renamed_spans[0]["spanId"] = json!("xx");
+        renamed_spans[0]["parentSpanId"] = json!("yy");
+        renamed_spans[1]["spanId"] = json!("yy");
+        let paths = json_differences(&case, &case, &committed_input, &renamed, &scenario);
+        assert!(paths.is_empty(), "{paths:?}");
+
+        // The tool span is re-parented to nothing: a difference.
+        let mut reparented = committed_input.clone();
+        reparented["resourceSpans"][0]["scopeSpans"][0]["spans"][1]
+            .as_object_mut()
+            .expect("span is an object")
+            .remove("parentSpanId");
+        let paths = json_differences(&case, &case, &committed_input, &reparented, &scenario);
+        assert!(!paths.is_empty(), "a changed parent must be reported");
+    }
+
+    #[test]
+    fn link_span_ids_are_labeled() {
+        let mut scenario = scenario(json!({}), None);
+        scenario.unordered_spans = true;
+        let mut committed_input = input_export("chat", "100", "200", "150", "9", "gpt", "t0");
+        let tool = input_export("tool", "300", "400", "350", "2", "gpt", "t1");
+        let tool_span = tool["resourceSpans"][0]["scopeSpans"][0]["spans"][0].clone();
+        let spans = committed_input["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array_mut()
+            .expect("spans are an array");
+        spans.push(tool_span);
+        spans[0]["spanId"] = json!("aa");
+        spans[1]["spanId"] = json!("bb");
+        spans[1]["parentSpanId"] = json!("aa");
+        // One link to a span of the request, one to an id no span has: span_names filtered
+        // the target out of the fixture.
+        spans[1]["links"] = json!([
+            {"spanId": "aa", "traceId": "111"},
+            {"spanId": "zz", "traceId": "222"},
+        ]);
+        let case = case_file("Two spans.", "2026-01-01T00:00:00Z");
+
+        // The same links with other span ids compare equal: a known target takes the
+        // target's placeholder, an unknown one a numbered external label.
+        let mut produced_input = committed_input.clone();
+        let produced_spans = produced_input["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array_mut()
+            .expect("spans are an array");
+        produced_spans[0]["spanId"] = json!("xx");
+        produced_spans[1]["spanId"] = json!("yy");
+        produced_spans[1]["parentSpanId"] = json!("xx");
+        produced_spans[1]["links"] = json!([
+            {"spanId": "xx", "traceId": "111"},
+            {"spanId": "other", "traceId": "222"},
+        ]);
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &scenario);
+        assert!(paths.is_empty(), "{paths:?}");
+
+        // A link that changes target is still a difference.
+        let mut retargeted = committed_input.clone();
+        let retargeted_spans = retargeted["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array_mut()
+            .expect("spans are an array");
+        retargeted_spans[1]["links"] = json!([
+            {"spanId": "bb", "traceId": "111"},
+            {"spanId": "zz", "traceId": "222"},
+        ]);
+        let paths = json_differences(&case, &case, &committed_input, &retargeted, &scenario);
+        assert!(!paths.is_empty(), "a retargeted link must be reported");
+    }
+
+    #[test]
+    fn two_unknown_link_targets_get_distinct_labels() {
+        let mut value = input_export("chat", "100", "200", "150", "9", "gpt", "t0");
+        value["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["spanId"] = json!("aa");
+        value["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["links"] = json!([
+            {"spanId": "xx", "traceId": "111"},
+            {"spanId": "yy", "traceId": "222"},
+            {"spanId": "xx", "traceId": "111"},
+        ]);
+        label_span_ids(&mut value);
+        let links = &value["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["links"];
+        assert_eq!(links[0]["spanId"], json!("external-0"));
+        assert_eq!(links[1]["spanId"], json!("external-1"));
+        // The same unknown target keeps the label it was first given.
+        assert_eq!(links[2]["spanId"], json!("external-0"));
+    }
+
+    #[test]
+    fn check_ignores_span_attribute_order() {
+        let scenario = scenario(json!({}), None);
+        let committed_input = input_export("chat", "100", "200", "150", "9", "gpt", "t0");
+        let mut produced_input = committed_input.clone();
+        // Bifrost writes its span attributes in a different order on every run.
+        produced_input["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"]
+            .as_array_mut()
+            .expect("span attributes are an array")
+            .reverse();
+        let case = case_file("A chat turn.", "2026-01-01T00:00:00Z");
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &scenario);
+        assert!(paths.is_empty(), "{paths:?}");
+
+        // A changed value is still reported, at its sorted position.
+        produced_input["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["attributes"][1]["value"]
+            ["stringValue"] = json!("gpt-other");
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &scenario);
+        assert_eq!(
+            paths,
+            vec![
+                "input.json: resourceSpans[0].scopeSpans[0].spans[0].attributes[2].value.stringValue".to_owned()
             ]
         );
     }

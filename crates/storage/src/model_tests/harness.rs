@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use bytesize::ByteSize;
-use datafusion::execution::context::{SessionConfig, SessionContext};
 use object_store::memory::InMemory;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
@@ -53,10 +52,10 @@ pub(super) fn model_config(dir: &std::path::Path) -> StorageConfig {
 }
 
 /// The sizes that make the model's files take both upload paths (R4.4): a file of
-/// more than 16 KiB is multipart, in parts of 8 KiB.
+/// more than 4 KiB is multipart, in parts of 2 KiB.
 pub(super) const MODEL_PUT_SIZES: PutSizes = PutSizes {
-    single_max: 16 * 1024,
-    part: 8 * 1024,
+    single_max: 4 * 1024,
+    part: 2 * 1024,
 };
 
 /// An in-memory object store with the model's sizes: a harness's `store` for a remote case.
@@ -65,10 +64,10 @@ pub(super) fn memory_store() -> (Arc<dyn ObjectStore>, PutSizes) {
 }
 
 /// The sizes of a run against a real bucket (R4.8). Every part but the last must be at least 5 MiB
-/// (`EntityTooSmall` otherwise), so the parts are 5 MiB; a file above 16 KiB is still multipart, as
+/// (`EntityTooSmall` otherwise), so the parts are 5 MiB; a file above 4 KiB is still multipart, as
 /// one last part.
 pub(super) const REMOTE_PUT_SIZES: PutSizes = PutSizes {
-    single_max: 16 * 1024,
+    single_max: 4 * 1024,
     part: 5 * 1024 * 1024,
 };
 
@@ -452,13 +451,24 @@ impl Harness {
     /// The bytes of `file`, read past the chaos store and the read cache: from
     /// `<dir>/objects/<path>` in local mode, from the inner store in S3 mode (R4.4).
     pub(super) fn object_bytes(&self, file: &FileMeta) -> Bytes {
+        self.raw_key_bytes(&file.path)
+    }
+
+    /// The `(pack_id, bytes)` of `file`'s sibling `.stpk` pack, if any.
+    pub(super) fn pack_bytes(&self, file: &FileMeta) -> Option<([u8; 16], Bytes)> {
+        file.pack
+            .as_ref()
+            .map(|pack| (pack.id, self.raw_key_bytes(&pack.path)))
+    }
+
+    fn raw_key_bytes(&self, path: &str) -> Bytes {
         match &self.remote {
             None => Bytes::from(
-                std::fs::read(self.data.join("objects").join(&file.path))
+                std::fs::read(self.data.join("objects").join(path))
                     .expect("read a catalogued object from disk"),
             ),
             Some(remote) => {
-                let key = ObjectPath::parse(&file.path).expect("a catalogued object path");
+                let key = ObjectPath::parse(path).expect("a catalogued object path");
                 self.block_on(async {
                     remote
                         .chaos
@@ -515,18 +525,11 @@ pub(super) fn visible_span_rows(harness: &Harness, project: ProjectId) -> usize 
             .query(project, crate::QueryOptions::new(None, None))
             .await
             .expect("query on the project");
-        let ctx =
-            SessionContext::new_with_config_rt(SessionConfig::new(), Arc::clone(&query.runtime));
-        ctx.register_table("spans_t", Arc::clone(&query.spans))
-            .expect("register spans of the project");
-        let batches = ctx
-            .sql("SELECT trace_id FROM spans_t")
-            .await
-            .expect("plan spans read of the project")
-            .collect()
+        let batches = query
+            .collect_raw_spans()
             .await
             .expect("run spans read of the project");
-        batches.iter().map(|batch| batch.num_rows()).sum()
+        batches.iter().map(cetra_column::Batch::num_rows).sum()
     })
 }
 

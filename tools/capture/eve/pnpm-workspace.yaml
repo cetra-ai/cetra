@@ -1,0 +1,11 @@
+packages: []
+
+# Minutes. D74/D117: no release younger than 7 days.
+minimumReleaseAge: 10080
+
+# The OpenTelemetry SDK packages @vercel/otel's peers pull in (sdk-trace, resources, metrics,
+# logs at 2.12.x) cap @opentelemetry/api below 1.10; pnpm's auto-installed peer would take
+# 1.10.0. One copy has to be the global tracer, pinned like tools/capture/ts does.
+# No package in this tree has an install script (IN9.0's store scan), so there is no allowBuilds.
+overrides:
+  "@opentelemetry/api": "1.9.0"

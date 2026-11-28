@@ -1,0 +1,380 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "python"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.45.2"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "mcp-python-sdk",
+            "version": "",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "a98511815ecacc7253468e6de435b1da",
+              "spanId": "b7f14481b9dd699a",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "MCP send server/discover",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590000000000",
+              "endTimeUnixNano": "1767225590490000000",
+              "attributes": [
+                {
+                  "key": "mcp.method.name",
+                  "value": {
+                    "stringValue": "server/discover"
+                  }
+                },
+                {
+                  "key": "jsonrpc.request.id",
+                  "value": {
+                    "stringValue": "1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "31c9773a6f6bc295bdfec6ff828731a6",
+              "spanId": "e7d68a56fb7d62fc",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "MCP send tools/call get_weather",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590493000000",
+              "endTimeUnixNano": "1767225590496000000",
+              "attributes": [
+                {
+                  "key": "mcp.method.name",
+                  "value": {
+                    "stringValue": "tools/call"
+                  }
+                },
+                {
+                  "key": "jsonrpc.request.id",
+                  "value": {
+                    "stringValue": "2"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ac7e9c1d89b0fc2e812058cb2e4770f9",
+              "spanId": "57675d2e99fc16ee",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "MCP send tools/list",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590497000000",
+              "endTimeUnixNano": "1767225590499000000",
+              "attributes": [
+                {
+                  "key": "mcp.method.name",
+                  "value": {
+                    "stringValue": "tools/list"
+                  }
+                },
+                {
+                  "key": "jsonrpc.request.id",
+                  "value": {
+                    "stringValue": "3"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "7e55d00159c9da0b3cf04f22bf543f9e",
+              "spanId": "60336d854610d7d1",
+              "traceState": "",
+              "parentSpanId": "",
+              "flags": 256,
+              "name": "MCP send tools/list",
+              "kind": 3,
+              "startTimeUnixNano": "1767225590529000000",
+              "endTimeUnixNano": "1767225590531000000",
+              "attributes": [
+                {
+                  "key": "mcp.method.name",
+                  "value": {
+                    "stringValue": "tools/list"
+                  }
+                },
+                {
+                  "key": "jsonrpc.request.id",
+                  "value": {
+                    "stringValue": "4"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    },
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "telemetry.sdk.language",
+            "value": {
+              "stringValue": "python"
+            }
+          },
+          {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
+            "key": "telemetry.sdk.version",
+            "value": {
+              "stringValue": "1.45.2"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "capture-app"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "mcp-python-sdk",
+            "version": "",
+            "attributes": [],
+            "droppedAttributesCount": 0
+          },
+          "spans": [
+            {
+              "traceId": "a98511815ecacc7253468e6de435b1da",
+              "spanId": "b7321d222c38039a",
+              "traceState": "",
+              "parentSpanId": "b7f14481b9dd699a",
+              "flags": 768,
+              "name": "server/discover",
+              "kind": 2,
+              "startTimeUnixNano": "1767225590488000000",
+              "endTimeUnixNano": "1767225590488000000",
+              "attributes": [
+                {
+                  "key": "mcp.method.name",
+                  "value": {
+                    "stringValue": "server/discover"
+                  }
+                },
+                {
+                  "key": "mcp.protocol.version",
+                  "value": {
+                    "stringValue": "2026-07-28"
+                  }
+                },
+                {
+                  "key": "jsonrpc.request.id",
+                  "value": {
+                    "stringValue": "1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "31c9773a6f6bc295bdfec6ff828731a6",
+              "spanId": "ea27a175449cc745",
+              "traceState": "",
+              "parentSpanId": "e7d68a56fb7d62fc",
+              "flags": 768,
+              "name": "tools/call get_weather",
+              "kind": 2,
+              "startTimeUnixNano": "1767225590493000000",
+              "endTimeUnixNano": "1767225590494000000",
+              "attributes": [
+                {
+                  "key": "mcp.method.name",
+                  "value": {
+                    "stringValue": "tools/call"
+                  }
+                },
+                {
+                  "key": "mcp.protocol.version",
+                  "value": {
+                    "stringValue": "2026-07-28"
+                  }
+                },
+                {
+                  "key": "jsonrpc.request.id",
+                  "value": {
+                    "stringValue": "2"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "get_weather"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "ac7e9c1d89b0fc2e812058cb2e4770f9",
+              "spanId": "6b97ea4e4de3c048",
+              "traceState": "",
+              "parentSpanId": "57675d2e99fc16ee",
+              "flags": 768,
+              "name": "tools/list",
+              "kind": 2,
+              "startTimeUnixNano": "1767225590498000000",
+              "endTimeUnixNano": "1767225590498000000",
+              "attributes": [
+                {
+                  "key": "mcp.method.name",
+                  "value": {
+                    "stringValue": "tools/list"
+                  }
+                },
+                {
+                  "key": "mcp.protocol.version",
+                  "value": {
+                    "stringValue": "2026-07-28"
+                  }
+                },
+                {
+                  "key": "jsonrpc.request.id",
+                  "value": {
+                    "stringValue": "3"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "7e55d00159c9da0b3cf04f22bf543f9e",
+              "spanId": "11d874ab5afd50de",
+              "traceState": "",
+              "parentSpanId": "60336d854610d7d1",
+              "flags": 768,
+              "name": "tools/list",
+              "kind": 2,
+              "startTimeUnixNano": "1767225590529000000",
+              "endTimeUnixNano": "1767225590530000000",
+              "attributes": [
+                {
+                  "key": "mcp.method.name",
+                  "value": {
+                    "stringValue": "tools/list"
+                  }
+                },
+                {
+                  "key": "mcp.protocol.version",
+                  "value": {
+                    "stringValue": "2026-07-28"
+                  }
+                },
+                {
+                  "key": "jsonrpc.request.id",
+                  "value": {
+                    "stringValue": "4"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            }
+          ],
+          "schemaUrl": ""
+        }
+      ],
+      "schemaUrl": ""
+    }
+  ]
+}

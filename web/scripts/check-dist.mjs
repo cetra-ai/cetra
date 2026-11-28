@@ -11,7 +11,7 @@ const needles = [
   "mulberry32",
   "EXAMPLE0EXAMPLE0",
   // The banner of the `demo` build (D-C-22).
-  "Demo, sample data",
+  "exploring a demo with sample data",
 ];
 
 let files = [];

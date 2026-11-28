@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "packageManager": "pnpm@11.28.10",
+  "dependencies": {
+    "promptfoo": "0.125.1"
+  }
+}

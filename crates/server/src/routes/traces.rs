@@ -13,7 +13,7 @@ use crate::api::common::{Page, TimeParam};
 use crate::api::convert;
 use crate::api::traces::{
     SpanDetail, SpanListParams, SpanSort, SpanSummary, TraceDetail, TraceDetailParams,
-    TraceListParams, TraceSort, TraceSummary, build_tree,
+    TraceListParams, TraceSort, TraceSummary, TraceTotals, TraceTotalsParams, build_tree,
 };
 use crate::auth::principal::Principal;
 use crate::auth::roles::ProjectPerm;
@@ -37,6 +37,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: get(list_traces),
+        },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/traces/totals",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(trace_totals),
         },
         RouteDef {
             method: Method::GET,
@@ -116,6 +126,37 @@ async fn list_traces(
     Ok(error::Json(Page {
         data,
         next_cursor: page.next_cursor,
+    }))
+}
+
+async fn trace_totals(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Query(params): error::Query<TraceTotalsParams>,
+) -> Result<error::Json<TraceTotals>, ApiError> {
+    check_search(params.search.as_deref())?;
+    let scope = list_scope(
+        params.from,
+        params.to,
+        params.include_eval,
+        params.include_experiments,
+    )?;
+    let deadline = Deadline::start();
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
+    let totals = storage::trace_totals(
+        &ctx,
+        storage::TraceTotalsRequest {
+            filter: params.filter.as_deref(),
+            search: params.search.as_deref(),
+            scope,
+            timeout: deadline.remaining()?,
+        },
+    )
+    .await?;
+    Ok(error::Json(TraceTotals {
+        trace_count: totals.trace_count,
+        error_trace_count: totals.error_trace_count,
+        cost_total: totals.cost_total,
     }))
 }
 
@@ -520,7 +561,7 @@ mod tests {
         span.resource_attributes
             .insert("host.name".to_owned(), "box".to_owned());
         span.conventions = vec![cetra_core::enums::Convention::Genai];
-        let batch = cetra_core::batch::spans_to_record_batch(&[span]).unwrap();
+        let batch = cetra_core::batch::spans_to_batch(&[span]).unwrap();
         app.state
             .storage
             .append_spans(seeded.project.id, batch)
@@ -704,5 +745,67 @@ mod tests {
             .send()
             .await;
         assert_eq!(free.status, StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn totals_cover_the_whole_list() {
+        let (app, seeded) = loaded().await;
+        for query in ["", "?include_eval=true", "?filter=status%20%3D%20'error'"] {
+            let (status, totals) = get_json(&app, &seeded, &format!("/traces/totals{query}")).await;
+            assert_eq!(status, StatusCode::OK, "{totals}");
+
+            // The list, with a limit that holds every trace of the example dataset.
+            let list_query = if query.is_empty() {
+                "?limit=1000".to_owned()
+            } else {
+                format!("{query}&limit=1000")
+            };
+            let (_, list) = get_json(&app, &seeded, &format!("/traces{list_query}")).await;
+            let rows = list["data"].as_array().unwrap();
+            assert!(!rows.is_empty(), "{query} matches no trace");
+
+            assert_eq!(totals["trace_count"], rows.len(), "{query}");
+            let errors = rows.iter().filter(|t| t["status"] == "error").count();
+            assert_eq!(totals["error_trace_count"], errors, "{query}");
+            let cost: f64 = rows
+                .iter()
+                .map(|t| t["cost_total"].as_f64().unwrap_or(0.0))
+                .sum();
+            let total = totals["cost_total"].as_f64().unwrap();
+            assert!((total - cost).abs() < 1e-12, "{query}: {total} vs {cost}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn totals_reject_bad_parameters() {
+        let (app, seeded) = loaded().await;
+        let path = format!("/api/v1/projects/{}/traces/totals", seeded.project.id);
+
+        let response = app
+            .request(Method::GET, &format!("{path}?filter=name%20%3D%20'x'%20)"))
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        let problem: Problem = response.problem();
+        assert_eq!(problem.errors[0].field, "filter");
+
+        // Sort and limit are list parameters, so they are unknown here.
+        let (status, body) = get_json(&app, &seeded, "/traces/totals?sort=cost_total").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let long = format!("?from=2000-01-01T00:00:00Z&search={}", "a".repeat(1025));
+        let (status, body) = get_json(&app, &seeded, &format!("/traces/totals{long}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["code"], "bad_request");
+
+        let (status, body) = get_json(
+            &app,
+            &seeded,
+            "/traces/totals?from=2026-01-02T00:00:00Z&to=2026-01-01T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["code"], "bad_request");
     }
 }

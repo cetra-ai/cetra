@@ -53,11 +53,11 @@
             "columns": [
               {
                 "name": "name",
-                "type": "VARCHAR"
+                "type": "string"
               },
               {
                 "name": "errors",
-                "type": "BIGINT"
+                "type": "integer"
               }
             ],
             "rows": [

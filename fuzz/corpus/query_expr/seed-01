@@ -1,0 +1,1 @@
+status = 'ok' AND duration_ns BETWEEN 10 AND 200 AND (environment IS DISTINCT FROM 'staging') AND metadata['channel'] = 'email'

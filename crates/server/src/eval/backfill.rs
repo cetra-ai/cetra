@@ -163,7 +163,7 @@ impl BackfillReadError {
     /// The error a failed backfill stores (§ Stored error strings).
     pub(crate) fn stored(&self) -> &'static str {
         match self {
-            Self::Query(QueryError::Busy) | Self::Run(RunError::Timeout) => {
+            Self::Query(QueryError::Busy) | Self::Run(RunError::Timeout | RunError::Busy) => {
                 ERROR_STORAGE_UNAVAILABLE
             }
             Self::Run(RunError::Invalid(_)) => ERROR_INVALID_FILTER,

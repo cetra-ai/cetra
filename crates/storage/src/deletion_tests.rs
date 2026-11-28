@@ -2,10 +2,8 @@
 //! `deletion_status` (M5.2, spec 03 §7).
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use arrow::array::{Array, RecordBatch};
 use bytesize::ByteSize;
 use cetra_core::ids::ProjectId;
 use cetra_core::score::ScoreTarget;
@@ -18,7 +16,9 @@ use crate::config::{FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageC
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::error::{CatalogError, DeletionError};
 use crate::hooks::HookPoint;
-use crate::test_support::{rows, score_row, score_rows, span_row, span_rows};
+use crate::test_support::{
+    object_rows, rows, score_row, score_rows, span_row, span_rows, trace_ids_of,
+};
 use crate::views::QueryContext;
 use crate::wal::Table;
 
@@ -70,47 +70,10 @@ async fn context(storage: &crate::Storage) -> QueryContext {
     .unwrap()
 }
 
-/// The first `i64` of the first row of `sql`.
+/// The first integer of the first row of `sql`.
 async fn scalar(storage: &crate::Storage, sql: &str) -> i64 {
-    let batches = rows(&context(storage).await, sql).await;
-    let column = batches[0]
-        .column(0)
-        .as_any()
-        .downcast_ref::<arrow::array::Int64Array>()
-        .unwrap();
-    column.value(0)
-}
-
-/// Every string cell of `sql`'s result, one per line (EXPLAIN plans).
-async fn text(storage: &crate::Storage, sql: &str) -> String {
-    let batches = rows(&context(storage).await, sql).await;
-    let mut text = String::new();
-    for batch in &batches {
-        for column in batch.columns() {
-            let Some(values) = column.as_any().downcast_ref::<arrow::array::StringArray>() else {
-                continue;
-            };
-            for index in 0..values.len() {
-                text.push_str(values.value(index));
-                text.push('\n');
-            }
-        }
-    }
-    text
-}
-
-/// `EXPLAIN` lines whose predicate names `ingest_time`: the tombstone filter.
-///
-/// DataFusion 55 pushes the gated file's `FilterExec` into the scan, so the
-/// predicate appears as `predicate=…` on the `DataSourceExec` line; the plain
-/// projection list alone does not count.
-fn ingest_time_filters(plan: &str) -> usize {
-    plan.lines()
-        .filter(|line| {
-            (line.contains("FilterExec") || line.contains("predicate="))
-                && line.contains("ingest_time")
-        })
-        .count()
+    let result = rows(&context(storage).await, sql).await;
+    result[0].values().next().unwrap().as_i64().unwrap()
 }
 
 async fn span_count(storage: &crate::Storage, trace: u16) -> i64 {
@@ -133,46 +96,15 @@ async fn trace_count(storage: &crate::Storage, trace: u16) -> i64 {
 
 /// The single flushed spans file of the project.
 async fn spans_file(storage: &crate::Storage) -> crate::catalog::FileMeta {
-    let query = storage
-        .query(project(), QueryOptions::new(None, None))
-        .await
-        .unwrap();
-    let files = query
-        .spans
-        .downcast_ref::<crate::query::SpansProvider>()
-        .unwrap()
-        .candidate_files(&[]);
+    let files = storage.catalog_files(Table::Spans);
     assert_eq!(files.len(), 1, "one flushed spans file");
-    let file = &*files[0];
-    file.clone()
+    files[0].as_ref().clone()
 }
 
 /// The raw 16-byte trace ids stored in one spans Parquet object.
 fn spans_trace_ids(dir: &Path, file: &crate::catalog::FileMeta) -> Vec<[u8; 16]> {
-    use arrow::array::Array;
-
-    let bytes = std::fs::read(dir.join("objects").join(&file.path)).unwrap();
-    let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-        bytes::Bytes::from(bytes),
-    )
-    .unwrap();
-    let schema = Arc::clone(builder.schema());
-    let batches: Vec<RecordBatch> = builder
-        .build()
-        .unwrap()
-        .map(|batch| batch.unwrap())
-        .collect();
-    let all = arrow::compute::concat_batches(&schema, &batches).unwrap();
-    let column = all
-        .column_by_name(cetra_core::schema::spans::TRACE_ID)
-        .unwrap();
-    let array = column
-        .as_any()
-        .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-        .unwrap();
-    (0..array.len())
-        .map(|row| <[u8; 16]>::try_from(array.value(row)).unwrap())
-        .collect()
+    let batch = object_rows(dir, file);
+    trace_ids_of(&batch)
 }
 
 /// Appends one span per `(trace, span)` plus a session-target score, then
@@ -338,7 +270,7 @@ async fn a_user_deletion_hides_user_rows_and_session_scores_only() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn explain_does_not_show_an_erased_users_identifiers() {
+async fn debug_does_not_show_an_erased_users_identifiers() {
     let dir = tempfile::tempdir().unwrap();
     let storage = flushed_with_score(&dir, &[(1, 0)]).await;
     storage
@@ -355,22 +287,26 @@ async fn explain_does_not_show_an_erased_users_identifiers() {
         .await
         .unwrap();
 
-    for table in ["spans", "scores"] {
-        let plan = text(&storage, &format!("EXPLAIN SELECT * FROM {table}")).await;
+    let query = storage
+        .query(project(), QueryOptions::new(None, None))
+        .await
+        .unwrap();
+    let engine = query.engine();
+    let ctx = QueryContext::new(query.clone(), None).unwrap();
+    let tombstones = storage.published.load().tombstones.for_project(project());
+    for debug in [
+        format!("{query:?}"),
+        format!("{ctx:?}"),
+        format!("{:?}", engine.spans),
+        format!("{:?}", engine.traces),
+        format!("{:?}", engine.scores),
+        format!("{tombstones:?}"),
+    ] {
         assert!(
-            plan.contains("user_id IN (<1 redacted>)"),
-            "the {table} plan shows the redacted term:\n{plan}"
-        );
-        assert!(
-            !plan.contains("erased@example.com") && !plan.contains("erased-session"),
-            "the {table} plan hides the identifiers:\n{plan}"
+            !debug.contains("erased@example.com") && !debug.contains("erased-session"),
+            "debug leaked erased identifier:\n{debug}"
         );
     }
-    let scores = text(&storage, "EXPLAIN SELECT * FROM scores").await;
-    assert!(
-        scores.contains("session_id IN (<1 redacted>)"),
-        "the scores plan redacts the session ids:\n{scores}"
-    );
     storage.shutdown().await.unwrap();
 }
 
@@ -383,32 +319,27 @@ async fn a_raised_file_escapes_the_tombstone_filter() {
         .await
         .unwrap();
 
-    let gated = text(&storage, "EXPLAIN SELECT * FROM spans").await;
-    assert!(
-        ingest_time_filters(&gated) > 0,
-        "before the raise the gated file is filtered:\n{gated}"
+    assert_eq!(
+        scalar(&storage, "SELECT count(*) AS n FROM spans").await,
+        0,
+        "before the raise the gated file is filtered"
     );
 
-    // The rewriter's bookkeeping (M5.4) raised to the known sequence; the test
-    // forces it to observe the plan change.
+    // Raising `deletions_applied_seq` without rewriting the file proves the
+    // scan skips tombstone filtering once the sequence covers the deletion.
     let file = spans_file(&storage).await.id;
     storage
         .commit_test_edit(&crate::catalog::CatalogEdit {
-            add: Vec::new(),
-            remove: Vec::new(),
-            flushed_seq: None,
-            sources: Vec::new(),
             raise: vec![(file, 1)],
-            quarantine: Vec::new(),
+            ..crate::catalog::CatalogEdit::default()
         })
         .await
         .unwrap();
 
-    let clean = text(&storage, "EXPLAIN SELECT * FROM spans").await;
     assert_eq!(
-        ingest_time_filters(&clean),
-        0,
-        "after the raise the clean file is not filtered:\n{clean}"
+        scalar(&storage, "SELECT count(*) AS n FROM spans").await,
+        1,
+        "after the raise the clean file is not filtered"
     );
     storage.shutdown().await.unwrap();
 }
@@ -443,15 +374,7 @@ async fn a_limit_over_clean_and_gated_sides_sits_above_the_union() {
         .unwrap();
 
     // Raise the file with no covered row: it becomes the clean side.
-    let query = storage
-        .query(project(), QueryOptions::new(None, None))
-        .await
-        .unwrap();
-    let files = query
-        .spans
-        .downcast_ref::<crate::query::SpansProvider>()
-        .unwrap()
-        .candidate_files(&[]);
+    let files = storage.catalog_files(Table::Spans);
     assert_eq!(files.len(), 2);
     let covered = *span_row(2, 0, 0, 0).trace_id.as_bytes();
     let clean = files
@@ -460,12 +383,8 @@ async fn a_limit_over_clean_and_gated_sides_sits_above_the_union() {
         .expect("one file holds no covered row");
     storage
         .commit_test_edit(&crate::catalog::CatalogEdit {
-            add: Vec::new(),
-            remove: Vec::new(),
-            flushed_seq: None,
-            sources: Vec::new(),
             raise: vec![(clean.id, 1)],
-            quarantine: Vec::new(),
+            ..crate::catalog::CatalogEdit::default()
         })
         .await
         .unwrap();
@@ -480,22 +399,15 @@ async fn a_limit_over_clean_and_gated_sides_sits_above_the_union() {
         "the limit returns exactly one row"
     );
     assert_eq!(scalar(&storage, "SELECT count(*) FROM spans").await, 2);
-    // DataFusion 55 fuses the `GlobalLimitExec` scan_union builds over the
-    // union into a `CoalescePartitionsExec: fetch=1` node; either name above
-    // the `UnionExec` is the limit applied after both sides.
-    let plan = text(&storage, "EXPLAIN SELECT span_id FROM spans LIMIT 1").await;
-    let lines: Vec<&str> = plan.lines().collect();
-    let union = lines
-        .iter()
-        .position(|line| line.contains("UnionExec"))
-        .expect("a union of the two file sides");
-    let limit_above_union = lines[..union].iter().any(|line| {
-        line.contains("GlobalLimitExec")
-            || (line.contains("CoalescePartitionsExec") && line.contains("fetch=1"))
-    });
-    assert!(
-        limit_above_union,
-        "the limit sits above the union, not on the clean side:\n{plan}"
+    assert_eq!(
+        rows(
+            &context(&storage).await,
+            "SELECT span_id FROM spans LIMIT 1"
+        )
+        .await
+        .len(),
+        1,
+        "LIMIT 1 returns one row across the union of clean and gated files"
     );
     storage.shutdown().await.unwrap();
 }
@@ -738,5 +650,278 @@ async fn a_reingested_trace_survives_another_pending_deletion() {
         .unwrap();
     assert_eq!(span_count(&storage, 1).await, 1);
     assert_eq!(trace_count(&storage, 1).await, 1, "so does the trace");
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explain_redacts_tombstone_pii_and_shows_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config_in(dir.path());
+    cfg.flush.max_age = Duration::from_millis(100);
+    let storage = crate::Storage::open(cfg).await.unwrap();
+
+    let mut span = span_row(1, 1, INGEST, INGEST);
+    span.user_id = Some("erased-alice@example.com".to_owned());
+    span.session_id = Some("erased-session-secret-01".to_owned());
+    let trace_hex = span.trace_id.to_hex();
+
+    let mut score = score_row(1, 1, INGEST, INGEST, INGEST, false, "quality");
+    score.user_id = Some("erased-alice@example.com".to_owned());
+    score.session_id = Some("erased-session-secret-01".to_owned());
+
+    storage
+        .append_spans(project(), span_rows(&[span.clone()]))
+        .await
+        .unwrap();
+    storage
+        .append_scores(project(), score_rows(&[score]))
+        .await
+        .unwrap();
+    // Wait briefly so spans/scores flush into Parquet files with `deletions_applied_seq == 0`.
+    wait_for_flush_commit(&storage, 1).await;
+
+    storage
+        .register_deletion(Deletion {
+            id: Uuid::now_v7(),
+            project: project(),
+            cutoff: INGEST + 1_000,
+            scope: DeletionScope::User {
+                user_id: "erased-alice@example.com".to_owned(),
+                trace_ids: vec![span.trace_id],
+                session_ids: vec!["erased-session-secret-01".to_owned()],
+            },
+        })
+        .await
+        .unwrap();
+
+    let ctx = context(&storage).await;
+    for table in ["spans", "traces", "scores"] {
+        let out = rows(&ctx, &format!("EXPLAIN SELECT * FROM {table}")).await;
+        let plan_text: String = out
+            .iter()
+            .filter_map(|r| r.get("plan").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan_text.contains("deletions=1"),
+            "EXPLAIN for {table} should include redacted deletions=1: {plan_text}"
+        );
+        assert!(
+            !plan_text.contains("erased-alice@example.com"),
+            "EXPLAIN for {table} leaked erased user_id: {plan_text}"
+        );
+        assert!(
+            !plan_text.contains("erased-session-secret-01"),
+            "EXPLAIN for {table} leaked erased session_id: {plan_text}"
+        );
+        assert!(
+            !plan_text.contains(&trace_hex),
+            "EXPLAIN for {table} leaked erased trace_id: {plan_text}"
+        );
+    }
+
+    storage.shutdown().await.unwrap();
+}
+
+/// Byte-level 0-byte GDPR proof across `.statam`, `.stpk`, and `<data_dir>/cache/` (`ReadCache`),
+/// verifying Decision 2A immediate cache eviction and streaming pack erasure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gdpr_erasure_purges_payload_from_statam_stpk_and_read_cache() {
+    use object_store::ObjectStoreExt;
+    use object_store::memory::InMemory;
+    use object_store::path::Path as ObjectPath;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let mut cfg = config_in(dir.path());
+    cfg.compaction.interval = Duration::from_secs(3_600);
+    cfg.compaction.l0_files = 2;
+    cfg.flush.max_age = Duration::from_secs(3_600);
+    cfg.query.read_cache_bytes = Some(ByteSize::mib(32));
+
+    let storage = crate::Storage::open_with_store(
+        cfg.clone(),
+        Arc::clone(&inner) as Arc<dyn object_store::ObjectStore>,
+        crate::objects::PutSizes::S3,
+    )
+    .await
+    .unwrap();
+
+    let erased_user = "erased-user-pii-9876543210";
+    let secret_erased = "GDPR_ERASED_USER_SECRET_TOKEN_9876543210";
+    let secret_kept = "GDPR_KEPT_USER_PAYLOAD_TOKEN_1122334455";
+    let mut s1 = span_row(1, 0, INGEST, INGEST);
+    s1.user_id = Some(erased_user.to_owned());
+    s1.input = Some(format!("{secret_erased} ").repeat(120));
+    s1.input_preview = Some(secret_erased.to_owned());
+    let mut s2 = span_row(2, 0, INGEST + 100, INGEST + 100);
+    s2.user_id = Some("kept-user".to_owned());
+    s2.input = Some(format!("{secret_kept} ").repeat(120));
+    s2.input_preview = Some(secret_kept.to_owned());
+
+    // Flush two L0 files, then compact to L1 so a sibling `.stpk` pack is created.
+    storage
+        .append_spans(project(), span_rows(&[s1]))
+        .await
+        .unwrap();
+    storage.flush_now(Duration::from_secs(10)).await.unwrap();
+    storage
+        .append_spans(project(), span_rows(&[s2]))
+        .await
+        .unwrap();
+    storage.flush_now(Duration::from_secs(10)).await.unwrap();
+
+    let comp = storage.compact(INGEST + 1_000).await.unwrap();
+    assert_eq!((comp.jobs, comp.failed), (1, 0), "{comp:?}");
+    let l1_files = storage.catalog_files(Table::Spans);
+    assert_eq!(l1_files.len(), 1);
+    assert_eq!(l1_files[0].level, 1);
+    assert!(
+        l1_files[0].pack.is_some(),
+        "L1 spans with >4 KiB payloads must own a sibling .stpk pack"
+    );
+
+    // Warm ReadCache for `spans` (`.statam` + `.stpk`) AND `traces` (`user_id` + `input_preview`)
+    // before GDPR deletion.
+    let before = rows(&context(&storage).await, "SELECT input FROM spans").await;
+    assert_eq!(before.len(), 2);
+    let traces_before = rows(
+        &context(&storage).await,
+        "SELECT user_id, input_preview FROM traces",
+    )
+    .await;
+    assert_eq!(traces_before.len(), 2);
+    assert!(
+        traces_before.iter().any(|r| {
+            r["user_id"].as_str() == Some(erased_user)
+                && r["input_preview"]
+                    .as_str()
+                    .is_some_and(|p| p.contains(secret_erased))
+        }),
+        "traces query before deletion must read erased user_id and input_preview"
+    );
+
+    let cache_dir = dir.path().join("cache");
+    let cached_before: Vec<std::ffi::OsString> = std::fs::read_dir(&cache_dir)
+        .expect("ReadCache directory must exist after warming spans + traces")
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert!(
+        cached_before.len() >= 3,
+        "expected spans .statam, .stpk, and traces .statam in ReadCache; got {cached_before:?}"
+    );
+
+    // Register user deletion and apply deletions (triggers streaming GDPR single-file rewrite + Decision 2A cache eviction).
+    storage
+        .register_deletion(Deletion {
+            id: Uuid::now_v7(),
+            project: project(),
+            cutoff: INGEST + 1_000,
+            scope: DeletionScope::User {
+                user_id: erased_user.to_owned(),
+                trace_ids: Vec::new(),
+                session_ids: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+    let del_report = storage.apply_deletions(INGEST + 2_000).await.unwrap();
+    assert_eq!(
+        (del_report.rewritten, del_report.applied, del_report.failed),
+        (1, 1, 0),
+        "{del_report:?}"
+    );
+
+    // Verify new active L1 file + sibling `.stpk` pack exist and contain ZERO bytes of `secret_erased`.
+    let after_files = storage.catalog_files(Table::Spans);
+    assert_eq!(after_files.len(), 1);
+    let active = &after_files[0];
+    assert_ne!(active.id, l1_files[0].id);
+    let statam_bytes = inner
+        .get(&ObjectPath::from(active.path.as_str()))
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert!(
+        !statam_bytes
+            .windows(secret_erased.len())
+            .any(|w| w == secret_erased.as_bytes()),
+        "erased secret leaked into rewritten .statam"
+    );
+    let new_pack = active
+        .pack
+        .as_ref()
+        .expect("kept user payload still lives in rewritten sibling .stpk pack");
+    let pack_bytes = inner
+        .get(&ObjectPath::from(new_pack.path.as_str()))
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert!(
+        !pack_bytes
+            .windows(secret_erased.len())
+            .any(|w| w == secret_erased.as_bytes()),
+        "erased secret leaked into rewritten .stpk"
+    );
+
+    // Verify every replaced ReadCache entry (spans `.statam`, `.stpk`, and `traces` `.statam`)
+    // was evicted immediately (Decision 2A / D-ST-3) and ZERO bytes of erased PII remain.
+    for old_name in &cached_before {
+        assert!(
+            !cache_dir.join(old_name).exists(),
+            "replaced ReadCache entry {:?} was not evicted",
+            old_name
+        );
+    }
+    if cache_dir.exists() {
+        let mut stack = vec![cache_dir];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d).unwrap() {
+                let p = entry.unwrap().path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    let data = std::fs::read(&p).unwrap();
+                    assert!(
+                        !data
+                            .windows(secret_erased.len())
+                            .any(|w| w == secret_erased.as_bytes()),
+                        "erased secret still present in ReadCache file {}",
+                        p.display()
+                    );
+                    assert!(
+                        !data
+                            .windows(erased_user.len())
+                            .any(|w| w == erased_user.as_bytes()),
+                        "erased user_id still present in ReadCache file {}",
+                        p.display()
+                    );
+                }
+            }
+        }
+    }
+
+    // Verify kept user's payload and trace summary are intact via SQL queries.
+    let after = rows(&context(&storage).await, "SELECT input FROM spans").await;
+    assert_eq!(after.len(), 1);
+    let input_val = after[0]["input"].as_str().unwrap();
+    assert!(input_val.contains(secret_kept));
+    assert!(!input_val.contains(secret_erased));
+    let traces_after = rows(
+        &context(&storage).await,
+        "SELECT user_id, input_preview FROM traces",
+    )
+    .await;
+    assert_eq!(traces_after.len(), 1);
+    assert_eq!(traces_after[0]["user_id"].as_str(), Some("kept-user"));
+    let preview_val = traces_after[0]["input_preview"].as_str().unwrap();
+    assert!(preview_val.contains(secret_kept));
+    assert!(!preview_val.contains(secret_erased));
+
     storage.shutdown().await.unwrap();
 }

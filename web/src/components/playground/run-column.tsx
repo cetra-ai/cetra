@@ -14,6 +14,7 @@ import {
 import { memo } from "react";
 import type { Schema } from "@/api/types";
 import { DisabledReason } from "@/components/disabled-reason";
+import { isPlaceholder } from "@/components/playground/message-editor";
 import { useProject } from "@/components/shell/project-context";
 import { MetricChip } from "@/components/trace/metric-chip";
 import { Badge } from "@/components/ui/badge";
@@ -30,7 +31,7 @@ import {
 } from "@/components/ui/select";
 import { prettyJson } from "@/lib/datasets";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
-import type { Column, Message, RunEvent } from "@/lib/playground";
+import type { Column, Entry, Message, RunEvent } from "@/lib/playground";
 
 type DoneData = Extract<RunEvent, { event: "done" }>["data"];
 type StreamError = Extract<RunEvent, { event: "error" }>["data"];
@@ -68,6 +69,9 @@ export function applyRunEvent(run: RunState, event: RunEvent): RunState {
   }
 }
 
+/** A version the column's select offers. */
+export type VersionOption = { version: number; labels: readonly string[] };
+
 type RunColumnProps = {
   /** 1-based position, for the accessible names. */
   number: number;
@@ -78,6 +82,12 @@ type RunColumnProps = {
   errors: Record<string, string>;
   /** Why Run is disabled, if it is. */
   runReason: string | undefined;
+  /** The source prompt's versions, newest first; `undefined` hides the select (no prompt source). */
+  versions: readonly VersionOption[] | undefined;
+  /** The pinned version's messages, once loaded; `undefined` for a draft column or while loading. */
+  template: readonly Entry[] | undefined;
+  /** Pins the column to a version, or back to the draft (`undefined`). */
+  onPickVersion: (id: string, version: number | undefined) => void;
   /** The run-all shortcut's label (`⌘↵` or `Ctrl+Enter`), shown before the first run. */
   shortcut: string;
   canRemove: boolean;
@@ -106,6 +116,22 @@ function endText(run: RunState): string {
   }
 }
 
+/** The select's text for a version: `v2`, or `v2 · latest, staging`. */
+export function versionLabel(option: VersionOption): string {
+  return option.labels.length === 0
+    ? `v${option.version}`
+    : `v${option.version} · ${option.labels.join(", ")}`;
+}
+
+/** The text of a template message: its text parts, one per line (prompt versions hold text only). */
+function templateText(message: Message): string {
+  return message.parts
+    .flatMap((part) =>
+      part.type === "text" && typeof part.content === "string" ? [part.content] : [],
+    )
+    .join("\n");
+}
+
 /** The error fields the Parameters popover holds: the client's and the server's spellings. */
 const PARAMETER_FIELDS = new Set(["temperature", "maxTokens", "max_tokens"]);
 
@@ -132,6 +158,9 @@ export const RunColumn = memo(function RunColumn({
   connections,
   errors,
   runReason,
+  versions,
+  template,
+  onPickVersion,
   shortcut,
   canRemove,
   onChange,
@@ -148,12 +177,48 @@ export const RunColumn = memo(function RunColumn({
   const parameterError = Object.keys(errors).some((field) => PARAMETER_FIELDS.has(field));
   const ended = endText(run);
   const empty = run.status === "idle" && run.text === "" && run.toolCalls.length === 0;
+  const picked = versions?.find((option) => option.version === column.version);
+  const versionTitle =
+    column.version === undefined ? "Draft" : picked ? versionLabel(picked) : `v${column.version}`;
   return (
     <section
       aria-label={`Model ${number}`}
       className="flex min-h-0 min-w-72 flex-1 flex-col rounded-md border"
     >
       <div className="flex flex-wrap items-center gap-1.5 border-b p-2">
+        {versions === undefined ? null : (
+          <Select
+            value={column.version === undefined ? "draft" : String(column.version)}
+            onValueChange={(value) => {
+              onPickVersion(id, value === "draft" ? undefined : Number(value));
+            }}
+          >
+            {/* Wide enough for "v12 · latest, production"; a longer label ends in an ellipsis,
+                and the title shows it whole. */}
+            <SelectTrigger
+              aria-label="Prompt version"
+              title={versionTitle}
+              className="w-56 min-w-0 shrink-0 *:data-[slot=select-value]:min-w-0"
+            >
+              <SelectValue>
+                <span className="truncate">{versionTitle}</span>
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="draft">Draft</SelectItem>
+              {versions.map((option) => (
+                <SelectItem key={option.version} value={String(option.version)}>
+                  {versionLabel(option)}
+                </SelectItem>
+              ))}
+              {column.version === undefined ||
+              versions.some((option) => option.version === column.version) ? null : (
+                // A pinned version the list does not offer (a newer page of versions): the trigger still shows it.
+                <SelectItem value={String(column.version)}>{`v${column.version}`}</SelectItem>
+              )}
+            </SelectContent>
+          </Select>
+        )}
         <Select
           value={column.connectionId ?? ""}
           disabled={connections.length === 0}
@@ -262,6 +327,36 @@ export const RunColumn = memo(function RunColumn({
         ) : null}
       </div>
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3">
+        {template !== undefined && column.version !== undefined ? (
+          <details open className="rounded-md border bg-muted/40">
+            <summary className="cursor-pointer px-2 py-1 text-caption text-muted-foreground">
+              Template of v{column.version}
+            </summary>
+            <ol
+              aria-label={`Template of version ${column.version}`}
+              className="flex flex-col gap-2 px-2 pb-2"
+            >
+              {template.map((entry, index) => (
+                <li
+                  // biome-ignore lint/suspicious/noArrayIndexKey: the template is fixed for the pinned version
+                  key={index}
+                  className="flex flex-col gap-1"
+                >
+                  {isPlaceholder(entry) ? (
+                    <p className="text-caption text-muted-foreground">Placeholder {entry.name}</p>
+                  ) : (
+                    <>
+                      <p className="text-caption text-muted-foreground">{entry.role}</p>
+                      <pre className="font-mono text-body break-words whitespace-pre-wrap">
+                        {templateText(entry)}
+                      </pre>
+                    </>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </details>
+        ) : null}
         {connections.length === 0 ? (
           <p className="text-caption text-muted-foreground">
             Add an LLM connection in{" "}

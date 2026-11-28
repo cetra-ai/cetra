@@ -37,8 +37,21 @@ pub const GROUPS: &[&str] = &[
     "claude_code",
     "codex",
     "gemini_cli",
+    "qwen_code",
+    "pi",
+    "openclaw",
+    "opencode",
+    "goose",
+    "oh_my_pi",
+    "hermes_agent",
+    "voltagent",
     "cetra",
     "edge",
+    "n8n",
+    "livekit",
+    "pipecat",
+    "promptflow",
+    "langflow",
 ];
 
 /// One fixture directory and its JSON files.
@@ -249,6 +262,27 @@ pub fn sort_spans(spans: &mut [Span]) {
             &right.span_id,
         ))
     });
+}
+
+/// The models that price a span, in order: the response model, then the request model when the
+/// response model is the request model with its `vendor/` prefix stripped (D-IN-20). Mirrors
+/// `normalize::retry_model`, which `cost::apply` retries with.
+pub fn price_models(span: &Span) -> Vec<&str> {
+    let response = span.response_model.as_deref();
+    let request = span.request_model.as_deref();
+    match (response, request) {
+        (Some(response), Some(request)) => {
+            let stripped = request
+                .rsplit_once('/')
+                .is_some_and(|(_, bare)| bare == response);
+            if stripped {
+                vec![response, request]
+            } else {
+                vec![response]
+            }
+        }
+        _ => response.or(request).into_iter().collect(),
+    }
 }
 
 /// Pretty-prints `value` with 2-space indentation and one trailing newline.

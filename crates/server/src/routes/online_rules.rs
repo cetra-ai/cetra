@@ -1100,7 +1100,7 @@ mod tests {
     use crate::meta::online_rules::{PAUSE_BUDGET, PAUSE_ERRORS, pause_rule};
     use crate::meta::rule_spend::add_spend;
     use crate::test_support::{Seeded, TestApp, TestResponse, dataset_span, set_limits};
-    use cetra_core::batch::scores_to_record_batch;
+    use cetra_core::batch::scores_to_batch;
     use cetra_core::enums::ScoreSource;
     use cetra_core::score::{Score, ScoreTarget, ScoreValue};
 
@@ -2752,7 +2752,7 @@ mod tests {
             deleted: false,
             ingest_time: created_at,
         };
-        let batch = scores_to_record_batch(&[score]).unwrap();
+        let batch = scores_to_batch(&[score]).unwrap();
         app.state
             .storage
             .append_scores(project, batch)
@@ -2953,7 +2953,7 @@ mod tests {
                 });
             }
         }
-        let batch = scores_to_record_batch(&scores).unwrap();
+        let batch = scores_to_batch(&scores).unwrap();
         app.state
             .storage
             .append_scores(project, batch)

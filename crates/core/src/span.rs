@@ -1,7 +1,7 @@
 //! Owned span record written by normalization and read by storage.
 //!
 //! Field names match the `spans` columns in spec 01. `duration_ns` and `model` are computed
-//! when the record is converted to Arrow; they are not stored on the struct (D60).
+//! when the record is converted to a columnar batch; they are not stored on the struct (D60).
 
 use std::collections::BTreeMap;
 
@@ -263,7 +263,7 @@ pub(crate) fn minimal_span() -> Span {
     }
 }
 
-/// A span with every field set, for serde and Arrow tests.
+/// A span with every field set, for serde and batch conversion tests.
 #[cfg(test)]
 pub(crate) fn full_span() -> Span {
     let start = crate::time_serde::parse_rfc3339("2026-11-09T10:12:03.123456789Z").unwrap();

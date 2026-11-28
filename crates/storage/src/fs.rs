@@ -3,8 +3,8 @@
 //! Each function is the `std::fs` call it is named after. The generic bounds
 //! match `std::fs`, so call sites compile unchanged. Under `cfg(test)`, a call
 //! on a path under a root registered in lossy mode (`lossy::Lossy`) is
-//! recorded, so a test can drop what a power loss may drop. SQLite and
-//! DataFusion do their own I/O and are not seen here.
+//! recorded, so a test can drop what a power loss may drop. SQLite does its
+//! own I/O and is not seen here.
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};

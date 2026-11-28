@@ -1,0 +1,114 @@
+---
+// The docs' header is the site's (design §5, the user 2026-11-26): the logo, the site's links with
+// Docs as the current page, GitHub, Log in and "Start free", plus Starlight's search and theme
+// switch. It stays dark in both themes, as a brand bar over the docs.
+import "@fontsource-variable/inter";
+import Search from "@astrojs/starlight/components/Search.astro";
+import ThemeSelect from "@astrojs/starlight/components/ThemeSelect.astro";
+import Button from "../marketing/components/Button.astro";
+import Logo from "../marketing/components/Logo.astro";
+import { MARKETING_ROUTES } from "../marketing/routes.mjs";
+import { CLOUD, DOCS_URL, GITHUB_URL, NAV } from "../marketing/site";
+
+const items = NAV.filter((item) => !item.route || MARKETING_ROUTES.includes(item.route));
+---
+
+<div class="site-bar">
+  <Logo height={24} />
+  <nav aria-label="Main" class="links">
+    <ul>
+      {
+        items.map((item) => (
+          <li>
+            <a href={item.href} aria-current={item.href === DOCS_URL ? "page" : undefined}>
+              {item.label}
+            </a>
+          </li>
+        ))
+      }
+    </ul>
+  </nav>
+  <div class="search"><Search /></div>
+  <div class="actions">
+    <a class="quiet wide-only" href={GITHUB_URL} rel="noopener">GitHub</a>
+    <a class="quiet wide-only" href={CLOUD.login}>Log in</a>
+    <span class="wide-only"><ThemeSelect /></span>
+    <Button href={CLOUD.signup} external>Start free</Button>
+  </div>
+</div>
+
+<style>
+  /* The site's tokens (src/marketing/styles/tokens.css), scoped to the bar: the docs keep theirs. */
+  .site-bar {
+    --c-ink: #141414;
+    --fg: #f5f5f4;
+    --fg-muted: #a8a29e;
+    --line: #2e2e2e;
+    --line-strong: #3d3d3d;
+    --surface: #1b1b1b;
+    --accent: #2dd4bf;
+    --accent-fg: #042f2e;
+    --font-body: "Inter Variable", "Inter", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --text-xs: 0.8125rem;
+    --text-sm: 0.9375rem;
+    --text-base: 1.0625rem;
+    --space-2: 0.5rem;
+    --space-3: 0.75rem;
+    --space-4: 1rem;
+    --space-5: 1.5rem;
+    --space-6: 2rem;
+    --radius: 10px;
+    display: flex;
+    align-items: center;
+    gap: var(--space-5);
+    height: 100%;
+    color: var(--fg);
+  }
+  .links ul {
+    display: flex;
+    gap: var(--space-5);
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .links a,
+  .quiet {
+    color: var(--fg-muted);
+    text-decoration: none;
+    font-size: var(--text-sm);
+    font-family: var(--font-body);
+    white-space: nowrap;
+  }
+  .links a:hover,
+  .quiet:hover,
+  .links a[aria-current="page"] {
+    color: var(--fg);
+  }
+  .search {
+    flex: 1;
+    display: flex;
+    justify-content: flex-end;
+    min-width: 0;
+  }
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+  }
+  .wide-only {
+    display: inline-flex;
+    align-items: center;
+  }
+  /* Below 75rem the links go, so the search keeps its room; the logo leads back to the site. */
+  @media (max-width: 75rem) {
+    .links {
+      display: none;
+    }
+  }
+  @media (max-width: 50rem) {
+    .wide-only {
+      display: none;
+    }
+  }
+</style>

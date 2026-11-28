@@ -1,0 +1,22 @@
+{
+  "description": "Oracle Agent Spec agent with one server tool, traced by OpenInference's Agent Spec instrumentor.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "openinference-instrumentation-agentspec",
+    "instrumentation_version": "0.1.22",
+    "language": "python",
+    "libraries": {
+      "openinference-instrumentation-agentspec": "0.1.22",
+      "pyagentspec": "26.3.1"
+    },
+    "captured_at": "2026-11-24T19:37:06Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Normalization rules"
+  ],
+  "notes": "pyagentspec 26.3.1 with its langgraph extra in envs/agentspec, plus openinference-instrumentation-agentspec 0.1.22. Only AgentSpecInstrumentor is enabled. The LangGraph adapter builds ChatOpenAI with no base_url (it ignores OpenAiConfig.url), so the program sets OPENAI_BASE_URL to the mock before pyagentspec loads. The tool is a ServerTool read_file(path) whose callable comes from AgentSpecLoader's tool_registry; it reads hello.txt from the working directory. Expected: AgentExecution[assistant] (agent), LlmGenerationSpan twice (llm, with input and output messages), ToolExecution[read_file] (tool). No span carries an instrumentation scope. The adapter writes the string \"null\" into every token count it does not know; the Agent Spec amendment to normalization rule 20 (D-IN-31 item 5) reads those as absent, so the llm spans have no token columns, no invalid_number warning, and no cost. Volatile: session.id is the trace's uuid4; agent.id, agent.llm_config.id and agent.tools.0.id are the components' uuid4s (the llm_config id also sits inside agent.llm_config.api_key.$component_ref); tool_call.id, request_id and the events' id are LangChain run uuid7s (request_id also sits inside completion_id); tools.0.id is the converted client tool's uuid4. Every event carries its timestamp as an attribute in nanoseconds, listed in timestamp_attributes."
+}

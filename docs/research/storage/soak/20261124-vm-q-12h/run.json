@@ -1,0 +1,61 @@
+{
+  "label": "vm-q",
+  "started_unix": 1795520324,
+  "machine": {
+    "cpu": "Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz",
+    "threads": 12,
+    "ram": "98870476 kB",
+    "kernel": "7.0.0-43-generic",
+    "disk": "vda rota=1 unknown",
+    "filesystem": "ext4 rw,relatime,discard,errors=remount-ro,commit=30",
+    "container": false,
+    "commit": "",
+    "dirty": false,
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+  },
+  "config": {
+    "dir": "~/r-validation/soak-b-data",
+    "out": "~/r-validation/soak-b2-out",
+    "label": "vm-q",
+    "hours": 12.0,
+    "rate": 1000,
+    "projects": 4,
+    "qps": 1.0,
+    "mix": [
+      [
+        "List",
+        30
+      ],
+      [
+        "Filter",
+        15
+      ],
+      [
+        "Detail",
+        25
+      ],
+      [
+        "Sessions",
+        10
+      ],
+      [
+        "Metrics",
+        10
+      ],
+      [
+        "Scores",
+        10
+      ]
+    ],
+    "retention_days": 0,
+    "sample_secs": 60,
+    "warmup_hours": 1.2,
+    "max_rss_gib": 8.0,
+    "max_l0_age_min": 30,
+    "keep": false
+  },
+  "store": "local",
+  "corpus_file": "oasst2-ready-messages.jsonl.gz",
+  "corpus_sha256": "a9f240c4c77aa1378364f70d37e753c07ba284e247b019d700e1947a0e5da751",
+  "storage_config": "StorageConfig {\n    data_dir: \"~/r-validation/soak-b-data\",\n    min_free_bytes: 2.0 GiB (2147483648 bytes),\n    object_store: None,\n    s3: S3Config {\n        region: None,\n        endpoint: None,\n        force_path_style: false,\n        allow_http: false,\n    },\n    wal: WalConfig {\n        sync: Always,\n        segment_bytes: 64.0 MiB (67108864 bytes),\n        group_max_bytes: 8.0 MiB (8388608 bytes),\n        group_max_wait: 2ms,\n        skip_corrupt: false,\n    },\n    flush: FlushConfig {\n        max_bytes: 256.0 MiB (268435456 bytes),\n        max_age: 120s,\n        upload_concurrency: 8,\n    },\n    memtable: MemtableConfig {\n        hard_limit: 1.0 GiB (1073741824 bytes),\n    },\n    query: QueryConfig {\n        target_partitions: 12,\n        metadata_cache_bytes: 512.0 MiB (536870912 bytes),\n        trace_lookback: 3600s,\n        max_memory_total: None,\n        max_memory: 2.0 GiB (2147483648 bytes),\n        initial_memory: 64.0 MiB (67108864 bytes),\n        admission_wait: 5s,\n        read_cache_bytes: Some(\n            48.4 GiB (51953779097 bytes),\n        ),\n    },\n    anchor: AnchorConfig {\n        window: None,\n    },\n    gc: GcConfig {\n        grace: 300s,\n    },\n    compaction: CompactionConfig {\n        interval: 30s,\n        threads: 3,\n        target_file_size: 512.0 MiB (536870912 bytes),\n        size_ratio: 4,\n        l0_files: 8,\n        l0_bytes: 512.0 MiB (536870912 bytes),\n        l0_age: 600s,\n        close_delay: 7200s,\n        max_memory: 1.0 GiB (1073741824 bytes),\n    },\n    deletion: DeletionConfig {\n        max_delay: 86400s,\n    },\n    delete_objects: true,\n}"
+}

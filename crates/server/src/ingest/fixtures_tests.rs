@@ -10,13 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use arrow::array::{Array, FixedSizeBinaryArray, RecordBatch};
-use arrow::compute::{cast, concat_batches};
-use arrow::datatypes::SchemaRef;
 use axum::http::{Method, StatusCode};
 use bytesize::ByteSize;
-use cetra_core::batch::spans_to_record_batch;
+use cetra_column::{Batch, Column, ScalarValue};
+use cetra_core::batch::spans_to_batch;
 use cetra_core::ids::ProjectId;
+use cetra_core::schema::spans_schema;
 use cetra_core::span::Span;
 use cetra_core::time_serde::parse_rfc3339;
 use cetra_otel::{IngestContext, PriceRow, PriceTable, decode_json, normalize};
@@ -24,7 +23,6 @@ use cetra_storage::Storage;
 use cetra_storage::config::{
     AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
-use datafusion::prelude::{SessionConfig, SessionContext};
 
 use crate::test_support::raw_query;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceResponse;
@@ -203,19 +201,62 @@ fn span_key(
 }
 
 /// Every stored span of `project`, in the order of the expected batch.
-async fn stored_batch(storage: &Storage, project: ProjectId) -> RecordBatch {
-    let query = raw_query(storage, project).await;
-    // The query's runtime carries the object store that the Parquet files are read from.
-    let ctx = SessionContext::new_with_config_rt(SessionConfig::new(), query.runtime);
-    ctx.register_table("raw_spans", query.spans)
-        .expect("spans register");
-    let frame = ctx
-        .sql("SELECT * FROM raw_spans ORDER BY trace_id, span_id, start_time, end_time, name")
+async fn stored_batch(storage: &Storage, project: ProjectId) -> Batch {
+    let raw = raw_query(storage, project)
         .await
-        .expect("sql");
-    let schema: SchemaRef = Arc::new(frame.schema().as_arrow().clone());
-    let batches = frame.collect().await.expect("collect");
-    concat_batches(&schema, &batches).expect("stored batches concatenate")
+        .collect_raw_spans()
+        .await
+        .expect("collect raw spans");
+    let schema = spans_schema();
+    let refs: Vec<&Batch> = raw.iter().collect();
+    let combined = Batch::concat(Arc::clone(&schema), &refs, None).expect("concat raw spans");
+    let n = combined.num_rows();
+    if n == 0 {
+        return combined;
+    }
+    let trace_col = combined.column_by_name("trace_id").expect("trace_id");
+    let span_col = combined.column_by_name("span_id").expect("span_id");
+    let start_col = combined.column_by_name("start_time").expect("start_time");
+    let end_col = combined.column_by_name("end_time").expect("end_time");
+    let name_col = combined.column_by_name("name").expect("name");
+
+    type SpanSortKey = ([u8; 16], [u8; 8], i64, i64, String);
+    let mut keys: Vec<(u32, SpanSortKey)> = (0..n)
+        .map(|row| {
+            let ScalarValue::FixedBytes16(tid) = trace_col.get_scalar(row).expect("trace_id")
+            else {
+                panic!("unexpected trace_id scalar");
+            };
+            let ScalarValue::FixedBytes8(sid) = span_col.get_scalar(row).expect("span_id") else {
+                panic!("unexpected span_id scalar");
+            };
+            let ScalarValue::TimestampNs { value: st, .. } =
+                start_col.get_scalar(row).expect("start_time")
+            else {
+                panic!("unexpected start_time scalar");
+            };
+            let ScalarValue::TimestampNs { value: et, .. } =
+                end_col.get_scalar(row).expect("end_time")
+            else {
+                panic!("unexpected end_time scalar");
+            };
+            let ScalarValue::Utf8(nm) = name_col.get_scalar(row).expect("name") else {
+                panic!("unexpected name scalar");
+            };
+            (
+                u32::try_from(row).expect("row fits u32"),
+                (tid, sid, st, et, nm),
+            )
+        })
+        .collect();
+    keys.sort_by(|a, b| a.1.cmp(&b.1));
+    let order: Vec<u32> = keys.into_iter().map(|(idx, _)| idx).collect();
+    let sorted_cols: Vec<Column> = combined
+        .columns()
+        .iter()
+        .map(|col| Column::Flat(col.take(&order, None).expect("take sorted")))
+        .collect();
+    Batch::try_new_all(schema, sorted_cols, order.len()).expect("sorted batch")
 }
 
 /// `POST /v1/traces` through the router with the project's key.
@@ -268,24 +309,21 @@ async fn check_case(app: &TestApp, seeded: &Seeded, case: &Case, prices: &PriceT
     );
     rewrite_reserved_environment(&mut want.spans);
     want.spans.sort_by(|a, b| span_key(a).cmp(&span_key(b)));
-    let expected = spans_to_record_batch(&want.spans)
+    let expected = spans_to_batch(&want.spans)
         .unwrap_or_else(|_| panic!("{label}: expected batch does not build"));
 
     let stored = stored_batch(&app.state.storage, project.id).await;
     assert_eq!(stored.num_rows(), expected.num_rows(), "{label}: row count");
     for (index, field) in expected.schema().fields().iter().enumerate() {
-        let name = field.name();
+        let name = &field.name;
         let actual = stored
             .column_by_name(name)
             .unwrap_or_else(|| panic!("{label}: column {name} is not stored"));
-        let actual = if actual.data_type() == field.data_type() {
-            Arc::clone(actual)
-        } else {
-            cast(actual.as_ref(), field.data_type())
-                .unwrap_or_else(|_| panic!("{label}: column {name} does not cast"))
-        };
         assert!(
-            expected.column(index).to_data() == actual.to_data(),
+            expected
+                .column(index)
+                .expect("expected column")
+                .semantic_eq(actual),
             "{label}: column {name} differs"
         );
     }
@@ -518,27 +556,19 @@ async fn post_over_tcp(addr: SocketAddr, body: &str) -> Option<u16> {
 
 /// Span ids stored for `project`, read from the raw `spans` provider.
 async fn stored_span_ids(storage: &Storage, project: ProjectId) -> HashSet<u64> {
-    let query = raw_query(storage, project).await;
-    // The query's runtime carries the object store that the Parquet files are read from.
-    let ctx = SessionContext::new_with_config_rt(SessionConfig::new(), query.runtime);
-    ctx.register_table("raw_spans", query.spans)
-        .expect("spans register");
-    let batches = ctx
-        .sql("SELECT span_id FROM raw_spans")
+    let batches = raw_query(storage, project)
         .await
-        .expect("sql")
-        .collect()
+        .collect_raw_spans()
         .await
-        .expect("collect");
+        .expect("collect raw spans");
     let mut ids = HashSet::new();
     for batch in &batches {
-        let column = batch.column_by_name("span_id").expect("span_id column");
-        let array = column
-            .as_any()
-            .downcast_ref::<FixedSizeBinaryArray>()
-            .expect("span_id is fixed-size binary");
-        for index in 0..array.len() {
-            let bytes = <[u8; 8]>::try_from(array.value(index)).expect("span ids are 8 bytes");
+        let col = batch.column_by_name("span_id").expect("span_id column");
+        for row in crate::api::convert::active_rows(batch) {
+            let ScalarValue::FixedBytes8(bytes) = col.get_scalar(row).expect("span_id scalar")
+            else {
+                panic!("span_id is fixed-size binary");
+            };
             ids.insert(u64::from_be_bytes(bytes));
         }
     }

@@ -1,0 +1,71 @@
+{
+  "description": "Goose 1.59.2 in run mode with the developer builtin: one shell call (cat hello.txt), then the answer; traces with prompts.",
+  "spec_refs": ["02 \u00a7 Coding agents"],
+  "notes": "Goose reads its endpoint, key and content switch from the environment, exactly the lines `cetra agents setup goose` prints (m7-setup-routes.md \u00a7 5.2); logs and metrics are off. The provider is Goose's openai entry pointed at the mock with the mock key. The developer builtin has no read tool, so the case uses its shell tool, whose only parameter the model needs is command. The first turn is the session-name call Goose makes beside the main flow, so it is an auxiliary turn served to the request that declares no tools; Goose exports no span for it. Goose's reply span carries the turn total and each stream_response_from_provider span repeats its chat parent's tokens (the double-count the spec's Goose rules resolve: chat is chain, reply's usage is not read). session.id and gen_ai.conversation.id differ between runs, so they are volatile. busy_ns and idle_ns are measured thread timings; gen_ai.input.messages embeds today's date, so the check ignores their values.",
+  "instrumentation": "goose",
+  "libraries": ["goose"],
+  "timing_attributes": ["busy_ns", "idle_ns", "gen_ai.input.messages"],
+  "volatile_attributes": ["gen_ai.conversation.id", "session.id"],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "auxiliary": true,
+      "message": {
+        "text": "Reading a file",
+        "reasoning": null,
+        "tool_calls": []
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 20,
+        "output": 5,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": 0
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": null,
+        "reasoning": null,
+        "tool_calls": [
+          {
+            "id": "call_capture_1",
+            "name": "shell",
+            "arguments": {
+              "command": "cat hello.txt"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": 0
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": "hello.txt says: hello from cetra",
+        "reasoning": null,
+        "tool_calls": []
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": 0
+      }
+    }
+  ]
+}

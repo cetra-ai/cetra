@@ -1,0 +1,77 @@
+---
+title: smolagents
+description: "Trace Hugging Face smolagents runs with cetra from Python: agent steps, model calls and tools."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace Hugging Face smolagents runs with cetra from Python: agent steps, model calls and tools.
+
+<Backing fixtures={["openinference/smolagents-code-agent"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[smolagents]" "smolagents[openai]"
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenAI through smolagents and needs OPENAI_API_KEY */}
+```python
+import os
+
+import cetra
+from smolagents import CodeAgent, OpenAIServerModel, tool
+
+cetra.init(instrument=["smolagents"])
+
+
+@tool
+def get_weather(city: str) -> str:
+    """Look up the weather for a city.
+
+    Args:
+        city: the city name
+    """
+    return f"sunny in {city}"
+
+
+model = OpenAIServerModel(model_id="gpt-4o-mini", api_key=os.environ["OPENAI_API_KEY"])
+agent = CodeAgent(tools=[get_weather], model=model, name="weather_agent")
+agent.run("What is the weather in Paris?")
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- The run is an `agent` span named after the agent, with a `chain` span per step (`Step 1`, `Step 2`).
+- Each model call is an `llm` span with the messages, the token counts and the cost, computed from the built-in prices.
+- Each tool run is a `tool` span named after the tool's class (`SimpleTool`, `FinalAnswerTool`); the tool's own name stays in the span's attributes.
+
+## Limits
+
+- Do not also enable `openai`: each model call would be recorded twice and counted twice.
+- The agent span repeats the run's total tokens; cetra counts tokens on model calls only, so nothing is counted twice.
+- The fixture was captured with smolagents 1.26.0 and openinference-instrumentation-smolagents 0.1.50.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

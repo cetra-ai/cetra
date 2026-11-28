@@ -224,8 +224,9 @@ export function ancestorsOf(spans: readonly { depth: number }[], index: number):
 
 // Rough widths of a name cell's parts at the grid's font size.
 const NAME_CHAR_PX = 7;
-const NAME_BASE_PX = 4 + 16 + 4 + 16 + 4 + 8;
-const NAME_INDENT_PX = 12;
+// The margin, the toggle slot, a gap, the kind icon, a gap and the right padding.
+const NAME_BASE_PX = 4 + 16 + 4 + 14 + 4 + 8;
+const NAME_INDENT_PX = 16;
 const NAME_ERROR_DOT_PX = 12;
 const NAME_DETACHED_BADGE_PX = 64;
 export const NAME_AUTO_MIN_PX = 220;
@@ -255,4 +256,63 @@ export function autoNameWidth(
     widest = Math.max(widest, width);
   }
   return Math.min(NAME_AUTO_MAX_PX, Math.max(NAME_AUTO_MIN_PX, Math.round(widest)));
+}
+
+/** The connector lines drawn in one row's indent. */
+export type TreeGuide = {
+  /** The elbow to this row: "mid" (├, later siblings follow), "last" (└), none for a root. */
+  elbow: "mid" | "last" | null;
+  /**
+   * One entry per ancestor level from depth 1 to the parent: whether that ancestor has later
+   * siblings, so its vertical line runs through this row.
+   */
+  through: boolean[];
+  /** The row's own children follow it, so a line starts under its icon. */
+  down: boolean;
+};
+
+/**
+ * The connector lines of the rows shown, from their depths in pre-order.
+ * A line belongs to the rows actually shown, so a filtered or collapsed tree stops it at
+ * the last shown child.
+ */
+export function treeGuides(depths: readonly number[]): TreeGuide[] {
+  const guides: TreeGuide[] = new Array(depths.length);
+  // later[d]: a row of depth d follows, before any shallower row.
+  const later: boolean[] = [];
+  for (let index = depths.length - 1; index >= 0; index--) {
+    const depth = depths[index] ?? 0;
+    const next = depths[index + 1];
+    const through: boolean[] = [];
+    for (let level = 1; level < depth; level++) {
+      through.push(later[level] === true);
+    }
+    guides[index] = {
+      elbow: depth === 0 ? null : later[depth] ? "mid" : "last",
+      through,
+      down: next !== undefined && next > depth,
+    };
+    later[depth] = true;
+    later.length = depth + 1;
+  }
+  return guides;
+}
+
+// The metric cells are 11px tabular text, about 7px a character, with 8px padding each side.
+// The header labels are 11px capitals, about 7px a character too.
+const METRIC_CHAR_PX = 7;
+const METRIC_PADDING_PX = 16;
+export const METRIC_MIN_PX = 44;
+export const METRIC_MAX_PX = 120;
+
+/** A metric column's width: its header label or its widest value, kept between 44px and 120px. */
+export function metricColumnWidth(label: string, values: Iterable<string>): number {
+  let chars = label.length;
+  for (const value of values) {
+    chars = Math.max(chars, value.length);
+  }
+  return Math.min(
+    METRIC_MAX_PX,
+    Math.max(METRIC_MIN_PX, chars * METRIC_CHAR_PX + METRIC_PADDING_PX),
+  );
 }

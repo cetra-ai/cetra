@@ -24,7 +24,7 @@ Some sources count differently, for example when a library reports the cache sep
 
 Each span shows where its cost came from:
 
-- **Reported.** Your code or your instrumentation sent a cost, and cetra keeps it. It never replaces it with a price table figure.
+- **Reported.** Your code, your instrumentation or a gateway such as LiteLLM Proxy or Bifrost sent a cost, and cetra keeps it. It never replaces it with a price table figure. One total counts as no report: exactly 0 on a span that counts tokens, whatever sent it, is priced from the table. OpenLIT writes a cost of 0 when its own price table has no row for the model.
 - **Computed.** cetra multiplied the token counts by a price.
 - **None.** cetra found no price, or the span has no token counts.
 
@@ -82,7 +82,7 @@ Call `span.setCost(totalUsd)` on the handle to report a cost.
   </TabItem>
   <TabItem label="Attributes">
 
-Set `cetra.cost.total` to the cost in USD. cetra also reads `llm.cost.total` and `gen_ai.usage.cost`, with the parts `llm.cost.prompt`, `llm.cost.completion`, `gen_ai.usage.input_cost` and `gen_ai.usage.output_cost`.
+Set `cetra.cost.total` to the cost in USD. cetra also reads `llm.cost.total`, `gen_ai.usage.cost` and `gen_ai.cost.total_cost`, with the parts `llm.cost.prompt`, `llm.cost.completion`, `gen_ai.usage.input_cost`, `gen_ai.usage.output_cost`, `gen_ai.cost.input_cost`, `gen_ai.cost.output_cost`, `bifrost.cost.input` and `bifrost.cost.output`.
 
   </TabItem>
 </Tabs>
@@ -95,6 +95,10 @@ When a span has no reported cost, cetra looks for a price for its model and prov
 2. A price applies when its model pattern matches the model name, ignoring case, its provider matches, and its start date is not after the span's start.
 3. The most specific wins: project over organization over built-in, then the latest start date, then the longest pattern.
 4. cetra prices uncached input, cache reads, cache writes, output and reasoning tokens separately, per million tokens. A price can have tiers for long inputs, chosen by the number of input tokens.
+
+Gateways (OpenRouter, Vercel AI Gateway, Helicone, Portkey, Cloudflare AI Gateway) are the exception: when no row of the gateway matches a model named `vendor/name`, the price of the model's publisher applies, without the gateway's fees.
+
+A model named with a provider prefix, such as `openai/gpt-4o-mini` from LiteLLM-style clients, is priced as `gpt-4o-mini` by that provider when no row matches the full name. This applies only when the span names no provider or the same one, so a reseller's own price is never replaced by the publisher's.
 
 Embedding spans use the input price only.
 

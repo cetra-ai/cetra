@@ -1,0 +1,84 @@
+---
+title: Haystack
+description: "Trace Haystack pipelines with cetra from Python: components and model calls."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace Haystack pipelines with cetra from Python: components and model calls.
+
+<Backing fixtures={["openinference/haystack-pipeline"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[haystack]" haystack-ai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenAI through Haystack and needs OPENAI_API_KEY */}
+```python
+import os
+
+import cetra
+from haystack import Pipeline
+from haystack.components.builders import ChatPromptBuilder
+from haystack.components.generators.chat import OpenAIChatGenerator
+from haystack.dataclasses import ChatMessage
+from haystack.utils import Secret
+
+cetra.init(instrument=["haystack"])
+
+pipeline = Pipeline()
+pipeline.add_component(
+    "prompt",
+    ChatPromptBuilder(
+        template=[ChatMessage.from_user("Capital of {{country}}?")],
+        required_variables=["country"],
+    ),
+)
+pipeline.add_component(
+    "llm",
+    OpenAIChatGenerator(
+        model="gpt-4o-mini",
+        api_key=Secret.from_token(os.environ["OPENAI_API_KEY"]),
+    ),
+)
+pipeline.connect("prompt.prompt", "llm.messages")
+pipeline.run({"prompt": {"country": "France"}})
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- The pipeline run is a `chain` span (`Pipeline.run`), with a `chain` span per component.
+- The generator's call is an `llm` span with the messages, the token counts and the cost, computed from the built-in prices.
+
+## Limits
+
+- Do not also enable `openai`: the model call would be recorded twice and counted twice.
+- The `Agent` component is not traced as an agent: its model calls appear as separate traces.
+- Haystack sends its own telemetry unless `HAYSTACK_TELEMETRY_ENABLED` is `False`.
+- The fixture was captured with haystack-ai 3.5.0 and openinference-instrumentation-haystack 0.1.53.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

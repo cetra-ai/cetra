@@ -77,7 +77,7 @@ pub(crate) async fn name_counts(
     ctx: &QueryContext,
     names: &[String],
     window: TimeWindow,
-    by_day: bool,
+    bucket_ns: Option<i64>,
 ) -> Result<Vec<ScoreNameCount>, ApiError> {
     let mut rows = Vec::new();
     for chunk in names.chunks(MAX_COUNT_NAMES) {
@@ -87,7 +87,7 @@ pub(crate) async fn name_counts(
                 ScoreNameCountsRequest {
                     names: chunk,
                     window,
-                    by_day,
+                    bucket_ns,
                     timeout: READ_TIMEOUT,
                 },
             )
@@ -109,7 +109,7 @@ pub(crate) async fn tallies(
         return Ok(HashMap::new());
     }
     let ctx = open_query(state, org, project, None).await?;
-    let counts = name_counts(&ctx, names, window, false).await?;
+    let counts = name_counts(&ctx, names, window, None).await?;
     Ok(counts
         .into_iter()
         .map(|row| {

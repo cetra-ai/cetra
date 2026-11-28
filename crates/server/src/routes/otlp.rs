@@ -367,11 +367,12 @@ mod tests {
     use axum::http::{Method, StatusCode};
     use bytes::Bytes;
     use bytesize::ByteSize;
+    use cetra_column::Batch;
     use cetra_otel::{IngestContext, PriceTable, builtin_price_rows, decode_json, normalize};
-    use datafusion::prelude::SessionContext;
+    use cetra_storage::{QueryContext, SqlRequest};
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceResponse;
     use prost::Message;
-    use serde_json::Value;
+    use serde_json::{Map, Value};
 
     use super::*;
     use crate::api::common::ProblemCode;
@@ -456,32 +457,30 @@ mod tests {
 
     /// Spans in the project, read through the storage query provider.
     async fn stored_spans(app: &TestApp, project: ProjectId) -> usize {
-        let query = raw_query(&app.state.storage, project).await;
-        let ctx = SessionContext::new();
-        ctx.register_table("raw_spans", query.spans)
-            .expect("spans register");
-        ctx.table("raw_spans")
+        raw_query(&app.state.storage, project)
             .await
-            .expect("spans table")
-            .count()
+            .collect_raw_spans()
             .await
-            .expect("count")
+            .expect("collect raw spans")
+            .iter()
+            .map(Batch::num_rows)
+            .sum()
     }
 
-    /// All stored span rows, formatted. Used to look at columns the tests need.
+    /// All stored span rows, formatted as JSON. Used to look at columns the tests need.
     async fn stored_rows(app: &TestApp, project: ProjectId) -> String {
-        let query = raw_query(&app.state.storage, project).await;
-        let ctx = SessionContext::new();
-        ctx.register_table("raw_spans", query.spans)
-            .expect("spans register");
-        let batches = ctx
-            .sql("SELECT * FROM raw_spans")
+        let ctx =
+            QueryContext::new(raw_query(&app.state.storage, project).await, None).expect("context");
+        let json = ctx
+            .sql_json(SqlRequest {
+                query: "SELECT environment, attributes FROM spans",
+                params: &Map::new(),
+                limit: 1000,
+                timeout: Duration::from_secs(10),
+            })
             .await
-            .expect("sql")
-            .collect()
-            .await
-            .expect("collect");
-        format!("{batches:?}")
+            .expect("sql");
+        serde_json::to_string(&json.rows).expect("json")
     }
 
     fn json_body(response: &crate::test_support::TestResponse) -> Value {
@@ -1445,18 +1444,21 @@ mod tests {
         })
     }
 
-    /// Spans of the project whose stored row matches the SQL `predicate` on `raw_spans`.
+    /// Spans of the project whose stored row matches the SQL `predicate` on `spans`.
     async fn spans_where(app: &TestApp, project: ProjectId, predicate: &str) -> usize {
-        let query = raw_query(&app.state.storage, project).await;
-        let ctx = SessionContext::new();
-        ctx.register_table("raw_spans", query.spans)
-            .expect("spans register");
-        ctx.sql(&format!("SELECT * FROM raw_spans WHERE {predicate}"))
+        let ctx =
+            QueryContext::new(raw_query(&app.state.storage, project).await, None).expect("context");
+        let json = ctx
+            .sql_json(SqlRequest {
+                query: &format!("SELECT count(*) AS n FROM spans WHERE {predicate}"),
+                params: &Map::new(),
+                limit: 1,
+                timeout: Duration::from_secs(10),
+            })
             .await
-            .expect("sql")
-            .count()
-            .await
-            .expect("count")
+            .expect("sql");
+        let count = json.rows[0]["n"].as_u64().expect("count");
+        usize::try_from(count).expect("count fits usize")
     }
 
     #[tokio::test(flavor = "multi_thread")]

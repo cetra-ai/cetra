@@ -128,7 +128,7 @@ test("the columns match pricing.mjs", () => {
   );
   assert.deepEqual(
     SELF_HOSTED_COLUMNS.map((c) => c.price),
-    ["$0", "$5,400 / year"],
+    ["$0", "Custom"],
   );
 });
 

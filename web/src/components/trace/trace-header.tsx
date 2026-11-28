@@ -120,19 +120,24 @@ export function TraceHeader({
   return (
     <TooltipProvider>
       <section aria-label="Trace" className="flex shrink-0 flex-col gap-2 border-b px-4 py-3">
-        <div className="flex min-w-0 items-center gap-2">
-          {backLink}
-          <span className="min-w-0 truncate text-title font-semibold select-text">
-            {trace.name}
-          </span>
-          {trace.status === "ok" ? (
-            <StatusPill className="bg-status-ok/12 text-status-ok">OK</StatusPill>
-          ) : null}
-          {trace.status === "error" ? (
-            <StatusPill className="bg-status-error/12 text-status-error">Error</StatusPill>
-          ) : null}
-          <IdText value={trace.trace_id} kind="trace" />
-          <div className="ml-auto flex shrink-0 items-center gap-1">
+        {/* When the name and the actions don't fit on one line, the actions wrap below the name
+            (and among themselves in a narrow column) instead of running past the edge; the name is
+            truncated only when it doesn't fit on a line of its own. */}
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <div className="flex min-w-48 flex-auto items-center gap-2">
+            {backLink}
+            <span className="min-w-0 truncate text-title font-semibold select-text">
+              {trace.name}
+            </span>
+            {trace.status === "ok" ? (
+              <StatusPill className="bg-status-ok/12 text-status-ok">OK</StatusPill>
+            ) : null}
+            {trace.status === "error" ? (
+              <StatusPill className="bg-status-error/12 text-status-error">Error</StatusPill>
+            ) : null}
+            <IdText value={trace.trace_id} kind="trace" />
+          </div>
+          <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1">
             {live ? (
               <span className="inline-flex items-center gap-1">
                 <span role="status" className="inline-flex">
@@ -313,7 +318,9 @@ export function TraceHeader({
 
 function StatusPill({ className, children }: { className: string; children: ReactNode }) {
   return (
-    <span className={cn("rounded px-1.5 text-caption font-medium", className)}>{children}</span>
+    <span className={cn("shrink-0 rounded px-1.5 text-caption font-medium", className)}>
+      {children}
+    </span>
   );
 }
 

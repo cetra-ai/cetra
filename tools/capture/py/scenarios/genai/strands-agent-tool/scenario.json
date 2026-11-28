@@ -1,0 +1,67 @@
+{
+  "description": "Strands Agents agent run with one tool call, traced by Strands' default legacy events.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Mapping tables / Input / output",
+    "02 § Normalization rules"
+  ],
+  "notes": "Strands' default telemetry: content is on legacy gen_ai.user.message, gen_ai.choice and gen_ai.tool.message events, as Bedrock Converse blocks. StrandsTelemetry is given the harness provider. The agent sets trace_attributes session.id to s1. event_loop.cycle_id and event_loop.parent_cycle_id are UUIDs per run and are volatile. gen_ai.server.time_to_first_token is an integer in milliseconds and is a timing attribute. gen_ai.event.start_time and gen_ai.event.end_time are RFC 3339 times that shift with the spans.",
+  "instrumentation": "strands-agents",
+  "libraries": [
+    "strands-agents",
+    "opentelemetry-sdk"
+  ],
+  "volatile_attributes": [
+    "event_loop.cycle_id",
+    "event_loop.parent_cycle_id"
+  ],
+  "timing_attributes": [
+    "gen_ai.server.time_to_first_token"
+  ],
+  "timestamp_attributes": [
+    {
+      "key": "gen_ai.event.start_time",
+      "format": "rfc3339"
+    },
+    {
+      "key": "gen_ai.event.end_time",
+      "format": "rfc3339"
+    }
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_weather_1",
+            "name": "get_weather",
+            "arguments": {
+              "city": "Paris"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "text": "It is sunny in Paris."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12
+      }
+    }
+  ]
+}

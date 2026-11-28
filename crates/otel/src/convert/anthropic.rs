@@ -196,12 +196,14 @@ fn media_block(map: Map<String, Json>, modality: Modality) -> Part {
         Located::Blob { content, mime_type } => Part::Blob {
             modality: Some(modality),
             mime_type,
+            transcript: None,
             content,
             extra,
         },
         Located::Uri { uri, mime_type } => Part::Uri {
             modality: Some(modality),
             mime_type,
+            transcript: None,
             uri,
             extra,
         },

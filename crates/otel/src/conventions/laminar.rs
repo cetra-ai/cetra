@@ -116,6 +116,8 @@ mod tests {
             bag: &mut bag,
             events: &[],
             kind: SpanKind::Llm,
+            scope: "",
+            conventions: &[],
             warnings: &mut warnings,
         })
     }

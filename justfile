@@ -163,7 +163,7 @@ fuzz-seed:
 
 # The fuzzing toolchain, updated by hand like rust-toolchain.toml (track R M3)
 fuzz_toolchain := "nightly-2026-11-03"
-fuzz_targets := "wal_record wal_replay parquet_file read_cache_block catalog_rows filter_dsl otlp_http_protobuf otlp_http_json otlp_grpc saml_response saml_metadata saml_assertion"
+fuzz_targets := "wal_record wal_replay parquet_file read_cache_block catalog_rows filter_dsl otlp_http_protobuf otlp_http_json otlp_grpc saml_response saml_metadata saml_assertion column_frame query_expr sql statam_file"
 
 # Install the fuzzing toolchain and cargo-fuzz (track R M3)
 # Install the fuzzing toolchain (track R M3); CI installs cargo-fuzz with taiki-e instead
@@ -228,7 +228,7 @@ fuzz-cmin: fuzz-lock
 _fuzz-max-len target:
     #!/usr/bin/env bash
     case "{{target}}" in
-        parquet_file) echo 1048576 ;;
+        parquet_file|statam_file) echo 1048576 ;;
         wal_replay|otlp_http_protobuf|otlp_http_json|otlp_grpc|saml_response|saml_metadata|saml_assertion) echo 262144 ;;
         *) echo 65536 ;;
     esac
@@ -238,7 +238,7 @@ _fuzz-max-len target:
 _fuzz-max-files target:
     #!/usr/bin/env bash
     case "{{target}}" in
-        parquet_file|filter_dsl|catalog_rows) echo 300 ;;
+        parquet_file|filter_dsl|catalog_rows|sql|statam_file) echo 300 ;;
         *) echo 2000 ;;
     esac
 
@@ -542,13 +542,40 @@ prices-update litellm_json:
 
 # Fixture capture
 
-# Capture OTLP fixtures from real instrumentations (tools/capture), e.g. `just capture openinference/openai-chat-tool`
-capture +cases: capture-py-sync capture-ts-sync
-    cargo run -q -p cetra-capture -- run {{cases}}
+# Fetch the pinned gateway binaries (Temporal CLI, Bifrost, aigw, Envoy), the JDK, Maven and the
+# .NET SDK into target/capture-tools, and build the Java and .NET capture scenarios (online)
+capture-tools:
+    bash tools/capture/fetch-tools.sh
+
+# Capture OTLP fixtures from real instrumentations (tools/capture), e.g. `just capture openinference/openai-chat-tool`.
+# Runs in a network namespace with only loopback (D-IN-26 item 11): no capture reaches the internet.
+# /root is a throwaway tmpfs inside it, where envoy-gateway's certgen writes (aigw, Amendment A point 7).
+capture +cases: capture-tools capture-py-sync capture-ts-sync
+    {{just_executable()}} _capture-namespace {{cases}}
+
+# The capture run in a private network namespace (Amendment B point 6). Builds cetra-capture outside
+# the namespace, probes that the namespace works (its own stderr is printed on failure), then runs
+# `cetra-capture run ARGS` inside it with loopback up.
+[private]
+_capture-namespace +args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -q -p cetra-capture
+    unshare --user --map-root-user --net --mount sh -c 'command -v ip >/dev/null && ip link set lo up && mount -t tmpfs tmpfs /root' || { echo "captures need unprivileged user namespaces, ip (iproute2) and a tmpfs mount on /root: see AGENTS.md" >&2; exit 1; }
+    # /root is a throwaway tmpfs: envoy-gateway's certgen writes to the passwd home of uid 0, which
+    # is /root whatever HOME says (Amendment A point 7). It is not mounted when HOME is /root or
+    # inside it, because the mount would hide HOME.
+    mount_root=''
+    case "${HOME:-}" in /root|/root/*) ;; *) mount_root='mount -t tmpfs tmpfs /root && ' ;; esac
+    UV_OFFLINE=1 CARGO_NET_OFFLINE=true unshare --user --map-root-user --net --mount sh -c "ip link set lo up && ${mount_root}exec cargo run -q -p cetra-capture -- run \"\$@\"" sh {{args}}
 
 # Recapture every scenario
-capture-all: capture-py-sync capture-ts-sync
-    cargo run -q -p cetra-capture -- run --all
+capture-all: capture-tools capture-py-sync capture-ts-sync
+    {{just_executable()}} _capture-namespace --all
+
+# Install the capture harness package (tools/capture/harness)
+capture-harness-sync:
+    cd tools/capture/harness && uv sync --locked
 
 # Install the Python capture project (tools/capture/py)
 capture-py-sync:
@@ -559,11 +586,13 @@ capture-ts-sync:
     pnpm --dir tools/capture/ts install --frozen-lockfile
 
 # Lint and type-check the capture scenarios, then recapture every scenario and compare (timing excluded)
-check-capture: capture-py-sync capture-ts-sync
+check-capture: capture-tools capture-harness-sync capture-py-sync capture-ts-sync
+    cd tools/capture/harness && uv run ruff format --check && uv run ruff check && uv run mypy
     cd tools/capture/py && uv run ruff format --check && uv run ruff check && uv run mypy
+    for env in tools/capture/envs/*/; do [ -d "${env}scenarios" ] || continue; (cd "$env" && uv run --locked ruff format --check && uv run --locked ruff check && uv run --locked mypy) || exit 1; done
     pnpm --dir tools/capture/ts run typecheck
     pnpm exec biome check tools/capture/ts
-    cargo run -q -p cetra-capture -- run --all --check
+    {{just_executable()}} _capture-namespace --all --check
 
 # Packaging and release (track N, docs/plans/n-packaging/)
 

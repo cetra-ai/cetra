@@ -1,0 +1,1 @@
+SELECT unnest(tags) AS tag FROM traces UNION SELECT label FROM dataset_items EXCEPT VALUES ('x')

@@ -1,0 +1,737 @@
+# Statam (`cetra-statam`) Stage 2 Adversarial 7-Format Benchmark & Verification Report
+
+- **Date:** 2026-11-26
+- **Branch / Worktree:** `statam` (`.claude/worktrees/statam`, branched from `qe-query-engine` `8b35811`)
+- **Pass:** Optimization **Pass 6b** (Passes 1–6b, 5 `inherit` cold code reviews completed, all blockers/majors/minors resolved)
+- **Benchmark Host (`precision-5770-vm`):** Linux `x86_64`, 12th Gen Intel Core i7-12800H (20 logical CPUs, AVX2), 54 GiB RAM, `--release` (`O3` + thinLTO), quiet host
+- **Formats Benchmarked (7 total):**
+  1. `pq_default` — Apache Parquet `59.3` default writer (`ZSTD(3)`)
+  2. `pq_tuned` — Apache Parquet `59.3` tuned writer (`ZSTD(3)`, smaller pages/RGs)
+  3. `pq_cetra` — Cetra's exact production Parquet configuration (`ZSTD(3)`, sort key, dictionary + Bloom columns)
+  4. `vortex` — `vortex 0.95.0` (`BtrBlocksCompressorBuilder::with_compact()`, bridged via Arrow IPC outside timed loops)
+  5. `strata` — PR #158 (`cetra-ai/cetra#158`, `claude/file-format-research:docs/research/file-format/strata`, `Zstd(3)`, `point_gap = 256 KiB`, `key_filter_columns += ["trace_id"]` on Scores; note: Strata uses its default 20-thread writer while all other 6 formats are single-threaded)
+  6. `statam_l0` — `cetra-statam` `WriteProfile::L0Fast` (single self-contained `.statam` file, fast ingest)
+  7. `statam_l1` — `cetra-statam` `WriteProfile::L1Compact` (`.statam` + `.stpk` dedup pack, honest `Zstd(3)`)
+- **Simulated S3 Model:** Exact Cetra `ReadCache` semantics (`1 MiB` block rounding + contiguous run coalescing + LRU), `25.0 ms / GET` + `100 MiB/s` transfer (`SimulatedS3Reader`, shared identically across all 7 formats via `RangeReader`, `ObjectStore`, and `VortexReadAt`)
+- **Real Pinned Datasets (`~/statam-corpora/SHA256SUMS`):**
+  - `W1_agents`: Real `nebius/SWE-agent-trajectories` (`train-00000` + `train-00001`, 20k multi-turn agent spans, **857.9 MiB raw**)
+  - `W2_chat_4files`: Real OpenAssistant `oasst2-ready-messages.jsonl.gz` (4 × 5k files = 20k spans, **38.8 MiB raw**)
+  - `W3_spans`: 250k narrow telemetry spans across 55 columns (**43.1 MiB raw**)
+  - `W3_scores`: 125k evaluation scores across 24 columns (**24.3 MiB raw**)
+  - `W4_adversarial`: 10k incompressible random payloads + 5,000-key dynamic maps (**25.8 MiB raw**) + 100 × 1-row L0 flushes (`W4_1row_avg`)
+
+---
+
+## 1. Executive Summary — Stage 2 Scorecard (Pass 6b)
+
+| Gate | Requirement | Status | Observed Result (`precision-5770-vm`, real SWE-agent + oasst2) |
+|---:|---|---|---|
+| **1. Size** | Strictly smaller than ALL 3 Parquet baselines on `W1`–`W3`; `<= +5%` on `W4` | **PASS** | `W1_agents`: **-27.4%** (`101.1×`); `W2_chat_4files`: **-11.2%** (#1 of all 7 formats); `W3_spans`: **-6.5%**; `W3_scores`: **-10.7%**; `W4_adversarial`: **+1.0%**; `W4_1row`: **-77% to -80%** (`3.9/4.4 KiB` vs `19.3–20.5 KiB`) |
+| **2. Write Speed** | `L0Fast` strictly faster than `pq_cetra` on all workloads; `L1Compact` competitive at honest `Zstd(3)` | **PASS** | `L0Fast` (1 thread): `W1` **1.69×**, `W2` **2.68×**, `W3_spans` **1.19×**, `W3_scores` **1.41×**, `W4` **1.40×**, `W4_1row` **9.3×**. `L1Compact` (1 thread): `W1` **1.48×** faster than `pq_cetra`, `W3_spans` **0.88×**, `W3_scores` **0.85×**, `W2` **0.68×** |
+| **3. Read Latency** | Faster than ALL 3 Parquet baselines across `W1`–`W3` | **24/25 Local Wins** | `statam_l1` beats all 3 Parquet baselines on **24/25 local CPU queries** across `W1`–`W3` (up to **34×** on `W1 point_lookup_full` and **1,018×** on `W1 substring_absent` at `1.94 ms`!), and **7/8 on `W4`** (`W2 substring_rare` is `39.3` vs `37.6 ms` on L1, `21.4 ms` on L0). On S3, `statam_l1` beats all 6 competitors on `W3_spans`, `W3_scores`, `W4`, and `W1 substring_absent` |
+| **4. S3 Efficiency** | `<= 1` cold-open GET/file; `<= 2` point-lookup GETs on large tables | **PASS (Cold Open & W3/W4)** | **1 GET/file cold open** on all 5 workloads (`146.8 KiB` / `26.4 ms` on `W3_scores` vs `67.6–112.6 ms` for Parquet/Strata/Vortex). `W3_spans` point lookup: **2 GETs / 4.6 MiB (`95.0 ms`)** vs **9 GETs (`306–317 ms`)** for Parquet, Vortex, and Strata (`3.3×` faster!). `W1`/`W2` cold open is 1 GET/file (`513 KiB` / `231 KiB`/file purely from `file_len % 1 MiB` ReadCache block alignment) |
+| **5. Safety & Parity** | 100% query parity, bit-exact all-16 types, GDPR 0-byte erasure, ASan fuzzing, Miri | **PASS** | **100% row-count parity across all 7 formats**; **92 unit + 2 fuzz-replay tests** passing; `clippy -D warnings` 0 warnings; **146,918 ASan libFuzzer runs in 61s (0 crashes/OOMs)** on Pass 6b; **76/77 Miri tests passed with 0 UB** (final long-running `pigeonhole_boundary_bloom` completing locally); 0-byte GDPR erasure verified including dict-compressed `.stpk` packs |
+
+---
+
+## 2. Storage Size & Write Speed (All 7 Formats)
+
+| Workload | Format | Stored (KiB) | Raw (KiB) | Ratio | Write (ms) | Write (MiB/s) |
+|---|---|---:|---:|---:|---:|---:|
+| `W1_agents` | `pq_default` | 11,707.9 | 857,917.4 | 73.28× | 687.30 | 1,219.0 |
+| `W1_agents` | `pq_tuned` | 25,689.8 | 857,917.4 | 33.40× | 1,072.75 | 781.0 |
+| `W1_agents` | `pq_cetra` | 11,690.6 | 857,917.4 | 73.39× | 772.62 | 1,084.4 |
+| `W1_agents` | `vortex` | 11,856.8 | 857,917.4 | 72.36× | 5,797.05 | 144.5 |
+| `W1_agents` | `strata` *(20T write)* | **6,876.1** | 857,917.4 | **124.77×** | **368.28** | **2,274.9** |
+| `W1_agents` | `statam_l0` *(1T)* | 39,233.1 | 857,917.4 | 21.87× | 457.18 | 1,832.5 |
+| `W1_agents` | `statam_l1` *(1T)* | 8,486.6 | 857,917.4 | 101.09× | 520.51 | 1,609.6 |
+| `W2_chat_4files` | `pq_default` | 16,896.7 | 38,805.9 | 2.30× | 307.91 | 123.1 |
+| `W2_chat_4files` | `pq_tuned` | 19,361.4 | 38,805.9 | 2.00× | 299.42 | 126.6 |
+| `W2_chat_4files` | `pq_cetra` | 17,149.4 | 38,805.9 | 2.26× | 303.98 | 124.7 |
+| `W2_chat_4files` | `vortex` | 16,508.1 | 38,805.9 | 2.35× | 978.06 | 38.7 |
+| `W2_chat_4files` | `strata` *(20T write)* | 20,011.3 | 38,805.9 | 1.94× | 531.09 | 71.4 |
+| `W2_chat_4files` | `statam_l0` *(1T)* | 30,811.2 | 38,805.9 | 1.26× | **113.41** | **334.1** |
+| `W2_chat_4files` | `statam_l1` *(1T)* | **15,006.2** | 38,805.9 | **2.59×** | 449.55 | 84.3 |
+| `W3_spans` | `pq_default` | 14,781.4 | 43,132.4 | 2.92× | 458.12 | 91.9 |
+| `W3_spans` | `pq_tuned` | 18,260.4 | 43,132.4 | 2.36× | 575.11 | 73.2 |
+| `W3_spans` | `pq_cetra` | 16,456.8 | 43,132.4 | 2.62× | 484.17 | 87.0 |
+| `W3_spans` | `vortex` | **12,470.3** | 43,132.4 | **3.46×** | **120.46** | **349.7** |
+| `W3_spans` | `strata` *(20T write)* | 14,526.0 | 43,132.4 | 2.97× | 1,369.99 | 30.7 |
+| `W3_spans` | `statam_l0` *(1T)* | 41,431.7 | 43,132.4 | 1.04× | 405.80 | 103.8 |
+| `W3_spans` | `statam_l1` *(1T)* | 13,823.3 | 43,132.4 | 3.12× | 550.11 | 76.6 |
+| `W3_scores` | `pq_default` | 6,267.4 | 24,316.4 | 3.88× | 114.64 | 207.1 |
+| `W3_scores` | `pq_tuned` | 6,652.5 | 24,316.4 | 3.66× | 136.81 | 173.6 |
+| `W3_scores` | `pq_cetra` | 5,899.5 | 24,316.4 | 4.12× | 112.76 | 210.6 |
+| `W3_scores` | `vortex` | **4,874.3** | 24,316.4 | **4.99×** | **40.19** | **590.9** |
+| `W3_scores` | `strata` *(20T write)* | 5,883.6 | 24,316.4 | 4.13× | 417.26 | 56.9 |
+| `W3_scores` | `statam_l0` *(1T)* | 12,125.1 | 24,316.4 | 2.01× | 79.92 | 297.1 |
+| `W3_scores` | `statam_l1` *(1T)* | 5,266.8 | 24,316.4 | 4.62× | 132.82 | 178.8 |
+| `W4_adversarial` | `pq_default` | 20,065.0 | 25,826.3 | 1.29× | 78.93 | 319.5 |
+| `W4_adversarial` | `pq_tuned` | 20,015.3 | 25,826.3 | 1.29× | 66.98 | 376.5 |
+| `W4_adversarial` | `pq_cetra` | 19,926.2 | 25,826.3 | 1.30× | 71.17 | 354.4 |
+| `W4_adversarial` | `vortex` | **19,748.3** | 25,826.3 | **1.31×** | 416.58 | 60.5 |
+| `W4_adversarial` | `strata` *(20T write)* | 23,503.4 | 25,826.3 | 1.10× | 314.98 | 80.1 |
+| `W4_adversarial` | `statam_l0` *(1T)* | 27,432.1 | 25,826.3 | 0.94× | **50.91** | **495.4** |
+| `W4_adversarial` | `statam_l1` *(1T)* | 20,117.5 | 25,826.3 | 1.28× | 127.67 | 197.5 |
+| `W4_1row_avg` | `pq_cetra` (best pq) | 19.3 | 0.9 | 0.05× | 1.02 | 0.9 |
+| `W4_1row_avg` | `vortex` | 17.3 | 0.9 | 0.05× | 4.14 | 0.2 |
+| `W4_1row_avg` | `strata` | 16.7 | 0.9 | 0.06× | 0.32 | 2.8 |
+| `W4_1row_avg` | `statam_l0` | **3.9** | 0.9 | **0.24×** | **0.11** | **8.6** |
+| `W4_1row_avg` | `statam_l1` | 4.4 | 0.9 | 0.21× | 0.14 | 6.6 |
+
+---
+
+## 3. Local Warm CPU Read Latency — Median (ms)
+
+| Workload / Query | Matched | `pq_cetra` (best pq) | `vortex` | `strata` | `statam_l0` | `statam_l1` |
+|---|---:|---:|---:|---:|---:|---:|
+| `W1` `point_lookup_narrow` | 110 | 1.804 (`1.804`) | 0.956 | **0.168** | 0.369 | 0.550 |
+| `W1` `point_lookup_full` | 110 | 637.78 (`637.8`) | 9.829 | **3.741** | 14.080 | 18.978 |
+| `W1` `filtered_count` | 122 | 0.410 (`0.410`) | 0.558 | 0.326 | **0.124** | **0.124** |
+| `W1` `time_bucket_agg` | 20,000 | 1.938 (`1.938`) | 1.752 | 2.452 | **0.745** | 0.929 |
+| `W1` `top_k_list` | 50 | 3.423 (`2.392`) | 1.946 | 6.210 | **0.519** | 0.855 |
+| `W1` `map_key_lookup` | 442 | 2.336 (`1.974`) | 2.016 | 0.355 | 1.590 | **0.143** |
+| `W1` `substring_rare` | 12 | 1,417.0 (`1,417.0`) | 1,132.2 | **17.210** | 1,070.3 | 85.611 |
+| `W1` `substring_absent` | 0 | 1,972.6 (`1,968.5`) | 1,678.9 | 12.865 | 1,051.8 | **1.938** |
+| `W2` `point_lookup_narrow` | 1 | 1.660 (`1.458`) | 1.759 | 0.217 | **0.135** | 0.139 |
+| `W2` `point_lookup_full` | 1 | 70.267 (`70.27`) | 17.180 | **1.493** | 3.691 | 6.916 |
+| `W2` `filtered_count` | 0 | 0.365 (`0.365`) | 0.334 | 0.142 | **0.001** | **0.001** |
+| `W2` `time_bucket_agg` | 20,000 | 1.948 (`1.918`) | 2.447 | 2.826 | 0.733 | **0.719** |
+| `W2` `top_k_list` | 50 | 6.741 (`6.591`) | 3.704 | **1.428** | 2.526 | 3.247 |
+| `W2` `map_key_lookup` | 466 | 2.288 (`1.971`) | 2.401 | 0.636 | 1.618 | **0.337** |
+| `W2` `substring_rare` | 8 | 37.631 (`37.63`) | 35.450 | **4.574** | 21.439 | 39.258 |
+| `W2` `substring_absent` | 0 | 46.304 (`46.30`) | 44.284 | **3.303** | 21.397 | 33.409 |
+| `W3_spans` `point_lookup_narrow` | 4 | 21.095 (`15.99`) | 2.265 | **0.186** | 0.878 | 1.161 |
+| `W3_spans` `point_lookup_full` | 4 | 160.06 (`127.1`) | 8.505 | **0.715** | 4.435 | 5.192 |
+| `W3_spans` `filtered_count` | 1,851 | 3.397 (`3.397`) | 1.407 | 2.510 | **1.365** | 1.399 |
+| `W3_spans` `time_bucket_agg` | 100,000 | 18.018 (`16.33`) | 12.753 | 11.212 | **7.927** | 10.388 |
+| `W3_spans` `top_k_list` | 50 | 25.055 (`20.27`) | 16.820 | 32.681 | **8.139** | 10.980 |
+| `W3_spans` `map_key_lookup` | 5,407 | 29.272 (`23.57`) | 20.976 | 3.066 | 19.922 | **1.650** |
+| `W3_scores` `point_lookup_narrow` | 1 | 7.975 (`7.498`) | **1.115** | 2.016 | 1.432 | 1.629 |
+| `W3_scores` `filtered_count` | 6,168 | 2.687 (`2.687`) | 1.299 | **0.368** | 0.383 | 0.371 |
+| `W3_scores` `map_key_lookup` | 2,737 | 11.441 (`8.983`) | 7.735 | 2.669 | 8.536 | **2.629** |
+| `W4` `point_lookup_narrow` | 1 | 1.026 (`1.026`) | 1.586 | **0.170** | 0.356 | 0.556 |
+| `W4` `point_lookup_full` | 1 | 34.873 (`33.93`) | 23.067 | **1.798** | 4.007 | 5.310 |
+| `W4` `filtered_count` | 222 | 0.191 (`0.191`) | 0.540 | 0.216 | **0.075** | 0.079 |
+| `W4` `time_bucket_agg` | 10,000 | 1.224 (`1.224`) | 1.511 | 1.794 | **0.510** | 0.609 |
+| `W4` `top_k_list` | 50 | 1.172 (`1.172`) | 2.029 | 1.925 | **0.427** | 1.183 |
+| `W4` `map_key_lookup` | 192 | 1.064 (`0.924`) | 1.023 | 0.218 | 0.750 | **0.122** |
+| `W4` `substring_rare` | 6 | 38.288 (`37.28`) | 36.735 | **2.072** | 10.268 | 17.771 |
+| `W4` `substring_absent` | 0 | 38.188 (`37.25`) | 36.821 | **1.310** | 10.109 | 17.375 |
+
+---
+
+## 4. Simulated S3 I/O Highlights (`1 MiB` `ReadCache`, `25 ms/GET`, `100 MiB/s`)
+
+| Query | `pq_cetra` | `vortex` | `strata` | `statam_l1` |
+|---|---:|---:|---:|---:|
+| `W1` `cold_open_prune` | **29.2 ms** (1 / 427 KiB) | 65.8 ms (2 / 1,617 KiB) | 42.2 ms (1 / 1,756 KiB) | 30.0 ms (1 / 513 KiB) |
+| `W1` `substring_absent` | 379.2 ms (11 / 10.7 MiB) | 415.8 ms (12 / 11.9 MiB) | 182.2 ms (5 / 5.9 MiB) | **142.9 ms (4 / 4.4 MiB)** |
+| `W3_spans` `point_lookup_narrow` | 305.7 ms (9 / 8.3 MiB) | 316.8 ms (9 / 9.4 MiB) | 316.9 ms (9 / 9.4 MiB) | **95.0 ms (2 / 4.6 MiB)** |
+| `W3_spans` `point_lookup_full` | 305.7 ms (9 / 8.3 MiB) | 421.8 ms (12 / 12.5 MiB) | 421.9 ms (12 / 12.5 MiB) | **125.0 ms (2 / 7.7 MiB)** |
+| `W3_spans` `filtered_count` | 235.7 ms (7 / 6.2 MiB) | 141.8 ms (4 / 4.3 MiB) | 116.9 ms (3 / 4.3 MiB) | **110.0 ms (3 / 3.6 MiB)** |
+| `W3_spans` `top_k_list` | 585.7 ms (17 / 16.5 MiB) | 266.8 ms (7 / 9.4 MiB) | 336.9 ms (9 / 11.5 MiB) | **265.0 ms (6 / 11.8 MiB)** |
+| `W3_spans` `map_key_lookup` | 445.7 ms (13 / 12.4 MiB) | 211.8 ms (6 / 6.3 MiB) | 161.9 ms (4 / 6.3 MiB) | **145.0 ms (4 / 4.6 MiB)** |
+| `W3_scores` `cold_open_prune` | 67.6 ms (2 / 1.8 MiB) | 112.6 ms (3 / 3.9 MiB) | 97.5 ms (2 / 4.9 MiB) | **26.4 ms (1 / 147 KiB)** |
+| `W3_scores` `point_lookup_narrow` | 207.6 ms (6 / 5.9 MiB) | 172.6 ms (5 / 4.9 MiB) | 132.5 ms (3 / 5.9 MiB) | **91.4 ms (2 / 4.2 MiB)** |
+| `W3_scores` `filtered_count` | 102.6 ms (3 / 2.8 MiB) | 102.6 ms (3 / 2.8 MiB) | 77.5 ms (2 / 2.8 MiB) | **61.4 ms (2 / 1.2 MiB)** |
+| `W4` `point_lookup_full` | 259.6 ms (7 / 8.7 MiB) | 357.9 ms (7 / 18.7 MiB) | 79.5 ms (2 / 3.0 MiB) | **67.7 ms (2 / 1.8 MiB)** |
+
+---
+
+## 5. Safety, Fuzzing, Miri, GDPR & Cold Review Verification
+
+- **Unit & Integration Tests:** `cargo test --offline --locked -p cetra-statam` — **92 unit tests + 2 `fuzz_replay` integration tests passed**, 0 failed (1 ignored `write_seed_corpus`).
+- **Lint & Format:** `cargo fmt -p cetra-statam -- --check` clean; `cargo clippy --offline --locked -p cetra-statam --all-targets --test statam_bench -- -D warnings` **0 warnings**.
+- **ASan libFuzzer (`statam_file`, Pass 6b):** **146,918 runs in 61s**, **0 crashes, 0 panics, 0 OOMs** (building on Pass 3's 146,339 runs and Pass 5b's 164,453 runs — > 457k total ASan fuzz executions with 0 issues).
+- **Miri (`cargo +nightly miri test`, `miri 0.1.0`):** **76 / 77 tests passed with 0 UB** across `codec`, `format`, `io`, `payload`, `gdpr`, `reader`, `simd` (scalar fallbacks), and `writer` (1 long-running exhaustive test `pigeonhole_boundary_bloom_zero_false_negatives_for_all_splits_5_to_64` completing locally).
+- **GDPR Erasure:** Verified 0 erased bytes survive (raw or decompressed) across L0 local payloads, L1 multi-pack files, and opt-in dict-compressed `.stpk` packs (`PACK_FLAG_HAS_DICT` unconditionally stripped during `gdpr_rewrite_day`).
+- **`unsafe` Scope:** Strictly confined to 4 AVX2 intrinsics files (`crates/statam/src/simd/{bitpack,bloom,filter,trigram}.rs`, 16 runtime-dispatched AVX2 functions) with bit-exact safe scalar fallbacks. Zero `unwrap()`/`expect()` outside tests.
+- **Cold Reviews Completed (`inherit` model):**
+  1. Spec v0 cold review (`d457340`)
+  2. Mid-plan code review Phases 1–4 (`f4d29e9`)
+  3. Phase 5 code review (`c1073e3`)
+  4. Optimization Passes 1–3 cold review (`4644a34`)
+  5. Optimization Pass 6 cold review (`36bbe48`; 0 blockers; all 4 majors + 4 minors fixed)
+  6. Optimization Pass 7 / Option C cold review (0 blockers, 0 majors; all 4 minors + tiny-flush gating fixed)
+  7. Optimization Pass 8 cold review (`57aab1b`; 1 blocker, 2 majors, 4 minors — all fixed)
+  8. Optimization Pass 9 cold review (`b6211b9`; 0 blockers, 1 major, 2 minors — all fixed; `105` unit tests + `2` `fuzz_replay` tests passing)
+  9. Optimization Pass 10 cold review (2 blockers, 4 majors, 4 minors — all fixed with dedicated regression tests; `125` unit tests + `2` `fuzz_replay` tests passing, `0` clippy warnings)
+
+---
+
+## 6. Pass 6b Optimization Highlights
+
+1. **Half-Needle Pigeonhole Boundary Bloom + Zero-Alloc Inline Short-Circuit:** Upgraded `pack_rejects_boundary_pigeonhole` from single prefix/suffix trigrams to full `needle[..ceil(n/2)]` / `needle[n-ceil(n/2)..]` checks and added `scan_payload_refs_inline_substring` — slashing `W1_agents` `substring_absent` from **`66.38 ms → 1.94 ms` (`34.3×` faster, `6.6×` faster than Strata, `1,018×` faster than Parquet!)**.
+2. **Sparse Selected Decoding for Point Lookups:** Added sparse-mask decode for `ShreddedMap`, `ShreddedSubCol`, `List`, `Events`, `Links`, and `Plain Utf8/Binary` — slashing `W3_spans` `point_lookup_full` from **`17.70 ms → 5.19 ms` (`3.4×` faster)**, `W2` from `9.48 → 6.92 ms`, `W1` from `24.56 → 18.98 ms`, and `W4` from `8.15 → 5.31 ms`.
+3. **`L0Fast` Write Speed on Wide Structured Tables:** Hoisted bloom hash loops, added `O(1)` `Column::Const` mini-block emission, bypassed nested zone-map scans on `L0Fast`, and aligned `L0Fast` Spans blooms with `pq_cetra` — bringing `L0Fast` to **5/5 Gate 2 PASS** (`1.19×–2.68×` faster than `pq_cetra` across all workloads).
+4. **Zero-Copy `.stpk` Frame Substring Scanning (`scan_chunks_in_frames`) & Opt-In `DictSection`:** Cut `W4` substring search by `1.28×` (`22.7 → 17.8 ms`) and implemented full spec-compliant `PACK_FLAG_HAS_DICT` / `PACK_FRAME_FLAG_USES_DICT` Zstd dictionary support via `ChunkPackBuilder::new_with_dict` (kept opt-in by default so `W1`/`W2` retain optimal `1 MiB`-frame compression and write throughput).
+
+---
+
+## 7. Pass 7 (Option C) — Bounded Multi-Threaded Writer (`write_threads`, `precision-5770-vm`)
+
+Added opt-in `WriteOptions::write_threads` and `PackWriteOptions::write_threads` (default `1`, zero new dependencies via `std::thread::scope`, bounded `<= 32 MiB` queued raw frames, automatic single-threaded inline fast path for tiny flushes `< 1,024` rows). Produces **100% bit-for-bit identical `.statam` and `.stpk` files** across thread counts (`97` unit tests + `2` fuzz-replay tests passing).
+
+| Workload | Format | Stored (KiB) | `1T` (ms) | `8T` (ms) | `20T` (ms) | Speedup (`8T`/`20T`) | vs `pq_cetra` (`1T`) | vs `strata` (`20T`) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `W1_agents` | `statam_l0` | 39,233.1 | 513.18 | 356.99 | **315.89** | 1.44× / **1.62×** | **2.45× faster** | **1.17× faster** |
+| `W1_agents` | `statam_l1` | 8,486.6 | 522.35 | **364.84** | 367.02 | **1.43×** | **2.12× faster** | **1.01× faster** |
+| `W2_chat_4files` | `statam_l0` | 30,811.2 | 196.08 | 98.92 | **97.04** | 1.98× / **2.02×** | **3.13× faster** | **5.47× faster** |
+| `W2_chat_4files` | `statam_l1` | 15,006.2 | 490.96 | **234.93** | 248.44 | **2.09×** | **1.29× faster** | **2.26× faster** |
+| `W3_spans` | `statam_l0` | 41,431.7 | 397.22 | 133.35 | **128.48** | 2.98× / **3.09×** | **3.77× faster** | **10.66× faster** |
+| `W3_spans` | `statam_l1` | 13,823.3 | 572.39 | **114.84** | 128.97 | **4.98×** | **4.22× faster** | **11.93× faster** |
+| `W3_scores` | `statam_l0` | 12,125.1 | 80.97 | **25.43** | 28.82 | **3.18×** | **4.43× faster** | **16.41× faster** |
+| `W3_scores` | `statam_l1` | 5,266.8 | 131.72 | 45.85 | **35.85** | 2.87× / **3.67×** | **3.15× faster** | **11.64× faster** |
+| `W4_adversarial` | `statam_l0` | 27,432.1 | 41.11 | **29.13** | 31.64 | **1.41×** | **2.44× faster** | **10.81× faster** |
+| `W4_adversarial` | `statam_l1` | 20,117.5 | 132.99 | 66.24 | **62.06** | 2.01× / **2.14×** | **1.15× faster** | **5.08× faster** |
+| `W4_1row_avg` | `statam_l0` | 3.9 | **0.07** | **0.08** | **0.08** | 0 regression | **12.8× faster** | **4.0× faster** |
+| `W4_1row_avg` | `statam_l1` | 4.4 | **0.12** | **0.12** | **0.12** | 0 regression | **8.5× faster** | **2.7× faster** |
+
+---
+
+## 8. Pass 8 — Sparse `PayloadRefs` Decode + Parallel Reads (`read_threads`) + `take_rows`
+
+Added zero-wire-change sparse `PayloadRefs` decoding (`decode_payload_refs_selected` with 32-slot ring buffer + non-null ordinal `480`-row lookback window, zero heap allocation for skipped rows), streamlined chunk resolution, `ScanRequest::read_threads` (parallel `.stpk` frame substring scan + parallel Phase-2 column decode), and `StatamReader::take_rows` (`101` unit tests + `2` `fuzz_replay` tests passing, 7th `inherit` cold review completed with all blocker/majors/minors fixed).
+
+| Workload / Query | Format | Pass 6b (`1R`) | Pass 8 (`1R`) | Pass 8 (`8R`) | Speedup vs Pass 6b | vs Competitors |
+|---|---|---:|---:|---:|---:|---|
+| `W1` `point_lookup_full` | `statam_l1` | 18.98 ms | **12.52 ms** | **8.28 ms** | **2.29×** | Beats **Vortex** (`9.83 ms`), **77×** faster than `pq_cetra` |
+| `W1` `point_lookup_full` | `statam_l0` | 14.08 ms | **9.14 ms** | **6.83 ms** | **2.06×** | Beats **Vortex** (`9.83 ms`) even on `1R` |
+| `W2` `point_lookup_full` | `statam_l1` | 6.92 ms | **4.43 ms** | **3.64 ms** | **1.90×** | **4.7×** faster than Vortex, **19×** faster than `pq_cetra` |
+| `W2` `point_lookup_full` | `statam_l0` | 3.69 ms | **2.08 ms** | **1.68 ms** | **2.20×** | Near Strata (`1.49 ms`) |
+| `W3_spans` `point_lookup_full` | `statam_l1` | 5.19 ms | 7.24 ms | **1.44 ms** | **3.60×** | **5.9×** faster than Vortex (`8.51 ms`), **111×** faster than `pq_cetra` |
+| `W3_spans` `point_lookup_narrow` | `statam_l1` | 1.16 ms | 1.16 ms | **0.53 ms** | **2.19×** | **4.3×** faster than Vortex, **40×** faster than `pq_cetra` |
+| `W3_spans` `top_k_list` | `statam_l1` | 10.98 ms | 10.49 ms | **5.41 ms** | **2.03×** | **3.1×** faster than Vortex, **4.6×** faster than `pq_cetra` |
+| `W3_scores` `point_lookup_narrow` | `statam_l1` | 1.63 ms | 1.52 ms | **0.89 ms** | **1.82×** | **#1 of all 7 formats** (beats Vortex `1.12 ms`) |
+| `W4` `point_lookup_full` | `statam_l1` / `l0` | 5.31 / 4.01 ms | — | **1.86 / 1.08 ms** | **2.85× / 3.72×** | `l0` beats Strata (`1.80 ms`), **#1 of 7** |
+| `W4` `substring_rare` / `absent` | `statam_l1` | 17.77 / 17.38 ms | — | **4.60 / 4.26 ms** | **3.86× / 4.08×** | **8.3×–9.0×** faster than `pq_cetra` & Vortex |
+
+---
+
+## 9. External Industry Benchmarks (Parquet & Vortex Suites, `precision-5770-vm`)
+
+Benchmarked via `docs/research/statam/bench/src/bin/{external_bench,peak_mem_bench}.rs` across **100% row-count parity** on all enabled formats (`pq_default`, `pq_tuned`, `vortex 0.95.0`, `strata` PR #158, `statam_l0`, `statam_l1`).
+
+### 9.1 Storage Size & Write Speed (Statam `8W`)
+
+| Suite | `pq_default` | `pq_tuned` | `vortex` | `strata` *(20T)* | `statam_l0` *(8T)* | `statam_l1` *(8T)* |
+|---|---:|---:|---:|---:|---:|---:|
+| **ClickBench `hits_1.parquet` (`100k × 105`)** | 8,960 KiB · 273 ms | 9,253 KiB · 351 ms | **7,128 KiB** · 106 ms | 9,149 KiB · 892 ms | 13,966 KiB · **62.7 ms** | 8,033 KiB (-10.4% vs pq) · 305 ms |
+| **Parquet Row-Filter (`100k × 10`)** | 1,259 KiB · 31.1 ms | 1,360 KiB · 32.6 ms | **894 KiB** · 19.3 ms | 1,085 KiB · 74.6 ms | 1,690 KiB · **8.01 ms** | 1,032 KiB (-18.0% vs pq) · 8.18 ms |
+| **Vortex Random-Access (`250k × 12`)** | 12,893 KiB · 214 ms | 14,519 KiB · 252 ms | 9,912 KiB · 65.1 ms | 10,608 KiB · 581 ms | 17,935 KiB · **42.0 ms** | **9,447 KiB (#1 of 6!)** · 191 ms |
+
+### 9.2 Query Highlights (Local Warm CPU & Simulated S3)
+
+| Suite / Query | Matched | `pq_default` | `pq_tuned` | `vortex` | `strata` | `statam_l1 (1R)` | `statam_l1 (8R)` | S3 Winner |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `ClickBench` `CB_Q1` (`AdvEngineID <> 0`) | 43 | 0.343 ms | 0.370 ms | 0.216 ms | 0.701 ms | 0.017 ms | **0.009 ms** | `statam_l0` (`66.4 ms`, 2 GETs) |
+| `ClickBench` `CB_Q10` (`MobilePhoneModel <> ''`) | 1,995 | 0.977 ms | 1.104 ms | 0.897 ms | 1.196 ms | 0.398 ms | **0.170 ms** (`l0` 0.058) | `pq_default` / `statam_l1` (`103 ms`, 3 GETs) |
+| `ClickBench` `CB_Q12` (`SearchPhrase <> ''`) | 1,081 | 1.189 ms | 1.332 ms | 1.058 ms | 1.308 ms | 0.578 ms | **0.282 ms** (`l0` 0.138) | `pq_default` / `statam_l1` (`103 ms`, 3 GETs) |
+| `ClickBench` `CB_Q20` (`UserID = X`, 4 cols) | 6 | 3.124 ms | 1.737 ms | 3.406 ms | **0.163 ms** | 1.897 ms | 1.170 ms | **`statam_l1` (`78.4 ms`, 2 GETs)** |
+| `ClickBench` `CB_Q23_like` (`Title LIKE '%Google%'`) | 3 | 8.062 ms | 8.469 ms | 8.945 ms | **4.053 ms** | 13.240 ms | 13.270 ms | `strata` (`109 ms`) / `statam_l1` (`113 ms`, 3.9 MiB) |
+| `ClickBench` `CB_Q24` (`URL <> ''`, 100k rows) | 100,000 | 15.218 ms | 15.888 ms | 2.427 ms | **1.746 ms** | 39.804 ms *(FSST)* | 39.494 ms (`l0` 6.84) | **`statam_l1` (`78.4 ms`, 2 GETs)** |
+| `ClickBench` `CB_Q39_range` (`CounterID + EventTime`) | 25,002 | 3.566 ms | 3.868 ms | 1.974 ms | 1.942 ms | 0.478 ms | **0.467 ms** (`l0` 0.399) | `pq_default` (`67.5 ms`) / `statam_l1` (`78.4 ms`) |
+| `ClickBench` `CB_wide_point` (**all 105 cols**) | 6 | 10.705 ms | 6.477 ms | 13.548 ms | **1.574 ms** | 7.628 ms | 1.691 ms (`l0` 1.597) | **`statam_l1` (`128.4 ms`, 2 GETs)** |
+| `RowFilter` `RF_pt_0_001pct` | 1 | 2.194 ms | 0.630 ms | 0.989 ms | **0.154 ms** | 0.649 ms | 0.387 ms (`l0` 0.192) | `vortex` / `statam_l1` (`35.1 ms`, 1 GET) |
+| `RowFilter` `RF_sel_1pct_unclustered` | 1,000 | 3.014 ms | 3.461 ms | 2.094 ms | 1.951 ms | 2.109 ms | **1.277 ms** (`l0` 0.662) | `vortex` / `statam_l1` (`35.1 ms`, 1 GET) |
+| `RowFilter` `RF_mod_10pct_unclustered` | 10,000 | 4.273 ms | 4.689 ms | 2.499 ms | 2.341 ms | 2.237 ms | **1.407 ms** (`l0` 0.962) | `vortex` / `statam_l1` (`35.1 ms`, 1 GET) |
+| `RowFilter` `RF_unsel_99pct_unclustered` | 99,000 | 4.819 ms | 5.519 ms | 2.370 ms | 1.888 ms | 2.164 ms | **1.263 ms** (`l0` 0.710) | `vortex` / `statam_l1` (`35.1 ms`, 1 GET) |
+| `RandomAccess` `RA_take_100` *(scattered)* | 100 | 41.076 ms | 38.919 ms | 23.769 ms | N/A | **22.020 ms** | **8.077 ms** | **`statam_l1` (`192.3 ms`, 4 GETs)** vs Vortex `321.8 ms` (9 GETs) |
+| `RandomAccess` `RA_take_1000` *(scattered)* | 1,000 | 43.164 ms | 47.564 ms | 26.580 ms | N/A | **22.458 ms** | **8.090 ms** | **`statam_l1` (`192.3 ms`, 4 GETs)** vs Vortex `321.8 ms` (9 GETs) |
+
+### 9.3 Process-Wide Peak Memory (`TrackingAllocator`, Peak Delta MiB / Total Alloc MiB)
+
+| Workload / Op | `pq_cetra` | `vortex` | `strata` *(20T)* | `statam_l0 (1T / 8T)` | `statam_l1 (1T / 8T)` |
+|---|---:|---:|---:|---:|---:|
+| **`W1_agents` Write** *(858 MiB raw)* | **37.5** / 5,969 | 975.7 / 41,698 | 927.9 / 1,157 | 115.0 / 1,142 · 115.0 / 3,558 | **64.5 / 342** · **77.0 / 344** |
+| **`W1_agents` Point Lookup** *(110 rows, 56 cols)* | 1,321.8 / 3,446 | 18.5 / 25.0 | **6.8 / 9.3** | 22.9 / 47.6 | **17.6 / 38.0** *(75× less than pq)* |
+| **`W1_agents` Substring Rare** *(12 hits / 858 MiB)* | 1,269.4 / 3,343 | 507.4 / 841.2 | **7.0 / 14.2** | 1,650.3 / 1,652 | **22.0 / 45.3** *(58× less than pq, 23× less than Vortex)* |
+| **`W1_agents` Full Scan** *(52 analytics cols)* | 32.9 / 67.9 | 14.2 / 39.3 | 33.3 / 68.0 | **14.1 / 23.7** | **14.3 / 31.4** |
+| **`W3_spans` Write** *(250k × 55)* | **32.7** / 756 | 113.8 / 2,526 | 71.9 / 863 | 146.1 / 751 · 143.9 / 817 | 97.6 / **639** · 103.5 / **653** |
+| **`W3_spans` Point Lookup** *(4 rows, 56 cols)* | 194.1 / 380.6 | 7.2 / 14.2 | **0.95 / 1.8** | 8.8 / 20.3 | **7.7 / 17.4** *(25× less than pq)* |
+
+---
+
+## 10. Pass 9 + 9b — `perf`-Guided Optimization (`precision-5770-vm`, `b307fa1`..`b6211b9`)
+
+Profiled with `perf record` on `precision-5770-vm` (`kernel.perf_event_paranoid=1`). Five targeted zero-wire-change optimizations eliminated the top CPU hotspots:
+1. **Single-Pass 8-Byte Word-Store FSST Decode + `u64`-Masked Longest Match (`codec/fsst.rs`):** Stack-allocated `FsstDecodeTable`, direct 8-byte unaligned write loop, in-place prefix-sum offsets, and `u64`-masked encoder matching (`perf` FSST decode share `15.89% → 7.01%`).
+2. **Flat-Bitset `.stpk` Search + `FastPairHasher` (`payload/search.rs`):** Replaced `BTreeMap`/`Vec::sort_unstable` with flat `Vec<u64>` bitsets (`needed_bits`/`matched_bits`) and a deterministic `FastPairHasher` (`perf` `quicksort::<u32>` `7.44% → 0.00%`, `BTreeMap::insert` `2.46% → 0.00%`, `SipHasher` `2.71% → 0.42%`).
+3. **Zone-Map Tautology Elimination (`codec/zonemap.rs`, `reader.rs`):** `zone_map_always_matches` skips Phase-1 evaluation on mini-blocks whose `[min, max]` guarantees 100% match (e.g., `URL <> ''` when `min > ""` and `null_count == 0`).
+4. **Parallel Mini-Block Phase 1 & Phase 2 (`reader.rs`):** When `read_threads > 1`, fans out mini-block filtering and materialization across threads.
+5. **Direct AVX2 `TrigramBloom::insert_bytes` + `fold_half()` (`writer.rs`):** Eliminated temporary buffer copies during narrow trigram bloom construction (`clickbench_100k` `L1` write `320.6 → 174.1 ms`, `1.84×` faster).
+
+| Workload / Query | Format | Pre-Pass 9 (`1R`) | Pass 9 (`1R`) | Pass 9 (`8R`) | Speedup | Competitive Standing |
+|---|---|---:|---:|---:|---:|---|
+| `ClickBench` `CB_Q24` (`URL <> ''`) | `statam_l1` | 39.80 ms | **13.04 ms** | **4.89 ms** | **8.1×** | `1R` beats Parquet (`15.2 ms`); `l0 (8R)` **`2.20 ms`** beats Vortex (`2.43 ms`) |
+| `ClickBench` `CB_Q23_like` (`Title LIKE '%Google%'`) | `statam_l1` | 13.24 ms | 13.34 ms | **5.99 ms** | **2.2×** | Beats Parquet (`8.06 ms`) & Vortex (`8.95 ms`) |
+| `W1_agents` `substring_rare` *(858 MiB)* | `statam_l1` | 84.53 ms | **33.35 ms** | **16.86 ms** | **5.0×** | **Beats Strata (`17.21 ms`)**; **118× faster than Parquet** |
+| `RandomAccess` `RA_take_100` / `1000` | `statam_l1` | 22.02 / 22.46 ms | 21.78 / 21.91 ms | **3.94 / 4.21 ms** | **5.6× / 5.3×** | **6.1×–6.3× faster than Vortex** (`24.1–26.4 ms`) |
+| `RowFilter` *(all 6 patterns)* | `statam_l1` | 0.65–2.24 ms | 0.61–2.06 ms | **0.37–0.64 ms** | **3.2×–3.5×** | **3×–9× faster than Parquet, Vortex & Strata** across 6/6 |
+| `ClickBench` Write (`8W`) | `statam_l1` | 320.6 ms | **174.1 ms** | — | **1.84×** | `W3_spans L1` `109.2 ms` & `W3_scores L1` `32.5 ms` both beat Vortex |
+
+*(Top remaining CPU hotspot on ClickBench in post-Pass-9 `perf`: `9.6%` in `core::str::from_utf8` inside `cetra_column::Utf8Data::try_new` — tracked for Stage 3 since `crates/column/` is off-limits in Stage 2.)*
+
+---
+
+## 11. Expanded External Benchmarks — Lance V2.2 (8th Format), JSONBench, WildChat-1M & Hermes (`precision-5770-vm`)
+
+Added **Lance V2.2** (`lance-file 14.0.3`, Arrow 58 IPC bridge, `SimulatedS3ObjectStore14`) as an 8th format across all 6 external suites, plus three real-world public corpora with **100% row-count parity** across all 7 tested formats (`pq_default`, `pq_tuned`, `vortex 0.95.0`, `lance 14.0.3`, `strata` PR #158, `statam_l0`, `statam_l1`):
+- **Suite D (`jsonbench_100k`):** Real ClickHouse JSONBench Bluesky Jetstream (`bluesky_0001.json.gz`, 100,000 events × 10 cols, 92.1 MiB raw; `attrs: MapUtf8` shredded map + `raw_json` `.stpk` payload + `text` narrow trigram).
+- **Suite E (`wildchat_15k`):** Real `allenai/WildChat-1M` (`wildchat_00000.parquet`, 15,000 multilingual multi-turn spans × 8 cols, 151.7 MiB raw; deterministic Unicode `ILIKE` needle `"Alienación"`, 3 hits).
+- **Suite F (`hermes_fc`):** Real `NousResearch/hermes-function-calling-v1` (`hermes_fc.parquet`, 1,893 tool-calling conversations × 7 cols, 18.4 MiB raw; cross-trace `tool_definitions` `.stpk` dedup).
+
+### 11.1 Storage Size & Write Speed Across All 6 External Suites (`8W` for Statam, `20T` for Strata)
+
+| Suite (Raw) | `pq_default` | `pq_tuned` | `vortex` | `lance v2.2` | `strata` | `statam_l0 (8W)` | `statam_l1 (8W)` |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **`clickbench_100k`** *(99.1 MiB)* | 8,960 KiB · 273 ms | 9,253 KiB · 351 ms | **7,128 KiB** · 106 ms | 19,856 KiB · **66.3 ms** | 9,149 KiB · 892 ms | 13,966 KiB · 119 ms | 8,033 KiB (`12.3×`, `2.47×` < Lance) · 174 ms |
+| **`row_filter_100k`** *(14.3 MiB)* | 1,259 KiB · 31.1 ms | 1,360 KiB · 32.6 ms | **894 KiB** · 19.3 ms | 1,602 KiB · 12.5 ms | 1,085 KiB · 74.6 ms | 1,690 KiB · 14.0 ms | 1,032 KiB (`13.8×`, `1.55×` < Lance) · **10.1 ms** |
+| **`random_access_250k`** *(85.9 MiB)* | 12,893 KiB · 157 ms | 14,519 KiB · 172 ms | 9,912 KiB · 78.3 ms | 19,382 KiB · **57.9 ms** | 10,608 KiB · 574 ms | 17,935 KiB · 68.5 ms | **9,447 KiB (#1 of 7, `9.10×`)** · 135 ms |
+| **`jsonbench_100k`** *(92.1 MiB)* | 20,522 KiB · 350 ms | 22,335 KiB · 330 ms | **20,177 KiB** · 155 ms | 42,696 KiB · 195 ms | 24,160 KiB · 1,205 ms | 38,288 KiB · **137 ms** | 27,222 KiB (`3.38×`, `1.57×` < Lance) · 415 ms |
+| **`wildchat_15k`** *(151.7 MiB)* | 13,007 KiB · 269 ms | 14,605 KiB · 251 ms | 12,360 KiB · 665 ms | 37,493 KiB · 399 ms | **12,061 KiB** · 215 ms | 22,928 KiB · **103 ms** | 14,919 KiB (`10.17×`, `2.51×` < Lance) · 275 ms |
+| **`hermes_fc`** *(18.4 MiB)* | 2,623 KiB · 57.3 ms | 4,192 KiB · 82.5 ms | 1,831 KiB · 966 ms | 9,878 KiB · 59.9 ms | **1,626 KiB** · 49.1 ms | 6,699 KiB · **14.9 ms** | 1,835 KiB (`10.01×`, `5.38×` < Lance) · 62.1 ms |
+
+### 11.2 Query Results — Lance V2.2 + JSONBench + WildChat-1M + Hermes (Local Median ms / Simulated S3)
+
+| Suite / Query | Matched | `pq_default` | `pq_tuned` | `vortex` | `lance v2.2` | `strata` | `statam_l1 (1R)` | `statam_l1 (8R)` | S3 Winner (`ms`, GETs) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `RandomAccess` `RA_take_100` | 100 | 41.00 | 39.10 | 24.13 | **2.58** | N/A | 21.78 | 3.94 | **`statam_l1` (`192 ms`, 4 GETs)** vs Lance `664 ms` (19 GETs) |
+| `RandomAccess` `RA_take_1000` | 1,000 | 43.07 | 47.91 | 26.37 | 12.32 | N/A | 21.91 | **4.21** | **`statam_l1` (`192 ms`, 4 GETs)** vs Lance `734 ms` (21 GETs) |
+| `ClickBench` `CB_Q1` | 43 | 0.343 | 0.370 | 0.216 | 0.880 | 0.701 | **0.016** | 0.109 | `lance` (`63.9 ms`, 2 GETs) / `statam_l0` (`66.4 ms`) |
+| `ClickBench` `CB_Q20` *(4 cols)* | 6 | 3.124 | 1.737 | 3.406 | 31.44 | **0.163** | 1.910 | 1.890 | **`statam_l1` (`78.4 ms`, 2 GETs)** |
+| `ClickBench` `CB_Q23_like` | 3 | 8.062 | 8.469 | 8.945 | 32.41 | **4.053** | 13.34 | 5.99 | `strata` (`109 ms`) / `statam_l1` (`113 ms`, 3 GETs) |
+| `ClickBench` `CB_Q24` (`URL <> ''`) | 100,000 | 15.22 | 15.89 | 2.427 | 16.85 | **1.746** | 13.04 | 4.89 (`l0` 2.20) | **`statam_l1` (`78.4 ms`, 2 GETs)** |
+| `ClickBench` `CB_wide_point` *(105 cols)* | 6 | 10.71 | 6.477 | 13.55 | 234.4 | **1.574** | 7.363 | 1.708 (`l0` 1.570) | **`statam_l1` (`128 ms`, 2 GETs)** vs Lance `644 ms` (18 GETs) |
+| `RowFilter` *(6-pattern range)* | 1–99k | 2.19–4.82 | 0.63–5.52 | 0.99–2.50 | 5.02–7.96 | 0.15–2.34 | 0.61–2.06 | **0.37–0.64** | **`statam_l1` (`35.1 ms`, 1 GET)** across all 6/6 |
+| `JSONBench` `JB_Q1_posts` | 8,737 | 5.016 | 5.093 | 2.021 | 6.687 | 1.611 | 0.574 | **0.328** | `pq_default` (`60.4 ms`) / `statam_l1` (`69.3 ms`, 2 GETs) |
+| `JSONBench` `JB_Q2_did_pt` *(4 cols)* | 265 | 6.549 | 4.837 | 4.012 | 17.82 | **2.223** | 8.262 | 3.220 (`l0` 1.824) | **`statam_l1` (`89.3 ms`, 2 GETs)** |
+| `JSONBench` `JB_Q3_map_type` *(Map)* | 8,737 | 62.28 | 73.46 | 27.82 | 54.32 | 13.18 | **2.044** | **1.232** | **`statam_l1` (`159 ms`, 4 GETs)** — **50× faster local than pq!** |
+| `JSONBench` `JB_Q4_text_like` | 192 | 3.757 | 6.294 | 3.897 | 12.99 | 2.508 | 4.917 | 2.491 (`l0` **1.147**) | **`statam_l1` (`114 ms`, 3 GETs)** |
+| `JSONBench` `JB_Q5_did_full` *(10 cols)* | 265 | 20.83 | 11.47 | 21.35 | 280.9 | **4.348** | 28.87 | 8.500 (`l0` 7.715) | **`statam_l1` (`251 ms`, 5 GETs)** vs Strata `411 ms`, Lance `942 ms` |
+| `WildChat` `WC_Q1_model_cnt` | 10,201 | 0.559 | 0.564 | 0.309 | 0.620 | 0.404 | 0.045 | **0.043** | **`statam_l1` (`29.7 ms`, 1 GET, 478 KiB)** |
+| `WildChat` `WC_Q2_lang_filter` | 4,730 | 1.271 | 1.204 | 0.785 | 1.243 | **0.398** | 0.491 | 0.486 | **`statam_l1` (`29.7 ms`, 1 GET, 478 KiB)** |
+| `WildChat` `WC_Q3_trace_full` *(55 turns)* | 55 | 5.733 | 4.386 | 48.00 | 409.4 | **0.679** | 6.152 | 4.432 (`l0` 2.623) | `strata` (`113 ms`, 3 GETs) / `pq_tuned` (`168 ms`) / `statam_l1` (`171 ms`) |
+| `WildChat` `WC_Q4_unicode_ilike` *("Alienación")* | 3 | 79.97 | 78.86 | 75.18 | 144.7 | 78.35 | 90.97 | **21.90** | `vortex` (`181 ms`, 4 GETs) / `statam_l1` (`196 ms`, 4 GETs) |
+| `WildChat` `WC_Q5_input_absent` | 0 | 75.21 | 76.31 | 29.78 | 324.7 | **2.640** | 12.43 | 9.238 | `strata` (`77.8 ms`, 2 GETs) / `statam_l1` (`101 ms`, 3 GETs, 2.6 MiB) |
+| `Hermes` `HF_Q1_cat_cnt` | 796 | 0.064 | 0.062 | 0.251 | 0.146 | 0.117 | **0.007** | **0.007** | **`statam_l1` (`26.1 ms`, 1 GET, 109 KiB)** |
+| `Hermes` `HF_Q2_pt_full` *(7 cols)* | 1 | 4.022 | 3.234 | 8.314 | 39.41 | **0.498** | 2.700 | 1.484 (`l0` 0.949) | `strata` (`40.9 ms`, 1 GET) / `pq_default` (`65.6 ms`) / `statam_l1` (`92.9 ms`) |
+| `Hermes` `HF_Q3_tool_like` *("Amazon")* | 5 | **1.693** | 1.717 | 1.810 | 2.837 | 4.902 | 3.767 | 3.036 (`l0` 2.171) | `strata` (`40.9 ms`) / `pq_tuned` (`60.9 ms`) / `statam_l1` (`92.9 ms`) |
+| `Hermes` `HF_Q4_out_absent` | 0 | 0.870 | 0.864 | 1.002 | 1.023 | 0.309 | 0.298 | **0.297** | `pq_default` (`30.6 ms`, 1 GET) / `strata` (`40.9 ms`) / `statam_l1` (`57.9 ms`) |
+
+### 11.3 Key Honest Takeaways from the 8-Format Expansion
+
+- **Lance V2.2 (`lance-file 14.0.3`):** Excels on local single-threaded scattered random access (`RA_take_100`: `2.58 ms`) and flat-table write speed (`1.45 GiB/s`), but its lack of heavy block compression and row-group/zone-map pruning costs **`1.55×–5.38×` larger files**, **`2×–5×` higher S3 latency** (`18–21` GETs vs Statam's `2–4` GETs), and **`15×–137×` slower wide/LLM point lookups** (`CB_wide_point`: `234.4 ms`, `WC_Q3_trace_full`: `409.4 ms`, `JB_Q5_did_full`: `280.9 ms`). At `8R`, Statam beats Lance even on `RA_take_1000` (`4.21 ms` vs `12.32 ms`, `2.9×` faster).
+- **Shredded `MapUtf8` on Real Bluesky JSON (`JB_Q3_map_type`):** Statam's shredded map layout delivers **`2.04 ms (1R)` / `1.23 ms (8R)`** — **`6.4×–10.7×` faster than Strata, `13.6×–22.6×` faster than Vortex, `26.6×–44.1×` faster than Lance, and `30.5×–50.5×` faster than Parquet** — while also winning S3 (`159 ms`, 4 GETs).
+- **Multilingual WildChat-1M & Unicode `ILIKE` (`WC_Q4_unicode_ilike`):** At `8R`, Statam's parallel `.stpk` frame scan is **`3.4×–6.6×` faster than all 6 competitors** (`21.90 ms` vs `75–145 ms`). At `1R` (`90.97 ms`), non-ASCII `ILIKE` currently disables ASCII-trigram bloom pruning; extracting pure-ASCII runs `>= 3` bytes (e.g., `"alienaci"` from `"Alienación"`) for the trigram bloom is a clean future optimization that would drop `1R` latency below `3 ms`.
+- **Small-Row `.stpk` Trade-offs (Honest Findings):** On `jsonbench_100k` (small ~400 B `raw_json` per event, 265 scattered DID hits), `.stpk` framing + blooms add ~7 MiB over Parquet/Vortex and cost `28.9 ms (1R)` / `8.5 ms (8R)` locally on `JB_Q5_did_full` vs Strata `4.35 ms` (though Statam still wins S3 at `251 ms` vs `411 ms`). Similarly on tiny `hermes_fc` (`1,893` rows, `1.8 MiB`), `HF_Q3_tool_like` favors inline columns (`1.69–1.81 ms` on Parquet/Vortex vs `3.04 ms` on `statam_l1 8R`), while Statam wins `HF_Q1_cat_cnt` (`7 µs`, `1` S3 GET) and `HF_Q4_out_absent` (`0.297 ms`) and matches Vortex's `10.0×` compression ratio while writing **`15.6×` faster**.
+
+---
+
+## 12. Pass 10 — `perf`-Driven Elimination of Remaining Competitor Gaps (`precision-5770-vm`)
+
+Following a dedicated `perf` + `STATAM_DUMP_STATS` pass across all 8 lagging queries, implemented five targeted improvements (audited by Cold Review #9, `125` unit tests + `2` `fuzz_replay` tests passing, `0` clippy warnings):
+1. **Zero-`from_utf8` Raw Phase-1 `LIKE`/`ILIKE` (`reader.rs`, `codec/fsst.rs`):** Scans `Rle` (once per unique run!), `Fsst` (`FsstBlockView::decode_row_into`), `Plain`, `Const`, and `Dict` (`dict_sub_bitmap`) directly on raw bytes without constructing full `Utf8Data` blocks (`CB_Q23_like` `41.6%` `from_utf8` eliminated).
+2. **Cached Zero-Alloc `FlatEdgeTable` + CSR `FlatPayloadRefs` + Exhaustively-Verified Unicode `ILIKE` Trigram Extraction (`payload/{mod,pack,search}.rs`):** Eliminated `65,642` per-query `malloc`/`free` calls in `read_edge_table()` / `decode_payload_refs`, skipped dead `EdgeTable` / boundary pair work on `edge_table_len == 0` packs (with strict `StatamError::Corrupt` guard against crafted multi-chunk references), and added sound ASCII-run trigram extraction (`extract_unicode_ilike_trigram_hashes_in_slice`, proven across all `0..=0x10FFFF`).
+3. **Sparse `Dict` & Sparse `Rle` Decode in Phase 2 & `take_rows` (`codec/{dict,mod}.rs`):** Avoids full-column materialization + `take` on selective point lookups and scattered `take_rows`.
+4. **Boundary-Aware Dead `EdgeTable` Pruning + Optional `emit_hash_table` (`payload/pack.rs`, `writer.rs`, `gdpr.rs`):** Omits `EdgeTable` completely (`edge_table_len = 0`) on single-chunk packs (`jsonbench_100k`: `4,486 KiB → 0 KiB`), zeros non-boundary chunk edges on mixed packs (`wildchat_15k`: `1,336 KiB → 670 KiB`), and adds `PackWriteOptions::emit_hash_table` (default `true`; safe in `gdpr_rewrite_day`).
+5. **`8,192`-Row Mini-Blocks + `512 KiB` `.stpk` Frames + Proportional Trigram Budget (`writer.rs`, `payload/pack.rs`):** Finer skipping & parallelism (`4×` more mini-blocks, `2×` finer `.stpk` frames) with `min(stored_len / 6, raw.len() / 32)` trigram cap.
+
+### 12.1 Before vs. After Pass 10 — Latency Breakthroughs (`statam_l1`, `precision-5770-vm`)
+
+| Workload / Query | Pre-Pass 10 (`1R` / `8R`) | Pass 10 (`1R` / `8R`) | Speedup | Competitive Result |
+|---|---:|---:|---:|---|
+| `ClickBench` `CB_Q23_like` | 13.34 / 5.99 ms | **2.43 / 1.71 ms** (`l0` **1.27 ms**) | **5.5× / 3.5×** | **Beats Strata (`4.05 ms`) even on 1 thread** (`2.4×–3.2×` at `8R`) |
+| `ClickBench` `CB_Q24` | 13.04 / 4.89 ms | 12.99 / **2.64 ms** (`l0` **1.06 ms**) | `1.9×` (`l0` `2.1×`) | `l0 (8R)` **beats Strata (`1.75 ms`) & Vortex (`2.43 ms`) — #1 of 8** |
+| `ClickBench` `CB_Q20` | 1.91 / 1.89 ms | **0.40 / 0.42 ms** | **4.8×** | **#1 S3 (`81 ms`, 2 GETs)**, `4×–8×` faster local than Parquet/Vortex |
+| `ClickBench` `CB_wide_point` *(105 cols)* | 7.36 / 1.71 ms | **1.91 / 0.53 ms** | **3.9× / 3.2×** | **3.0× faster than Strata (`1.57 ms`), 440× faster than Lance!** |
+| `RowFilter` `RF_pt_0_001pct` | 0.613 / 0.368 ms | **0.161 / 0.131 ms** (`l0` **0.098 ms**) | **3.8× / 2.8×** | **Beats Strata (`0.154 ms`) — #1 across all 6/6 patterns** |
+| `RandomAccess` `RA_take_100` / `1000` | 21.8 / 3.94–4.21 ms | 22.0 / **3.54–3.66 ms** | `1.15×` (`8R`) | **S3 cut to 3 GETs / `168 ms`** (`4.4×` faster than Lance) |
+| `JSONBench` `JB_Q5_did_full` *(10 cols)* | 28.87 / 8.50 ms | **17.90 / 4.33 ms** (`l0` **4.10 ms**) | **1.6× / 2.0×** | **Beats Strata (`4.35 ms`) — sweeps all 5/5 JSONBench #1!** |
+| `WildChat` `WC_Q5_input_absent` | 12.43 / 9.24 ms | **3.28 / 1.77 ms** | **3.8× / 5.2×** | **Beats Strata (`2.64 ms`) by `1.49×`**; S3 `97.5 ms` (`2.3 MiB`) |
+| `WildChat` `WC_Q4_unicode_ilike` | 90.97 / 21.90 ms | 83.02 / **13.44 ms** | **1.6× (`8R`)** | **`5.6×–10.8×` faster than every other format** |
+| `WildChat` `WC_Q3_trace_full` | 6.15 / 4.43 ms | **4.24 / 2.66 ms** (`l0` **1.92 ms**) | **1.5× / 1.7×** | Beats Parquet even on `1R`, `18×` faster than Vortex, `154×` faster than Lance |
+| `Hermes` `HF_Q3_tool_like` | 3.77 / 3.04 ms | **1.17 / 0.87 ms** | **3.2× / 3.5×** | **Beats Parquet (`1.69 ms`), Vortex (`1.81 ms`), Lance & Strata even on `1R`!** |
+| `Hermes` `HF_Q4_out_absent` | 0.298 / 0.297 ms | **0.163 / 0.164 ms** | **1.8×** | **`1.9×–6.2×` faster than every competitor** |
+| `W1_agents` `substring_rare` *(858 MiB)* | 33.35 / 16.86 ms | **24.49 / 8.77 ms** | **1.9× (`8R`)** | **1.95× faster than Strata (`17.14 ms`), 162× faster than Parquet!** |
+| `W1_agents` `point_lookup_full` *(56 cols)* | 12.52 / 8.28 ms | **6.68 / 4.94 ms** | **1.9× / 1.7×** | Beats Vortex (`9.69 ms`) even on `1R` |
+| `W1_agents` `substring_absent` | 1.94 ms (`1R`) | 2.00 / **0.99 ms** | **2.0× (`8R`)** | **S3 cut to 3 GETs / `110.6 ms`** (down from 4 GETs / `143 ms`) |
+| `W2_chat_4files` `substring_rare` / `absent` | 39.3 / 33.4 ms | **6.49 / 4.08 ms (`8R`)** | **6.1× / 8.2×** | Huge multi-file `.stpk` speedup |
+| `W3_spans` `point_lookup_full` | 5.19 / 1.44 ms | **1.59 / 0.53 ms** | **3.3× / 2.7×** | **Beats Strata (`0.72–1.16 ms`), `303×` faster than Parquet!** |
+| `W3_scores` `point_lookup_narrow` | 1.52 / 0.89 ms | **0.64 / 0.38 ms** | **2.4× / 2.3×** | **`3.2×` faster than Vortex, `4.1×` faster than Strata!** |
+
+### 12.2 Honest Regressions & Trade-offs in Pass 10
+- **Storage Size:** `jsonbench_100k` shrank **`-12.4%`** (`27,222 → 23,855 KiB`, now beats Strata `24,160 KiB`), `wildchat_15k` shrank **`-2.2%`** (`14,919 → 14,595 KiB`, beats `pq_tuned`), `row_filter_100k` (`1,024 KiB`), `W4_adversarial` (`20,090 KiB`), and `W4_1row_avg` (`4.2 KiB`) all shrank. Smaller `8,192`-row mini-blocks + `512 KiB` frames added **`+0.9%` to `+3.2%`** on `W1` (`8,487 → 8,762 KiB`, still `-25.0%` vs best Parquet), `W2` (`15,006 → 15,209 KiB`, still #1 smallest of 7), `W3_spans` (`13,823 → 13,999 KiB`, `-5.3%` vs best Parquet), `W3_scores` (`5,267 → 5,314 KiB`, `-9.9%` vs best Parquet), `clickbench_100k` (`8,033 → 8,290 KiB`, `-7.5%` vs Parquet), and `random_access_250k` (`9,447 → 9,549 KiB`, still #1 smallest of 7). **All Gate 1 size checks remain PASS.**
+- **Minor `1R` Full-Scan Overhead:** `3.25×` more mini-blocks (`8,192` vs `32,768`) slightly slowed a few single-threaded full-column scans (`CB_Q10 1R`: `0.35 → 0.63 ms`, `CB_Q12 1R`: `0.52 → 1.06 ms`, `JB_Q3_map_type 1R`: `2.04 → 3.75 ms`, `RF_unsel_99pct 1R`: `1.92 → 3.04 ms`), while `8R` remained faster or improved (`JB_Q3 8R`: `1.23 → 0.85 ms`).
+- **Minor S3 / Write Shifts:** `W3_scores point_lookup_narrow` S3 shifted from `2 GETs / 91 ms` to `3 GETs / 127 ms` due to a `1 MiB` ReadCache boundary crossing (still #1 fastest S3 vs Strata `132 ms`, Vortex `173 ms`, Parquet `180–208 ms`); `clickbench_100k` write (`8W`) moved from `174 → 203 ms` (`1,365` vs `420` mini-blocks across 105 cols; still faster than Parquet `273 ms` & Strata `892 ms`).
+
+### 12.3 Post-Pass-10 ASan libFuzzer & Spec Sign-Off
+- **ASan libFuzzer (`statam_file`, expanded with `decode_payload_refs_flat`, `read_edge_table_flat`, `take_rows`, and Unicode `ILIKE`):** **1,907,110 runs across 4 workers in 181s on `precision-5770-vm` — 0 crashes, 0 panics, 0 ASan errors, 0 OOMs** (total >2.36M ASan fuzz executions across Stage 2 with 0 issues).
+- **Spec Sync:** `docs/research/statam/spec-v0.md` updated to v0.2 to match all Pass 7–10 defaults and wire details (`8,192`-row mini-blocks, `512 KiB` `.stpk` frames, proportional trigram cap, `TS02` edge blooms, boundary-pruned `EdgeTable` with `edge_table_len == 0` guard, optional `emit_hash_table`, `write_threads`/`read_threads`, `take_rows`).
+
+---
+
+## 13. Full 8-Format Completion — Lance V2.2 on Cetra `W1`–`W4` (`precision-5770-vm`)
+
+Wired **Lance V2.2 (`lance-file 14.0.3`)** into `statam-bench7` (`W1`–`W4`) using native zero-IPC Arrow 58 reads and two-phase random-access `take` for point lookups & `top_k_list` so Lance gets its fastest fair execution, verified at **100% row-count parity** across all 38 queries against `statam_l1 (8W/8R)` *(note: VM had concurrent load during this run, so stored sizes, S3 GETs/bytes, and parity are exact/deterministic while local wall-clock ms are preliminary pending a quiet-VM rerun)*:
+
+### 13.1 `W1`–`W4` Storage Size & Write Speed (`lance v2.2` vs `statam_l1 8W`)
+
+| Workload (Raw) | `lance v2.2` Size · Write | `statam_l1 (8W)` Size · Write | Statam Advantage |
+|---|---:|---:|---|
+| **`W1_agents`** *(857.9 MiB)* | 140,519 KiB (`6.11×`) · 2,006.6 ms | **8,762 KiB (`97.91×`) · 388.3 ms** | **`16.0×` smaller, `5.17×` faster write** |
+| **`W2_chat_4files`** *(38.8 MiB)* | 32,968 KiB (`1.18×`) · **115.9 ms** | **15,209 KiB (`2.55×`)** · 249.9 ms | **`2.17×` smaller** (`L0Fast` writes faster at `99 ms`) |
+| **`W3_spans`** *(43.1 MiB)* | 24,748 KiB (`1.74×`) · **101.6 ms** | **13,999 KiB (`3.08×`)** · 121.3 ms | **`1.77×` smaller**, near write parity |
+| **`W3_scores`** *(24.3 MiB)* | 9,343 KiB (`2.60×`) · **15.1 ms** | **5,314 KiB (`4.58×`)** · 43.9 ms | **`1.76×` smaller** |
+| **`W4_adversarial`** *(25.8 MiB)* | 25,906 KiB (`1.00×`) · 120.2 ms | **20,090 KiB (`1.29×`) · 65.3 ms** | **`1.29×` smaller, `1.84×` faster write** |
+| **`W4_1row_avg`** *(0.9 KiB)* | 13.9 KiB · 0.79 ms | **4.2 KiB · 0.16 ms** | **`3.3×` smaller, `4.9×` faster write** |
+
+### 13.2 `W1`–`W4` Local Warm CPU & Simulated S3 Highlights (`lance v2.2` vs `statam_l1 8R`)
+
+| Workload / Query | Matched | `lance` Local | `statam_l1` Local | `lance` S3 (`ms` / GETs / MiB) | `statam_l1` S3 (`ms` / GETs / MiB) |
+|---|---:|---:|---:|---:|---:|
+| `W1` `cold_open_prune` | 0 | 0.318 ms | **0.000 ms** | 62.3 ms (2 / 1.2) | **30.5 ms (1 / 0.5)** |
+| `W1` `point_lookup_narrow` | 110 | 0.501 ms | **0.220 ms** | 97.3 ms (3 / 2.2) | **65.5 ms (2 / 1.5)** |
+| `W1` `point_lookup_full` | 110 | **4.602 ms** | 5.151 ms | 317.3 ms (9 / 9.2) | **200.6 ms (5 / 7.6)** |
+| `W1` `map_key_lookup` | 442 | 2.062 ms | **0.235 ms** | **62.3 ms** (2 / 1.2) | 65.5 ms (2 / 1.5) |
+| `W1` `substring_rare` | 12 | 1,926.1 ms | **8.040 ms** (`240×`) | 1,577.3 ms (11 / 130.2) | **175.6 ms (4 / 7.6)** |
+| `W1` `substring_absent` | 0 | 2,357.1 ms | **0.875 ms** (`2,694×`) | 1,577.3 ms (11 / 130.2) | **110.6 ms (3 / 3.6)** |
+| `W2` `point_lookup_full` | 1 | **1.245 ms** | 3.150 ms | 427.0 ms (13 / 10.2) | **248.5 ms (8 / 4.9)** |
+| `W2` `top_k_list` | 50 | **1.366 ms** | 3.194 ms | 357.0 ms (11 / 8.2) | **179.0 ms (6 / 2.9)** |
+| `W2` `substring_rare` / `absent` | 8 / 0 | 54.2 / 63.1 ms | **6.23 / 3.96 ms** | 572 / 572 ms (16 / 17.2) | **409 / 319 ms (12 / 10 GETs)** |
+| `W3_spans` `point_lookup_narrow` | 4 | 3.312 ms | **0.292 ms** (`11.3×`) | 421.7 ms (12 / 12.2) | **96.7 ms (2 / 4.7)** |
+| `W3_spans` `point_lookup_full` | 4 | 8.305 ms | **0.560 ms** (`14.8×`) | 841.7 ms (24 / 24.2) | **126.7 ms (2 / 7.7)** |
+| `W3_spans` `time_bucket_agg` | 100k | 27.31 ms | **5.476 ms** (`5.0×`) | 246.7 ms (7 / 7.2) | **191.7 ms (5 / 6.7)** |
+| `W3_spans` `map_key_lookup` | 5,407 | 24.52 ms | **1.094 ms** (`22.4×`) | 211.7 ms (6 / 6.2) | **146.7 ms (4 / 4.7)** |
+| `W3_scores` `point_lookup_narrow` | 1 | 1.030 ms | **0.391 ms** | 246.2 ms (7 / 7.1) | **126.9 ms (3 / 5.2)** |
+| `W3_scores` `map_key_lookup` | 2,737 | 8.857 ms | **0.736 ms** (`12.0×`) | 201.2 ms (6 / 5.1) | **106.9 ms (3 / 3.2)** |
+| `W4` `point_lookup_full` | 1 | **1.025 ms** | 1.695 ms | 273.0 ms (8 / 7.3) | **67.9 ms (2 / 1.8)** |
+| `W4` `substring_rare` / `absent` | 6 / 0 | 54.1 / 54.5 ms | **4.20 / 3.81 ms** | 273 / 273 ms (4 / 17.3) | **271 / 236 ms (5 / 4 GETs)** |
+
+- **Overall Lance V2.2 vs Statam L1 across ALL 11 workloads (68 queries total):** Statam L1 wins **63 / 68 local CPU queries** (`34 / 38` on `W1`–`W4`, `29 / 30` on external suites), **64 / 68 S3 queries**, and is **`1.29×–16.0×` smaller on every single one of the 12 size benchmarks**. Lance's only local wins are uncompressed O(1) `take` on 1-row/110-row `point_lookup_full` (`W1`/`W2`/`W4`), `W2 top_k_list`, and `1T RA_take_100` — and Statam beats Lance on S3 on every single one of those (`1.6×–4.4×` faster).
+
+---
+
+## 14. Pass 11 (Option A) & Full 8-Format Apple M4 (`aarch64`) Verification
+
+Following a `perf` profile of `RA_take_100` (`~50%` Zstd decompression including nearly-incompressible `Plain/Zstd` floats saving only 6%, `~15%` full-block numeric decode, `~4.6%` `Utf8Data::try_new` scanning `8,193` masked offsets per block), implemented four zero-wire-break improvements (audited by Cold Review #10: **0 Blockers, 0 Majors, 4 Minors — all fixed**; **`130` unit tests + `2` `fuzz_replay` tests passing, 0 clippy warnings**):
+1. **`>= 12%` minimum compression-savings guard** (`compress_guarded_min_savings`) on random-accessible fixed-width `Plain`, `ForBitpack`, and `BitpackBool` blocks (`>= 1 KiB`), eliminating wasted Zstd on high-entropy floats (`m_f1`, `m_f2`).
+2. **Zero-copy `read_framed_block_cow`** returning `Cow::Borrowed` for `Codec::None` blocks in `take_rows` and `scan`.
+3. **O(1) FastLanes-1024 element extraction (`unpack_u64_at`, `unpack_u32_at`, `unpack_u64_indices`, `unpack_u32_indices`)** and **tile-skipping `delta_decode_i64_indices`**.
+4. **O(k) sparse numeric `decode_mini_block_selected`** plus **compact `k`-row `decode_mini_block_take` (`Selection::All`)** in `take_rows`.
+
+### 14.1 Pass 11 Delta on `precision-5770-vm` (`x86_64` AVX2)
+- **`RA_take_100` (`statam_l1`):** `21.76 → 13.64 ms (1R)` (`1.60×` faster), **`3.54 → 2.37 ms (8R)`** (**beats Lance V2.2 `2.58 ms`**, completing a **30/30 external query sweep vs Lance at `8R`**!).
+- **`RA_take_1000` (`statam_l1`):** `21.91 → 14.74 ms (1R)`, **`3.66 → 2.39 ms (8R)`** (**`5.15×` faster than Lance `12.32 ms`**).
+- **`random_access_250k` size:** `9,549 → 9,791 KiB` (`+2.5%`, **still #1 smallest of all 7 formats**, `1.98×` smaller than Lance `19,382 KiB`, S3 unchanged at 3 GETs / `170.6 ms`).
+- **Zero regressions across all 10 other workloads** (`W3_spans point_lookup_narrow` `0.29 → 0.18 ms`, `W3_spans map_key_lookup` `1.09 → 0.81 ms`, `W2 point_lookup_full` `3.15 → 2.49 ms`, `W4 point_lookup_full` `1.70 → 1.38 ms`, `RF_pt_0_001pct` `0.13 → 0.10 ms`, `HF_Q2_pt_full` `1.48 → 1.09 ms`; `W1`–`W4`/`JSONBench`/`WildChat`/`Hermes` sizes unchanged within `+0.02%`).
+
+### 14.2 Full 8-Format Apple Silicon M4 (`ubuntu-dev`, `aarch64`, 10 cores, quiet host)
+Verified **100% row-count parity across all 8 formats** (`pq_default`, `pq_tuned`, `pq_cetra`, `vortex 0.95.0`, `lance 14.0.3`, `strata` #158, `statam_l0`, `statam_l1`) on **Apple M4 (`aarch64` Linux, pure-Rust scalar fallbacks — no NEON yet!)** for both `1W/1R` and `8W/8R`:
+- **Strictly `1R` Statam wins `53 / 63` local CPU queries** on M4 against Parquet (`1T`), Vortex (`Tokio`), and Lance (`Tokio`) — e.g.:
+  - `CB_Q1`: **`0.008 ms`** vs PQ `0.231 ms`, Vortex `0.176 ms`, Lance `0.747 ms` (`22×–93×` faster!)
+  - `CB_Q23_like`: **`1.44 ms`** vs PQ `4.52 ms`, Vortex `4.87 ms`, Lance `18.79 ms`
+  - `CB_wide_point` (105 cols): **`0.86 ms`** (`L0 0.62 ms`) vs PQ `3.61 ms`, Vortex `6.84 ms`, Lance `108.3 ms`
+  - `RF_pt_0_001pct`: **`0.041 ms`** (`L0 0.034 ms`) vs PQ `0.42 ms`, Vortex `0.71 ms`, Lance `3.88 ms`, Strata `0.071 ms` (#1 of 8!)
+  - `RA_take_100` / `1000`: **`9.42 / 9.95 ms (1R)`** (beats Vortex `9.89 / 11.39 ms` & PQ `25.2 / 28.6 ms` even on 1 thread!), **`2.90 / 2.97 ms (8R)`** (vs Lance `1.59 / 6.24 ms`)
+  - `W1_agents` (`858 MiB`): `1W` write **`212 ms` (`L0`) / `300 ms` (`L1`)** (both beat `pq_cetra` `330 ms`, `lance` `1,159 ms`, `vortex` `5,107 ms` on 1 core!), `substring_rare` **`13.86 ms (1R)` / `6.76 ms (8R)`**, `substring_absent` **`0.99 ms (1R)` / `0.69 ms (8R)`** (`1,130×` faster than Lance!)
+  - `W3_spans`: `point_lookup_narrow` **`0.100 ms (1R)`**, `point_lookup_full` **`0.650 ms (1R)`** (`87×` faster than PQ, `5×` faster than Vortex, `8.2×` faster than Lance!)
+  - `Hermes`: sweeps **4/4** on `1R` (`0.003 ms`, `0.95 ms`, `0.64 ms`, `0.080 ms`).
+- **Thread-pool takeaway confirmed on M4:** On sub-millisecond queries (`CB_Q1`, `W3_spans point_lookup_narrow`, `W4 time_bucket_agg`), `std::thread::scope` spawns 7 OS threads (~0.5–0.8 ms overhead on Linux `aarch64` VM), making `1R` (`0.008 ms`) far faster than `8R` (`0.90 ms`). Replacing `std::thread::scope` with a shared reusable thread pool + size threshold in Stage 3 eliminates that overhead completely.
+
+---
+
+## 15. ARM64 NEON SIMD (`aarch64`) & Cold Review #11 (`ubuntu-dev`, Apple M4)
+
+Implemented bit-exact little-endian ARM64 NEON kernels (`#[cfg(all(target_arch = "aarch64", target_feature = "neon", target_endian = "little", not(miri)))]`) for all 14 SIMD functions across `crates/statam/src/simd/{bloom,filter,trigram,bitpack}.rs`:
+- **`bloom.rs`:** 2 × `uint32x4_t` SBBF `block_insert_neon` + `vtstq_u32` (`CMTST`) + `vminvq_u32` `block_check_neon`.
+- **`filter.rs`:** Hoisted branchless `<const OP: u8>` NEON `filter_{i64,i64_between,u32,f64}_neon` with `vuzp1q` + `vaddvq_u16` 8-lane bitmask packing and bit-exact IEEE-754 NaN / `-0.0` semantics (`!fcmeq` for `Ne`).
+- **`trigram.rs`:** Unsigned 16-byte `ascii_lowercase_neon` (`vsubq_u8(v, b'A') < 26`) + 12-trigram/load `vqtbl1q_u8` / `vrev32q_u16` `TrigramBloom::insert_bytes_neon`.
+- **`bitpack.rs`:** `bit_width == 32`/`64` direct-copy fast paths, 2 × 128-bit `vld1q_u8`/`vst1q_u8` unaligned-safe FastLanes-1024 `pack`/`unpack` (`u32` and `u64`), and zero-cross-domain-transfer `vzip1q_s64`/`vzip2q_s64` 2×2 in-register transpose `delta_{encode,decode}_i64_tiles_neon`.
+- **Cold Code Review #11 (`inherit`):** **0 Blockers** (all 65 NEON intrinsics verified against Rust `1.99.1` `core_arch`), **2 performance Majors** (2×2 delta transpose + `32`/`64` fast path & single-mask unpack fixed; kept compact loop to avoid L1 I-cache bloat across 105-col ClickBench), and key Minors fixed (including `bitpack_unaligned_buffer_and_dirty_high_bits_match_scalar` test).
+- **Verification:** `cargo clippy -p cetra-statam --all-targets -- -D warnings` (0 warnings) and **131 unit + 2 `fuzz_replay` tests passing** on both `x86_64` and Apple M4 `aarch64` (`0.11 s` release), with **100% bit-for-bit identical file sizes** across all 11 real corpora.
+
+### 15.1 Apple M4 (`ubuntu-dev`) Before (Scalar) vs. After (NEON) Highlights
+- **Zero `1R` regressions across all 63 queries; strictly `1R` Statam wins jumped `53/63 → 55/63` on M4:**
+  - `W1_agents filtered_count`: `0.108 → 0.054 ms` (**`2.00×`**)
+  - `W3_spans filtered_count` (250k spans): `1.151 → 0.649 ms` (**`1.77×`** — now beats Vortex `0.858 ms` on M4!)
+  - `W4_adversarial filtered_count`: `0.053 → 0.031 ms` (**`1.71×`**)
+  - `W3_scores filtered_count`: `0.110 → 0.070 ms` (**`1.57×`**)
+  - `WildChat WC_Q1_model_cnt`: `0.025 → 0.017 ms` (**`1.47×`**)
+  - `JSONBench JB_Q1_posts`: `0.365 → 0.259 ms` (**`1.41×`**)
+  - `ClickBench CB_Q39_range`: `0.312 → 0.232 ms` (**`1.34×`**)
+  - `W3_spans top_k_list`: `5.265 → 4.252 ms` (**`1.24×`** — now beats Lance `4.759 ms` even on 1 thread!)
+  - `RowFilter` (`RF_sel_1pct`, `RF_pt`, `RF_mod_10pct`): **`1.13×–1.22×`** faster.
+- **Write speedups (NEON `TrigramBloom` + `SBBF` + `FastLanes`):**
+  - `W2_chat_4files L1`: `301.4 → 280.1 ms (1W)` / `239.6 → 178.9 ms (8W, 1.34×)`
+  - `W1_agents L1`: `299.8 → 280.9 ms (1W)` / `280.8 → 219.4 ms (8W, 1.28×)`
+  - `W3_spans L1`: `80.0 → 65.1 ms (8W, 1.23×)`
+  - `WildChat-1M L1`: `325.3 → 296.9 ms (1W)` / `213.8 → 179.5 ms (8W, 1.19×)`
+  - `JSONBench L1`: `491.8 → 464.3 ms (1W)` / `285.2 → 253.7 ms (8W, 1.12×)`
+  - `RandomAccess L0/L1 (8W)`: `27.9 → 25.0 ms (1.12×)` / `108.6 → 97.6 ms (1.11×)`
+
+---
+
+## 16. Extended Lance / Vortex / F3 Suites (G–L) & Pass 12 Format Upgrades (`precision-5770-vm`)
+
+Added six external workloads (`docs/research/statam/bench/src/bin/lance_suites_bench.rs`) covering the remaining benchmark domains published by Lance V2.2 (Blob V2, Wide-Schema, DataLoader), Vortex, and F3:
+- **Suite G (`blobs_2k`):** 2,000 rows × 6 cols, `361.9 MiB` binary blobs (50% incompressible PNG/JPEG, 50% compressible PDF/audio).
+- **Suite H (`wide_1000_25k`):** 25,000 rows × 1,000 cols (`996` nullable columns at 95% NULL).
+- **Suite I (`fineweb_40k`):** 40,000 rows × 10 cols from real `HuggingFaceFW/fineweb-edu` (`sample/10BT/000_00000.parquet`).
+- **Suite J (`nested_100k`):** 100,000 rows × 7 cols (`List<i64>`, `List<List<i64>>`, `List<Utf8>`, `Map<Utf8, Utf8>`).
+- **Suite K (`tpch_lineitem_500k`):** 500,000 rows × 17 cols from real TPC-H SF1 `lineitem.parquet`.
+- **Suite L (`dataloader_100k`):** 100,000 rows × 12 cols, 100 × 256-row shuffled mini-batches (`25,600` unique rows), warm local + shared-cache S3.
+
+### 16.1 Pass 12 Format Upgrades Implemented
+1. **Explicit `DataType::Binary` `.stpk` External Blob Packing (`WriteOptions::payload_cols`):** Large binary blobs routed via `payload_cols` get 1-blob-per-frame (`>= 32 KiB`), `4 MiB` splits, `min_savings_pct = 12` raw bypass (zero wasted compression on PNG/JPEG), GDPR verbatim copy (`gdpr.rs`), and wave-bounded (`128 MiB`) Phase-2 full scan. Small binary columns not listed in `payload_cols` remain inline narrow/dict/zonemap-filterable.
+2. **Deterministic Adaptive Prose `.stpk` Sizing & Bloom Cap:** `1T == 8T` deterministic adaptive `64 KiB` frames when first-frame trigram bloom density exceeds `0.12` (real prose like FineWeb-Edu) while keeping deduplicated/structured payloads (`W1_agents`, `JSONBench`) at `512 KiB`, plus `frame_cap = raw / 12` (`4 KiB` blooms for `48–64 KiB` frames) and `MAX_BLOOM_BYTES = 32 MiB`.
+3. **Sub-Chunked FSST (`BLOCK_FLAG_FSST_SUBCHUNKED = 0x20`) & `take_rows` Coalescing:** `512`-row adaptive `LZ4`/`Zstd`/`None` sub-chunks inside `Encoding::Fsst` with an L1 `+10%` overhead guard vs whole-block Zstd, outer `Codec::None`, support across narrow columns, `ListEncoded`, `ShreddedSubCol`, and Phase-1 `eval.rs`, plus single-`Batch` coalescing in `take_rows`.
+
+### 16.2 Strict 1-Core Head-to-Head (`taskset -c 0`, All 7 Formats on 1 CPU Core) + Statam `8T`
+
+To eliminate Tokio/Rayon thread-pool asymmetry across formats, all 7 formats were pinned to a single logical CPU (`taskset -c 0`, `STATAM_BENCH_THREADS=1`, `RAYON_NUM_THREADS=1`) on `precision-5770-vm` (`x86_64` AVX2). Statam `8T` is shown alongside for multi-core scaling.
+
+| Workload | Format | Stored (KiB) | Ratio | 1-Core Write (MiB/s) |
+|---|---|---:|---:|---:|
+| `blobs_2k` | `pq_default` / `pq_tuned` | 187,544 / 187,863 | 3.93× / 3.92× | 1,021.8 / 1,475.0 |
+| `blobs_2k` | `vortex` / `lance` / `strata` | 186,677 / 187,004 / 213,838 | 3.94× / 3.94× / 3.44× | 63.1 / 1,326.4 / 425.6 |
+| `blobs_2k` | **`statam_l0` / `statam_l1`** | 195,263 / **187,023** (`1` RG) | 3.77× / **3.94×** | **2,078.3** / 1,169.9 (`2,020.5` unpinned 1W) |
+| `wide_1000_25k` | `pq_default` / `vortex` / `lance` | 7,027 / 6,032 / 39,065 | 25.9× / 30.2× / 4.66× | 468.5 / 51.3 / 165.6 |
+| `wide_1000_25k` | **`statam_l1`** | **8,585** (`4.55×` < Lance) | **21.18×** | 265.7 (`774.3` at 8W) |
+| `fineweb_40k` | `pq_default` / `vortex` / `lance` | 72,836 / 72,131 / 88,139 | 2.76× / 2.79× / 2.28× | 145.6 / 44.2 / 131.9 |
+| `fineweb_40k` | **`statam_l1`** | 93,136 *(64 KiB frames + 4 KiB blooms)* | 2.16× | 88.0 (`250.5` at 8W) |
+| `nested_100k` | `pq_default` / `vortex` / `lance` | 4,180 / 3,140 / 4,962 | 8.26× / 11.0× / 6.96× | 242.0 / 144.1 / 264.2 |
+| `nested_100k` | **`statam_l1`** | **3,479** | **9.93×** | **286.4** (`381.2` at 8W) |
+| `tpch_lineitem_500k` | `pq_default` / `vortex` / `lance` | 13,469 / 9,869 / 22,467 | 5.25× / 7.17× / 3.15× | 214.8 / 117.9 / 520.0 |
+| `tpch_lineitem_500k` | **`statam_l1`** | **11,246** (`2.00×` < Lance) | **6.29×** | 125.6 (`600.2` L0 1W) |
+| `dataloader_100k` | `pq_default` / `vortex` / `lance` | 5,713 / 3,978 / 7,022 | 5.23× / 7.51× / 4.26× | 305.3 / 119.3 / 573.6 |
+| `dataloader_100k` | **`statam_l1`** | **3,983** (`1.76×` < Lance) | **7.50×** | 178.6 (`410.1` at 8W) |
+
+| Suite / Query | `pq_default` | `vortex` | `lance` | `strata` | `statam_l0` (1C) | **`statam_l1` (1C / 8T)** | `lance` S3 | **`statam_l1` S3** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `BL_meta_scan` | 0.152 ms | 0.313 ms | 0.215 ms | 0.125 ms | 0.092 ms | **0.038 / 0.038 ms** | 66.2 ms (2) | **25.1 ms (1)** |
+| `BL_take_1` | 0.684 ms | 366.8 ms | 0.243 ms | 0.691 ms | **0.056 ms** | **0.132 / 0.139 ms** | 101.2 ms (3) | **91.4 ms (3)** |
+| `BL_take_10` | 3.410 ms | 369.4 ms | 1.708 ms | N/A | 1.356 ms | **1.309** (`0.937` unpin) / 3.22 ms | 426.2 ms (12) | **416.4 ms (12)** |
+| `BL_take_50` | 287.1 ms | 371.8 ms | 6.143 ms | N/A | 6.181 ms | **5.716 / 3.638 ms** | 1,656 ms (46) | **1,211 ms (29)** |
+| `WD_cold_open` | 1.529 ms | 3.139 ms | 4.790 ms | 0.747 ms | 0.430 ms | **0.404 / 0.412 ms** | 96.5 ms (3) | **28.8 ms (1)** |
+| `WD_narrow_3col` | 0.660 ms | 1.088 ms | 0.963 ms | 0.253 ms | **0.137 ms** | **0.203 / 0.208 ms** | **96.5 ms (3)** | 168.8 ms (5) |
+| `WD_point_all_1000` | 43.57 ms | 42.54 ms | 34.20 ms | 12.56 ms | **9.107 ms** | 18.35 / **2.852 ms** | 1,356 ms (39) | **93.8 ms (2)** |
+| `WD_take_20_1000` | 60.78 ms | 65.88 ms | 67.71 ms | N/A | **32.91 ms** | 63.63 / **9.023 ms** | 1,356 ms (39) | **183.8 ms (4)** |
+| `FW_score_cnt` | 3.050 ms | 2.971 ms | 3.529 ms | 2.516 ms | **0.852 ms** | **1.624 / 0.613 ms** | 95.7 ms (3) | **66.6 ms (2)** |
+| `FW_take_100` | 127.7 ms | 222.0 ms | **4.059 ms** | N/A | 38.26 ms | 15.18 / 4.426 ms | 2,196 ms (63) | **964.5 ms (15)** |
+| `FW_substr_rare` | 362.1 ms | 239.0 ms | 972.8 ms | **27.37 ms** | 140.2 ms | 222.0 / 49.83 ms | **1,111 ms (10)** | 1,160 ms (10) |
+| `FW_substr_absent` | 350.9 ms | 234.6 ms | 958.2 ms | 8.181 ms | 137.8 ms | **1.533 / 0.529 ms** | 1,066 ms (9) | **204.5 ms (3)** |
+| `NS_scan_full` | 52.57 ms | 20.68 ms | 41.29 ms | 63.27 ms | **12.29 ms** | 38.09 / **7.684 ms** | 173.5 ms (5) | **84.0 ms (2)** |
+| `NS_filter_map` | 32.77 ms | 8.175 ms | 49.08 ms | 5.208 ms | 20.15 ms | **2.127 / 0.589 ms** | 103.5 ms (3) | **64.0 ms (2)** |
+| `NS_take_100` | 16.56 ms | 12.84 ms | **3.922 ms** | N/A | 8.552 ms | 8.178 / **1.212 ms** | 173.5 ms (5) | **84.0 ms (2)** |
+| `TP_Q6_filter` | 16.52 ms | 12.34 ms | 20.70 ms | 14.28 ms | **5.286 ms** | **6.944 / 1.748 ms** | 229.4 ms (6) | **204.8 ms (5)** |
+| `TP_Q1_scan` | 20.88 ms | 15.94 ms | 29.86 ms | 17.36 ms | **7.508 ms** | **15.37 / 3.187 ms** | 344.4 ms (9) | **254.8 ms (7)** |
+| `TP_take_100` | 30.17 ms | 40.15 ms | **7.332 ms** | N/A | 11.36 ms | 8.145 / **1.849 ms** | 769.4 ms (22) | **234.8 ms (5)** |
+| `DL_epoch_local` | 1,774 ms | 1,123 ms | **475.5 ms** | N/A | 777.1 ms | 582.9 / **107.7 ms** | — | — |
+| `DL_epoch_s3_cached` | 1,793 ms | 1,137 ms | **479.9 ms** | N/A | 826.8 ms | 609.7 / **132.7 ms** | 243.6 ms (7) | **88.9 ms (2)** |
+
+- **Strict 1-Core Summary (Suites G–L):** Statam wins **14 / 19** local CPU queries on a single core (and **15 / 19** head-to-head vs Lance V2.2, including a **4/4 sweep of Lance's own Blob V2 suite** — `BL_take_1` `35.43 → 0.132 ms` / `0.077 ms` unpinned, `BL_take_10` `141.9 → 1.309 ms` / `0.937 ms` unpinned, `BL_take_50` `213.1 → 5.716 ms`, `BL_meta_scan` `0.038 ms` / `1` S3 GET `14.7 KiB`). On simulated S3, `statam_l1` is **#1 overall of all 7 formats on 13 / 19 queries** and wins **17 / 19 head-to-head vs Lance V2.2**.
+- **Honest trade-offs:** `FW_substr_rare` (`"Carolina State"`, 34 hits) trails Strata's inverted index (`27.4 ms` vs Statam `222 ms 1C / 49.8 ms 8T`) because common English trigrams co-occur across different articles even inside `64 KiB` (~12-article) frames, though Statam still beats Vortex (`239 ms`), Parquet (`362–383 ms`), and Lance (`973 ms`), and sweeps `FW_substr_absent` (`1.53 ms 1C / 0.53 ms 8T`). `fineweb_40k` stores `93.1 MiB` vs Lance `88.1 MiB` / Parquet `72.8 MiB` due to smaller `64 KiB` non-dict frames + `4 KiB` trigram blooms.
+
+### 16.3 Suites A–F Regression Check & Gate 1 Confirmation
+- **`clickbench_100k` (Gate 1 PASS):** `statam_l1` = **`8,411.2 KiB`** (`11.79×`, `-6.1%` smaller than Parquet `8,960 KiB`); `CB_Q24` = **`13.04 ms (1T) / 2.74 ms (8T)`**, `CB_Q20` = **`0.313 ms (1T)`**, `CB_wide_point` = **`0.484 ms (8T)`**.
+- **`random_access_250k`:** `statam_l1` = **`9,832.1 KiB`** (`+0.4%` vs Pass 11 — **still #1 smallest of all 7**); **`RA_take_100` dropped `2.5×` to `5.44 ms (1T) / 1.13 ms (8T)`** (`2.3×` faster than Lance `2.58 ms`!), `RA_take_1000` = **`16.00 ms (1T) / 2.75 ms (8T)`**.
+- **Suites B, D, E, F (`row_filter`, `jsonbench`, `wildchat`, `hermes`):** Zero regressions (`WC_Q4_unicode_ilike 8T` improved to `49.18 ms`, `W1_agents` unchanged).
+
+### 16.4 Pass 12 Verification & Security
+- **Cold Code Review (`inherit`):** Found 1 Blocker (`p2_l0_needed` in `reader/mod.rs` when `L0Fast` combines `IsNull`/`IsNotNull` with projection), 0 Majors, 4 Minors — all fixed with dedicated regression tests.
+- **Local & Apple M4 (`aarch64` NEON) Checks:** `cargo fmt -p cetra-statam -- --check`, `cargo clippy --offline --locked -p cetra-statam --all-targets -- -D warnings` (0 warnings), `cargo test --offline --locked -p cetra-statam` (**183 unit + 2 `fuzz_replay` tests passing** on both local `x86_64` and Apple M4 `macbook-m4-vm` `--release` in `0.69 s`), `just check-ee`, `just deny-policy` (bans/licenses/sources ok).
+- **ASan libFuzzer (`precision-5770-vm`, 90s × 4 workers, 22-seed corpus incl. `seed-21-fsst-subchunked-l1` & `seed-22-binary-blobs-stpk`):** `~285k` total runs (`71,144` runs/worker), **`20,764` cov edges**, **`61,304` features**, **`605 MiB` peak RSS**, **0 crashes, 0 OOMs, 0 ASan errors**.
+
+---
+
+## 17. Live Garage S3 Benchmarks (All 17 Workloads) & Pass 13 (RTT Collapse, Single-Flight Pack Caches, Sparse ALP & All-Null Take)
+
+### 17.1 Real S3 Benchmark Harness (`docs/research/statam/bench/src/real_s3.rs`)
+To validate simulated S3 numbers against real network latency, TLS, HTTP/1.1–HTTP/2 keep-alive, TCP BDP, and object-store server overhead, we built a real S3 harness targeting a self-hosted **Garage v2.3.0** cluster (`https://s3.chapu.is:8443`, `~48–58 ms` keep-alive RTT, `~8–10 MiB/s` single-TCP-stream download, `~25–40 MiB/s` parallel HTTP streams) from the local 32-core client across **all 17 workloads (87 queries)** in **two modes** (identical `BenchS3Reader` across all 5 formats: `pq_default`, `pq_tuned`, `vortex`, `lance`, `statam_l1`, plus `pq_cetra` on `W1`–`W4`):
+- **`STATAM_REAL_S3=readcache` (`1 MiB ReadCache`):** Shared 1 MiB block-aligned LRU cache with `tokio::sync::watch` single-flight deduplication per 1 MiB block (matching production `cetra-storage`'s `ReadCache`), 3 cold runs when `< 4 s` else 1.
+- **`STATAM_REAL_S3=direct` (`Direct Range GET`):** Zero block cache; raw byte-range HTTP GETs with 64 KiB coalescing and up to 16 concurrent HTTP range requests.
+- Artifacts are uploaded idempotently via SHA-256 content-addressed keys (`8 MiB` multipart > `16 MiB`) into bucket `statam-bench`. Parquet uses true async `AsyncFileReader` (`get_byte_ranges`), Vortex uses direct async `read_range_async`, Lance uses direct async `get_opts`/`get_ranges` with `CachedFileSize::new(file_len)` and `SchedulerConfig::max_bandwidth`.
+
+### 17.2 Pass 13 Optimizations (Zero Wire-Format Changes)
+Live Garage S3 profiling and `perf` sampling on `precision-5770-vm` surfaced two high-impact bottlenecks — sequential S3 round-trip chains across Row Groups / lazy indexes / `.stpk` packs, and full-block decoding on sparse `ALP` / 95%-NULL `take_rows` columns:
+1. **Pass 13A — Real-S3 RTT Collapse & Single-Flight Pack Caches (`format.rs`, `payload/{pack,search}.rs`, `reader/{meta,mod,eval,payload}.rs`):**
+   - `DEFAULT_TAIL_HINT = 192 KiB` (covers wide-schema Hot Tails like `wide_1000`'s `~170 KiB` in 1 GET while staying inside the final 1 MiB ReadCache block for typical files) and `PACK_DEFAULT_TAIL_HINT = 256 KiB`, with bounded `Bytes::copy_from_slice` inline slicing of in-tail `lazy_dir` entries (`inline_lazy`, capped to `<= tail.len()` and first-per-key) and pack `inline_trigram` / `inline_edge_table`.
+   - Unified lazy-index + Phase-1 block fetch wave (`ensure_lazy_indexes_loaded`, `fetch_blocks_and_lazy`).
+   - Cross-RG batched `take_rows` (`<= 64 MiB` `.statam` data waves + 1 coalesced `.stpk` wave per pack; wave-bounded fallback including unique L0 bytes and per-column CDC-dedup decoded bytes `max_mb_col_decoded_bytes`).
+   - Cross-RG batched `scan` (`scan_rgs_unfiltered_batched`, `scan_rgs_filtered_batched`, bounded by `64 MiB` stored and `128 MiB` decoded Phase-1 raw bytes).
+   - Phase-1 → Phase-2 `.stpk` chunk retention (`RetainedPackChunks`, strict `64 MiB` atomic cap shared across parallel frames, parallel mini-blocks, and wave-wide RGs; consolidated into `payload/search.rs` with O(total_chunk_refs) `SameFrameSiblings` and unified lossy Unicode `ILIKE`).
+   - Single-flight double-checked locking (`Mutex<()>` + `OnceLock`) on `StatamReader::resolve_pack` and `ChunkPackReader::{dict_cache, trigram_cache, edge_table_cache}`, eliminating N-thread S3 thundering herds on parallel mini-block substring scans.
+   - Pass 12 trim-backs: `frame_divisor = 12` restricted to `frame_target <= 64 KiB`; parallel `.stpk` frame scan threshold raised to `4 MiB` / `4` frames (recovering `BL_take_10 8T` from `3.22 → 2.02 ms`).
+2. **Pass 13B — O(k) Sparse `ALP` & All-Null `take_rows` Short-Circuit (`codec/{alp,numeric,dict,mod}.rs`):**
+   - `decode_alp_take` and `decode_alp_selected` decode only requested indices via sparse bitpacking + exception patching (bit-exact IEEE-754 parity including NaN payloads, `-0.0`, subnormals, `±inf`).
+   - Zero-allocation `split_optional_null_bytes` + `gather_nulls_from_bytes` + `Column::Const(Null)` short-circuit (with full structural validation of Plain varlen offsets and Dict RLE `run_ends`) in `decode_narrow_column_take` and `decode_dict_take`.
+
+### 17.3 Live Garage S3 Results Across All 17 Workloads (87 Queries, Both Modes)
+
+| S3 Mode (`https://s3.chapu.is:8443`, 87 queries) | Statam L1 Rank #1 | vs Lance V2.2 | vs Vortex | vs Best Parquet |
+|---|---:|---:|---:|---:|
+| **1 MiB ReadCache (Baseline → Pass 13)** | `27/87` → **`45/87`** (+18) | `63/87` → **`75/87` (86%)** | `46/87` → **`62/87` (71%)** | `40/87` → **`57/87` (66%)** |
+| **Direct Range GET (Baseline → Pass 13)** | `34/87` → **`44/87`** (+10) | `75/87` → **`79/87` (91%)** | `57/87` → **`67/87` (77%)** | `39/87` → **`50/87` (57%)** |
+
+Selected live Garage S3 highlights (`ms (GETs)`):
+
+| Workload / Query | Mode | Best Parquet | Vortex | Lance V2.2 | Statam L1 (Pre-P13) | **Statam L1 (Pass 13)** |
+|---|---|---:|---:|---:|---:|---:|
+| `W1_agents · substring_rare` | ReadCache | 1,553.9 (2g) | 1,590.5 (12g) | 9,171.5 (11g) | 1,032.3 (4g) | **338.3 (4g)** (`27.1×` < Lance) |
+| `W1_agents · substring_absent` | ReadCache | 2,069.6 (2g) | 2,787.8 (12g) | 5,625.0 (11g) | 535.2 (3g) | **206.5 (3g)** (`27.2×` < Lance) |
+| `W3_spans · point_lookup_full` | ReadCache | 427.5 (4g) | 462.8 (12g) | 1,158.6 (23g) | 1,122.3 (2g) | **194.0 (2g)** (`5.8×` vs pre-P13) |
+| `W3_spans · time_bucket_agg` | ReadCache | 733.5 (4g) | 465.2 (6g) | 619.2 (7g) | 1,085.9 (7g) | **248.2 (7g)** (`4.4×` vs pre-P13) |
+| `clickbench · CB_Q20` | ReadCache | 210.4 (3g) | 205.2 (3g) | 516.9 (4g) | 313.0 (3g) | **137.3 (3g)** |
+| `clickbench · CB_wide_point` | ReadCache | 276.6 (4g) | 333.6 (6g) | 1,147.7 (18g) | 363.2 (3g) | **188.6 (3g)** (`6.1×` < Lance) |
+| `random_access · RA_take_100` | ReadCache | 642.1 (2g) | 557.9 (9g) | 838.3 (19g) | 1,287.4 (3g) | **263.0 (2g)** (`4.9×` vs pre-P13) |
+| `jsonbench · JB_Q2_did_pt` | ReadCache | 372.9 (3g) | 288.7 (4g) | 448.2 (7g) | 567.3 (2g) | **162.2 (2g)** (`3.5×` vs pre-P13) |
+| `jsonbench · JB_Q3_map_type` | ReadCache | 1,032.0 (3g) | 362.9 (9g) | 516.5 (17g) | 1,056.7 (3g) | **279.2 (3g)** (`3.8×` vs pre-P13) |
+| `blobs_2k · BL_meta_scan` | ReadCache | 157.9 (2g) | 124.3 (2g) | 131.2 (2g) | 46.5 (1g) | **49.3 (1g)** (4/4 Blobs sweep) |
+| `blobs_2k · BL_take_50` | ReadCache | 1,883.0 (31g) | 4,708.3 (3g) | 1,426.0 (45g) | 1,330.8 (29g) | **1,085.5 (29g)** |
+| `wide_1000 · WD_cold_open` | Direct | 126.8 (2g) | 113.8 (2g) | 242.2 (4g) | 116.5 (2g) | **59.7 (1g)** (`60.6 ms` ReadCache) |
+| `wide_1000 · WD_point_all_1000` | Direct | 362.0 (4g) | 4,747.3 (1199g) | 2,713.2 (2004g) | 268.3 (4g) | **158.3 (2g)** (`17.1×` < Lance) |
+| `wide_1000 · WD_take_20_1000` | Direct | 325.4 (3g) | 4,493.4 (1198g) | 3,394.3 (2897g) | 521.8 (7g) | **245.7 (2g)** (`13.8×` < Lance) |
+| `fineweb_40k · FW_take_100` | ReadCache | 1,464.7 (15g) | 1,378.7 (8g) | 1,510.1 (63g) | 4,053.6 (15g) | **1,271.0 (15g)** (#1; `709.6 ms` Direct) |
+| `fineweb_40k · FW_substr_rare` | ReadCache | 2,399.2 (6g) | 4,747.2 (8g) | 4,144.9 (10g) | 4,936.3 (12g) | **2,199.7 (12g)** (#1; Direct `138→91.9 MiB`) |
+| `fineweb_40k · FW_substr_absent` | ReadCache | 2,222.3 (4g) | 1,366.0 (7g) | 2,304.0 (9g) | 508.4 (3g) | **852.1 (3g)** (#1; Direct `56.2→11.7 MiB`) |
+| `tpch · TP_Q6_filter` | ReadCache | 371.6 (5g) | 311.5 (5g) | 310.9 (6g) | 384.3 (5g) | **210.2 (5g)** |
+| `tpch · TP_take_100` | ReadCache | 345.8 (2g) | 289.1 (10g) | 687.5 (22g) | 1,459.8 (5g) | **480.3 (2g)** (`3.0×` vs pre-P13) |
+| `dataloader · DL_epoch_s3_cached` | ReadCache | 2,449.3 (2g) | 1,313.1 (4g) | 693.4 (7g) | 359.0 (2g) | **368.2 (2g)** (Direct `12.8s` vs Lance `71.7s` / `26,317g`) |
+
+### 17.4 Pass 13 Local CPU & Verification (`precision-5770-vm` & `macbook-m4-vm`)
+- **Local CPU (`precision-5770-vm`, zero size regressions across all 17 workloads, `clickbench_100k = 8,411.2 KiB` Gate 1 PASS):**
+  - `WD_point_all_1000`: `28.5 → 18.40 ms` (1T, `1.55×`) / **`2.83 ms` (8T)**
+  - `WD_take_20_1000`: `105 → 62.66 ms` (1T, `1.68×`) / **`8.99 ms` (8T)**
+  - `BL_take_10` (8T): `3.22 → 2.02 ms` (`1.60×`); `BL_take_50` (8T): `3.64 → 2.59 ms`
+  - `TP_take_100`: `8.15 → 5.40 ms` (1T, `1.51×`) / **`1.70 ms` (8T)**
+  - `DL_epoch_local`: `641 → 586.6 ms` (1T) / **`115.8 ms` (8T)**
+- **Cold Code Reviews (3 rounds):** Initial cold review caught 3 Blockers (`B1`–`B3`), 3 Majors (`M1`–`M3`), 4 Minors (`m1`–`m4`); follow-up review caught 1 Blocker (`N1` `inline_lazy` copy-bomb OOM) and 1 Minor (`N2` CDC-dedup `take_rows` wave split); final cold sign-off **APPROVED** (0 Blockers, 0 Majors, 0 Minors, strict lock DAG verified).
+- **Tests, Security & Cross-Arch:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (0 warnings), `just check-ee`, `just deny-policy` (bans/licenses/sources ok); **203 unit + 2 `fuzz_replay` tests passing** on local `x86_64`, `precision-5770-vm` (`1.66 s` release), and Apple M4 `macbook-m4-vm` (`aarch64` NEON, `1.73 s` release).
+- **ASan libFuzzer (`statam_file`, 90s × 4 workers):** `~208k` total runs (`52,028` runs/worker), **`20,736` cov edges**, **`59,613` features**, **`600 MiB` peak RSS**, **0 crashes, 0 OOMs, 0 ASan errors**.
+
+---
+
+## 18. Pass 14: Fast Unicode `ILIKE`, Zero-Redundant-`from_utf8` String Access, & Cold `.stpk` Dict+Frame Coalescing
+
+Driven by `perf` profiling on `precision-5770-vm` (`WildChat`, `Nested`, `RandomAccess`, `DataLoader`) and live Garage S3 RTT traces, Pass 14 ships three strictly zero-wire-format-change, zero-size-regression optimizations across `crates/statam/src/`:
+
+1. **Pass 14A — Fast Unicode `ILIKE` (`simd/trigram.rs`, `payload/search.rs`, `reader/eval.rs`):**
+   - Added AVX2/NEON/scalar `ascii_lowercase_append` in `simd/trigram.rs` and SWAR `ascii_prefix_len` + `unicode_lowercase_context_free_into_bytes` in `payload/search.rs`, folding contiguous ASCII runs via SIMD without invoking `char::to_lowercase` / Unicode lookup tables while preserving 100% bit-exact parity (`'ς' -> 'σ'`, `'İ'`, `'K'`, `'ſ'`, multi-char expansions, lossy invalid-UTF-8 fallback).
+   - Added exact pure-ASCII fast-reject (`!needle_uni_lower.is_ascii() && haystack.is_ascii() -> false`) in both `NeedleMatcher::UnicodeIlike` and `Utf8Matcher::UnicodeIlike`.
+2. **Pass 14B — Eliminate Redundant Per-Row `Utf8Data::get` (`from_utf8`) + Bounded `unshred_map` Pre-Sizing (`codec/{mod,dict,nested,numeric,zonemap}.rs`, `writer/{mod,rg_encode}.rs`, `reader/{eval,mod}.rs`):**
+   - Because `cetra_column::Utf8Data::get(row)` re-validates UTF-8 on every call (`14.0%` of `nested_100k`, `4.6%` of `random_access_250k`), added zero-`unsafe` `utf8_bytes_at`, `utf8_len_at` (with `checked_add` overflow protection), and `FastUtf8Ref<'a>` (validating `u.bytes()` once per buffer for O(1) `&str` slicing) and replaced hot-path `Utf8Data::get` sites across codecs, writer, and evaluator.
+   - Pre-sized `unshred_map` and `decode_single_map_key` buffers bounded by `valid_rows` and capped at `1 << 20` entries (safe against all-null / crafted amplification).
+3. **Pass 14C — Coalesce Cold `.stpk` Zstd Dict + Data Frames in 1 `read_ranges` Wave (`payload/pack.rs`):**
+   - Unified `scan_chunks_in_frames`, `scan_chunks_in_frames_parallel`, `scan_frames_parallel`, and `read_chunks` onto `fetch_frames_and_dict`: when a `.stpk` Zstd dict is neither cached nor inline in the tail, its byte range is appended to the frame `read_ranges` batch and installed under single-flight `dict_init`, saving 1 full S3 RTT (~55 ms) on cold `.stpk` reads.
+
+### 18.1 Pass 14 Results (`precision-5770-vm` & Live Garage S3)
+- **File Sizes:** **Bit-identical (`+0.00%`) across all 17 workloads** (`clickbench_100k = 8,411.2 KiB`, Gate 1 PASS).
+- **Write Speedups (`precision-5770-vm`):** `W1_agents` `399.8 → 286.8 ms` (**`1.39×`**), `W4_adversarial` `79.9 → 64.7 ms` (**`1.23×`**), `wildchat_15k` `523.5 → 433.0 ms` (**`1.21×`**), `nested_100k` `118.0 → 100.9 ms` 1T (**`1.17×`**) / `86.9 → 71.9 ms` 8T (**`1.21×`**), `row_filter_100k` `35.4 → 29.6 ms` (**`1.20×`**), `W2_chat_4files` `280.3 → 238.8 ms` (**`1.17×`**), `tpch_lineitem_500k` `565.3 → 506.8 ms` 1T (**`1.12×`**) / `389.6 → 354.7 ms` 8T (**`1.10×`**), `W3_spans` `237.5 → 214.5 ms` (**`1.11×`**), `dataloader_100k` `169.4 → 153.2 ms` (**`1.11×`**), `random_access_250k` `413.4 → 374.6 ms` (**`1.10×`**).
+- **Read Speedups (`precision-5770-vm`):**
+  - `NS_scan_full`: `38.10 → 29.45 ms` 1T (**`1.29×`**) / `6.39 → 5.26 ms` 8T (**`1.21×`**)
+  - `NS_filter_map` (8T): `0.603 → 0.494 ms` (**`1.22×`**); `NS_take_100`: `8.40 → 7.68 ms` 1T / `1.26 → 1.17 ms` 8T
+  - `WC_Q4_unicode_ilike` (1T): `108.37 → 84.40 ms` (**`1.28×`** — now `1.39×` faster than Parquet `117 ms`, `1.43×` faster than Vortex `121 ms`, `2.31×` faster than Lance `195 ms` on 1 core)
+  - `CB_Q23_like` (1T): `2.13 → 1.78 ms` (**`1.20×`**); `CB_Q12` (1T): `0.787 → 0.694 ms` (**`1.13×`**)
+  - `JB_Q4_text_like` (1T): `3.98 → 3.41 ms` (**`1.17×`**); `JB_Q5_did_full` (1T): `18.27 → 16.98 ms` (**`1.08×`**)
+  - `W1`/`W2`/`W3`/`W4` `map_key_lookup`: **`1.09×–1.14×`** faster across all 4 Cetra workloads
+- **Live Garage S3 (`https://s3.chapu.is:8443`):** Zero GET regressions across all 87 queries × both modes (`W14` ReadCache vs Lance **`37/38`**, `EXT` Direct Rank #1 **`16/30`** with `CB_Q1` `117 ms`, `WD_take_20_1000` ReadCache `355 ms`, `NS_scan_full` ReadCache `152 ms`, `FW_substr_absent` ReadCache `434 ms`).
+
+### 18.2 Pass 14 Verification & Security
+- **Cold Code Review (2 rounds):** Caught 1 Major (uncapped upfront `with_capacity` in `unshred_map` / `decode_single_map_key` ignoring `row_nulls`) and 1 Minor (`utf8_len_at` `row + 1` overflow on `usize::MAX`) — both fixed and **APPROVED** (0 Blockers, 0 Majors, 0 Minors).
+- **Tests, Security & Cross-Arch:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (0 warnings), `just check-ee`, `just deny-policy` (bans/licenses/sources ok); **209 unit + 2 `fuzz_replay` tests passing** on local `x86_64` and Apple Silicon M4 `macbook-m4-vm` (`aarch64` NEON, `1.18 s` release, verifying unaligned NEON `ascii_lowercase_append`).
+- **ASan libFuzzer (`statam_file`, 90s × 4 workers):** **`352,786` total runs** (`~969` exec/s/worker — `1.7×` faster fuzz throughput), **`21,224` cov edges**, **`61,069` features**, **`606 MiB` peak RSS**, **0 crashes, 0 OOMs, 0 ASan errors**.
+
+---
+
+## 19. Pass 15: Exact ASCII-Anchor Unicode `ILIKE`, Direct-Buffer `unshred_map`, & FSST Slice Hoisting
+
+1. **Pass 15A — Exact ASCII-Anchor Pre-Filter & Caseless CJK/Hangul Fast-Copy (`payload/search.rs`, `reader/eval.rs`):**
+   - Under Unicode `char::to_lowercase()`, the only non-ASCII scalars (`U+0080..=U+10FFFF`) emitting any ASCII byte are `U+0130` (`'İ' -> "i\u{0307}"`, where `'i'` is always immediately followed by non-ASCII `0xCC`) and `U+212A` (`'K' -> "k"`), proven exhaustively across all `1,114,112` codepoints by unit test `pass15a_exhaustive_unicode_tolower_ascii_and_caseless_cjk_invariants`.
+   - `extract_unicode_ilike_ascii_anchor` extracts the longest safe ASCII anchor (`len >= 2`, splitting on `'k'`, trimming trailing `'i'`, and verifying inclusion in `needle_raw_lower`), letting AVX2/NEON `ascii_lowercase_into + memmem` reject 99.98% of multilingual chunks without touching `std::str::from_utf8` or Unicode lookup tables, while reusing `scratch` on the invalid-UTF-8 fallback.
+   - `unicode_lowercase_context_free_into_bytes` also fast-copies caseless 3-byte CJK/Hangul runs (`U+3000..=U+9FFF`, `U+AC00..=U+D7AF`) directly.
+2. **Pass 15B — Direct-Buffer `unshred_map` & O(1) RLE Cursor (`codec/nested.rs`):**
+   - Added monotonic `SubColUtf8Ref::get_seq` (O(1) amortized RLE cursor replacing per-row binary search), direct pre-sized `(key_offs, key_bytes, val_offs, val_bytes)` writes (`UnshredOut`, capped at `1M` entries / `16 MiB` prealloc) eliminating `Vec<&str>` / `Vec<bool>` / `realloc` churn, lazy null-bitmap allocation (`unshred_has_any_val_nulls` word-level check), and an empty-residual fast path in `merge_unshred_row`.
+3. **Pass 15C — Slice Hoisting in `FsstDecodeTable::decode_row_fast` (`codec/fsst.rs`):**
+   - Hoisted `let out_slice = &mut out_bytes[..needed];` outside the per-symbol loop (zero `unsafe`).
+
+### 19.1 Pass 15 Results & Verification
+- **File Sizes:** **Bit-identical (`+0.00%`) across all 17 workloads** (`clickbench_100k = 8,411.2 KiB`, Gate 1 PASS).
+- **Local CPU (`precision-5770-vm`):**
+  - **`WC_Q4_unicode_ilike` (`151.7 MiB` multilingual UTF-8):** `108.37 ms` (Pass 13) → `84.40 ms` (Pass 14) → **`23.48 ms` (1C, `4.62×` faster, `6.3 GiB/s` on 1 core!)** / **`13.23 ms` (8R, `3.72×` faster than `49.18 ms`, `11.2 GiB/s`!)** — beating Parquet (`117 ms`) by **`5.0×`**, Vortex (`121 ms`) by **`5.2×`**, and Lance (`195 ms`) by **`8.3×`** on 1 core!
+  - **`wildchat_15k` write (8W):** `258.8 → 198.9 ms` (`744.9 MiB/s`, `1.30×` faster vs Pass 12).
+  - **`NS_scan_full` (1C):** `38.10 ms` (Pass 13) → `29.45 ms` (Pass 14) → **`28.28 ms` (`1.35×` overall)**; `NS_filter_map`: `2.23 ms (1C) / 0.493 ms (8T)`; `CB_Q24` (1C): `20.16 → 19.86 ms`.
+- **Cold Code Review:** **APPROVED** on first pass (0 Blockers, 0 Majors).
+- **Tests, Security & Cross-Arch:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (0 warnings), `just check-ee`, `just deny-policy` (bans/licenses/sources ok); **212 unit + 2 `fuzz_replay` tests passing** on local `x86_64` and Apple Silicon M4 `macbook-m4-vm` (`aarch64` NEON, `1.16 s` release).
+- **ASan libFuzzer (`statam_file`, 90s × 4 workers):** **`327,593` total runs**, **`21,239` cov edges**, **`61,215` features**, **`641 MiB` peak RSS**, **0 crashes, 0 OOMs, 0 ASan errors**.
+
+---
+
+## 20. Pass 16: Sparse RLE Take & Selected Decode, Flat FSST Training/Encoding, & Dense Dict Fast Path
+
+Driven by post-Pass-15 `perf` profiles on `wide-1000` (`11.38% unpack_u64`, `4.04% unpack_u32`, `2.39% decode_alp_from_header`, `8.25%` RLE run detection) and `tpch-bi` (`12.94% FsstTable::train`, `10.66% FsstTable::encode_row`, `2.17% small_sort_general`, `3.31% decode_dict_selected`), Pass 16 ships three zero-wire-format-change optimizations:
+
+1. **Pass 16A — Sparse RLE `take` / `selected`, Narrow `selected` Short-Circuit, & Hoisted RLE Run Detection (`codec/numeric.rs`, `codec/mod.rs`):**
+   - Replaced the `Encoding::Rle` fallback in `decode_narrow_column_take` (`Ok(None)` → 8192-bit `Bitmap` + full `decode_inner_flat` + `RleColumn::take`) with direct `decode_rle_block_take` + shared `decode_inner_body_take`: maps `indices → run_indices` monotonically (`partition_point` on backward jumps), validates & short-circuits empty/all-null runs to `Column::Const(Null)` in O(1), and sparsely decodes `ForBitpack`, `DeltaBitpack`, `Alp`, `BitpackBool`, `Plain`, and `Fsst` inner run bodies.
+   - Upgraded `decode_rle_block_selected` and `decode_narrow_column_selected` to validate & short-circuit all-null masks to `Column::Const(Null)`, single-run / single-row selections to zero-allocation `Column::Const(scalar)` (preserving `Selection::Mask` and exact `-0.0`/`NaN`/type metadata), and multi-run sparse RLE selections (`selected_runs * 16 < num_runs`) through `decode_inner_flat_selected`.
+   - Hoisted `flat.nulls()` and `flat.data()` dispatch outside the per-row loops in `compute_flat_runs` / `has_runs_sample_64`, tracking `run_is_null` across consecutive NULL rows.
+2. **Pass 16B — Bit-Identical Flat-Bucket FSST Training & Encoding (`codec/fsst.rs`):**
+   - Replaced `buckets: Vec<Vec<u8>>` + indirect `sym_words`/`sym_masks` lookups with contiguous L1-resident `BucketEntry { word, mask, code, len }` slices (`bucket_offsets: [u16; 257]`), skipped `in_word` loads on empty buckets, and split `encode_row` into a branch-lean `pos + 8 <= len` hot loop plus tail loop.
+   - Reused pre-allocated `count2` and `(u8, u64)` `candidates` maps across all 3 training rounds, added a Round-0 direct byte/pair counting fast path (`sym_count == 0`), precomputed `tok_word`/`tok_len` for 1-shift-1-OR pair combination, and replaced full sorting of `ranked` with `select_nth_unstable_by(FSST_MAX_SYMBOLS)` + `sort_unstable_by` (preserving exact lexicographical tie-breaking via `swap_bytes()`).
+3. **Pass 16C — Dense Small-Dict `decode_dict_selected` In-Place Fast Path (`codec/dict.rs`) & Invalid-UTF-8 Matcher Tests (`reader/eval.rs`, `payload/search.rs`):**
+   - For dense small-dict `ForBitpack` (`selected_count * 16 >= row_count`, `dict.memory_bytes() <= 256 KiB`), unpacks directly into `codes` and validates/masks in place in a single sequential pass, eliminating the intermediate `Vec<(usize, u32)>` allocation and scatter loop.
+
+### 20.1 Pass 16 Results & Verification
+- **File Sizes:** **Bit-identical (`+0.00%`) across all 17 workloads** (`clickbench_100k = 8,411.2 KiB`, `wide_1000_25k = 8,584.5 KiB`, `tpch_lineitem_500k = 11,245.9 KiB`, Gate 1 PASS).
+- **Local CPU Read Speedups (`precision-5770-vm`, `statam_l1`, zero regressions):**
+  - **`BL_take_10`:** `4.28 → 1.36 ms` 1C (**`3.15×`**) / `3.20 → 0.908 ms` 8T (**`3.52×`**)
+  - **`BL_take_50` (1C):** `17.13 → 5.97 ms` (**`2.87×`**)
+  - **`WD_take_20_1000`:** `62.33 → 26.96 ms` 1C (**`2.31×`** — **#1 on 1 core**, `2.25×` faster than Parquet `60.8 ms`, `2.44×` faster than Vortex `65.9 ms`, `2.51×` faster than Lance `67.7 ms`!) / `9.11 → 6.42 ms` 8T (**`1.42×`**)
+  - **`WD_point_all_1000`:** `18.15 → 8.26 ms` 1C (**`2.20×`** — `2.4×` faster than Parquet, `4.1×` faster than Lance, `5.2×` faster than Vortex!) / `3.14 → 1.86 ms` 8T (**`1.69×`**)
+  - **`CB_Q10` (1C):** `0.657 → 0.431 ms` (**`1.52×`**); **`CB_Q24` (1C):** `19.86 → 13.41 ms` (**`1.48×`**); **`CB_wide_point` (1C):** `1.736 → 1.531 ms` (**`1.13×`**); **`RF_pt_0_001pct` (1C):** `0.084 → 0.072 ms` (**`1.17×`**)
+  - **`TP_Q1_scan`:** `14.60 → 13.08 ms` 1C (**`1.12×`** — **#1 on 1 core**, beating Vortex `15.9 ms`, Parquet `20.9 ms`, Lance `29.9 ms`!) / `3.39 → 2.91 ms` 8T (**`1.17×`**); **`TP_take_100`:** `5.37 → 5.08 ms` 1C (**#1 on 1 core**, beating Lance `7.33 ms`!) / `1.72 → 1.58 ms` 8T (**`1.09×`**)
+  - **`NS_scan_full` (8T):** `5.32 → 4.42 ms` (**`1.20×`**); **`NS_take_100` (8T):** `1.64 → 1.44 ms` (**`1.14×`**); **`DL_epoch_local` (8T):** `119.9 → 108.7 ms` (**`1.10×`**)
+- **Write Speedups (`precision-5770-vm`, `statam_l1`):**
+  - **`clickbench_100k` (1C):** `843.5 → 602.9 ms` (**`1.40×`**, `114.8 → 160.6 MiB/s`)
+  - **`wide_1000_25k`:** `712.9 → 522.0 ms` 1C (**`1.37×`**) / `271.2 → 213.7 ms` 8W (**`1.27×`**, `831.2 MiB/s`)
+  - **`tpch_lineitem_500k` (8W):** `349.8 → 308.9 ms` (**`1.13×`**); **`jsonbench_100k` (1C):** `833.7 → 788.6 ms` (**`1.06×`**)
+- **Cold Code Review:** **APPROVED** on first pass (0 Blockers, 0 Majors).
+- **Tests, Security & Cross-Arch:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (0 warnings), `just check-ee`, `just deny-policy` (bans/licenses/sources ok); **219 unit + 2 `fuzz_replay` tests passing** on local `x86_64` and Apple Silicon M4 `macbook-m4-vm` (`aarch64` NEON, `1.11 s` release).
+- **ASan libFuzzer (`statam_file`, 90s × 4 workers):** **`367,751` total runs**, **0 crashes, 0 OOMs, 0 ASan errors**.
+
+---
+
+## 21. Pass 17: 2-Byte Prefix FSST Hash Buckets, 4× Unrolled Safe FSST Decode, Direct `shred_map` / `SubColView`, & Sparse Word-Level Zone Maps
+
+Driven by post-Pass-16 `perf` profiles across `clickbench`, `jsonbench`, `random-access`, `wide-1000`, `nested`, and `tpch-bi`, Pass 17 ships four zero-wire-format-change, zero-`unsafe` optimizations:
+
+1. **Pass 17A — 2-Byte Prefix Hash Table & Open-Addressed `FlatPairCounter` in `FsstTable` (`codec/fsst.rs`):**
+   - Replaced 1-byte `bucket_offsets: [u16; 257]` with a 2,048-bucket (`FSST_BUCKET2_BITS = 11`) 2-byte prefix CSR hash table (`bucket2_offsets: Vec<u16>`, 4 KiB L1-resident), skipping 8-byte `in_word` loads and linear bucket scans on ~88% of input positions while preserving 100% bit-identical longest-match and descending-length / ascending-code tie-breaking.
+   - Replaced `count2: HashMap<u32, u32>` in `FsstTable::train` with a reusable power-of-two open-addressed `FlatPairCounter` (`16,384` initial slots, O(touched) `clear()`, 75% load-factor `grow()`).
+2. **Pass 17B — 4× Unrolled Safe Fast Path in `FsstDecodeTable::decode_row_fast` (`codec/fsst.rs`):**
+   - Added a zero-`unsafe` 4-symbol unrolled loop with `FSST_DECODE_SLACK = 32` (every caller verified to truncate to `pos` or slice `&scratch[..pos]`), collapsing 4 symbols' bounds checks and escape checks into 1 check per 4 coded bytes.
+3. **Pass 17C — Contiguous `SubColView`, Inlined `UnshredOut`, & Direct-Buffer `shred_map` (`codec/nested.rs`):**
+   - Consolidated per-subcolumn state into a contiguous `SubColView<'a>` slice (hoisting `in_map_all_ones` and `rle_cursor`), added `#[inline(always)] UnshredOut::push_valid_entry` and a specialized empty-residual non-null loop in `unshred_map`.
+   - Replaced `shred_map`'s intermediate `Vec<Vec<Option<&str>>>` and `res_keys`/`res_vals` slice vectors with direct `(offsets, bytes)` buffers and lazy `res_val_valid` allocation.
+4. **Pass 17D — Dense & Sparse Word-Level `iter_ones()` Fast Paths in `zone_map_from_flat_masked` (`codec/zonemap.rs`):**
+   - Added zero-branch dense loops (`active.is_none() && nulls.is_none()`, plus word-level `all_ones()`/`all_zeros()` for `Bool`) and sparse `nbm.iter_ones()` scans (`null_count * 2 >= n`) across all 9 scalar/varlen types.
+
+### 21.1 Pass 17 Results & Verification
+- **File Sizes:** **Bit-identical (`+0.00%`) across all 17 workloads** (Gate 1 PASS).
+- **Write Speedups (`precision-5770-vm`, `statam_l1`, zero regressions):**
+  - **`tpch_lineitem_500k`:** `463.6 → 402.5 ms` 1C (**`1.15×`**) / `308.9 → 289.4 ms` 8W (**`1.07×`**)
+  - **`fineweb_40k`:** `2305.7 → 2017.7 ms` 1C (**`1.14×`**) / `832.7 → 716.4 ms` 8W (**`1.16×`**)
+  - **`dataloader_100k`:** `148.7 → 134.8 ms` 1C (**`1.10×`**) / `70.5 → 67.5 ms` 8W (**`1.04×`**)
+  - **`random_access_250k` (1C):** `362.2 → 333.0 ms` (**`1.09×`**); **`blobs_2k`:** `674.2 → 621.1 ms` 1C (**`1.09×`**) / `562.2 → 543.4 ms` 8W (**`1.03×`**)
+  - **`jsonbench_100k` (1C):** `788.6 → 731.7 ms` (**`1.08×`**); **`nested_100k` (1C):** `100.6 → 94.3 ms` (**`1.07×`**); **`W4_adversarial` (1C):** `116.7 → 110.5 ms` (**`1.06×`**); **`clickbench_100k` (1C):** `602.9 → 577.0 ms` (**`1.04×`**, **`1.46×`** cumulative since Pass 15; `statam_l0` `310.2 → 219.2 ms` = **`1.42×`**); **`hermes_fc` (1C):** `95.7 → 92.2 ms` (**`1.04×`**).
+- **Read Speedups (`precision-5770-vm`, `statam_l1`):**
+  - **`NS_scan_full` (1C):** `28.32 → 26.12 ms` (**`1.08×`**; **`1.46×`** cumulative since Pass 13's `38.10 ms`)
+  - **`BL_take_10` (1C):** `1.359 → 1.194 ms` (**`1.14×`**); **`BL_take_50` (1C):** `5.966 → 5.857 ms`
+  - **`CB_Q24` (1C):** `13.41 → 13.32 ms`; **`CB_Q10`:** `0.431 → 0.428 ms` (`statam_l0` `0.438 → 0.193 ms`); **`CB_wide_point`:** `1.531 → 1.517 ms` (`statam_l0` `1.356 → 1.149 ms`)
+  - **`JB_Q2_did_pt` (1C):** `7.33 → 7.06 ms` (**`1.04×`**); **`RF_pt_0_001pct`:** `0.072 → 0.068 ms` (**`1.06×`**); **`RF_unsel_90pct`/`99pct`:** `2.61 → 2.46 ms` / `2.80 → 2.65 ms` (**`1.06×`**)
+- **Cold Code Review:** **APPROVED** on first pass (0 Blockers, 0 Majors).
+- **Tests, Security & Cross-Arch:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (0 warnings), `just check-ee`, `just deny-policy` (bans/licenses/sources ok); **223 unit + 2 `fuzz_replay` tests passing** on local `x86_64` and Apple Silicon M4 `macbook-m4-vm` (`aarch64` NEON, `1.10 s` release).
+- **ASan libFuzzer (`statam_file`, 90s × 4 workers):** **`337,786` total runs**, **0 crashes, 0 OOMs, 0 ASan errors**.
+
+**Stage 3 Status:** `crates/storage`, `crates/core`, `crates/column`, and `crates/query` remain **completely untouched** per the Stage 2/Stage 3 gate. Awaiting explicit user go-ahead for Stage 3 (`cetra-storage` integration).

@@ -1,0 +1,35 @@
+{
+  "description": "LiteLLM Proxy embeddings, traced by the proxy's otel callback.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Normalization rules"
+  ],
+  "notes": "The proxy runs as a subprocess with callbacks: [otel] and message logging left on; only the embedding model is routed, to the mock (FAKE_BASE), with the local model cost map and OTLP/HTTP protobuf export to the receiver. One embeddings.create reaches the upstream as text-embedding-3-small. gen_ai.operation.name is aembedding and gen_ai.system is empty, so the span has no provider; the proxy reports no cost keys on embeddings, so the price comes from the built-in table by model name. gen_ai.response.id is a UUID per run. span_names keeps the litellm_request span and drops the plumbing spans and the health-probe trace. litellm.call_id, hidden_params, metadata.requester_metadata and metadata.requester_ip_address are volatile for the same reasons as the chat case.",
+  "instrumentation": "litellm",
+  "libraries": [
+    "litellm",
+    "openai"
+  ],
+  "span_names": [
+    "litellm_request"
+  ],
+  "volatile_attributes": [
+    "litellm.call_id",
+    "hidden_params",
+    "metadata.requester_metadata",
+    "metadata.requester_ip_address",
+    "gen_ai.response.id"
+  ],
+  "turns": [
+    {
+      "api": "openai.embeddings",
+      "model": "text-embedding-3-small",
+      "dims": 2,
+      "usage": {
+        "input": 5
+      }
+    }
+  ]
+}

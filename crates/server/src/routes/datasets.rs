@@ -6503,7 +6503,7 @@ mod tests {
             deleted: false,
             ingest_time: now,
         };
-        let batch = cetra_core::batch::scores_to_record_batch(&[score]).unwrap();
+        let batch = cetra_core::batch::scores_to_batch(&[score]).unwrap();
         app.state
             .storage
             .append_scores(seeded.project.id, batch)

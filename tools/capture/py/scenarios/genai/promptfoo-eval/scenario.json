@@ -1,0 +1,43 @@
+{
+  "description": "Promptfoo 0.125 runs one eval: one prompt, a contains assertion and an llm-rubric assertion graded by a second model call, traced by Promptfoo's own OTLP export.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Normalization rules"
+  ],
+  "notes": "promptfoo eval runs from a temporary directory with its config directory in it. The provider and the llm-rubric grader both call the mock's /v1 (apiBaseUrl), with the same provider id, so the grader is a second chat call. The grader's turn returns the JSON that promptfoo's llm-rubric parser reads: {\"pass\": true, \"score\": 1, \"reason\": ...} (promptfoo's runJsonGradingPrompt and deriveVerdictFromGrader). Promptfoo exports its spans to the receiver through PROMPTFOO_OTEL_ENABLED and PROMPTFOO_OTEL_ENDPOINT (the full traces URL, passed to the exporter as given). Its network use is off through PROMPTFOO_DISABLE_TELEMETRY, PROMPTFOO_DISABLE_UPDATE and PROMPTFOO_DISABLE_SHARING, each checked in promptfoo 0.125.1's dist. --max-concurrency 1 keeps the span order stable. Expected spans: the test case (evaluator), the provider wrapper (span), the target chat call (llm), the grader's evaluator and its chat call (llm).",
+  "instrumentation": "promptfoo",
+  "libraries": [
+    "promptfoo"
+  ],
+  "volatile_attributes": [
+    "promptfoo.eval.id"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "text": "Paris"
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 20,
+        "output": 2
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "text": "{\"pass\": true, \"score\": 1, \"reason\": \"The answer names a city.\"}"
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 30,
+        "output": 8
+      }
+    }
+  ]
+}

@@ -1058,6 +1058,11 @@ impl Running {
             socket.abort();
             let _ = socket.await;
         }
+        // Aborting the socket cancels a running backup; its task removes the backup's
+        // directory before it frees the slot (`backup::run`).
+        if let Some(state) = &self.state {
+            drop(state.backup_slot.lock().await);
+        }
         if let Some(state) = &self.state
             && let Err(error) = admin_socket::remove_socket_file(&state.config.data_dir)
         {

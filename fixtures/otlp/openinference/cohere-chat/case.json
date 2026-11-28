@@ -1,0 +1,21 @@
+{
+  "description": "Cohere SDK v2 chat, one turn, traced by OpenInference through cetra's SDK.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "openinference-instrumentation-cohere",
+    "instrumentation_version": "0.1.22",
+    "language": "python",
+    "libraries": {
+      "cohere": "7.3.1",
+      "openinference-instrumentation-cohere": "0.1.22",
+      "opentelemetry-sdk": "1.45.2"
+    },
+    "captured_at": "2026-11-23T15:01:25Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Model, provider, usage",
+    "02 § Cost computation"
+  ],
+  "notes": "The Cohere client keeps its default base URL https://api.cohere.com, and the harness routes the request to the capture mock under that host (D-IN-3). The instrumentor writes llm.provider cohere, so the provider comes from that explicit value (D-IN-2). The model command-a-03-2025 is priced by its cohere row in the built-in snapshot's fixtures. Cost is computed, not reported. Token counts are input 14 and output 8."
+}

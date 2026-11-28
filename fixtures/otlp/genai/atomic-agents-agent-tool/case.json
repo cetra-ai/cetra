@@ -1,0 +1,21 @@
+{
+  "description": "Atomic Agents chat agent and an explicit tool call, traced by its own instrumentor.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "atomic-agents",
+    "instrumentation_version": "2.16.0",
+    "language": "python",
+    "libraries": {
+      "atomic-agents": "2.16.0",
+      "instructor": "1.17.0"
+    },
+    "captured_at": "2026-11-24T19:50:05Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage"
+  ],
+  "notes": "atomic-agents 2.16.0 without the [phoenix] extra in envs/atomic-agents, over instructor and the OpenAI client pointed at the mock. Only AtomicAgentsInstrumentor is enabled. The agent makes one model call through instructor's forced tool call (the output schema BasicChatOutputSchema as the function), so the mock serves exactly one turn; the app then calls ReadFileTool itself inside the same turn span (an app span of the capture.app tracer), and Atomic Agents names that span after the input schema class (execute_tool ReadFileInput) while atomic_agents.tool.class holds the tool class. ATOMIC_AGENTS_TRACE_CAPTURE_MESSAGES=true is set in the program, so the llm span carries gen_ai.input.messages and gen_ai.output.messages. Expected: turn (span), invoke_agent AtomicAgent (agent; it repeats the llm span's tokens as attributes, which no column counts, and has no input or output previews without the extra), chat gpt-4o-mini (llm, tokens 82/17, cost computed), execute_tool ReadFileInput (tool, a child of turn, with arguments and result). Deterministic across runs: no volatile, timing, name or ordering masks are needed (the scrubber drops service.instance.id)."
+}

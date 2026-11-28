@@ -1,8 +1,9 @@
 ---
+import costByRepository from "../../assets/screenshots/marketing-coding-cost.png";
 import Button from "../components/Button.astro";
+import Frame from "../components/Frame.astro";
 import Section from "../components/Section.astro";
 import SectionHeading from "../components/SectionHeading.astro";
-import Terminal from "../components/Terminal.astro";
 ---
 
 <Section tone="teal" divider labelledby="coding-title">
@@ -12,10 +13,10 @@ import Terminal from "../components/Terminal.astro";
         eyebrow="Coding agents"
         title="See what your coding agents cost."
         id="coding-title"
-        lede="Trace Claude Code, Codex, Gemini CLI and GitHub Copilot. Every turn, model call and tool call, with tokens and API-equivalent cost per person, and per repository and branch where the agent reports them."
+        lede="Trace Claude Code, Codex, Gemini CLI, GitHub Copilot, Qwen Code, Pi, OpenClaw, OpenCode, Goose and Oh My Pi. Every turn, model call and tool call, with tokens and API-equivalent cost per person, and per repository and branch where the agent reports them."
       />
       <ul class="features bullets">
-        <li>One cetra agents setup command for Claude Code, Codex and Gemini CLI</li>
+        <li>One cetra agents setup command for Claude Code, Codex, Gemini CLI, Qwen Code, OpenClaw, OpenCode and Oh My Pi</li>
         <li>A ready-made Coding agents dashboard</li>
         <li>Claude Code: leave prompts and tool output out with --no-content</li>
         <li>API-equivalent cost, to compare people, repositories and sessions</li>
@@ -24,16 +25,14 @@ import Terminal from "../components/Terminal.astro";
         <Button href="/docs/integrations/claude-code/" variant="ghost">Set up Claude Code →</Button>
       </div>
     </div>
-    <Terminal
-      title="terminal"
-      lines={[
-        { kind: "user", text: "export CETRA_INGEST_KEY=sk-cetra-…" },
-        { kind: "user", text: "cetra agents setup claude-code --url https://cetra.example.com" },
-        { kind: "user", text: "claude \"fix the failing test in billing\"" },
-        { kind: "out", text: "# in cetra: one trace per prompt, with its model calls and tools" },
-        { kind: "out", text: "# tagged you@example.com · acme/billing · fix-tests" },
-      ]}
-    />
+    <div class="visual">
+      <Frame
+        src={costByRepository}
+        alt="A cetra dashboard card, Cost by repository: the coding agents' cost over the last 7 days, stacked by repository, rising from about $5 to $15 per six hours, with github.com/sebastiencs/chromium taking a growing share. Under it, Cost per repository lists each repository's cost for the week: chromium $79.91, linux $57.93, kubernetes $39.48, postgres $35.67, react $17.48."
+        label="Dashboards · Coding agents"
+        fade={false}
+      />
+    </div>
   </div>
 </Section>
 
@@ -55,6 +54,9 @@ import Terminal from "../components/Terminal.astro";
   }
   .docs-link {
     margin-left: -0.4rem;
+  }
+  .visual {
+    min-width: 0;
   }
   @media (min-width: 960px) {
     .coding {

@@ -27,8 +27,12 @@ pub(crate) struct SoakConfig {
     pub(crate) rate: u64,
     /// `CETRA_SOAK_PROJECTS`, default 4, 1..=8.
     pub(crate) projects: usize,
-    /// `CETRA_SOAK_QPS`, default 1.0.
+    /// `CETRA_SOAK_QPS`, default 1.0; 0 turns the queries off.
     pub(crate) qps: f64,
+    /// `CETRA_SOAK_QUERY_TASKS`, default 1, 1..=16: concurrent query tasks, which share
+    /// `qps` evenly. One task runs its queries one after another, so its rate is capped
+    /// by their latency.
+    pub(crate) query_tasks: usize,
     /// `CETRA_SOAK_QUERY_MIX`, default "list=30,filter=15,detail=25,sessions=10,metrics=10,scores=10".
     pub(crate) mix: Vec<(QueryKind, u32)>,
     /// `CETRA_SOAK_RETENTION_DAYS`, default 0 (keep today only).
@@ -131,6 +135,14 @@ impl SoakConfig {
         if !(1..=8).contains(&projects) {
             return Err("CETRA_SOAK_PROJECTS must be between 1 and 8".to_owned());
         }
+        let qps = number("CETRA_SOAK_QPS")?.unwrap_or(1.0);
+        if !(qps >= 0.0 && qps.is_finite()) {
+            return Err("CETRA_SOAK_QPS must be 0 or more".to_owned());
+        }
+        let query_tasks = number("CETRA_SOAK_QUERY_TASKS")?.map_or(1, |n| n as usize);
+        if !(1..=16).contains(&query_tasks) {
+            return Err("CETRA_SOAK_QUERY_TASKS must be between 1 and 16".to_owned());
+        }
         let mix = parse_mix(
             lookup("CETRA_SOAK_QUERY_MIX")
                 .as_deref()
@@ -143,7 +155,8 @@ impl SoakConfig {
             hours,
             rate: number("CETRA_SOAK_RATE")?.map_or(2_000, |n| n as u64),
             projects,
-            qps: number("CETRA_SOAK_QPS")?.unwrap_or(1.0),
+            qps,
+            query_tasks,
             mix,
             retention_days: number("CETRA_SOAK_RETENTION_DAYS")?.map_or(0, |n| n as u32),
             sample_secs: number("CETRA_SOAK_SAMPLE_SECS")?.map_or(60, |n| n as u64),

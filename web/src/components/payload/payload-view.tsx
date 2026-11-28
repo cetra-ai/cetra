@@ -1,13 +1,13 @@
 import { useState } from "react";
 import type { Schema } from "@/api/types";
 import { CopyButton } from "@/components/copy-button";
-import { toolLinks } from "@/components/payload/chat-view";
 import { FormatSwitch, usePayloadFormat } from "@/components/payload/format-switch";
 import { JsonView } from "@/components/payload/json-view";
 import { Markdown } from "@/components/payload/markdown";
 import { MessageView } from "@/components/payload/message-view";
 import { ShowMore } from "@/components/payload/show-more";
 import { Badge } from "@/components/ui/badge";
+import { foldedMessage, toolLinks } from "@/lib/tool-calls";
 
 /** Pretty rendering stops here until the user asks for it. Serialized characters, not bytes. */
 const RENDER_CAP = 1_000_000;
@@ -124,9 +124,10 @@ function PayloadBody({
 function MessageList({ messages }: { messages: readonly Schema<"Message">[] }) {
   const links = toolLinks(messages);
   const seen = new Map<string, number>();
+  const shown = messages.filter((message) => !foldedMessage(message, links));
   return (
     <div className="flex flex-col gap-2">
-      {messages.map((message) => {
+      {shown.map((message) => {
         const base = messageKey(message);
         const n = seen.get(base) ?? 0;
         seen.set(base, n + 1);

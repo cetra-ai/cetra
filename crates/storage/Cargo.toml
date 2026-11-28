@@ -1,6 +1,6 @@
 [package]
 name = "cetra-storage"
-description = "WAL, Parquet storage, catalog, compaction, and queries"
+description = "WAL, Statam storage, catalog, compaction, and queries"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,22 +11,22 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+cetra-column.workspace = true
 cetra-core.workspace = true
-arrow = { workspace = true, features = ["ipc_compression", "json"] }
+cetra-query.workspace = true
+cetra-statam.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 bytesize.workspace = true
 chrono.workspace = true
 crc32c.workspace = true
-datafusion.workspace = true
-datafusion-datasource.workspace = true
 futures.workspace = true
 hex.workspace = true
 humantime-serde.workspace = true
 lz4_flex = { workspace = true }
 # `fs` is already a default feature of the pin. `aws` is the S3 backend (D119).
 object_store = { workspace = true, features = ["fs", "aws"] }
-parquet.workspace = true
+parquet = { workspace = true, features = ["zstd"] }
 rustix = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
@@ -44,6 +44,8 @@ arbitrary.workspace = true
 
 [dev-dependencies]
 arbitrary.workspace = true
+# The binary's allocator (D56) in the integration tests, so the soak measures its memory.
+mimalloc.workspace = true
 proptest.workspace = true
 flate2.workspace = true
 tracing-subscriber.workspace = true

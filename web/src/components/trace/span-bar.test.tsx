@@ -16,16 +16,22 @@ const SPAN = {
 
 const TRACE_START = instantNs("2026-01-01T11:00:00.000Z");
 
-function bar(leftPct: number, widthPct: number, timelineWidth = 400) {
+function bar(
+  leftPct: number,
+  widthPct: number,
+  timelineWidth = 400,
+  extra: Partial<Schema<"TreeSpan">["span"]> = {},
+) {
   render(
     <TooltipProvider>
       <div style={{ position: "relative" }}>
         <SpanBar
-          span={SPAN}
+          span={{ ...SPAN, ...extra }}
           bar={{ leftPct, widthPct, clipStart: false, clipEnd: false }}
           colorClass="bg-primary"
           timelineWidth={timelineWidth}
           traceStartNs={TRACE_START}
+          selfNs={200_000_000}
           onDoubleClick={() => {}}
         />
       </div>
@@ -35,20 +41,27 @@ function bar(leftPct: number, widthPct: number, timelineWidth = 400) {
 
 const placement = () => document.querySelector("[data-placement]")?.getAttribute("data-placement");
 
-it("writes the duration to the right of the bar when there is room", () => {
-  bar(10, 20);
-  expect(placement()).toBe("right");
-  expect(document.querySelector("[data-placement]")).toHaveTextContent("500ms");
-});
+const label = () => document.querySelector("[data-placement]");
 
-it("writes it to the left when the bar ends near the right edge", () => {
-  bar(60, 38);
-  expect(placement()).toBe("left");
-});
-
-it("writes it inside the bar when the bar spans the whole width", () => {
+it("writes the duration inside the bar when it fits", () => {
   bar(0, 100);
   expect(placement()).toBe("inside");
+  expect(label()).toHaveTextContent("500ms");
+});
+
+it("adds the cost after the duration when the span has one", () => {
+  bar(0, 100, 400, { cost_total: 0.0079 });
+  expect(label()?.textContent).toBe("500ms  $0.0079");
+});
+
+it("writes it to the right of a short bar", () => {
+  bar(10, 2);
+  expect(placement()).toBe("right");
+});
+
+it("writes it to the left of a short bar near the end of the trace", () => {
+  bar(95, 4);
+  expect(placement()).toBe("left");
 });
 
 it("shows the start, end and total time in a tooltip", async () => {
@@ -59,4 +72,5 @@ it("shows the start, end and total time in a tooltip", async () => {
   expect(tip).toHaveTextContent(/Start \d\d:\d\d:\d\d\.500 \(\+1\.50s\)/);
   expect(tip).toHaveTextContent(/End \d\d:\d\d:\d\d\.000 \(\+2\.00s\)/);
   expect(tip).toHaveTextContent("Duration 500ms");
+  expect(tip).toHaveTextContent("Self time 200ms");
 });

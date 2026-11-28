@@ -1,0 +1,24 @@
+{
+  "description": "Haystack pipeline with a prompt builder and a generator, traced by OpenInference.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage"
+  ],
+  "notes": "Only HaystackInstrumentor is enabled. The openai instrumentor would add a second llm span for the call, and the call would count twice; the page says not to enable it. HAYSTACK_TELEMETRY_ENABLED is False, set in main.py before haystack is imported, so no telemetry leaves the process. The pipeline is ChatPromptBuilder into OpenAIChatGenerator, pointed at the mock. The tree is Pipeline.run [chain] over ChatPromptBuilder.run [chain] and OpenAIChatGenerator.run [llm]. The instrumentor traces pipelines only: the page says the Agent component is not traced as an agent, and its model calls appear as separate traces.",
+  "instrumentation": "openinference-instrumentation-haystack",
+  "libraries": [
+    "haystack-ai",
+    "openinference-instrumentation-haystack",
+    "opentelemetry-sdk"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": { "text": "Paris is the capital of France." },
+      "finish": "stop",
+      "usage": { "input": 25, "output": 9 }
+    }
+  ]
+}

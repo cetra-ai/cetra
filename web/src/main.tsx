@@ -37,11 +37,46 @@ async function main(): Promise<void> {
       import("./mocks/mock-mode"),
     ]);
     if (readMockMode() === "large") {
-      const [{ createDataset }, { largeHandlers }] = await Promise.all([
+      const [
+        { createDataset },
+        { SUPPORT_STORY_PROFILE },
+        { CODING_STORY_PROFILE },
+        { VOICE_STORY_PROFILE },
+        { EXTRACTION_STORY_PROFILE },
+        { largeHandlers },
+        { STORY_PROJECTS, projectHandlers },
+      ] = await Promise.all([
         import("./mocks/generated/dataset"),
+        import("./mocks/generated/story-support"),
+        import("./mocks/generated/story-coding"),
+        import("./mocks/generated/story-voice"),
+        import("./mocks/generated/story-extraction"),
         import("./mocks/generated/handlers"),
+        import("./mocks/projects"),
       ]);
-      worker.use(...largeHandlers(createDataset({ seed: 1, now: Date.now(), traces: 5000 })));
+      const profiles = {
+        support: SUPPORT_STORY_PROFILE,
+        coding: CODING_STORY_PROFILE,
+        voice: VOICE_STORY_PROFILE,
+        extraction: EXTRACTION_STORY_PROFILE,
+      };
+      const now = Date.now();
+      worker.use(...projectHandlers);
+      for (const project of STORY_PROJECTS) {
+        const dataset = createDataset({
+          seed: 1,
+          now,
+          // The coding project has more runs, so its Coding agents dashboard has some in every bucket of a week.
+          traces: { support: 5_000, coding: 8_000, voice: 2_000, extraction: 2_000 }[project.story],
+          profile: profiles[project.story],
+        });
+        worker.use(
+          ...largeHandlers(dataset, {
+            project: project.ref,
+            datasets: project.story === "support",
+          }),
+        );
+      }
     }
     await worker.start({
       quiet: import.meta.env.MODE === "demo",
@@ -75,14 +110,6 @@ async function main(): Promise<void> {
       <QueryClientProvider client={queryClient}>
         <ThemeProvider>
           <RouterProvider router={router} />
-          {import.meta.env.MODE === "demo" ? (
-            <div
-              role="status"
-              className="pointer-events-none fixed bottom-3 left-1/2 z-50 -translate-x-1/2 rounded-full border bg-muted px-3 py-1 text-caption text-muted-foreground shadow-sm"
-            >
-              Demo, sample data
-            </div>
-          ) : null}
         </ThemeProvider>
       </QueryClientProvider>
     </StrictMode>,

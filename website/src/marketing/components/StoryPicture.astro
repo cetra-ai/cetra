@@ -1,0 +1,181 @@
+---
+import type { ImageMetadata } from "astro";
+import { panelsOf, pictureById, STORIES } from "../data/stories.mjs";
+import Frame from "./Frame.astro";
+import Tabs from "./Tabs.astro";
+
+interface Props {
+  /** A picture of data/stories.mjs: "hero", "trace", "explore", "issues", "evaluate", "prompts" or "alert". */
+  picture: string;
+  /** Fade the bottom of the frame into the band's background (Frame's prop). */
+  fade?: boolean;
+  /** The first story's picture loads with the page (only the hero). The others are always lazy. */
+  eager?: boolean;
+  /** Where the chip row and the caption sit at 960 px and wider; phones are always centred. */
+  align?: "center" | "start" | "end";
+}
+const { picture, fade = true, eager = false, align = "center" } = Astro.props;
+
+// Only a bundler import gives Astro's image pipeline an ImageMetadata, so the shots are
+// imported here by name; data/stories.mjs holds the names (a missing PNG fails the build).
+const shots = import.meta.glob<ImageMetadata>("../../assets/screenshots/marketing-*.png", {
+  eager: true,
+  import: "default",
+});
+function shotOf(name: string): ImageMetadata {
+  const shot = shots[`../../assets/screenshots/${name}.png`];
+  if (!shot) throw new Error(`StoryPicture: no src/assets/screenshots/${name}.png`);
+  return shot;
+}
+
+const panels = panelsOf(picture);
+const section = pictureById(picture).section;
+// A shared picture is one shot for every story: no story picker, so the page's pickers skip it.
+const shared = pictureById(picture).shared !== undefined;
+const [only] = panels;
+// A panel with a start scrolls in a frame as tall as the tallest other panel's picture (CSS px: the shots are 2x),
+// so it never sets the chapter's height.
+const tallest = Math.max(
+  0,
+  ...panels
+    .filter((panel) => panel.start === undefined)
+    .map((panel) => shotOf(panel.shot).height / 2),
+);
+---
+
+{shared && only ? (
+  <div class:list={["story", `story--${align}`]}>
+    <Frame src={shotOf(only.shot)} alt={only.alt} label={only.label} fade={fade} eager={eager} />
+    <p class="caption">{only.caption}</p>
+  </div>
+) : (
+  <div class:list={["story", `story--${align}`]} data-story-picker>
+    <Tabs id={`story-${picture}`} label={`Story: ${section}`} labels={STORIES.map((story) => story.label)}>
+      {panels.map((panel, i) => (
+        <div data-tab-panel data-story={panel.story} hidden={i !== 0}>
+          <Frame
+            src={shotOf(panel.shot)}
+            alt={panel.alt}
+            label={panel.label}
+            fade={fade && panel.start === undefined}
+            eager={eager && i === 0}
+            height={panel.start === undefined ? undefined : Math.round(tallest)}
+            start={panel.start}
+          />
+          <p class="caption">{panel.caption}</p>
+        </div>
+      ))}
+    </Tabs>
+  </div>
+)}
+
+<style>
+  /* Every story's panel sits in the same grid cell, and the hidden ones keep their box (visibility, not display):
+     the cell is as tall as the tallest panel, so switching stories never moves the page, and each frame keeps its
+     picture's own size. */
+  .story :global([data-tabs]) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .story :global([data-tabs] > .tablist) {
+    grid-row: 1;
+  }
+  .story :global([data-tabs] > [data-tab-panel]) {
+    grid-row: 2;
+    grid-column: 1;
+  }
+  .story :global([data-tabs] > [data-tab-panel][hidden]) {
+    display: block;
+    visibility: hidden;
+  }
+  .story :global(.tablist) {
+    justify-content: safe center;
+    border-bottom: 0;
+    margin-bottom: var(--space-4);
+  }
+  .caption {
+    margin-top: var(--space-3);
+    text-align: center;
+    font-size: var(--text-sm);
+    color: var(--fg-muted);
+  }
+  @media (min-width: 960px) {
+    .story--start :global(.tablist) {
+      justify-content: flex-start;
+    }
+    .story--start .caption {
+      text-align: left;
+    }
+    .story--end :global(.tablist) {
+      justify-content: flex-end;
+    }
+    .story--end .caption {
+      text-align: right;
+    }
+  }
+</style>
+
+<script>
+  // Keeps every story picker on the page on the same story (D-W-25). Each picker is a Tabs
+  // (lib/tabs.ts handles its clicks, arrow keys, Home and End); this script copies a change to the
+  // others and to the URL, and reads `?story=` on load.
+  document.addEventListener("DOMContentLoaded", () => {
+    const pickers = Array.from(document.querySelectorAll<HTMLElement>("[data-story-picker]")).map(
+      (root) =>
+        Array.from(
+          root.querySelectorAll<HTMLElement>(":scope > [data-tabs] > [role=tablist] > [role=tab]"),
+        ),
+    );
+    // The story ids, in order, from the first picker's panels (each carries its data-story).
+    const ids = Array.from(
+      document.querySelector<HTMLElement>("[data-story-picker]")?.querySelectorAll<HTMLElement>(
+        ":scope > [data-tabs] > [data-tab-panel]",
+      ) ?? [],
+    ).map((panel) => panel.dataset.story ?? "");
+    if (pickers.length === 0 || pickers.some((tabs) => tabs.length !== ids.length)) {
+      console.error("Story pickers: the tabs and the stories differ");
+      return;
+    }
+
+    let current = ids[0];
+    // Selects `id` in every picker and writes it to the URL. Idempotent: the clicks it makes
+    // change aria-selected again, which calls this again and returns at the first line.
+    const show = (id: string) => {
+      const i = ids.indexOf(id);
+      if (i < 0 || id === current) return;
+      current = id;
+      for (const tabs of pickers) {
+        if (tabs[i].getAttribute("aria-selected") === "true") continue;
+        const tab = tabs[i];
+        tab.click();
+        // Scroll only this picker's chip row, horizontally, so the chosen chip is visible
+        // on a phone. scrollIntoView would also scroll the page.
+        const list = tab.parentElement as HTMLElement;
+        const t = tab.getBoundingClientRect();
+        const l = list.getBoundingClientRect();
+        if (t.left < l.left) list.scrollLeft -= l.left - t.left;
+        else if (t.right > l.right) list.scrollLeft += t.right - l.right;
+      }
+      const url = new URL(window.location.href);
+      url.searchParams.set("story", id);
+      history.replaceState(null, "", url);
+    };
+
+    // Clicks, arrow keys, Home and End all end in wireTabs' select(), which sets aria-selected.
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        const tab = record.target as HTMLElement;
+        if (tab.getAttribute("aria-selected") !== "true") continue;
+        const tabs = pickers.find((list) => list.includes(tab));
+        if (tabs) show(ids[tabs.indexOf(tab)]);
+      }
+    });
+    for (const tab of pickers.flat()) {
+      observer.observe(tab, { attributes: true, attributeFilter: ["aria-selected"] });
+    }
+
+    // On load: an unknown or missing value changes nothing, and the URL is not rewritten.
+    const wanted = new URLSearchParams(window.location.search).get("story");
+    if (wanted !== null) show(wanted);
+  });
+</script>

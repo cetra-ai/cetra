@@ -89,8 +89,8 @@ pub(crate) async fn read_copy(path: &Path) -> Result<(Vec<LiveObject>, [u64; 2])
         .read_only(true)
         .connect()
         .await?;
-    let files: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT path, size_bytes FROM data_files WHERE state = 'active' ORDER BY path",
+    let files: Vec<(String, i64, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT path, size_bytes, pack_path, pack_size_bytes FROM data_files WHERE state = 'active'",
     )
     .fetch_all(&mut connection)
     .await?;
@@ -109,13 +109,35 @@ pub(crate) async fn read_copy(path: &Path) -> Result<(Vec<LiveObject>, [u64; 2])
             .await?;
     connection.close().await?;
 
-    let mut objects = Vec::with_capacity(files.len() + media.len());
-    for (key, size) in files {
-        objects.push(LiveObject {
+    let mut file_objects = Vec::with_capacity(files.len());
+    for (key, size, pack_path, pack_size) in files {
+        file_objects.push(LiveObject {
             key,
             size_bytes: stored_u64(size)?,
         });
+        match (pack_path, pack_size) {
+            (Some(pack_key), Some(pack_size)) => {
+                if pack_key.is_empty() || pack_size <= 0 {
+                    return Err(SnapshotError::Db(sqlx::Error::Decode(
+                        "invalid pack metadata in the copy".into(),
+                    )));
+                }
+                file_objects.push(LiveObject {
+                    key: pack_key,
+                    size_bytes: stored_u64(pack_size)?,
+                });
+            }
+            (None, None) => {}
+            _ => {
+                return Err(SnapshotError::Db(sqlx::Error::Decode(
+                    "incomplete pack metadata in the copy".into(),
+                )));
+            }
+        }
     }
+    file_objects.sort_by(|left, right| left.key.cmp(&right.key));
+    let mut objects = Vec::with_capacity(file_objects.len() + media.len());
+    objects.extend(file_objects);
     for (project, sha, size) in media {
         let project: ProjectId = project.parse().map_err(|_| SnapshotError::BadProjectId)?;
         objects.push(LiveObject {
@@ -711,24 +733,9 @@ mod tests {
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
-        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
-            datafusion::execution::context::SessionConfig::new(),
-            Arc::clone(&query.runtime),
-        );
-        ctx.register_table("spans_t", query.spans).unwrap();
-        let counted = ctx
-            .sql("SELECT count(*) FROM spans_t")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-        counted[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap()
-            .value(0)
+        let ctx = crate::views::QueryContext::new(query, None).unwrap();
+        let counted = crate::test_support::rows(&ctx, "SELECT count(*) AS n FROM spans").await;
+        counted[0]["n"].as_i64().unwrap()
     }
 
     /// Rows of the scores table that `project` sees through a query.
@@ -737,24 +744,9 @@ mod tests {
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
-        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
-            datafusion::execution::context::SessionConfig::new(),
-            Arc::clone(&query.runtime),
-        );
-        ctx.register_table("scores_t", query.scores).unwrap();
-        let counted = ctx
-            .sql("SELECT count(*) FROM scores_t")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-        counted[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap()
-            .value(0)
+        let ctx = crate::views::QueryContext::new(query, None).unwrap();
+        let counted = crate::test_support::rows(&ctx, "SELECT count(*) AS n FROM scores").await;
+        counted[0]["n"].as_i64().unwrap()
     }
 
     /// The core restore test: a backup taken from a running storage opens on
@@ -1094,5 +1086,139 @@ mod tests {
             .shutdown()
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_copy_emits_sorted_pack_live_objects_and_rejects_corrupt_pack_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let committer = crate::catalog::Committer::open(dir.path(), Default::default())
+            .await
+            .unwrap();
+        let p = project();
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
+        let spans_id = crate::catalog::FileId::new_v7();
+        let traces_id = crate::catalog::FileId::new_v7();
+        let pack_id = [0x42_u8; 16];
+        // Choose keys where pack_path sorts strictly BEFORE spans_path and traces_path sorts last.
+        let pack_path = format!("tables/spans/project={p}/day=2026-06-01/0-aaa-pack.stpk");
+        let spans_path = format!("tables/spans/project={p}/day=2026-06-01/1-zzz-spans.parquet");
+        let traces_path = format!("tables/traces/project={p}/day=2026-06-01/1-traces.parquet");
+        let spans = crate::catalog::FileMeta {
+            id: spans_id,
+            table: FileTable::Spans,
+            project: p,
+            day: d,
+            level: 1,
+            path: spans_path.clone(),
+            size: 120,
+            footer_size: 16,
+            rows: 2,
+            min_time: 1,
+            max_time: 2,
+            min_ingest_time: 1,
+            max_ingest_time: 2,
+            fully_merged: true,
+            deletions_applied_seq: 0,
+            pack: Some(crate::catalog::PackMeta {
+                id: pack_id,
+                path: pack_path.clone(),
+                size: 345,
+                toc_size: 112,
+            }),
+        };
+        let traces = crate::catalog::FileMeta {
+            id: traces_id,
+            table: FileTable::Traces,
+            project: p,
+            day: d,
+            level: 1,
+            path: traces_path.clone(),
+            size: 80,
+            footer_size: 16,
+            rows: 1,
+            min_time: 1,
+            max_time: 2,
+            min_ingest_time: 1,
+            max_ingest_time: 2,
+            fully_merged: true,
+            deletions_applied_seq: 0,
+            pack: None,
+        };
+        committer
+            .stage(&[spans_path.clone(), pack_path.clone(), traces_path.clone()])
+            .await
+            .unwrap();
+        committer
+            .commit(
+                &crate::catalog::CatalogEdit {
+                    add: vec![spans, traces],
+                    sources: vec![(traces_id, spans_id)],
+                    ..crate::catalog::CatalogEdit::default()
+                },
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let sha = "a".repeat(64);
+        let media_key = Objects::media_path(p, &sha);
+        committer
+            .insert_media(p, &sha, "image/png", 99, &media_key, 10, 10)
+            .await
+            .unwrap();
+
+        let copy = dir.path().join("snapshot.db");
+        committer
+            .snapshot_into(copy.to_str().unwrap())
+            .await
+            .unwrap();
+        let (objects, _) = super::read_copy(&copy).await.unwrap();
+        assert_eq!(
+            objects,
+            vec![
+                LiveObject {
+                    key: pack_path,
+                    size_bytes: 345,
+                },
+                LiveObject {
+                    key: spans_path,
+                    size_bytes: 120,
+                },
+                LiveObject {
+                    key: traces_path,
+                    size_bytes: 80,
+                },
+                LiveObject {
+                    key: media_key,
+                    size_bytes: 99,
+                },
+            ]
+        );
+
+        // Negative pack_size_bytes in the copy must fail read_copy.
+        let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&copy)
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query("UPDATE data_files SET pack_size_bytes = -1 WHERE id = ?")
+            .bind(spans_id.to_string())
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        assert!(matches!(
+            super::read_copy(&copy).await,
+            Err(SnapshotError::Db(_))
+        ));
+
+        // Partial pack columns (pack_path present, pack_size_bytes NULL) must fail read_copy.
+        sqlx::query("UPDATE data_files SET pack_size_bytes = NULL WHERE id = ?")
+            .bind(spans_id.to_string())
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        assert!(matches!(
+            super::read_copy(&copy).await,
+            Err(SnapshotError::Db(_))
+        ));
     }
 }

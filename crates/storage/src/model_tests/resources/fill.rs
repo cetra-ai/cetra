@@ -5,7 +5,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use arrow::array::RecordBatch;
+use cetra_column::Batch;
 use cetra_core::ids::ProjectId;
 use cetra_core::span::Span;
 
@@ -106,7 +106,7 @@ pub(super) fn filler_batch(
     text: Text,
     day_offset: u8,
     ingest: i64,
-) -> RecordBatch {
+) -> Batch {
     assert!(
         batch < 60_000,
         "a filler batch number must keep trace 1000 + batch in a u16"
@@ -145,7 +145,7 @@ pub(super) fn filler_rows(h: &Harness) -> u64 {
 /// or `max_batches` were sent, sleeping `pace` between appends. Returns every outcome in order.
 pub(super) fn append_filler(
     h: &Harness,
-    mut next: impl FnMut(u16) -> RecordBatch,
+    mut next: impl FnMut(u16) -> Batch,
     pace: Duration,
     mut stop: impl FnMut(&Result<AppendReceipt, AppendError>) -> bool,
     max_batches: u16,

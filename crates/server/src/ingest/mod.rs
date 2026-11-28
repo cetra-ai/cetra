@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
-use cetra_core::batch::spans_to_record_batch;
+use cetra_core::batch::spans_to_batch;
 use cetra_core::error::CoreError;
 use cetra_core::ids::{OrgId, ProjectId};
 use cetra_core::media::MediaBlob as CoreBlob;
@@ -436,7 +436,7 @@ impl Ingest {
         let billable = billable_spans(&spans);
         if !spans.is_empty() {
             let (batch, spans) = tokio::task::spawn_blocking(move || {
-                spans_to_record_batch(&spans).map(|batch| (batch, spans))
+                spans_to_batch(&spans).map(|batch| (batch, spans))
             })
             .await
             .map_err(IngestError::Join)?
@@ -762,16 +762,14 @@ mod tests {
 
     /// Spans in the project, read through the storage query provider.
     async fn stored_spans(app: &TestApp, project: ProjectId) -> usize {
-        let query = raw_query(&app.state.storage, project).await;
-        let ctx = datafusion::prelude::SessionContext::new();
-        ctx.register_table("raw_spans", query.spans)
-            .expect("spans register");
-        ctx.table("raw_spans")
+        raw_query(&app.state.storage, project)
             .await
-            .expect("spans table")
-            .count()
+            .collect_raw_spans()
             .await
-            .expect("count")
+            .expect("collect raw spans")
+            .iter()
+            .map(cetra_column::Batch::num_rows)
+            .sum()
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1201,20 +1199,24 @@ mod tests {
         assert_eq!(read.mime_type, blob.mime_type);
         assert_eq!(stored_spans(&app, seeded.project.id).await, span_total);
         // The span row carries the media reference.
-        let query = raw_query(&app.state.storage, seeded.project.id).await;
-        let ctx = datafusion::prelude::SessionContext::new();
-        ctx.register_table("raw_spans", query.spans)
-            .expect("register");
-        let batches = ctx
-            .sql("SELECT media_refs FROM raw_spans")
+        let ctx = cetra_storage::QueryContext::new(
+            raw_query(&app.state.storage, seeded.project.id).await,
+            None,
+        )
+        .expect("context");
+        let json = ctx
+            .sql_json(cetra_storage::SqlRequest {
+                query: "SELECT media_refs FROM spans",
+                params: &serde_json::Map::new(),
+                limit: 100,
+                timeout: Duration::from_secs(10),
+            })
             .await
-            .expect("sql")
-            .collect()
-            .await
-            .expect("collect");
+            .expect("sql");
+        let serialized = serde_json::to_string(&json.rows).expect("json");
         assert!(
-            format!("{batches:?}").contains(&blob.sha256),
-            "the stored span does not reference the blob"
+            serialized.contains(&blob.sha256),
+            "the stored span does not reference the blob: {serialized}"
         );
     }
 
@@ -1687,7 +1689,7 @@ mod tests {
             ),
             (
                 IngestError::Media(MediaError::Query(
-                    datafusion::error::DataFusionError::Internal("test".to_owned()),
+                    cetra_storage::error::engine_error_for_test("test"),
                 )),
                 503,
                 "busy",

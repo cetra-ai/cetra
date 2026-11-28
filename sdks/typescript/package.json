@@ -58,19 +58,19 @@
     "check": "biome check . && pnpm typecheck && pnpm test && pnpm build && pnpm check:package"
   },
   "devDependencies": {
-    "@anthropic-ai/sdk": "1.8.0",
+    "@anthropic-ai/sdk": "1.11.0",
     "@arethetypeswrong/cli": "0.18.5",
-    "@arizeai/openinference-instrumentation-anthropic": "1.0.3",
-    "@arizeai/openinference-instrumentation-langchain": "4.2.1",
-    "@arizeai/openinference-instrumentation-openai": "4.5.0",
-    "@langchain/core": "1.4.1",
+    "@arizeai/openinference-instrumentation-anthropic": "1.0.4",
+    "@arizeai/openinference-instrumentation-langchain": "4.2.2",
+    "@arizeai/openinference-instrumentation-openai": "4.6.0",
+    "@langchain/core": "1.4.2",
     "@opentelemetry/api": "1.9.1",
     "@types/node": "26.6.6",
-    "openai": "7.57.0",
+    "openai": "7.62.0",
     "publint": "0.3.25",
     "tsdown": "0.23.7",
     "typescript": "5.9.3",
-    "vitest": "5.1.0"
+    "vitest": "5.1.1"
   },
   "dependencies": {
     "@opentelemetry/context-async-hooks": "2.12.1",
@@ -81,7 +81,7 @@
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": "^1.0.0",
-    "@arizeai/openinference-instrumentation-anthropic": "^1.0.0",
+    "@arizeai/openinference-instrumentation-anthropic": "^1.0.1",
     "@arizeai/openinference-instrumentation-langchain": "^4.1.5",
     "@arizeai/openinference-instrumentation-openai": "^4.4.3",
     "@langchain/core": "^1.0.0",

@@ -1,0 +1,98 @@
+---
+title: Qwen (Alibaba Cloud Model Studio)
+description: "Trace Qwen models on Alibaba Cloud Model Studio (DashScope) with cetra through the OpenAI client."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Trace Qwen (Alibaba Cloud Model Studio) model calls with cetra through the OpenAI client.
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[openai]" openai
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```bash
+npm install @cetra-ai/sdk @arizeai/openinference-instrumentation-openai openai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls Qwen (Alibaba Cloud Model Studio) and needs DASHSCOPE_API_KEY */}
+```python
+import os
+
+import cetra
+from openai import OpenAI
+
+cetra.init(instrument=["openai"])
+
+client = OpenAI(base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1", api_key=os.environ["DASHSCOPE_API_KEY"])
+response = client.chat.completions.create(
+    model="qwen-plus",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+)
+print(response.choices[0].message.content)
+
+cetra.flush()
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+{/* untested: the imports of the example below */}
+```ts
+import { init } from "@cetra-ai/sdk";
+import { openai } from "@cetra-ai/sdk/openai";
+import OpenAI from "openai";
+```
+
+{/* example:integration-openai */}
+```ts
+init({ apiKey: process.env.CETRA_API_KEY, instrument: [openai(OpenAI)] });
+```
+
+{/* untested: calls Qwen (Alibaba Cloud Model Studio) and needs DASHSCOPE_API_KEY */}
+```ts
+const client = new OpenAI({ baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", apiKey: process.env.DASHSCOPE_API_KEY });
+await client.chat.completions.create({
+  model: "qwen-plus",
+  messages: [{ role: "user", content: "What is the capital of France?" }],
+});
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- Each chat completion is an `llm` span with the provider `dashscope`.
+- Input and output token counts come from the response.
+- Cost comes from the built-in prices.
+- With `cetra.init(instrument=["openai"])`, the endpoint host is in `server.address`, and cetra names the provider from it.
+
+## Limits
+
+- Model Studio keys are bound to a region; use that region's base URL.
+- No spans of Qwen (Alibaba Cloud Model Studio) are captured in the repository. cetra maps the hosts `dashscope-intl.aliyuncs.com`, `*.maas.aliyuncs.com` to the provider `dashscope`.
+- With plain OpenInference or the official OpenAI instrumentation in Python, the provider shows as `openai`: they do not record the endpoint. Use `cetra.init(instrument=["openai"])` or OpenLLMetry.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.
