@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 78788d685e7ddf4eb9c4c867d1aef9517ea13ce7d1734263178eb5d06da5ae4f # shrinks to b = And([Cmp(0, Eq, PrimitiveArray<Int64> [   15, ]), Cmp(0, Eq, PrimitiveArray<Int64> [   0, ])]), values = [(None, None, None, None, None), (Some(0), None, None, None, None), (Some(0), None, None, None, None), (Some(0), None, None, None, None), (Some(16), None, None, None, None), (Some(0), None, None, None, None), (Some(0), None, None, None, None), (Some(15), None, None, None, None), (Some(0), None, None, None, None), (Some(0), None, None, None, None), (Some(0), None, None, None, None), (Some(0), None, None, None, None), (Some(0), None, None, None, None), (Some(0), None, None, None, None), (Some(16), None, None, None, None), (Some(0), None, None, None, None)]
+cc d79b087041de4441b71b9340847dfa99bb5945d7b07f8db9a0c8c2b38ea4edd1 # shrinks to b = And([IsNull(0), Mask(0)]), values = [(Some(0), None, None, None, None), (Some(0), None, None, None, None), (Some(0), None, None, None, None), (Some(0), None, None, None, None), (Some(0), None, None, None, None), (Some(0), None, None, None, None), (None, None, None, Some(false), None), (Some(0), None, None, None, None)]

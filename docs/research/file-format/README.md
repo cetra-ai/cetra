@@ -1,6 +1,6 @@
 # A faster columnar format: Parquet vs Vortex, and a design that beats both
 
-Date: 2026-11-15. Status: research. No decision is taken here, and nothing in the product depends on it.
+Date: 2026-11-15; Strata v1 and v2 results 2026-11-17. Status: research. No decision is taken here, and nothing in the product depends on it.
 
 **Question.** Is there a file format faster than Parquet for LLM-observability data, and if not, what would one look like?
 
@@ -20,7 +20,7 @@ LLM-trace data is the example dataset because it stresses all five.
 | [bench/](bench/) | The benchmark crate (data generator, both formats through DataFusion 55, payload-layer prototype) |
 | [other-formats-a.md](other-formats-a.md) | Ideas from media containers, compression containers, dedup and VCS tools, and HTTP-range-native formats |
 | [other-formats-b.md](other-formats-b.md) | Ideas from LSM and embedded databases, columnar engines, search and log engines, and time-series formats |
-| [prototype-plan.md](prototype-plan.md) | Plan for the Strata v0 prototype: design decisions, phases, benchmark protocol, go/no-go criteria |
+| [prototype-plan.md](prototype-plan.md) | Plan for the Strata prototype (v0, with the v2 payload layer in § S4 in v2): design decisions, phases, benchmark protocol, go/no-go criteria |
 | this file | Method, measurements, conclusions, and the proposed design |
 
 ## TL;DR
@@ -44,6 +44,19 @@ LLM-trace data is the example dataset because it stresses all five.
    - The format adds a zero-parse footer, a sort-key index, one contiguous bloom section and shredded maps.
    - The design is below; the measured and projected gains are in § Expected gains.
    - Nothing in this research says to move off Parquet now. Today only the payload layer and the two existing formats are measured. That a full format built this way would beat both on every workload class is a projection, to be confirmed by an end-to-end prototype (§ Next steps).
+6. **The end-to-end prototype, Strata v0, fails its go/no-go: Stop** (§ Strata v0 results). Only 2 of the 11 criteria pass: the no-engine lookup, and the map-key filter.
+   - **Bytes:** cold lookups read 0.65–0.73× of the best Parquet's bytes, and substring search 0.66×. Real-data payloads are 0.88× of Parquet's size, against the 0.6× targeted. The prototype's better size counted neither the trigram filters nor the `output` column, which has nothing to deduplicate.
+   - **Speed:** narrow scans are 1.2–2.3× slower than Parquet and up to 5× slower than Vortex. Writes run at 0.20× of Parquet's speed, and merges are 2.6× slower. Substring search is 6.5× faster than Parquet.
+7. **Strata v1 passes the same go/no-go: Go** (§ Strata v1 results). G1a, G1b, G4 and G6 pass, and only G8 (write speed) and G9 (merge) fail. G7 is not judged, because the search filters are now off by default.
+   - **Lookups:** a warm full-trace lookup reads 281–442 KiB, from 2.2× to 5.9× less than the best Parquet. A cold one reads 0.24–0.30× of its bytes, in 4 waves.
+   - **Narrow queries:** all four beat the best Parquet by the 0.6× the plan asked for and stay within 1.3× of Vortex compact; `user_filter` beats both.
+   - **Size:** real-data payloads are 0.57× of Parquet's size, from one chunk store shared by `input` and `output` and zstd level 9.
+   - **Costs:** substring search lost its 6.5× win and now runs at Parquet's speed. Writes run at about 0.16× of Parquet's speed, and merges are 4.8× slower.
+8. **Strata v2 passes every criterion: Go** (§ Strata v2 results). All 11 of G1a–G9 pass, G7 included, with search back on.
+   - **Lookups:** a warm full-trace lookup reads 260–392 KiB, from 2.4× to 6.7× less than the best Parquet, and takes 4.8 ms against 12.2 ms on `payload`. A cold one reads 0.25× of the best Parquet's bytes, in 4 waves.
+   - **Search:** a 5-gram index per frame makes `%needle%` on real agent data 25× faster than Parquet and 10× faster than Vortex compact, reading 0.16× of Parquet's bytes.
+   - **Size:** real-data payloads are 0.56× of Parquet's size; `payload` files are 0.78× of pq_default's and 0.82× of vx_compact's.
+   - **Costs:** writes run at 0.87× of Parquet's speed and merges at 0.27× of its time. What remains slower: a full payload scan takes 1.14× Parquet's time and 2.4× its peak memory (2.2× and 5.5× before the last reader changes), `light` files are 17% bigger than Parquet's, and Vortex compact is still faster on the aggregate rollup.
 
 ## Method
 
@@ -235,6 +248,354 @@ What the real data shows:
 - **Search gets faster even without a filter.** Only unique chunks are scanned, so the search itself runs 4× faster. The trigram filter then skips 97–100% of frames.
 - **The filter has to be sized against compressed data.** At 2 KiB per 64 KiB raw frame it adds 5 MiB to a 17 MiB column. A writer should size filters from each frame's compressed size or unique-trigram count, not its raw size.
 - **Timings are noisy (±2× between passes on a shared machine).** Sizes, bytes and frame counts are deterministic. Search times are from the first pass; the absent-needle pass ran separately.
+
+## Strata v0 results (M7.4)
+
+These figures come from the M7 bench ([bench/](bench/), [prototype-plan.md](prototype-plan.md) § Go / no-go criteria), run on `ubuntu-vm` (12 vCPUs). Each dataset is written as 4 files per variant.
+
+- **Sizes, bytes, requests and waves** come from a run on 2026-11-15, and are the same in every later run. Bytes and requests are counted by a wrapper around the object store.
+- **Timings** come from 2026-11-16, with the VM otherwise idle:
+  - local disk: 30 runs per query (`swe` needles: 5 runs), then `profile` and `merge`; the load average stayed between 0.1 and 2.4;
+  - S3: Versity Gateway v1.11.0 behind toxiproxy 2.13.0, which adds 20 ± 5 ms per response; 5 runs per query, 1 run per needle.
+- **Deviation:** S3 uses 5 runs instead of the planned 30. Parquet's no-engine lookups make up to 2,900 requests per trace, so 30 runs would have taken hours per variant. The load rose to about 5 near the end of the S3 `light` run, so treat those figures as indicative.
+
+**Datasets.**
+- `payload`: 318,139 synthetic spans (60,000 traces); 3,211 MiB of payload strings.
+- `light`: 1,590,902 synthetic spans (300,000 traces), with no payloads.
+- `swe`: 94,396 spans from two shards of the public SWE-agent trajectories; 2,155 MiB of payload strings. The bench uses 20 needles of 8–32 bytes, with 15–937 hits each.
+
+### File size (MiB, 4 files)
+
+| Dataset | `st` | pq_default | pq_tuned | pq_cetra | vx_default | vx_compact |
+|---|---|---|---|---|---|---|
+| payload | 419 | 332 | 622 | 438 | 487 | 316 |
+| light | 166 | 151 | 191 | 161 | 210 | 136 |
+| swe | 35 | 36 | 65 | 36 | 560 | 31 |
+
+`swe` payload columns, in KiB:
+- `input`: Strata 15,180, against 21,289 for pq_default, 45,791 for pq_tuned and 21,288 for pq_cetra.
+- `output`: Strata 12,030, against 9,729, 12,394 and 9,791.
+
+Every Strata frame has a trigram filter.
+
+### Trace lookup (mean per trace ID over 20 IDs)
+
+**Warm.** A warm-up pass loads the file metadata first, so these figures count data reads only.
+
+| Dataset | `st` | Best Parquet | Others |
+|---|---|---|---|
+| payload, all columns | **1,210 KiB**, 39 requests, 2.0 waves | pq_cetra: 2,610 KiB, 74 requests | pq_default: 6,350 KiB; vx_compact: 70,381 KiB |
+| payload, light columns | **141 KiB**, 9.5 requests, 1.0 wave | pq_cetra: 563 KiB, 16 requests | |
+| swe, all columns | 677 KiB, 15 requests, 2.0 waves | pq_tuned: **615 KiB**, 102 requests | pq_default: 1,328 KiB |
+| swe, light columns | **179 KiB**, 4.2 requests, 1.0 wave | pq_cetra: 276 KiB, 14 requests | |
+
+**Cold.** A fresh context for each ID, so the open and the metadata are counted too. Requests exclude HEAD and LIST.
+
+| Dataset | `st` | pq_default | pq_tuned | pq_cetra | vx_compact |
+|---|---|---|---|---|---|
+| payload | **3,037 KiB**, 68.5 requests, 4 waves | 8,398 KiB, 116 | 9,094 KiB, 109 | 4,658 KiB, 78 | 73,355 KiB, 15 |
+| swe | **1,940 KiB**, 28.4 requests, 4 waves | 3,376 KiB, 110 | 2,663 KiB, 106 | 2,843 KiB, 75 | 29,542 KiB, 13 |
+
+The prototype's no-engine Parquet reader (`pq_fast`) reads 10–100 MiB for one full trace. It is a correctness baseline, not a contender.
+
+### Narrow queries and search (KiB fetched, warm)
+
+| Query | Dataset | `st` | pq_default | Best Parquet | vx_compact |
+|---|---|---|---|---|---|
+| count_errors_6h | light | 4,297 (4 requests) | 5,111 (46) | pq_cetra: 4,300 (52) | 3,954 (16) |
+| model_rollup_day | light | 16,252 (20) | 13,007 (340) | 13,007 | 17,729 (19) |
+| list_llm_1h | light | 16,553 (7) | 14,292 (214) | 14,271 | 18,859 (8) |
+| user_filter | light | 1,606 (11) | 2,089 (16) | pq_cetra: 1,231 (31) | 2,184 (13) |
+| metadata_filter (map key) | light | 1,170 (4) | 2,088 (8) | 2,088 | errors |
+| substring_input, 1 needle | payload | **8,999** (71) | 128,316 (4) | 128,316 | 115,726 (38) |
+| substring, mean over 20 needles, cold | swe | **14,143** | 21,289 | 21,289 | 19,085 |
+| scan_all_payload | payload | 321,591 (32) | 263,995 (8) | 263,995 | 263,680 (43) |
+
+On narrow queries, Strata reads as much as Parquet and Vortex, in a few large requests where Parquet makes hundreds of small ones. Over S3 that should favour Strata; the timed S3 run will tell. Its `trace_list` fast path (`st_fast list_llm_1h`) makes one wave per chunk: 80 waves on `payload` and 196 on `light`, against 2–4 through DataFusion. It also reads 4–9× more bytes. It needs a cross-chunk fetch before it is usable over S3.
+
+### Timed results (local disk, min of 30 runs)
+
+**Trace lookup on `payload`, warm, ms per trace:**
+
+| | `st` | `st_fast` | Best Parquet | `pq_fast` (best) | vx_compact |
+|---|---|---|---|---|---|
+| all columns | 7.15 | 6.02 | pq_tuned: 12.16 | 322.10 | 33.71 |
+| light columns | 1.09 | 0.69 | pq_cetra: 5.18 | 8.39 | 5.57 |
+
+**Profile on `payload`, one partition, min of 30, ms.** Total is the whole query, and "execute" is the time in execution, from the plan metrics.
+
+| | `st` total | `st` execute | Best Parquet total | Best Parquet execute |
+|---|---|---|---|---|
+| lookup, all columns | 7.10 | 6.05 | pq_tuned: 11.37 | 8.90 |
+| lookup, 9 light columns | 1.02 | 0.70 | pq_cetra: 4.48 | 2.94 |
+| trace list (top 50 in 1 h) | 30.07 | 28.83 | pq_cetra: 24.97 | 22.51 |
+
+**Narrow queries on `light`, ms:**
+
+| Query | `st` | Best Parquet | vx_compact | vx_default |
+|---|---|---|---|---|
+| count_errors_6h | 12.72 | pq_cetra: 10.63 | 6.16 | 4.29 |
+| model_rollup_day | 79.56 | pq_cetra: 38.38 | 19.59 | 14.34 |
+| list_llm_1h | 98.51 | pq_tuned: 43.37 | 18.74 | 11.51 |
+| user_filter | 11.45 | pq_cetra: 6.99 | 11.76 | 4.71 |
+| metadata_filter | 9.65 | pq_tuned: 29.25 | errors | errors |
+
+**Substring search on `swe`, 20 needles, warm, one partition:** `st` takes 79 ms per needle, against 510 ms for pq_cetra and 206 ms for vx_compact.
+
+**Write and merge on `payload`:**
+- `gen` writes at 107 MiB/s of Arrow for `st`, against 534 MiB/s for pq_default and 526 MiB/s for vx_compact.
+- Merging the 4 files takes 27.3 s for Strata and 10.4 s for Parquet: 2.64× slower.
+
+### S3 with 20 ms of added latency (min of 5 runs, ms)
+
+| Query | Dataset | `st` | pq_default | Best other |
+|---|---|---|---|---|
+| lookup, warm, all columns | payload | 115.7 | 89.9 | |
+| lookup, warm, light columns | payload | 43.9 | 73.4 | |
+| lookup, cold, mean | payload | 337.6 | 154.5 | vx_default: 256.7 |
+| lookup, warm, all columns | swe | 73.6 | 76.7 | |
+| lookup, cold, mean | swe | 265.1 | 141.6 | |
+| substring, 20 needles | swe | 315 per needle | 651 | vx_compact: 651 |
+| count_errors_6h | light | 44.8 | 69.0 | vx_compact: 165.4 |
+| list_llm_1h | light | 172.0 | 210.3 | vx_compact: 168.9 |
+| `st_fast` list_llm_1h | light | 9,527 | | |
+
+**Wave counts do not turn into lower latency.** A cold Strata lookup needs 4 waves, which should cost about 100 ms at 25 ms per round trip. It takes 265–338 ms, about twice as long as pq_default, which makes 110 requests. Two plausible causes, neither confirmed:
+- each of the 4 files is opened in turn, with a HEAD and a tail read for each;
+- the requests in a wave are serialized somewhere between the reader and the HTTP client.
+
+This needs a trace of the requests before any S3 claim is made for the format. The `trace_list` fast path is unusable on S3, at 9.5 s, because it makes one wave per chunk.
+
+### Go / no-go
+
+| # | Criterion | Measured | Verdict |
+|---|---|---|---|
+| G1a | warm lookup ≤ 0.5 MB, ≤ 2 waves, best Parquet ≥ 2× the bytes | payload: 1.24 MB, 2 waves, Parquet 2.2×; swe: 0.69 MB, 2 waves, Parquet **0.91×** | **fail** (bytes on both; ratio on swe) |
+| G1b | cold lookup ≤ 0.5 × best Parquet bytes, ≤ 4 waves | payload 0.65×, swe 0.73×; 4 waves | **fail** |
+| G2 | `st_fast` ≤ 0.5 × `pq_fast`, light and all columns | light 0.08×, all 0.02× | pass |
+| G3 | `st` total ≤ 0.75× and execute ≤ 0.5× of best Parquet, light and all columns | light: total 0.23×, execute 0.24×; all: total 0.62×, execute **0.68×** | **fail** (execute, all columns) |
+| G4 | each narrow query ≤ 1.3 × vx_compact and ≤ 0.6 × best Parquet | 1.0–5.3× vx_compact; 1.2–2.3× best Parquet | **fail** on all four queries |
+| G5 | map-key filter ≤ 0.5 × best Parquet | 0.33× | pass |
+| G6 | swe payload bytes ≤ 0.6 × best Parquet | 27,213 KiB against 31,017 KiB: **0.88×** | **fail** |
+| G7 | substring: cold bytes and warm time both ≤ 0.2 × best Parquet | time 0.155× (pass), cold bytes **0.66×** (100% of frames filtered) | **fail** |
+| G8 | write ≥ 0.8 × pq_default | 0.20× | **fail** |
+| G9 | merge ≤ 0.5 × Parquet | 2.64× | **fail** |
+
+**Outcome: Stop.** Only G2 and G5 pass. The plan's rule is "None of G1a, G6 and G7 pass → Stop", and all three fail on bytes, which no timing can change. Two points were checked before the verdict was written down:
+
+1. **The size gap with the payload prototype is explained, and it does not save G6.** A rerun of `swe` written as 2 files instead of 4 shows where Strata's payload bytes go. A single file is not possible here, because Arrow's 32-bit string offsets overflow at 2.16 GB. Sizes are in KiB:
+
+   | Column | Frames | Refs | Filters | Edges | Strata total | pq_default |
+   |---|---|---|---|---|---|---|
+   | `input` | 11,762 | 569 | 1,294 | 501 | 14,145 | 21,843 |
+   | `output` | 9,356 | 441 | 938 | 507 | 11,255 | 9,657 |
+   | both | 21,118 | 1,010 | 2,232 | 1,008 | **25,403 (0.81×)** | 31,500 |
+
+   - **`input` reproduces the prototype.** Its frames alone are 0.54× of Parquet, close to the prototype's 0.62×. Every agent step resends the history, so 2,237,498 chunk references resolve to only 69,730 unique chunks.
+   - **`output` has nothing to deduplicate.** Its 112,708 references point to 59,801 unique chunks, because each answer is new text. Its 64 KiB frames come out the same size as Parquet's 1 MiB pages, at 0.97×. Filters and edges then add 20% on top.
+   - **The prototype's "38–64% smaller" counted neither filters nor `output`.** Its own table gives 22.1 MiB against 27.8 MiB, or 0.79×, for 64 KiB frames *with* trigram filters. That matches this run's 0.81×. The 0.6× target in G6 was set from the figure without filters.
+   - **Dedup scope matters, but only a little.** Going from 4 files to 2 moves the ratio from 0.88× to 0.81×. Even with no filters, edges or refs at all, frames alone would be 0.67×, so G6 fails at any file count.
+2. **Where the lookup bytes go (not measured directly).**
+   - On `payload`, a warm full lookup reads 1,210 KiB, and a lookup of the light columns reads 141 KiB.
+   - So roughly 1 MiB goes to the payload columns and the remaining narrow columns, against the ~21 KiB per payload column that the 0.5 MB target assumed.
+   - Splitting that read by column, the way the size breakdown above does, is the next diagnostic if the lookup path is pursued.
+
+**What is worth keeping.** The verdict is about building a whole new format. Some parts of Strata did win, and could be reused on their own:
+- **Trigram-filtered search:** 0.15× of Parquet's time warm, and about 0.5× on S3.
+- **The no-engine lookup path:** 0.02–0.08× of the time of a Parquet reader without an engine.
+- **The shredded map key:** 0.33× of the best Parquet.
+
+The README's cheaper alternative is to store payloads as a sidecar next to Parquet. It would keep the search win without the narrow layer, which is where Strata is slowest (G4, G3), and without the write and merge costs (G8, G9).
+
+## Strata v1 results (M8)
+
+Strata v1 is v0 with the changes below, each made after a profile or a byte count on the M7 datasets. The go/no-go is the plan's, unchanged, measured with the same `fmtbench` on the same VM. Times are local disk, minimum of 30 runs, every format measured in the same run.
+
+### What changed from v0
+
+| Area | Change | Why |
+|---|---|---|
+| DataFusion scan | Each file is split into row-range partitions, about `target_partitions` in all; files that no chunk can match are dropped first (`StrataFile::may_match`). A scan that reads a payload column takes one partition per file and builds its batches ahead of DataFusion (`real-data.md` § Payload scans). | v0 gave one partition per file: 4 cores of 12. Split payload scans decoded shared frames once per partition. |
+| Scan internals | Chunks are found once per chunk, not once per row; contiguous runs are sliced instead of gathered; no error value is built on the success path. | Per-row binary searches and `BTreeSet` inserts took about 30% of the CPU. |
+| Dictionary strings | Decoded as `Dictionary(UInt32, Utf8)` over the file dictionary's shared values; comparisons run on codes (the dictionary is sorted); `Utf8View` is built only for DataFusion's output. | v0 copied every string twice. |
+| Decoding | Bit-unpacking reads one unaligned word per value; numeric chunks decode in one pass into the Arrow buffer. | Three intermediate copies per chunk. |
+| Dictionaries | Up to 1 MiB (was 64 KiB), so `user_id` gets one. | Equality on codes, and chunk postings. |
+| Chunk postings | The key filter segment of a dictionary column also lists the chunks holding each bucket of codes. | `user_filter` read every `user_id` chunk to find a user in a few. |
+| Payload store | One chunk store per file for all payload columns, rows interleaved across columns; previews get stores of their own. | An answer and its copy in the next call's input then share frames (E2 in `format-survey.md`). |
+| Payload search | Trigram filters and edge groups off by default (`Config::payload_filters`); `Contains` then reads every value. | They cost about 20% of the payload, which G6 cannot afford. |
+| Frames | zstd level 9 (was 3). | 10% smaller payloads; writes are slower. |
+| Lookup I/O | Point reads merge gaps under 4 KiB (was 64 KiB); refs pages hold 1,024 rows (was 4,096); a file is opened with a 64 KiB suffix read (was 256 KiB). | Gap merging doubled a lookup's bytes; the hot tails measure 12–110 KiB. |
+
+The merge no longer copies payload frames byte for byte: with one store per file, a column's frames are not its own. It re-chunks instead.
+
+### Go / no-go
+
+| # | Criterion | Measured | Verdict |
+|---|---|---|---|
+| G1a | warm lookup ≤ 0.5 MB, ≤ 2 waves, best Parquet ≥ 2× the bytes | payload: 442 KiB, ≤ 2 waves, best Parquet (pq_cetra) 2,610 KiB = 5.9×; swe: 281 KiB, best Parquet (pq_tuned) 615 KiB = 2.19× | **pass** |
+| G1b | cold lookup ≤ 0.5 × best Parquet bytes, ≤ 4 waves | payload: 1,388 KiB against 4,658 = 0.30×; swe: 651 against 2,663 = 0.24×; 4 waves | **pass** |
+| G2 | `st_fast` ≤ 0.5 × `pq_fast` | all columns 4.49 against 322.2 ms = 0.014×; light 0.48 against 7.74 ms = 0.06× | pass |
+| G3 | `st` total ≤ 0.75×, execute ≤ 0.5× of best Parquet | all columns: total 5.66 against 11.94 ms = 0.47×, execute 4.64 against 9.44 ms = 0.49×; light: total 0.90 against 4.96 = 0.18×, execute 0.57 against 3.25 = 0.18× | pass |
+| G4 | each narrow query ≤ 1.3 × vx_compact and ≤ 0.6 × best Parquet | see the table below | **pass** |
+| G5 | map-key filter ≤ 0.5 × best Parquet | 3.25 against 33.59 ms = 0.10× | pass |
+| G6 | swe payload bytes ≤ 0.6 × best Parquet | 17,586 KiB against 31,017 KiB = **0.57×** | **pass** |
+| G7 | substring search | not judged: no frame has a filter. Measured anyway: 472 ms per needle against 491 for pq_cetra and 206 for vx_compact; cold bytes 0.99× | not judged |
+| G8 | write ≥ 0.8 × pq_default | 83 MiB/s of Arrow on `payload` (`restrata`), against about 534 for pq_default in M7.4: about 0.16× | fail |
+| G9 | merge ≤ 0.5 × Parquet | 49.2 s against 10.3 s = 4.76× | fail |
+
+**Outcome: Go.** G1a, G1b, G4 and G6 pass, and two of the others fail (G8, G9), which the plan's first rule allows.
+
+**Narrow queries on `light` (G4), ms, minimum of 30:**
+
+| Query | `st` | vx_compact | Best Parquet | Limit (min of 1.3 × vx_compact, 0.6 × best Parquet) |
+|---|---|---|---|---|
+| count_errors_6h | 4.69 | 5.70 | 10.41 (pq_cetra) | 6.25 |
+| model_rollup_day | 21.96 | 18.92 | 37.90 (pq_cetra) | 22.74 |
+| list_llm_1h | 17.92 | 18.44 | 41.58 (pq_tuned) | 23.97 |
+| user_filter | 3.13 | 8.52 | 6.26 (pq_tuned) | 3.76 |
+
+v0 took 12.72, 79.56, 98.51 and 11.45 ms.
+
+### Caveats
+
+- **Thin margins.** `model_rollup_day` passes by 3%, and G3's all-column execute time by 2%. A noisier run could flip either.
+- **The "0.5 MB" of G1a** is read as 500,000 bytes (488 KiB); `payload` reads 442 KiB.
+- **G1a and G1b were measured on local disk.** They count bytes and waves, which do not depend on the store, but the S3 run of M7.4 was not repeated.
+- **G8 compares** a Strata write measured with `restrata` in this run against the Parquet write speed measured in M7.4 on the same machine.
+- **Search is gone.** The filters can still be turned on (`payload_filters`), which brings back v0's search speed and puts G6 out of reach. A search index that fits in G6's budget is still open (`format-survey.md` § 2).
+- **Writes and merges** are where v1 is weakest; the two-tier design of `format-survey.md` § 4 is the lead.
+
+## Strata v2 results (M9)
+
+Strata v2 rebuilds v1's payload layer to win back search without losing v1's size, and speeds up writes, merges and narrow decoding. The go/no-go is the plan's, unchanged, measured with the same `fmtbench` on the same VM. The design is in [prototype-plan.md](prototype-plan.md) § S4 in v2.
+
+**Runs.** Times are local disk, minimum of 30 runs, every format measured in the same run. Sizes, writes and the merge come from a run on 2026-11-17 (writes: fastest of 5, interleaved with Parquet's; `FMT_REPEAT=5`). Lookups, search and the profile come from a later run that day, after the last reader change. The full payload scan comes from a run on 2026-11-18, after the streaming scan change; lookups, search and narrow queries in that run matched the earlier one. Peak RSS is `/usr/bin/time` of a separate `scan_all_payload` run per variant; a narrow query peaks at 0.13 GB (`st`) and 0.17 GB (pq_cetra). `light` queries come from the first run: nothing it reads changed after it. Other sessions shared the VM; the load average was 1–5 during most runs.
+
+### What changed from v1
+
+| Area | Change | Why |
+|---|---|---|
+| Chunking | Pieces of 256 B to 4 KiB (was 512 B to 8 KiB), from units of 2 KiB or more. | Near copies of mid-size tool outputs now dedup: −13% of payload bytes on `swe`. |
+| Chunk reuse | A value equal to, or extending, the previous value of its column reuses its chunk ids. A value of 256 B or more seen anywhere earlier in the store (by `xxh3_128`) reuses them too. | On `payload`, the bytes cut per file drop from 477 to 325 MiB. |
+| Stores | A store holds runs: one per write, several after a merge. The shared store's frames use zstd level 3 with a 64 KiB dictionary trained per store. The preview stores use level 1 and no dictionary. | Level 9 (v1) made writes slow. The dictionary wins back the size. |
+| Search | A 5-gram index per run: one bit per frame and row, stored bit-sliced in 1 KiB pages. Every store has one. `LIKE '%x%'` is pushed down exactly, so DataFusion keeps no filter above the scan. | v1 turned the trigram filters off to fit G6. The index costs about 14% of the frames' size. |
+| Merge | Stores are copied run by run: frames, index pages and dictionaries byte for byte, chunk ids shifted. Only the refs pages are written again. | v1 re-chunked every payload on merge. |
+| Narrow chunks | 2,048 rows (was 4,096); kept raw unless zstd saves at least 30% (was 15%); bit-unpacking writes the Arrow type directly. | A lookup reads one chunk per column; scans skip decompressing chunks that zstd barely shrinks. |
+| Point reads | Columns that share a store fetch and decompress each frame once. A refs page is decoded only up to the last row wanted. | A frame was decoded once per column (up to 4 times); a page's rows past the last wanted one were decoded for nothing. |
+| Index build | One byte per row while a frame is open, then an 8×8 bit transpose per 8 frames. | Setting bits in place made each gram wait on the previous store. |
+| Full scans | Frames are decoded once per file, lazily and on several threads; values are built in 8,192-row pieces, one thread per core, as `Utf8View` arrays that point into the decoded frames when a value is contiguous there, and copy it into 256 KiB blocks otherwise; each thread keeps one zstd context per dictionary. Batches are built a few at a time as DataFusion consumes them, and a frame is dropped after the last batch that uses it. | A full payload scan took 674 ms, 2.2× Parquet; it now takes 370 ms, 1.14×. Peak RSS went from 4.6 to 1.8 GB. |
+
+### Go / no-go
+
+| # | Criterion | Measured | Verdict |
+|---|---|---|---|
+| G1a | warm lookup ≤ 0.5 MB, ≤ 2 waves, best Parquet ≥ 2× the bytes | payload: 392 KiB, 2 waves, best Parquet (pq_cetra) 2,610 KiB = 6.7×; swe: 260 KiB, 2 waves, best Parquet (pq_tuned) 615 KiB = 2.4× | **pass** |
+| G1b | cold lookup ≤ 0.5 × best Parquet bytes, ≤ 4 waves | payload: 1,160 KiB against 4,658 = 0.25×; swe: 656 against 2,663 = 0.25×; 4 waves | **pass** |
+| G2 | `st_fast` ≤ 0.5 × `pq_fast` | all columns 3.86 against 313.0 ms = 0.012×; light 0.35 against 8.26 ms = 0.04× | pass |
+| G3 | `st` total ≤ 0.75×, execute ≤ 0.5× of best Parquet | all columns: total 4.97 against 12.89 ms (pq_tuned) = 0.39×, execute 3.99 against 9.66 = 0.41×; light: total 0.73 against 5.48 (pq_cetra) = 0.13×, execute 0.39 against 3.25 = 0.12×. With one partition: all columns 0.43× and 0.44×, light 0.17× and 0.14× | pass |
+| G4 | each narrow query ≤ 1.3 × vx_compact and ≤ 0.6 × best Parquet | see the table below | **pass** |
+| G5 | map-key filter ≤ 0.5 × best Parquet | 3.59 against 33.95 ms (pq_cetra) = 0.11× | pass |
+| G6 | swe payload bytes ≤ 0.6 × best Parquet | 17,415 KiB against 31,019 KiB = **0.56×** | **pass** |
+| G7 | substring search ≤ 0.2 × best Parquet, warm time and cold bytes | warm 20.5 against 506.5 ms per needle (pq_default) = 0.04×; cold 3,466 against 21,289 KiB = 0.16×; every frame has an index | pass |
+| G8 | write ≥ 0.8 × pq_default | `payload`: 477 against 548 MiB/s of Arrow = 0.87× | pass |
+| G9 | merge ≤ 0.5 × Parquet | 2.75 s against 10.16 s = 0.27× | pass |
+
+**Outcome: Go, with every criterion passing.**
+
+**Narrow queries on `light` (G4 and G5), ms, minimum of 30:**
+
+| Query | `st` | vx_compact | vx_default | Best Parquet | Limit (min of 1.3 × vx_compact, 0.6 × best Parquet) |
+|---|---|---|---|---|---|
+| count_errors_6h | 5.16 | 5.76 | 4.15 | 10.59 (pq_cetra) | 6.35 |
+| model_rollup_day | 21.38 | 18.92 | 14.28 | 37.49 (pq_cetra) | 22.49 |
+| list_llm_1h | 17.30 | 18.64 | 10.97 | 42.00 (pq_tuned) | 24.23 |
+| user_filter | 2.73 | 8.00 | 4.59 | 6.55 (pq_tuned) | 3.93 |
+| metadata_filter | 3.59 | errors | errors | 33.95 (pq_cetra) | 16.98 (G5: 0.5 × best Parquet) |
+
+### Against Parquet and Vortex
+
+| | `st` | pq_default | Best Parquet | vx_compact | vx_default |
+|---|---|---|---|---|---|
+| `payload` size, MiB (4 files) | **260** | 332 | 332 (pq_default) | 316 | 487 |
+| `light` size, MiB | 177 | 151 | 151 | **136** | 210 |
+| `swe` size, MiB | **25** | 36 | 36 | 31 | 560 |
+| warm full-trace lookup, `payload`, ms | **4.83** | 23.80 | 12.22 (pq_tuned) | 32.06 | 16.92 |
+| warm full-trace lookup, `payload`, KiB | **392** | 6,350 | 2,610 (pq_cetra) | 72,937 | 71,638 |
+| cold full-trace lookup, `payload`, KiB | **1,160** | 8,398 | 4,658 (pq_cetra) | 72,161 | 72,462 |
+| substring, `swe`, ms per needle (warm, one partition) | **20.5** | 506.5 | 506.5 (pq_default) | 201.4 | 348.6 |
+| substring, `swe`, cold KiB per needle | **3,466** | 21,289 | 21,289 (pq_default) | 18,972 | 548,808 |
+| full payload scan, `payload`, ms | 370 | 333 | 325 (pq_cetra) | 256 | **248** |
+| full payload scan, `payload`, CPU s | 3.29 | **1.38** | 1.38 (pq_default) | 2.85 | 2.80 |
+| full payload scan, `payload`, peak RSS GB | 1.84 | | 0.77 (pq_cetra) | | |
+| write, `payload`, MiB/s of Arrow | 477 | **548** | | | |
+
+Sizes of Parquet and Vortex are from M7.4; `pq_default`'s write speed is from the v2 run.
+
+### Caveats
+
+- **Full payload scans are 1.14× slower than Parquet** (370 against 325 ms; 1.09× on `swe`) although they read 0.6× of its bytes, and use more CPU (3.3 s against 2.1 s for pq_cetra and 1.4 s for pq_default; Vortex uses 2.8 s): every frame is decompressed, and a value split across frames is copied. Peak RSS is 1.84 GB against 0.77 GB: a frame stays in memory until the last batch that uses it, and later rows reuse early frames, so a file holds many frames until near its end. A scan that projects no payload column is not affected.
+- **`light` files are 17% bigger than pq_default's** (177 against 151 MiB), and 30% bigger than vx_compact's. The narrow layer stores more chunks raw since v2 (30% rule) and in smaller chunks (2,048 rows).
+- **Writes of `light` run at 0.59× of Parquet's speed.** G8 is judged on `payload`, as planned; `swe` writes at 1.20×.
+- **`model_rollup_day` is slower than vx_compact** (21.4 against 18.9 ms), within the 1.3× allowed; its G4 margin against 0.6 × best Parquet is 5%.
+- **The VM was shared.** Other sessions ran on it; the load average reached 5 during some runs. Each figure is a minimum, and Parquet and Vortex ran in the same runs.
+- **G1a and G1b were measured on local disk.** They count bytes and waves, which do not depend on the store, but the S3 run of M7.4 was not repeated.
+
+## Time-series data: the columnar-format-benchmarks tests
+
+[timeseries.md](timeseries.md) runs the tests of [balicat/columnar-format-benchmarks](https://github.com/balicat/columnar-format-benchmarks) on Strata, Parquet and Vortex, using 75M rows of public EIA energy series.
+
+The first run found four gaps. Two are now fixed:
+- **String zones.** Strings stored without a dictionary now have chunk zones, in a plain 16-byte form or a shared-prefix form.
+- **Row count.** DataFusion now gets the row count of a scan.
+
+`count(*)` is now the fastest of all formats (0.3 ms). A one-series query on sorted data went from 24–110× Parquet's time to 0.8× (PET) and 2.5× (ELEC).
+
+Two gaps remain:
+- **Size.** Strata has no run-length or delta encoding of sorted columns, so its files stay 1–137% bigger than the smallest.
+- **Full reads.** The per-chunk decode cost keeps them 1.3–5× slower than Parquet.
+
+## More real data: Open-SWE, Toucan and WildChat
+
+[real-data.md](real-data.md) runs the bench on three more public datasets, converted to OTel GenAI messages with reasoning, tool calls and tool definitions. Strata, best Parquet and Vortex compact sizes, in MiB:
+
+| Dataset | What it is | Strata | Parquet | Vortex compact |
+|---|---|---|---|---|
+| openswe | Coding agents (Claude Code and OpenHands harnesses), 2.4 GB of payloads | **29** | 47 | 158 |
+| toucan | Tool-calling agents on 495 MCP servers | **190** | 246 | 233 |
+| wildchat | Real users chatting with ChatGPT | **564** | 592 | 584 |
+
+- **On agent data** Strata has the smallest files, lookups about 2× faster than Parquet's, and search 10–32× faster.
+- **On chat data**, with many short conversations, Strata lost at first. A full payload scan took 1.4× Parquet's time, and `list_llm_1h` 1.45×.
+  - Most of that was arrow's per-value UTF-8 check, which is slow on non-ASCII text.
+  - Checking with `simdutf8` brought the scan to 1.14× Parquet's time and `list_llm_1h` to 0.92×.
+  - Checking each byte once, with two `unsafe` constructors and a chunker that cuts between characters, brought the scan to Parquet's time (544 against 538 ms).
+  - Agent-data scans also got 6–22% faster, then 3–8% more.
+  - Files stay the same size as the others'.
+- **Narrow queries** on toucan and wildchat ran on one thread: each file is one partition, and a wave under 4 MiB was decoded serially. Scans now decode a wave of 1 MiB or more on the partition's share of the cores, and `list_llm_1h` dropped by 37% on toucan and 12% on wildchat. Vortex compact was still faster there (10.4 and 14.6 ms against 16.8 and 18.8 ms).
+- **Top rows in the scan:** DataFusion now pushes `ORDER BY … LIMIT k` into the Strata scan. Each partition keeps the rows that rank in the first k by the first sort key, and decodes the other columns only for them. `list_llm_1h` dropped by 35–65% on the six datasets (toucan 7.2 ms, wildchat 9.6 ms), and Strata now beats Vortex compact on all of them.
+- **Plain integer chunks:** an integer chunk is stored plain, compressed by zstd, when that saves at least 30% over bit-packing. On `light`, `ingest_time` dropped from 6.2 to 2.1 MB and the file from 177 to 173 MiB. The rest of the narrow-size gap is the float costs and the previews, where Parquet uses dictionaries.
+
+- **Smaller files:** preview stores and narrow text columns now use trained zstd dictionaries, and Float64 columns whose values repeat use a file dictionary. Files are 3–9% smaller (wildchat 591 → 564 MiB, now under Vortex compact; `light` 174 → 159). `Config::cold()` and `strata::rewrite` recompress a file at zstd level 19 for compaction: 13–19% smaller than before, written at 9–21 MiB/s, read 2–9% slower (lookups up to 21%).
+- **Braintrust's search benchmark** (FineWeb, 1.94M spans of 10 KB): Strata is 70–100× faster than Parquet and Vortex on rare and absent phrases, with files 21% larger. For a common phrase, a sort with a limit over a search now searches the files newest first and stops once the limit is met: the newest 100 matches of "help me" take 94 ms instead of 3.6 s (Parquet 3.7 s). Counting a common phrase still decompresses every frame that holds it (3.2 s, Parquet 6.5 s).
+
+- **Time ranges, S3 and writes:** a search with a time range now searches only the rows in the range: the newest matches of "help me" in the last 5 minutes take 54 ms instead of 90. `FMT_SIM_S3=1` estimates S3 times from each reader's own requests (30 ms first byte, 90 MB/s per connection); it found merged ranges too large (now 4 MiB) and too few requests in flight (now 256), and cut Strata's simulated S3 times by 10–60% on searches and full scans. Writes run on every core: FineWeb from 95 to about 300 MiB/s, with byte-identical files. On FineWeb the gram index is three quarters of Strata's 21% extra size.
+
+- **Grouping on codes:** a `GROUP BY` on a dictionary column with plain aggregates now runs in Strata, per dictionary code (`StrataAggregateRule`). `model_rollup_day` dropped by 6–25%; Strata now wins it on four of six datasets and trails Vortex compact by about 1 ms on the other two.
+
+- **ClickHouse with Langfuse's schema:** on our data, ClickHouse takes 1.6–5× Strata's space on agent and chat data (the same on FineWeb). Strata is 1.5–6× faster on trace views, filters and rollups, and on phrase and newest-first searches (FineWeb: 9–12× on the newest matches); ClickHouse's text index wins rare-word searches (3–5 ms against 17–74), its sorted `events_core` an hourly histogram (12 against 79 ms), and it leads full payload scans with Vortex.
+
+- **Cold lookups on S3:** the metadata segments now lie together before the hot tail, and the open reads them with it. A cold trace lookup on simulated S3 takes one wave less and half the requests: 135–151 ms against 156–173 before on five datasets, 145 against 208 on FineWeb. It now beats the best Parquet by 9–20%, except on wildchat (179 against 170), whose tail is just over the open's 1 MiB first read.
+
+- **Real S3:** on Cloudflare R2 (EU, read from Helsinki: 60 ms to the first byte, 100–118 MB/s per request, about 1 Gbit/s of link), a cold trace lookup takes 383–481 ms with Strata, 12–20% under the best Parquet on four datasets and level on swe and openswe; Vortex takes 2–3× as long. The simulator gave half these times: it charged nothing for the LIST and no slow requests. It now draws each latency from a lognormal (`FMT_SIM_LATENCY_SIGMA`, 0.35 on R2) and charges the LIST, and lands within ±15% of R2.
+
+- **Real S3 from Virginia:**
+  - From a server next to its R2 bucket (45–50 ms to the first byte), Strata leads every search (2–5× ahead of Parquet) and most scans, but Parquet led cold lookups on five of six datasets.
+  - Request timelines show why. Both formats take three waves, but Strata's send up to 45 small GETs each, and a wave waits for its slowest; Parquet reads through object_store's `get_ranges`, which merges ranges under 1 MiB apart.
+  - Three read-side settings, off by default, fix it on object storage: the catalog's exact tail length at open, a 256 KiB merge gap for lookups (`Config::point_gap`) capped at 1 MiB (`Config::point_max_range`), and searches kept at 4 KiB (`ScanKind::Sparse`), since wider gaps made them up to 2.8× slower.
+  - Together they make lookups 8–32% faster, leave searches and scans unchanged, and put Strata ahead of Parquet on cold lookups on four datasets and within 5% on the other two.
+  - Hedged GETs (a second copy of a slow request) gained nothing and were dropped.
+
+Details in [real-data.md](real-data.md).
 
 ## What each format gets right and wrong
 
