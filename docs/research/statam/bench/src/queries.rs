@@ -1769,6 +1769,7 @@ pub fn run_statam_query(
                 "span_kind",
                 ZonePred::Eq(ZoneValue::Bytes(b"llm".to_vec())),
             )],
+            top_k: Some(cetra_statam::TopKSpec::desc(6, 50)),
             ..ScanRequest::default()
         },
         (TableKindBench::Spans, "map_key_lookup") => ScanRequest {
@@ -1815,15 +1816,20 @@ pub fn run_statam_query(
     let mut agg: BTreeMap<(i64, String), (usize, f64, i64)> = BTreeMap::new();
     let mut topk: BinaryHeap<Reverse<(i64, usize)>> = BinaryHeap::new();
 
+    if qname == "top_k_list" {
+        let reader_refs: Vec<&StatamReader> = readers.iter().collect();
+        let batches = StatamReader::scan_top_k_files(&reader_refs, &req)?;
+        for b in &batches {
+            topk_statam_batch(b, &mut topk);
+        }
+        return Ok(topk.len());
+    }
+
     for r in readers {
         let batches = r.scan(&req)?;
         if qname == "time_bucket_agg" {
             for b in &batches {
                 agg_statam_batch(b, &mut agg);
-            }
-        } else if qname == "top_k_list" {
-            for b in &batches {
-                topk_statam_batch(b, &mut topk);
             }
         } else {
             total += batches.iter().map(Batch::num_rows).sum::<usize>();
@@ -1832,9 +1838,6 @@ pub fn run_statam_query(
 
     if qname == "time_bucket_agg" {
         return Ok(agg.values().map(|v| v.0).sum());
-    }
-    if qname == "top_k_list" {
-        return Ok(topk.len());
     }
     Ok(total)
 }

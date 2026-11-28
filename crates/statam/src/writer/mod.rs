@@ -31,7 +31,7 @@ use crate::format::{
 use crate::payload::chunker::{DedupBypassDetector, INLINE_PAYLOAD_THRESHOLD};
 use crate::payload::pack::ChunkPackBuilder;
 use crate::payload::{
-    PayloadRefRow, encode_payload_refs, encode_payload_refs_l0_direct,
+    EncodedPayloadRefs, PayloadRefRow, encode_payload_refs_adaptive, encode_payload_refs_l0_direct,
     encode_payload_refs_l0_from_bytes,
 };
 use crate::simd::bloom::Sbbf;
@@ -355,7 +355,7 @@ impl<PW: Write + Seek> PackBuilderTarget<'_, PW> {
     }
 }
 
-type PendingL0MiniBlock = (u16, u16, u8, Vec<u8>);
+type PendingL0MiniBlock = (u16, u16, u8, EncodedPayloadRefs);
 
 /// Streaming bounded-memory PAX writer producing `.statam` files.
 pub struct StatamWriter<'a, W: Write + Seek, PW: Write + Seek = std::io::Cursor<Vec<u8>>> {
@@ -941,7 +941,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
             .pending_l0_mbs
             .values()
             .flat_map(|v| v.iter())
-            .map(|(_, _, _, body)| body.len().saturating_add(BLOCK_FRAME_HEADER_LEN))
+            .map(|(_, _, _, body)| body.byte_len().saturating_add(BLOCK_FRAME_HEADER_LEN))
             .sum();
         let partial_bytes: usize = self
             .pending_l0_partial
@@ -1272,11 +1272,11 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                             .count();
                         let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
                         let raw_body = if null_count_usize == mb_size {
-                            Vec::new()
+                            EncodedPayloadRefs::empty()
                         } else {
                             let mut rb = Vec::new();
                             encode_payload_refs_l0_direct(partial, &mut rb)?;
-                            rb
+                            EncodedPayloadRefs::Raw(rb)
                         };
                         self.pending_l0_mbs.entry(cidx).or_default().push((
                             mb_size as u16,
@@ -1290,10 +1290,12 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
             }
             while take - pos >= mb_size {
                 let mb_u16 = mb_size as u16;
-                self.pending_l0_mbs
-                    .entry(cidx)
-                    .or_default()
-                    .push((mb_u16, mb_u16, 0, Vec::new()));
+                self.pending_l0_mbs.entry(cidx).or_default().push((
+                    mb_u16,
+                    mb_u16,
+                    0,
+                    EncodedPayloadRefs::empty(),
+                ));
                 pos += mb_size;
             }
             if pos < take {
@@ -1370,11 +1372,11 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                     .count();
                 let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
                 let raw_body = if null_count_usize == mb_size {
-                    Vec::new()
+                    EncodedPayloadRefs::empty()
                 } else {
                     let mut rb = Vec::new();
                     encode_payload_refs_l0_direct(&partial, &mut rb)?;
-                    rb
+                    EncodedPayloadRefs::Raw(rb)
                 };
                 self.pending_l0_mbs.entry(cidx).or_default().push((
                     mb_size as u16,
@@ -1415,7 +1417,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                 mb_size as u16,
                 null_count,
                 0,
-                raw_body,
+                EncodedPayloadRefs::Raw(raw_body),
             ));
             pos += mb_size;
         }
@@ -1460,10 +1462,13 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                             .count();
                         let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
                         let (extra_flags, raw_body) = if null_count_usize == mb_size {
-                            (0u8, Vec::new())
+                            (0u8, EncodedPayloadRefs::empty())
                         } else {
-                            let mut rb = Vec::new();
-                            encode_payload_refs(partial, &mut rb)?;
+                            let rb = encode_payload_refs_adaptive(
+                                partial,
+                                self.options.profile,
+                                self.options.zstd_level,
+                            )?;
                             let f = if rg_encode::payload_ref_rows_all_external_or_null(partial) {
                                 BLOCK_FLAG_NO_INLINE_PAYLOADS
                             } else {
@@ -1483,10 +1488,12 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
             }
             while take - pos >= mb_size {
                 let mb_u16 = mb_size as u16;
-                self.pending_l0_mbs
-                    .entry(cidx)
-                    .or_default()
-                    .push((mb_u16, mb_u16, 0, Vec::new()));
+                self.pending_l0_mbs.entry(cidx).or_default().push((
+                    mb_u16,
+                    mb_u16,
+                    0,
+                    EncodedPayloadRefs::empty(),
+                ));
                 pos += mb_size;
             }
             if pos < take {
@@ -1516,10 +1523,13 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                     .count();
                 let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
                 let (extra_flags, raw_body) = if null_count_usize == mb_size {
-                    (0u8, Vec::new())
+                    (0u8, EncodedPayloadRefs::empty())
                 } else {
-                    let mut rb = Vec::new();
-                    encode_payload_refs(&partial, &mut rb)?;
+                    let rb = encode_payload_refs_adaptive(
+                        &partial,
+                        self.options.profile,
+                        self.options.zstd_level,
+                    )?;
                     let f = if rg_encode::payload_ref_rows_all_external_or_null(&partial) {
                         BLOCK_FLAG_NO_INLINE_PAYLOADS
                     } else {
@@ -1548,10 +1558,13 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                 .count();
             let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
             let (extra_flags, raw_body) = if null_count_usize == mb_size {
-                (0u8, Vec::new())
+                (0u8, EncodedPayloadRefs::empty())
             } else {
-                let mut rb = Vec::new();
-                encode_payload_refs(&refs, &mut rb)?;
+                let rb = encode_payload_refs_adaptive(
+                    &refs,
+                    self.options.profile,
+                    self.options.zstd_level,
+                )?;
                 let f = if rg_encode::payload_ref_rows_all_external_or_null(&refs) {
                     BLOCK_FLAG_NO_INLINE_PAYLOADS
                 } else {

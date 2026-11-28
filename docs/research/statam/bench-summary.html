@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Statam Pass 27d CPU (big-server-vm · All 88 Queries) &amp; Live Cloudflare R2 / Garage S3 vs Parquet, Vortex &amp; Lance V2.2</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    .win-cell {
+      color: var(--success);
+      font-weight: 600;
+      background: color-mix(in srgb, var(--success) 14%, transparent);
+      border-radius: 4px;
+    }
+    .win-sub {
+      color: var(--success);
+      font-weight: 600;
+    }
+    .badge-1c {
+      font-size: 11px;
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: color-mix(in srgb, var(--primary) 14%, transparent);
+      color: var(--primary);
+      font-weight: 500;
+    }
+    .num {
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body class="bg-[var(--background)] text-[var(--foreground)] antialiased p-5 m-0">
+  <div class="max-w-7xl mx-auto space-y-5">
+    <!-- Header -->
+    <div class="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-[var(--border)]">
+      <div>
+        <h1 class="text-lg font-semibold tracking-tight">Statam (Pass 27d CPU · All 88 Queries · Live Cloudflare R2 &amp; Garage S3) vs. Parquet, Vortex &amp; Lance V2.2</h1>
+        <p id="host-subtitle" class="text-xs text-[var(--muted-foreground)] mt-1"></p>
+      </div>
+      <div id="win-pills" class="flex flex-wrap gap-2 text-xs"></div>
+    </div>
+
+    <!-- Controls bar -->
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="flex items-center gap-1 bg-[var(--card)] border border-[var(--border)] rounded-lg p-1 text-xs">
+          <button data-host="big" class="host-btn px-3 py-1.5 rounded-md font-medium transition">Intel i7-8700 (big-server-vm Pass 27d · All 88 Queries)</button>
+          <button data-host="x86" class="host-btn px-3 py-1.5 rounded-md font-medium transition">Intel i7-12800H (precision-5770-vm Pass 22 · 17 Suites)</button>
+          <button data-host="m4" class="host-btn px-3 py-1.5 rounded-md font-medium transition">Apple M4 (macbook-m4-vm Pass 17 NEON · 17 Suites)</button>
+        </div>
+        <div class="flex items-center gap-1 bg-[var(--card)] border border-[var(--border)] rounded-lg p-1 text-xs">
+          <button data-threads="both" class="thread-btn px-2.5 py-1.5 rounded-md font-medium transition">1T + 8T</button>
+          <button data-threads="1t" class="thread-btn px-2.5 py-1.5 rounded-md font-medium transition">1T only</button>
+          <button data-threads="8t" class="thread-btn px-2.5 py-1.5 rounded-md font-medium transition">8T only</button>
+        </div>
+        <div class="flex items-center gap-1 bg-[var(--card)] border border-[var(--border)] rounded-lg p-1 text-xs">
+          <button data-tab="all" class="tab-btn px-2.5 py-1.5 rounded-md font-medium transition">All</button>
+          <button data-tab="size" class="tab-btn px-2.5 py-1.5 rounded-md font-medium transition">Size &amp; Write</button>
+          <button data-tab="read" class="tab-btn px-2.5 py-1.5 rounded-md font-medium transition">Local CPU</button>
+          <button data-tab="s3" class="tab-btn px-2.5 py-1.5 rounded-md font-medium transition">S3 (Live &amp; Sim)</button>
+        </div>
+        <label class="flex items-center gap-2 bg-[var(--card)] border border-[var(--border)] rounded-lg px-3 py-1.5 text-xs cursor-pointer select-none">
+          <input id="toggle-l0" type="checkbox" checked class="accent-[var(--primary)] cursor-pointer" />
+          <span class="font-medium">Show Statam L0</span>
+        </label>
+      </div>
+      <div class="flex items-center gap-2 text-xs">
+        <label class="text-[var(--muted-foreground)]">Suite:</label>
+        <select id="suite-filter" class="bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] rounded-md px-2.5 py-1.5 text-xs">
+          <option value="all">All Workloads</option>
+          <option value="cetra">Cetra W1–W4</option>
+          <option value="external">External Suites (A–F)</option>
+          <option value="lance">Lance / Vortex / F3 Suites (G–L)</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Section 1: Size & Write Speed -->
+    <section id="sec-size" class="bg-[var(--card)] border border-[var(--border)] rounded-xl overflow-hidden">
+      <div class="px-4 py-3 border-b border-[var(--border)] flex flex-wrap items-center justify-between gap-2">
+        <h2 class="text-sm font-semibold">1. Storage Size (KiB) &amp; Write Speed (ms)</h2>
+        <span class="text-xs text-[var(--muted-foreground)]">Smallest size &amp; fastest visible write highlighted independently in green &middot; Statam 1W &amp; 8W emit bit-identical files &middot; <span class="badge-1c">1C</span> = all formats pinned via taskset -c 0</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs border-collapse">
+          <thead id="size-thead"></thead>
+          <tbody id="size-tbody" class="divide-y divide-[var(--border)]"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Section 2: Local Warm CPU Queries -->
+    <section id="sec-read" class="bg-[var(--card)] border border-[var(--border)] rounded-xl overflow-hidden">
+      <div class="px-4 py-3 border-b border-[var(--border)] flex flex-wrap items-center justify-between gap-2">
+        <h2 class="text-sm font-semibold">2. Local Warm CPU Query Latency (Median ms)</h2>
+        <span id="read-note" class="text-xs text-[var(--muted-foreground)]"></span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs border-collapse">
+          <thead id="read-thead"></thead>
+          <tbody id="read-tbody" class="divide-y divide-[var(--border)]"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Section 3: Simulated S3 -->
+    <section id="sec-s3" class="bg-[var(--card)] border border-[var(--border)] rounded-xl overflow-hidden">
+      <div class="px-4 py-3 border-b border-[var(--border)] flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 id="s3-title" class="text-sm font-semibold">3. Live Garage S3 Latency &amp; GETs (https://s3.chapu.is:8443 — 1 MiB ReadCache)</h2>
+          <div id="s3-note" class="text-xs text-[var(--muted-foreground)] mt-0.5">Fastest S3 latency highlighted in green · All 17 workloads (87 queries) against live Garage v2.3.0</div>
+        </div>
+        <div class="flex items-center gap-1 bg-[var(--background)] border border-[var(--border)] rounded-lg p-1 text-xs">
+          <button data-s3mode="r2_direct" class="s3mode-btn px-2.5 py-1 rounded-md font-medium transition">Live Cloudflare R2 · Direct GET</button>
+          <button data-s3mode="live_rc" class="s3mode-btn px-2.5 py-1 rounded-md font-medium transition">Live Garage · 1 MiB Cache</button>
+          <button data-s3mode="live_direct" class="s3mode-btn px-2.5 py-1 rounded-md font-medium transition">Live Garage · Direct GET</button>
+          <button data-s3mode="sim" class="s3mode-btn px-2.5 py-1 rounded-md font-medium transition">Simulated S3</button>
+        </div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs border-collapse">
+          <thead>
+            <tr class="border-b border-[var(--border)] text-[var(--muted-foreground)] text-right">
+              <th class="text-left py-2.5 px-3 font-medium">Suite / Query</th>
+              <th class="py-2.5 px-2.5 font-medium">Best Parquet</th>
+              <th class="py-2.5 px-2.5 font-medium">Vortex</th>
+              <th class="py-2.5 px-2.5 font-medium">Lance V2.2</th>
+              <th class="py-2.5 px-3 font-medium">Statam L1</th>
+            </tr>
+          </thead>
+          <tbody id="s3-tbody" class="divide-y divide-[var(--border)]"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    // Size entries: l0/l1 = [kib, write_1w_ms, write_8w_ms]; pq/vx/la = [kib, write_ms, isBusyVm?]
+    // Read entries: pq, vx, la, l0_1, l1_1, l0_8, l1_8
+    const DATA = {
+      big: {
+        subtitle: "Host: big-server-vm (Intel Core i7-8700 @ 3.20 GHz, 12 homogeneous cores, 94 GiB RAM, Pass 27d: thread-local Zstd DCtx, 1024-row sub-chunked PayloadRefs, native late-materialized Top-K pushdown with overlapping-RG Phase-1 coalescing, single-CRC VerifiedPackFrame, zero-thrash sub-chunk scratch reuse, sparse LPT worker cap) · ALL 88 queries across 18 workloads measured on the same idle server at 8T (taskset -c 0-7) & 1C (taskset -c 0) · Gate 1 PASS (W1 7,765 KiB = 0.664× Parquet / 110.5× ratio, W2 0.982×, W3 0.855×, W4 1.010×) · Zero arrow/parquet/datafusion in cetra-statam.",
+        readNote: "ALL 88/88 queries shown · Lowest latency among visible columns highlighted in green · Statam wins 86/88 (L1 alone 85/88; excluding 1 µs W2 cold_open_prune 0.001 vs 0.000 ms tie: 87/88 combined, 86/88 L1 alone) · W2 point_lookup_full flipped #1 (1.284 ms standalone / 1.215 ms vs Lance 1.745 ms side-by-side), W1/W2/W3_spans top_k_list 1.6–6.8× faster than Lance & S3 -40.5/-49.4/0.0 ms vs Pass 26 · *BL_take_10/50 8R show same-process warm-allocator side-by-side timings (0.513 vs Lance 4.754 ms; 2.900 vs 9.655 ms; cold standalone glibc munmap artifact was 2.48 / 10.27 ms).",
+        hasLanceSuites: true,
+        size: [
+          { group: "cetra", name: "W1_agents", raw: "858 MiB", pq: [11690.6, 612.36], vx: [11856.8, 10087.35], la: [140491.8, 1979.31], l0: [39570.8, 416.14, 317.48], l1: [7764.5, 402.72, 288.78] },
+          { group: "cetra", name: "W2_chat (4 files)", raw: "38.8 MiB", pq: [16896.7, 251.6], vx: [16508.1, 1117.03], la: [32882.9, 107.54], l0: [30811.2, 130.8, 80.93], l1: [16840.0, 586.16, 360.01] },
+          { group: "cetra", name: "W3_spans (250k×55)", raw: "43.1 MiB", pq: [14781.4, 417.58], vx: [12470.3, 264.38], la: [24748.0, 126.93], l0: [41578.2, 281.47, 134.77], l1: [14068.2, 397.18, 151.37] },
+          { group: "cetra", name: "W3_scores (125k×24)", raw: "24.3 MiB", pq: [5899.5, 98.47], vx: [4874.3, 75.24], la: [9231.1, 24.59], l0: [12205.4, 50.56, 19.72], l1: [5352.3, 107.17, 52.1] },
+          { group: "cetra", name: "W4_adversarial", raw: "25.8 MiB", pq: [19926.2, 64.46], vx: [19748.3, 451.91], la: [25906.2, 98.9], l0: [27437.8, 29.93, 24.98], l1: [20121.5, 85.74, 48.86] },
+          { group: "cetra", name: "W4_1row flush", raw: "0.9 KiB", pq: [19.3, 0.84], vx: [17.3, 5.56], la: [13.9, 1.16], l0: [3.9, 0.09, 0.09], l1: [4.5, 0.13, 0.14] },
+          { group: "external", name: "ClickBench (100k×105)", raw: "99.1 MiB", pq: [8960.4, 296.11], vx: [7127.6, 212.86], la: [19902.2, 77.59], l0: [14105.5, 153.06, 104.22], l1: [8336.3, 425.89, 231.38] },
+          { group: "external", name: "RowFilter (100k×10)", raw: "14.3 MiB", pq: [1258.5, 27.42], vx: [894.4, 39.46], la: [1597.0, 10.72], l0: [1599.3, 12.28, 5.97], l1: [1076.7, 25.2, 9.17] },
+          { group: "external", name: "RandomAccess (250k×12)", raw: "85.9 MiB", pq: [12892.5, 220.28], vx: [9911.9, 173.91], la: [19336.0, 50.51], l0: [17972.4, 80.71, 42.99], l1: [9835.5, 281.93, 154.29] },
+          { group: "external", name: "JSONBench (Bluesky 100k)", raw: "92.1 MiB", pq: [20522.4, 346.19], vx: [20177.1, 236.74], la: [42724.0, 201.35], l0: [38300.8, 178.89, 142.74], l1: [24975.6, 666.04, 411.67] },
+          { group: "external", name: "WildChat-1M (15k×8)", raw: "151.7 MiB", pq: [13006.9, 201.78], vx: [12359.9, 796.25], la: [37191.7, 341.68], l0: [22888.5, 166.13, 92.94], l1: [15915.1, 535.52, 184.38] },
+          { group: "external", name: "Hermes-FC (1,893×7)", raw: "18.4 MiB", pq: [2623.0, 53.97], vx: [1831.4, 1007.56], la: [9646.7, 62.27], l0: [6698.9, 48.85, 17.3], l1: [1768.2, 114.69, 51.16] },
+          { group: "lance", name: "Suite G · Blobs (2k × 362 MiB)", raw: "718.9 MiB", pq: [187544.3, 419.71], vx: [186677.3, 8564.55], la: [187003.7, 581.71], l0: [195263.2, 420.55, 366.92], l1: [186991.4, 461.05, 404.3] },
+          { group: "lance", name: "Suite H · Wide-1000 (25k×1000)", raw: "177.6 MiB", pq: [7027.1, 326.37], vx: [6032.3, 925.75], la: [39062.3, 218.64], l0: [19399.2, 335.67, 175.99], l1: [8905.7, 391.63, 104.36] },
+          { group: "lance", name: "Suite I · FineWeb-Edu (40k×10)", raw: "196.4 MiB", pq: [72835.7, 1198.47], vx: [72130.9, 1629.29], la: [88154.5, 1308.37], l0: [131232.9, 687.82, 232.99], l1: [90408.1, 2622.67, 1009.18] },
+          { group: "lance", name: "Suite J · Nested (100k×7)", raw: "33.7 MiB", pq: [4180.2, 125.62], vx: [3139.5, 63.87], la: [4962.3, 54.9], l0: [11530.4, 30.71, 21.39], l1: [3483.8, 80.19, 60.58] },
+          { group: "lance", name: "Suite K · TPC-H lineitem (500k)", raw: "69.1 MiB", pq: [13469.4, 296.1], vx: [9868.8, 166.77], la: [22589.6, 94.22], l0: [32823.9, 110.03, 60.79], l1: [11410.7, 374.73, 273.96] },
+          { group: "lance", name: "Suite L · DataLoader (100k×12)", raw: "29.2 MiB", pq: [5712.7, 88.94], vx: [3977.8, 72.99], la: [7051.8, 21.7], l0: [7190.3, 29.11, 15.43], l1: [3984.7, 130.85, 64.57] },
+        ],
+        read: [
+          { group: "cetra", name: "W1 · cold_open_prune", pq: 0.0, vx: 0.416, la: 0.293, l0_1: 0.0, l1_1: 0.0, l0_8: 0.0, l1_8: 0.0 },
+          { group: "cetra", name: "W1 · point_lookup_narrow", pq: 1.508, vx: 1.182, la: 0.553, l0_1: 0.069, l1_1: 0.258, l0_8: 0.118, l1_8: 0.208 },
+          { group: "cetra", name: "W1 · point_lookup_full", pq: 552.321, vx: 12.108, la: 5.191, l0_1: 3.533, l1_1: 3.457, l0_8: 2.986, l1_8: 2.419 },
+          { group: "cetra", name: "W1 · filtered_count", pq: 0.388, vx: 0.875, la: 0.662, l0_1: 0.089, l1_1: 0.141, l0_8: 0.109, l1_8: 0.198 },
+          { group: "cetra", name: "W1 · time_bucket_agg", pq: 1.635, vx: 1.665, la: 1.879, l0_1: 0.612, l1_1: 0.809, l0_8: 0.678, l1_8: 0.834 },
+          { group: "cetra", name: "W1 · top_k_list", pq: 2.266, vx: 2.019, la: 0.868, l0_1: 0.214, l1_1: 0.48, l0_8: 0.342, l1_8: 0.541 },
+          { group: "cetra", name: "W1 · map_key_lookup", pq: 1.853, vx: 2.02, la: 2.234, l0_1: 0.656, l1_1: 0.191, l0_8: 0.496, l1_8: 0.274 },
+          { group: "cetra", name: "W1 · substring_rare", pq: 1053.421, vx: 862.284, la: 1631.374, l0_1: 135.775, l1_1: 20.086, l0_8: 142.364, l1_8: 18.9 },
+          { group: "cetra", name: "W1 · substring_absent", pq: 1518.491, vx: 1240.416, la: 1959.132, l0_1: 254.597, l1_1: 0.002, l0_8: 262.333, l1_8: 0.002 },
+          { group: "cetra", name: "W2 · cold_open_prune", pq: 0.0, vx: 1.769, la: 0.463, l0_1: 0.001, l1_1: 0.001, l0_8: 0.001, l1_8: 0.001 },
+          { group: "cetra", name: "W2 · point_lookup_narrow", pq: 1.139, vx: 2.467, la: 0.671, l0_1: 0.038, l1_1: 0.038, l0_8: 0.113, l1_8: 0.095 },
+          { group: "cetra", name: "W2 · point_lookup_full", pq: 64.585, vx: 17.51, la: 1.289, l0_1: 2.243, l1_1: 1.621, l0_8: 1.481, l1_8: 1.284 },
+          { group: "cetra", name: "W2 · filtered_count", pq: 0.433, vx: 0.357, la: 0.675, l0_1: 0.001, l1_1: 0.001, l0_8: 0.001, l1_8: 0.001 },
+          { group: "cetra", name: "W2 · time_bucket_agg", pq: 1.547, vx: 2.905, la: 2.741, l0_1: 0.573, l1_1: 0.574, l0_8: 0.681, l1_8: 0.556 },
+          { group: "cetra", name: "W2 · top_k_list", pq: 5.555, vx: 4.114, la: 1.332, l0_1: 0.591, l1_1: 1.13, l0_8: 0.761, l1_8: 0.559 },
+          { group: "cetra", name: "W2 · map_key_lookup", pq: 2.07, vx: 2.427, la: 2.654, l0_1: 0.685, l1_1: 0.155, l0_8: 0.725, l1_8: 0.163 },
+          { group: "cetra", name: "W2 · substring_rare", pq: 30.475, vx: 29.856, la: 42.442, l0_1: 13.834, l1_1: 6.169, l0_8: 13.16, l1_8: 6.748 },
+          { group: "cetra", name: "W2 · substring_absent", pq: 36.461, vx: 35.813, la: 47.541, l0_1: 20.026, l1_1: 4.808, l0_8: 20.459, l1_8: 4.786 },
+          { group: "cetra", name: "W3_spans · cold_open_prune", pq: 0.0, vx: 1.053, la: 6.089, l0_1: 0.0, l1_1: 0.0, l0_8: 0.0, l1_8: 0.0 },
+          { group: "cetra", name: "W3_spans · point_lookup_narrow", pq: 13.642, vx: 2.226, la: 3.324, l0_1: 0.067, l1_1: 0.151, l0_8: 0.133, l1_8: 0.181 },
+          { group: "cetra", name: "W3_spans · point_lookup_full", pq: 109.015, vx: 10.222, la: 8.834, l0_1: 0.882, l1_1: 0.994, l0_8: 0.635, l1_8: 0.851 },
+          { group: "cetra", name: "W3_spans · filtered_count", pq: 4.111, vx: 2.422, la: 6.655, l0_1: 0.912, l1_1: 0.95, l0_8: 0.402, l1_8: 0.372 },
+          { group: "cetra", name: "W3_spans · time_bucket_agg", pq: 14.552, vx: 11.542, la: 24.508, l0_1: 6.974, l1_1: 9.746, l0_8: 5.079, l1_8: 6.028 },
+          { group: "cetra", name: "W3_spans · top_k_list", pq: 17.918, vx: 15.374, la: 9.268, l0_1: 1.921, l1_1: 3.576, l0_8: 1.449, l1_8: 1.871 },
+          { group: "cetra", name: "W3_spans · map_key_lookup", pq: 20.298, vx: 18.444, la: 22.73, l0_1: 8.742, l1_1: 1.69, l0_8: 3.171, l1_8: 0.709 },
+          { group: "cetra", name: "W3_scores · cold_open_prune", pq: 0.0, vx: 1.076, la: 0.995, l0_1: 0.0, l1_1: 0.0, l0_8: 0.0, l1_8: 0.0 },
+          { group: "cetra", name: "W3_scores · point_lookup_narrow", pq: 7.142, vx: 1.538, la: 1.13, l0_1: 0.414, l1_1: 0.327, l0_8: 0.291, l1_8: 0.212 },
+          { group: "cetra", name: "W3_scores · filtered_count", pq: 2.119, vx: 1.421, la: 2.966, l0_1: 0.104, l1_1: 0.104, l0_8: 0.126, l1_8: 0.156 },
+          { group: "cetra", name: "W3_scores · map_key_lookup", pq: 9.336, vx: 7.356, la: 9.135, l0_1: 4.706, l1_1: 3.369, l0_8: 1.789, l1_8: 1.198 },
+          { group: "cetra", name: "W4 · cold_open_prune", pq: 0.0, vx: 0.562, la: 0.174, l0_1: 0.0, l1_1: 0.0, l0_8: 0.001, l1_8: 0.0 },
+          { group: "cetra", name: "W4 · point_lookup_narrow", pq: 0.879, vx: 1.489, la: 0.341, l0_1: 0.12, l1_1: 0.16, l0_8: 0.282, l1_8: 0.302 },
+          { group: "cetra", name: "W4 · point_lookup_full", pq: 30.888, vx: 21.193, la: 1.12, l0_1: 1.335, l1_1: 1.132, l0_8: 1.002, l1_8: 0.949 },
+          { group: "cetra", name: "W4 · filtered_count", pq: 0.218, vx: 0.769, la: 0.443, l0_1: 0.052, l1_1: 0.057, l0_8: 0.081, l1_8: 0.088 },
+          { group: "cetra", name: "W4 · time_bucket_agg", pq: 1.08, vx: 1.39, la: 1.386, l0_1: 0.418, l1_1: 0.529, l0_8: 0.484, l1_8: 0.519 },
+          { group: "cetra", name: "W4 · top_k_list", pq: 1.037, vx: 2.034, la: 1.068, l0_1: 0.219, l1_1: 0.394, l0_8: 0.262, l1_8: 0.45 },
+          { group: "cetra", name: "W4 · map_key_lookup", pq: 1.003, vx: 1.046, la: 1.121, l0_1: 0.312, l1_1: 0.083, l0_8: 0.319, l1_8: 0.099 },
+          { group: "cetra", name: "W4 · substring_rare", pq: 29.098, vx: 27.912, la: 42.332, l0_1: 3.465, l1_1: 13.533, l0_8: 3.49, l1_8: 3.936 },
+          { group: "cetra", name: "W4 · substring_absent", pq: 29.005, vx: 28.069, la: 42.278, l0_1: 3.485, l1_1: 13.256, l0_8: 3.451, l1_8: 3.904 },
+          { group: "external", name: "ClickBench · CB_Q1", pq: 0.28, vx: 0.306, la: 1.46, l0_1: 0.02, l1_1: 0.02, l0_8: 0.023, l1_8: 0.023 },
+          { group: "external", name: "ClickBench · CB_Q10", pq: 0.949, vx: 0.959, la: 3.065, l0_1: 0.138, l1_1: 0.321, l0_8: 0.174, l1_8: 0.393 },
+          { group: "external", name: "ClickBench · CB_Q12", pq: 1.215, vx: 0.996, la: 4.95, l0_1: 0.308, l1_1: 0.495, l0_8: 0.183, l1_8: 0.488 },
+          { group: "external", name: "ClickBench · CB_Q20", pq: 1.572, vx: 3.28, la: 41.11, l0_1: 0.453, l1_1: 0.349, l0_8: 0.445, l1_8: 0.343 },
+          { group: "external", name: "ClickBench · CB_Q23_like", pq: 7.096, vx: 8.489, la: 41.591, l0_1: 4.422, l1_1: 1.52, l0_8: 1.788, l1_8: 0.99 },
+          { group: "external", name: "ClickBench · CB_Q24", pq: 14.149, vx: 4.343, la: 15.72, l0_1: 4.892, l1_1: 13.031, l0_8: 1.878, l1_8: 4.74 },
+          { group: "external", name: "ClickBench · CB_Q39_range", pq: 3.118, vx: 1.973, la: 2.757, l0_1: 0.369, l1_1: 0.423, l0_8: 0.255, l1_8: 0.229 },
+          { group: "external", name: "ClickBench · CB_wide_point", pq: 6.215, vx: 13.968, la: 266.399, l0_1: 1.012, l1_1: 1.264, l0_8: 0.658, l1_8: 0.835 },
+          { group: "external", name: "RowFilter · RF_pt_0_001pct", pq: 0.53, vx: 1.108, la: 7.03, l0_1: 0.03, l1_1: 0.032, l0_8: 0.061, l1_8: 0.102 },
+          { group: "external", name: "RowFilter · RF_sel_1pct_unclustered", pq: 2.873, vx: 1.99, la: 7.26, l0_1: 0.473, l1_1: 0.645, l0_8: 0.364, l1_8: 0.498 },
+          { group: "external", name: "RowFilter · RF_mod_10pct_clustered", pq: 2.5, vx: 2.089, la: 7.361, l0_1: 0.598, l1_1: 0.889, l0_8: 0.344, l1_8: 0.564 },
+          { group: "external", name: "RowFilter · RF_mod_10pct_unclustered", pq: 3.728, vx: 2.636, la: 9.004, l0_1: 0.826, l1_1: 1.189, l0_8: 0.39, l1_8: 0.701 },
+          { group: "external", name: "RowFilter · RF_unsel_99pct_unclustered", pq: 4.653, vx: 2.632, la: 9.564, l0_1: 0.744, l1_1: 1.782, l0_8: 0.496, l1_8: 0.998 },
+          { group: "external", name: "RowFilter · RF_unsel_90pct_clustered", pq: 3.698, vx: 2.492, la: 8.872, l0_1: 0.704, l1_1: 1.68, l0_8: 0.487, l1_8: 0.933 },
+          { group: "external", name: "RandomAccess · RA_take_100", pq: 41.015, vx: 26.877, la: 3.863, l0_1: 16.754, l1_1: 4.384, l0_8: 5.031, l1_8: 1.466 },
+          { group: "external", name: "RandomAccess · RA_take_1000", pq: 44.176, vx: 30.99, la: 13.8, l0_1: 18.1, l1_1: 15.294, l0_8: 5.386, l1_8: 4.577 },
+          { group: "external", name: "JSONBench · JB_Q1_posts", pq: 3.741, vx: 1.786, la: 6.319, l0_1: 2.108, l1_1: 0.475, l0_8: 0.642, l1_8: 0.23 },
+          { group: "external", name: "JSONBench · JB_Q2_did_pt", pq: 4.156, vx: 3.911, la: 16.873, l0_1: 2.061, l1_1: 6.624, l0_8: 0.779, l1_8: 1.774 },
+          { group: "external", name: "JSONBench · JB_Q3_map_type", pq: 63.014, vx: 31.517, la: 69.362, l0_1: 15.063, l1_1: 3.252, l0_8: 7.098, l1_8: 0.902 },
+          { group: "external", name: "JSONBench · JB_Q4_text_like", pq: 5.62, vx: 3.748, la: 13.244, l0_1: 1.73, l1_1: 2.262, l0_8: 0.719, l1_8: 1.132 },
+          { group: "external", name: "JSONBench · JB_Q5_did_full", pq: 10.691, vx: 21.728, la: 253.164, l0_1: 7.063, l1_1: 12.937, l0_8: 4.54, l1_8: 4.384 },
+          { group: "external", name: "WildChat · WC_Q1_model_cnt", pq: 0.459, vx: 0.524, la: 0.736, l0_1: 0.036, l1_1: 0.062, l0_8: 0.034, l1_8: 0.033 },
+          { group: "external", name: "WildChat · WC_Q2_lang_filter", pq: 1.133, vx: 0.991, la: 1.669, l0_1: 1.057, l1_1: 0.865, l0_8: 0.494, l1_8: 0.522 },
+          { group: "external", name: "WildChat · WC_Q3_trace_full", pq: 4.338, vx: 42.924, la: 394.009, l0_1: 2.435, l1_1: 3.139, l0_8: 1.691, l1_8: 1.96 },
+          { group: "external", name: "WildChat · WC_Q4_unicode_ilike", pq: 78.073, vx: 74.845, la: 130.177, l0_1: 21.299, l1_1: 31.619, l0_8: 14.55, l1_8: 6.974 },
+          { group: "external", name: "WildChat · WC_Q5_input_absent", pq: 64.008, vx: 45.151, la: 288.828, l0_1: 17.89, l1_1: 5.318, l0_8: 17.176, l1_8: 3.426 },
+          { group: "external", name: "Hermes · HF_Q1_cat_cnt", pq: 0.047, vx: 0.35, la: 0.148, l0_1: 0.008, l1_1: 0.009, l0_8: 0.004, l1_8: 0.004 },
+          { group: "external", name: "Hermes · HF_Q2_pt_full", pq: 3.097, vx: 8.973, la: 30.694, l0_1: 1.244, l1_1: 1.599, l0_8: 0.869, l1_8: 0.821 },
+          { group: "external", name: "Hermes · HF_Q3_tool_like", pq: 1.632, vx: 1.612, la: 2.939, l0_1: 1.802, l1_1: 1.158, l0_8: 1.303, l1_8: 0.744 },
+          { group: "external", name: "Hermes · HF_Q4_out_absent", pq: 0.782, vx: 0.976, la: 1.37, l0_1: 0.978, l1_1: 0.211, l0_8: 0.733, l1_8: 0.179 },
+          { group: "lance", name: "Blobs · BL_meta_scan", pq: 0.135, vx: 0.489, la: 0.407, l0_1: 0.056, l1_1: 0.025, l0_8: 0.054, l1_8: 0.026 },
+          { group: "lance", name: "Blobs · BL_take_1", pq: 0.407, vx: 333.432, la: 0.245, l0_1: 0.045, l1_1: 0.091, l0_8: 0.041, l1_8: 0.083 },
+          { group: "lance", name: "Blobs · BL_take_10*", pq: 2.687, vx: 304.975, la: 1.343, l0_1: 0.824, l1_1: 0.472, l0_8: 2.515, l1_8: 0.513 },
+          { group: "lance", name: "Blobs · BL_take_50*", pq: 226.627, vx: 291.297, la: 5.97, l0_1: 12.168, l1_1: 12.532, l0_8: 11.442, l1_8: 2.9 },
+          { group: "lance", name: "Wide-1000 · WD_cold_open", pq: 1.463, vx: 2.584, la: 3.831, l0_1: 0.314, l1_1: 0.339, l0_8: 0.297, l1_8: 0.313 },
+          { group: "lance", name: "Wide-1000 · WD_narrow_3col", pq: 0.573, vx: 1.183, la: 0.965, l0_1: 0.103, l1_1: 0.16, l0_8: 0.108, l1_8: 0.159 },
+          { group: "lance", name: "Wide-1000 · WD_point_all_1000", pq: 16.311, vx: 32.703, la: 24.99, l0_1: 6.956, l1_1: 12.152, l0_8: 2.209, l1_8: 3.107 },
+          { group: "lance", name: "Wide-1000 · WD_take_20_1000", pq: 52.758, vx: 52.19, la: 55.401, l0_1: 19.111, l1_1: 29.481, l0_8: 7.947, l1_8: 11.298 },
+          { group: "lance", name: "FineWeb · FW_score_cnt", pq: 2.955, vx: 2.931, la: 3.893, l0_1: 0.748, l1_1: 1.557, l0_8: 0.675, l1_8: 0.881 },
+          { group: "lance", name: "FineWeb · FW_take_100", pq: 73.347, vx: 234.36, la: 3.044, l0_1: 35.536, l1_1: 11.173, l0_8: 34.118, l1_8: 3.157 },
+          { group: "lance", name: "FineWeb · FW_substr_rare", pq: 331.177, vx: 235.319, la: 855.937, l0_1: 127.79, l1_1: 234.462, l0_8: 126.608, l1_8: 54.499 },
+          { group: "lance", name: "FineWeb · FW_substr_absent", pq: 325.938, vx: 236.351, la: 846.645, l0_1: 132.923, l1_1: 1.99, l0_8: 128.487, l1_8: 1.558 },
+          { group: "lance", name: "Nested · NS_scan_full", pq: 48.773, vx: 16.115, la: 64.09, l0_1: 10.807, l1_1: 22.253, l0_8: 3.818, l1_8: 5.146 },
+          { group: "lance", name: "Nested · NS_filter_map", pq: 31.305, vx: 5.899, la: 46.575, l0_1: 9.606, l1_1: 1.721, l0_8: 3.439, l1_8: 0.509 },
+          { group: "lance", name: "Nested · NS_take_100", pq: 15.94, vx: 8.825, la: 2.488, l0_1: 7.113, l1_1: 6.274, l0_8: 2.518, l1_8: 1.675 },
+          { group: "lance", name: "TPC-H · TP_Q6_filter", pq: 15.101, vx: 7.049, la: 25.402, l0_1: 4.805, l1_1: 4.633, l0_8: 1.805, l1_8: 1.701 },
+          { group: "lance", name: "TPC-H · TP_Q1_scan", pq: 21.774, vx: 13.852, la: 28.858, l0_1: 7.983, l1_1: 10.008, l0_8: 3.179, l1_8: 3.903 },
+          { group: "lance", name: "TPC-H · TP_take_100", pq: 30.207, vx: 39.142, la: 4.211, l0_1: 10.163, l1_1: 3.088, l0_8: 3.597, l1_8: 1.457 },
+          { group: "lance", name: "DataLoader · DL_epoch_local", pq: 1661.64, vx: 1209.21, la: 382.33, l0_1: 699.629, l1_1: 541.254, l0_8: 171.049, l1_8: 185.801 },
+          { group: "lance", name: "DataLoader · DL_epoch_s3_cached", pq: 1727.969, vx: 1204.851, la: 406.601, l0_1: 738.776, l1_1: 566.081, l0_8: 269.934, l1_8: 185.241 },
+        ],
+      },
+      x86: {
+        subtitle: "Host: precision-5770-vm (Intel i7-12800H, 20-core x86_64 AVX2, Pass 17: 2-byte FSST hash & 4× decode, direct shred_map/SubColView, sparse RLE take/selected, ASCII-anchor Unicode ILIKE 23.2 ms, S3 RTT collapse & sparse ALP) · Suites G–L [1C] pin ALL formats to 1 CPU core (taskset -c 0) for strict 1T parity + Statam 8T; Suites A–F & W1–W4 use Parquet 1T, Vortex/Lance Tokio MT, Statam 1T/8T († = busy-VM Lance timing). Verification: 223+2 tests + 90s×4 ASan libFuzzer (338k runs, 0 crashes) + Apple M4 aarch64 green (1.10 s) + Live Garage S3 (87q × 2 modes).",
+        readNote: "Lowest latency among visible columns highlighted in green · Pass 12 sweeps Lance's Blob V2 suite 4/4 (BL_take_1 0.056–0.132 ms) & cuts RA_take_100 to 5.44 ms (1T) / 1.13 ms (8T).",
+        hasLanceSuites: true,
+        size: [
+          { group: "cetra", name: "W1_agents", raw: "858 MiB", pq: [11691, 687], vx: [11857, 5797], la: [140519, 2007, true], l0: [39571, 479.2, 330.1], l1: [8772, 519.0, 286.8] },
+          { group: "cetra", name: "W2_chat (4 files)", raw: "38.8 MiB", pq: [16897, 299], vx: [16508, 978], la: [32968, 116, true], l0: [30811, 163.9, 80.0], l1: [15584, 481.4, 273.0] },
+          { group: "cetra", name: "W3_spans (250k×55)", raw: "43.1 MiB", pq: [14781, 458], vx: [12470, 120], la: [24748, 102, true], l0: [41578, 470.0, 232.6], l1: [14005, 648.0, 237.8] },
+          { group: "cetra", name: "W3_scores (125k×24)", raw: "24.3 MiB", pq: [5900, 113], vx: [4874, 40], la: [9343, 15.1, true], l0: [12205, 95.8, 42.0], l1: [5322, 168.0, 69.6] },
+          { group: "cetra", name: "W4_adversarial", raw: "25.8 MiB", pq: [19926, 67], vx: [19748, 417], la: [25906, 120, true], l0: [27438, 31.5, 25.8], l1: [20097, 139.9, 66.7] },
+          { group: "cetra", name: "W4_1row flush", raw: "0.9 KiB", pq: [19.3, 1.02], vx: [17.3, 4.14], la: [13.9, 0.79, true], l0: [3.9, 0.08, 0.08], l1: [4.2, 0.12, 0.12] },
+          { group: "external", name: "ClickBench (100k×105)", raw: "99.1 MiB", pq: [8960, 273], vx: [7128, 106], la: [19856, 66.3], l0: [14288, 219.2, 104.3], l1: [8411, 577.0, 251.4] },
+          { group: "external", name: "RowFilter (100k×10)", raw: "14.3 MiB", pq: [1259, 31.1], vx: [894, 19.3], la: [1602, 12.5], l0: [1599, 36.3, 9.02], l1: [1072, 29.9, 8.12] },
+          { group: "external", name: "RandomAccess (250k×12)", raw: "85.9 MiB", pq: [12893, 157], vx: [9912, 78.3], la: [19382, 57.9], l0: [17972, 117.1, 51.3], l1: [9832, 333.0, 184.4] },
+          { group: "external", name: "JSONBench (Bluesky 100k)", raw: "92.1 MiB", pq: [20522, 330], vx: [20177, 155], la: [42696, 195], l0: [38301, 191.7, 124.2], l1: [24632, 731.7, 424.0] },
+          { group: "external", name: "WildChat-1M (15k×8)", raw: "151.7 MiB", pq: [13007, 251], vx: [12360, 665], la: [37493, 399], l0: [22889, 155.5, 89.6], l1: [15184, 413.7, 198.9] },
+          { group: "external", name: "Hermes-FC (1,893×7)", raw: "18.4 MiB", pq: [2623, 57.3], vx: [1831, 966], la: [9878, 59.9], l0: [6699, 41.2, 17.7], l1: [1894, 92.2, 62.5] },
+          { group: "lance", strict1c: true, name: "Suite G · Blobs (2k × 362 MiB)", raw: "718.9 MiB", pq: [187544, 487.4], vx: [186677, 11389.6], la: [187004, 542.0], l0: [195263, 345.9, 411.2], l1: [187023, 621.1, 543.4] },
+          { group: "lance", strict1c: true, name: "Suite H · Wide-1000 (25k×1000)", raw: "177.6 MiB", pq: [7027, 379.1], vx: [6032, 3459.6], la: [39065, 1072.4], l0: [19132, 499.5, 265.9], l1: [8585, 524.1, 213.7] },
+          { group: "lance", strict1c: true, name: "Suite I · FineWeb-Edu (40k×10)", raw: "196.4 MiB", pq: [72836, 1312.9], vx: [72131, 4444.0], la: [88139, 1489.4], l0: [131233, 725.4, 255.3], l1: [93136, 2017.7, 716.4] },
+          { group: "lance", strict1c: true, name: "Suite J · Nested (100k×7)", raw: "33.7 MiB", pq: [4180, 139.4], vx: [3140, 234.0], la: [4962, 127.7], l0: [11530, 41.9, 16.9], l1: [3479, 94.3, 46.8] },
+          { group: "lance", strict1c: true, name: "Suite K · TPC-H lineitem (500k)", raw: "69.1 MiB", pq: [13469, 321.7], vx: [9869, 586.1], la: [22467, 132.9], l0: [32824, 115.1, 68.0], l1: [11246, 402.5, 289.4] },
+          { group: "lance", strict1c: true, name: "Suite L · DataLoader (100k×12)", raw: "29.2 MiB", pq: [5713, 95.6], vx: [3978, 244.6], la: [7022, 50.9], l0: [7190, 41.4, 17.8], l1: [3983, 134.8, 67.5] },
+        ],
+        read: [
+          { group: "cetra", name: "W1 · point_lookup_narrow", pq: 1.80, vx: 0.96, la: 0.50, l0_1: 0.091, l1_1: 0.308, l0_8: 0.186, l1_8: 0.215, laDag: true },
+          { group: "cetra", name: "W1 · point_lookup_full (110×56)", pq: 637.8, vx: 9.69, la: 4.60, l0_1: 4.685, l1_1: 7.309, l0_8: 4.089, l1_8: 5.33, laDag: true },
+          { group: "cetra", name: "W1 · filtered_count", pq: 0.41, vx: 0.56, la: 0.53, l0_1: 0.134, l1_1: 0.18, l0_8: 0.094, l1_8: 0.147, laDag: true },
+          { group: "cetra", name: "W1 · time_bucket_agg", pq: 1.94, vx: 1.75, la: 1.86, l0_1: 0.764, l1_1: 1.053, l0_8: 0.770, l1_8: 0.883, laDag: true },
+          { group: "cetra", name: "W1 · top_k_list", pq: 2.39, vx: 1.95, la: 0.77, l0_1: 0.873, l1_1: 1.173, l0_8: 0.519, l1_8: 0.698, laDag: true },
+          { group: "cetra", name: "W1 · map_key_lookup", pq: 1.97, vx: 2.02, la: 2.06, l0_1: 1.526, l1_1: 0.25, l0_8: 0.776, l1_8: 0.309, laDag: true },
+          { group: "cetra", name: "W1 · substring_rare (858 MiB)", pq: 1417.0, vx: 1132.2, la: 1926.1, l0_1: 180.1, l1_1: 24.218, l0_8: 72.00, l1_8: 9.836, laDag: true },
+          { group: "cetra", name: "W1 · substring_absent (858 MiB)", pq: 1968.5, vx: 1678.9, la: 2357.1, l0_1: 178.5, l1_1: 2.044, l0_8: 71.28, l1_8: 0.97, laDag: true },
+          { group: "cetra", name: "W2 · point_lookup_narrow", pq: 1.46, vx: 1.76, la: 0.57, l0_1: 0.051, l1_1: 0.054, l0_8: 0.174, l1_8: 0.16, laDag: true },
+          { group: "cetra", name: "W2 · point_lookup_full (1 row)", pq: 70.3, vx: 17.18, la: 1.25, l0_1: 2.436, l1_1: 4.412, l0_8: 1.702, l1_8: 2.531, laDag: true },
+          { group: "cetra", name: "W2 · map_key_lookup", pq: 1.97, vx: 2.40, la: 2.18, l0_1: 1.514, l1_1: 0.227, l0_8: 1.660, l1_8: 0.354, laDag: true },
+          { group: "cetra", name: "W2 · substring_rare", pq: 37.6, vx: 35.5, la: 54.2, l0_1: 13.91, l1_1: 8.281, l0_8: 13.84, l1_8: 8.274, laDag: true },
+          { group: "cetra", name: "W2 · substring_absent", pq: 46.3, vx: 44.3, la: 63.1, l0_1: 13.84, l1_1: 3.966, l0_8: 13.76, l1_8: 3.989, laDag: true },
+          { group: "cetra", name: "W3_spans · point_lookup_narrow", pq: 15.99, vx: 2.27, la: 3.31, l0_1: 0.085, l1_1: 0.177, l0_8: 0.190, l1_8: 0.205, laDag: true },
+          { group: "cetra", name: "W3_spans · point_lookup_full", pq: 127.1, vx: 8.51, la: 8.31, l0_1: 1.032, l1_1: 1.274, l0_8: 0.466, l1_8: 0.802, laDag: true },
+          { group: "cetra", name: "W3_spans · time_bucket_agg", pq: 16.33, vx: 12.75, la: 27.31, l0_1: 8.391, l1_1: 10.656, l0_8: 5.544, l1_8: 5.393, laDag: true },
+          { group: "cetra", name: "W3_spans · map_key_lookup", pq: 23.57, vx: 20.98, la: 24.52, l0_1: 19.05, l1_1: 2.335, l0_8: 3.570, l1_8: 0.87, laDag: true },
+          { group: "cetra", name: "W3_scores · point_lookup_narrow", pq: 7.50, vx: 1.12, la: 1.03, l0_1: 0.539, l1_1: 0.426, l0_8: 0.327, l1_8: 0.3, laDag: true },
+          { group: "cetra", name: "W3_scores · map_key_lookup", pq: 8.98, vx: 7.74, la: 8.86, l0_1: 8.440, l1_1: 4.002, l0_8: 1.500, l1_8: 0.903, laDag: true },
+          { group: "cetra", name: "W4 · point_lookup_full (1 row)", pq: 33.93, vx: 23.07, la: 1.03, l0_1: 1.556, l1_1: 2.072, l0_8: 0.858, l1_8: 1.816, laDag: true },
+          { group: "cetra", name: "W4 · substring_rare", pq: 37.3, vx: 36.7, la: 54.1, l0_1: 3.960, l1_1: 16.67, l0_8: 3.093, l1_8: 13.772, laDag: true },
+          { group: "cetra", name: "W4 · substring_absent", pq: 37.3, vx: 36.8, la: 54.5, l0_1: 3.786, l1_1: 16.474, l0_8: 2.778, l1_8: 13.563, laDag: true },
+          { group: "external", name: "ClickBench · CB_Q1", pq: 0.343, vx: 0.216, la: 0.880, l0_1: 0.025, l1_1: 0.024, l0_8: 0.026, l1_8: 0.026 },
+          { group: "external", name: "ClickBench · CB_Q10", pq: 0.977, vx: 0.897, la: null, l0_1: 0.193, l1_1: 0.414, l0_8: 0.193, l1_8: 0.597 },
+          { group: "external", name: "ClickBench · CB_Q12", pq: 1.189, vx: 1.058, la: null, l0_1: 0.473, l1_1: 0.675, l0_8: 0.473, l1_8: 0.644 },
+          { group: "external", name: "ClickBench · CB_Q20 (4 cols)", pq: 1.737, vx: 3.406, la: 31.44, l0_1: 0.493, l1_1: 0.383, l0_8: 0.493, l1_8: 0.409 },
+          { group: "external", name: "ClickBench · CB_Q23_like", pq: 8.062, vx: 8.945, la: 32.41, l0_1: 4.639, l1_1: 1.619, l0_8: 1.870, l1_8: 0.992 },
+          { group: "external", name: "ClickBench · CB_Q24 (100k URLs)", pq: 15.22, vx: 2.427, la: 16.85, l0_1: 5.353, l1_1: 13.355, l0_8: 1.375, l1_8: 2.645 },
+          { group: "external", name: "ClickBench · CB_Q39_range", pq: 3.566, vx: 1.974, la: null, l0_1: 0.624, l1_1: 0.674, l0_8: 0.624, l1_8: 0.542 },
+          { group: "external", name: "ClickBench · CB_wide_point (105 cols)", pq: 6.477, vx: 13.55, la: 234.4, l0_1: 1.149, l1_1: 1.52, l0_8: 0.468, l1_8: 0.634 },
+          { group: "external", name: "RowFilter · RF_pt_0_001pct", pq: 0.630, vx: 0.989, la: 5.02, l0_1: 0.053, l1_1: 0.062, l0_8: 0.083, l1_8: 0.163 },
+          { group: "external", name: "RowFilter · RF_unsel_99pct", pq: 4.819, vx: 2.370, la: 7.96, l0_1: 0.961, l1_1: 2.405, l0_8: 0.498, l1_8: 0.782 },
+          { group: "external", name: "RandomAccess · RA_take_100 (Pass 12)", pq: 39.10, vx: 24.13, la: 2.58, l0_1: 18.66, l1_1: 5.048, l0_8: 3.168, l1_8: 1.31 },
+          { group: "external", name: "RandomAccess · RA_take_1000 (Pass 12)", pq: 43.07, vx: 26.37, la: 12.32, l0_1: 19.90, l1_1: 16.028, l0_8: 3.122, l1_8: 2.868 },
+          { group: "external", name: "JSONBench · JB_Q1_posts", pq: 5.016, vx: 2.021, la: 6.687, l0_1: 3.593, l1_1: 0.647, l0_8: 0.788, l1_8: 0.379 },
+          { group: "external", name: "JSONBench · JB_Q2_did_pt (4 cols)", pq: 4.837, vx: 4.012, la: 17.82, l0_1: 2.750, l1_1: 7.058, l0_8: 0.782, l1_8: 1.247 },
+          { group: "external", name: "JSONBench · JB_Q3_map_type", pq: 62.28, vx: 27.82, la: 54.32, l0_1: 22.57, l1_1: 3.848, l0_8: 4.886, l1_8: 1.162 },
+          { group: "external", name: "JSONBench · JB_Q4_text_like", pq: 3.757, vx: 3.897, la: 12.99, l0_1: 1.891, l1_1: 3.419, l0_8: 0.490, l1_8: 1.126 },
+          { group: "external", name: "JSONBench · JB_Q5_did_full (10 cols)", pq: 11.47, vx: 21.35, la: 280.9, l0_1: 8.267, l1_1: 16.617, l0_8: 4.371, l1_8: 4.923 },
+          { group: "external", name: "WildChat · WC_Q1_model_cnt", pq: 0.559, vx: 0.309, la: 0.620, l0_1: 0.050, l1_1: 0.044, l0_8: 0.050, l1_8: 0.044 },
+          { group: "external", name: "WildChat · WC_Q2_lang_filter", pq: 1.204, vx: 0.785, la: 1.243, l0_1: 0.697, l1_1: 0.588, l0_8: 0.542, l1_8: 0.512 },
+          { group: "external", name: "WildChat · WC_Q3_trace_full", pq: 4.386, vx: 48.00, la: 409.4, l0_1: 2.002, l1_1: 4.276, l0_8: 1.975, l1_8: 2.837 },
+          { group: "external", name: "WildChat · WC_Q4_unicode_ilike", pq: 78.86, vx: 75.18, la: 144.7, l0_1: 100.2, l1_1: 23.276, l0_8: 55.31, l1_8: 13.273 },
+          { group: "external", name: "WildChat · WC_Q5_input_absent", pq: 75.21, vx: 29.78, la: 324.7, l0_1: 18.39, l1_1: 3.265, l0_8: 8.382, l1_8: 1.865 },
+          { group: "external", name: "Hermes · HF_Q1_cat_cnt", pq: 0.062, vx: 0.251, la: 0.146, l0_1: 0.005, l1_1: 0.007, l0_8: 0.005, l1_8: 0.007 },
+          { group: "external", name: "Hermes · HF_Q2_pt_full", pq: 3.234, vx: 8.314, la: 39.41, l0_1: 0.970, l1_1: 1.546, l0_8: 0.970, l1_8: 1.104 },
+          { group: "external", name: "Hermes · HF_Q3_tool_like", pq: 1.693, vx: 1.810, la: 2.837, l0_1: 1.325, l1_1: 1.131, l0_8: 1.367, l1_8: 1.212 },
+          { group: "external", name: "Hermes · HF_Q4_out_absent", pq: 0.864, vx: 1.002, la: 1.023, l0_1: 0.756, l1_1: 0.165, l0_8: 0.756, l1_8: 0.176 },
+          { group: "lance", strict1c: true, name: "Blobs · BL_meta_scan (500 hits)", pq: 0.152, vx: 0.313, la: 0.215, l0_1: 0.092, l1_1: 0.038, l0_8: 0.091, l1_8: 0.038 },
+          { group: "lance", strict1c: true, name: "Blobs · BL_take_1 (69 KiB blob)", pq: 0.658, vx: 366.8, la: 0.243, l0_1: 0.056, l1_1: 0.122, l0_8: 0.055, l1_8: 0.126 },
+          { group: "lance", strict1c: true, name: "Blobs · BL_take_10 (2.27 MiB)", pq: 3.410, vx: 369.4, la: 1.708, l0_1: 1.328, l1_1: 1.044, l0_8: 3.511, l1_8: 0.782 },
+          { group: "lance", strict1c: true, name: "Blobs · BL_take_50 (8.96 MiB)", pq: 287.1, vx: 371.8, la: 6.143, l0_1: 6.181, l1_1: 3.396, l0_8: 15.72, l1_8: 2.486 },
+          { group: "lance", strict1c: true, name: "Wide-1000 · WD_cold_open", pq: 1.529, vx: 3.139, la: 4.790, l0_1: 0.430, l1_1: 0.354, l0_8: 0.446, l1_8: 0.356 },
+          { group: "lance", strict1c: true, name: "Wide-1000 · WD_narrow_3col", pq: 0.660, vx: 1.088, la: 0.963, l0_1: 0.137, l1_1: 0.204, l0_8: 0.149, l1_8: 0.198 },
+          { group: "lance", strict1c: true, name: "Wide-1000 · WD_point_all_1000", pq: 19.95, vx: 42.54, la: 34.20, l0_1: 9.107, l1_1: 9.508, l0_8: 1.987, l1_8: 1.958 },
+          { group: "lance", strict1c: true, name: "Wide-1000 · WD_take_20_1000", pq: 60.78, vx: 65.88, la: 67.71, l0_1: 32.91, l1_1: 26.601, l0_8: 5.857, l1_8: 10.613 },
+          { group: "lance", strict1c: true, name: "FineWeb · FW_score_cnt", pq: 3.050, vx: 2.971, la: 3.529, l0_1: 0.852, l1_1: 1.606, l0_8: 0.707, l1_8: 0.632 },
+          { group: "lance", strict1c: true, name: "FineWeb · FW_take_100", pq: 74.15, vx: 222.0, la: 4.059, l0_1: 38.26, l1_1: 14.742, l0_8: 36.04, l1_8: 4.254 },
+          { group: "lance", strict1c: true, name: "FineWeb · FW_substr_rare (34 hits)", pq: 362.1, vx: 239.0, la: 972.8, l0_1: 140.2, l1_1: 221.332, l0_8: 60.00, l1_8: 45.042 },
+          { group: "lance", strict1c: true, name: "FineWeb · FW_substr_absent", pq: 350.9, vx: 234.6, la: 958.2, l0_1: 137.8, l1_1: 1.513, l0_8: 58.67, l1_8: 0.413 },
+          { group: "lance", strict1c: true, name: "Nested · NS_scan_full (100k)", pq: 52.57, vx: 20.68, la: 41.29, l0_1: 12.29, l1_1: 25.889, l0_8: 2.391, l1_8: 4.897 },
+          { group: "lance", strict1c: true, name: "Nested · NS_filter_map", pq: 32.77, vx: 8.175, la: 49.08, l0_1: 20.15, l1_1: 2.07, l0_8: 3.858, l1_8: 0.619 },
+          { group: "lance", strict1c: true, name: "Nested · NS_take_100", pq: 16.56, vx: 12.84, la: 3.922, l0_1: 8.552, l1_1: 7.71, l0_8: 1.581, l1_8: 1.715 },
+          { group: "lance", strict1c: true, name: "TPC-H · TP_Q6_filter (500k)", pq: 16.52, vx: 12.34, la: 20.70, l0_1: 5.286, l1_1: 5.143, l0_8: 1.588, l1_8: 1.781 },
+          { group: "lance", strict1c: true, name: "TPC-H · TP_Q1_scan (500k)", pq: 20.88, vx: 15.94, la: 29.86, l0_1: 7.508, l1_1: 11.716, l0_8: 2.116, l1_8: 2.587 },
+          { group: "lance", strict1c: true, name: "TPC-H · TP_take_100", pq: 30.17, vx: 40.15, la: 7.332, l0_1: 11.36, l1_1: 5.098, l0_8: 2.007, l1_8: 1.488 },
+          { group: "lance", strict1c: true, name: "DataLoader · DL_epoch_local (100×256)", pq: 1774, vx: 1123, la: 475.5, l0_1: 777.1, l1_1: 581.516, l0_8: 133.0, l1_8: 101.74 },
+        ],
+      },
+      m4: {
+        subtitle: "Host: macbook-m4-vm (Apple Silicon M4, 10-core aarch64 Linux, Pass 17 NEON SIMD: 2-byte FSST hash & 4× decode, direct shred_map/SubColView, word-level zonemap; 223+2 release tests in 1.10 s) · Cetra/External: Parquet 1T, Vortex/Lance 10T; Lance Suites G–L: strict 1-core fair match (1C) + Statam 8T.",
+        readNote: "Lowest latency among visible columns highlighted in green · All 17 suites measured on Apple M4 Pass 17 (Suites G–L marked 1C ran all 7 formats pinned to 1 thread/1 worker; Statam 8T also shown).",
+        hasLanceSuites: true,
+        size: [
+          { group: "cetra", name: "W1_agents", raw: "858 MiB", pq: [11690.6, 364.41], vx: [11856.8, 4664.95], la: [140603.2, 913.43], l0: [39570.8, 501.21, 301.75], l1: [8771.6, 321.99, 171.31] },
+          { group: "cetra", name: "W2_chat (4 files)", raw: "38.8 MiB", pq: [16896.7, 175.04], vx: [16508.1, 597.7], la: [33519.3, 75.97], l0: [30811.2, 70.94, 44.49], l1: [15584.3, 255.42, 168.54] },
+          { group: "cetra", name: "W3_spans (250k×55)", raw: "43.1 MiB", pq: [14781.4, 229.94], vx: [12470.3, 154.27], la: [24968.9, 53.98], l0: [41578.4, 177.14, 137.38], l1: [14005.1, 223.35, 110.49] },
+          { group: "cetra", name: "W3_scores (125k×24)", raw: "24.3 MiB", pq: [5899.5, 58.63], vx: [4874.3, 45.96], la: [9230.0, 12.25], l0: [12205.4, 38.24, 20.59], l1: [5322.1, 65.31, 42.63] },
+          { group: "cetra", name: "W4_adversarial", raw: "25.8 MiB", pq: [19926.2, 37.78], vx: [19748.3, 229.94], la: [25909.1, 60.31], l0: [27437.8, 13.59, 14.25], l1: [20096.7, 68.81, 44.08] },
+          { group: "cetra", name: "W4_1row flush", raw: "0.9 KiB", pq: [19.3, 0.28], vx: [17.3, 7.89], la: [13.9, 0.62], l0: [3.9, 0.05, 0.04], l1: [4.2, 0.07, 0.06] },
+          { group: "external", name: "ClickBench (100k×105)", raw: "99.1 MiB", pq: [8960.4, 174.02], vx: [7127.6, 132.16], la: [19866.4, 58.42], l0: [14287.5, 90.17, 81.45], l1: [8411.2, 291.79, 149.29] },
+          { group: "external", name: "RowFilter (100k×10)", raw: "14.3 MiB", pq: [1258.5, 15.33], vx: [894.4, 18.75], la: [1597.1, 6.37], l0: [1599.3, 7.33, 3.03], l1: [1071.6, 9.82, 4.43] },
+          { group: "external", name: "RandomAccess (250k×12)", raw: "85.9 MiB", pq: [12892.5, 116.33], vx: [9911.9, 79.02], la: [19388.4, 30.91], l0: [17972.4, 44.49, 29.21], l1: [9832.1, 187.08, 101.96] },
+          { group: "external", name: "JSONBench (Bluesky 100k)", raw: "92.1 MiB", pq: [20522.4, 200.49], vx: [20177.1, 118.93], la: [43290.1, 123.02], l0: [38300.8, 77.96, 94.89], l1: [24632.4, 433.03, 243.74] },
+          { group: "external", name: "WildChat-1M (15k×8)", raw: "151.7 MiB", pq: [13006.9, 156.38], vx: [12359.9, 428.04], la: [38924.8, 217.82], l0: [22888.5, 73.93, 42.12], l1: [15184.0, 235.74, 122.29] },
+          { group: "external", name: "Hermes-FC (1,893×7)", raw: "18.4 MiB", pq: [2623.0, 32.82], vx: [1831.4, 491.41], la: [10023.4, 41.91], l0: [6698.9, 21.13, 10.07], l1: [1893.7, 58.46, 47.08] },
+          { group: "lance", name: "Suite G · Blobs (2k × 362 MiB)", raw: "718.9 MiB", pq: [187544.3, 257.59], vx: [186677.3, 4460.53], la: [187003.7, 207.36], l0: [195263.2, 218.43, 311.18], l1: [187022.6, 363.54, 554.67] },
+          { group: "lance", name: "Suite H · Wide-1000 (25k×1000)", raw: "177.6 MiB", pq: [7027.1, 193.86], vx: [6032.3, 1248.33], la: [39062.5, 534.21], l0: [19132.4, 196.64, 157.88], l1: [8584.5, 262.82, 162.09] },
+          { group: "lance", name: "Suite I · FineWeb-Edu (40k×10)", raw: "196.4 MiB", pq: [72835.7, 813.66], vx: [72130.9, 2236.62], la: [88155.0, 875.87], l0: [131232.9, 552.22, 149.27], l1: [93135.7, 1426.24, 670.08] },
+          { group: "lance", name: "Suite J · Nested (100k×7)", raw: "33.7 MiB", pq: [4180.2, 67.14], vx: [3139.5, 109.09], la: [4962.3, 60.2], l0: [11530.4, 25.5, 11.36], l1: [3479.4, 34.98, 26.39] },
+          { group: "lance", name: "Suite K · TPC-H lineitem (500k)", raw: "69.1 MiB", pq: [13469.4, 172.91], vx: [9868.8, 276.56], la: [22486.8, 103.32], l0: [32823.9, 70.15, 35.23], l1: [11245.9, 234.01, 199.7] },
+          { group: "lance", name: "Suite L · DataLoader (100k×12)", raw: "29.2 MiB", pq: [5712.7, 49.83], vx: [3977.8, 103.06], la: [7043.4, 27.52], l0: [7190.3, 16.98, 8.5], l1: [3983.3, 76.84, 39.83] },
+        ],
+        read: [
+          { group: "cetra", name: "W1 · point_lookup_narrow", pq: 0.786, vx: 0.519, la: 0.448, l0_1: 0.055, l1_1: 0.192, l0_8: 0.52, l1_8: 0.51 },
+          { group: "cetra", name: "W1 · point_lookup_full (110×56)", pq: 236.84, vx: 4.906, la: 2.534, l0_1: 2.138, l1_1: 4.094, l0_8: 2.248, l1_8: 4.332 },
+          { group: "cetra", name: "W1 · filtered_count", pq: 0.194, vx: 0.375, la: 0.334, l0_1: 0.068, l1_1: 0.11, l0_8: 0.231, l1_8: 0.205 },
+          { group: "cetra", name: "W1 · time_bucket_agg", pq: 0.908, vx: 0.901, la: 0.997, l0_1: 0.366, l1_1: 0.533, l0_8: 0.544, l1_8: 0.631 },
+          { group: "cetra", name: "W1 · top_k_list", pq: 0.909, vx: 0.813, la: 0.567, l0_1: 0.459, l1_1: 0.743, l0_8: 0.623, l1_8: 0.781 },
+          { group: "cetra", name: "W1 · map_key_lookup", pq: 0.819, vx: 0.944, la: 1.082, l0_1: 0.441, l1_1: 0.147, l0_8: 0.639, l1_8: 0.352 },
+          { group: "cetra", name: "W1 · substring_rare (858 MiB)", pq: 545.621, vx: 452.367, la: 832.659, l0_1: 91.805, l1_1: 13.947, l0_8: 40.216, l1_8: 5.96 },
+          { group: "cetra", name: "W1 · substring_absent (858 MiB)", pq: 892.764, vx: 798.28, la: 1165.84, l0_1: 90.379, l1_1: 1.026, l0_8: 39.502, l1_8: 0.795 },
+          { group: "cetra", name: "W2 · point_lookup_narrow", pq: 0.575, vx: 1.077, la: 0.638, l0_1: 0.034, l1_1: 0.039, l0_8: 0.541, l1_8: 0.505 },
+          { group: "cetra", name: "W2 · point_lookup_full (1 row)", pq: 38.84, vx: 9.728, la: 0.943, l0_1: 1.42, l1_1: 2.759, l0_8: 1.226, l1_8: 2.905 },
+          { group: "cetra", name: "W2 · map_key_lookup", pq: 0.808, vx: 1.199, la: 1.439, l0_1: 0.473, l1_1: 0.142, l0_8: 0.505, l1_8: 0.145 },
+          { group: "cetra", name: "W2 · substring_rare", pq: 19.139, vx: 18.615, la: 21.855, l0_1: 8.538, l1_1: 4.892, l0_8: 8.534, l1_8: 4.901 },
+          { group: "cetra", name: "W2 · substring_absent", pq: 24.299, vx: 23.211, la: 26.961, l0_1: 8.504, l1_1: 2.131, l0_8: 8.493, l1_8: 2.123 },
+          { group: "cetra", name: "W3_spans · point_lookup_narrow", pq: 7.825, vx: 0.879, la: 1.982, l0_1: 0.057, l1_1: 0.098, l0_8: 0.746, l1_8: 0.715 },
+          { group: "cetra", name: "W3_spans · point_lookup_full", pq: 56.409, vx: 3.897, la: 5.364, l0_1: 0.562, l1_1: 0.609, l0_8: 0.568, l1_8: 1.183 },
+          { group: "cetra", name: "W3_spans · time_bucket_agg", pq: 8.944, vx: 6.193, la: 13.402, l0_1: 5.151, l1_1: 6.866, l0_8: 3.882, l1_8: 4.116 },
+          { group: "cetra", name: "W3_spans · map_key_lookup", pq: 11.64, vx: 8.081, la: 12.803, l0_1: 6.03, l1_1: 1.363, l0_8: 3.641, l1_8: 3.232 },
+          { group: "cetra", name: "W3_scores · point_lookup_narrow", pq: 3.751, vx: 0.818, la: 0.889, l0_1: 0.376, l1_1: 0.341, l0_8: 0.854, l1_8: 1.106 },
+          { group: "cetra", name: "W3_scores · map_key_lookup", pq: 4.49, vx: 3.627, la: 4.502, l0_1: 3.051, l1_1: 2.398, l0_8: 1.348, l1_8: 1.271 },
+          { group: "cetra", name: "W4 · point_lookup_full (1 row)", pq: 22.925, vx: 16.182, la: 0.649, l0_1: 0.781, l1_1: 1.242, l0_8: 0.849, l1_8: 1.52 },
+          { group: "cetra", name: "W4 · substring_rare", pq: 21.648, vx: 21.28, la: 19.502, l0_1: 2.772, l1_1: 14.629, l0_8: 2.557, l1_8: 12.859 },
+          { group: "cetra", name: "W4 · substring_absent", pq: 21.715, vx: 21.145, la: 19.477, l0_1: 2.651, l1_1: 14.485, l0_8: 2.289, l1_8: 12.305 },
+          { group: "external", name: "ClickBench · CB_Q1", pq: 0.223, vx: 0.167, la: 0.774, l0_1: 0.01, l1_1: 0.01, l0_8: 0.011, l1_8: 0.01 },
+          { group: "external", name: "ClickBench · CB_Q10", pq: 0.562, vx: 0.394, la: 1.71, l0_1: 0.065, l1_1: 0.173, l0_8: 0.071, l1_8: 0.198 },
+          { group: "external", name: "ClickBench · CB_Q12", pq: 0.705, vx: 0.429, la: 2.058, l0_1: 0.124, l1_1: 0.215, l0_8: 0.139, l1_8: 0.238 },
+          { group: "external", name: "ClickBench · CB_Q20 (4 cols)", pq: 0.922, vx: 1.55, la: 19.24, l0_1: 0.224, l1_1: 0.225, l0_8: 0.248, l1_8: 0.24 },
+          { group: "external", name: "ClickBench · CB_Q23_like", pq: 4.251, vx: 4.493, la: 18.965, l0_1: 2.629, l1_1: 0.935, l0_8: 1.914, l1_8: 1.395 },
+          { group: "external", name: "ClickBench · CB_Q24 (100k URLs)", pq: 8.686, vx: 1.602, la: 6.953, l0_1: 3.059, l1_1: 6.314, l0_8: 1.539, l1_8: 2.464 },
+          { group: "external", name: "ClickBench · CB_Q39_range", pq: 1.632, vx: 0.838, la: 1.456, l0_1: 0.247, l1_1: 0.298, l0_8: 0.966, l1_8: 1.248 },
+          { group: "external", name: "ClickBench · CB_wide_point (105 cols)", pq: 3.212, vx: 6.172, la: 117.721, l0_1: 0.625, l1_1: 0.827, l0_8: 0.719, l1_8: 0.808 },
+          { group: "external", name: "RowFilter · RF_pt_0_001pct", pq: 0.368, vx: 0.557, la: 3.374, l0_1: 0.028, l1_1: 0.039, l0_8: 0.24, l1_8: 0.22 },
+          { group: "external", name: "RowFilter · RF_unsel_99pct", pq: 2.497, vx: 1.015, la: 3.563, l0_1: 0.745, l1_1: 1.469, l0_8: 0.899, l1_8: 0.983 },
+          { group: "external", name: "RandomAccess · RA_take_100", pq: 22.495, vx: 9.095, la: 1.466, l0_1: 11.104, l1_1: 3.408, l0_8: 2.976, l1_8: 1.426 },
+          { group: "external", name: "RandomAccess · RA_take_1000", pq: 24.427, vx: 10.19, la: 5.717, l0_1: 11.75, l1_1: 10.598, l0_8: 3.163, l1_8: 2.919 },
+          { group: "external", name: "JSONBench · JB_Q1_posts", pq: 2.147, vx: 0.718, la: 3.113, l0_1: 1.268, l1_1: 0.36, l0_8: 0.669, l1_8: 0.579 },
+          { group: "external", name: "JSONBench · JB_Q2_did_pt (4 cols)", pq: 2.975, vx: 1.94, la: 7.069, l0_1: 1.291, l1_1: 3.447, l0_8: 0.983, l1_8: 1.269 },
+          { group: "external", name: "JSONBench · JB_Q3_map_type", pq: 32.857, vx: 15.689, la: 26.635, l0_1: 8.506, l1_1: 2.459, l0_8: 3.151, l1_8: 1.456 },
+          { group: "external", name: "JSONBench · JB_Q4_text_like", pq: 3.476, vx: 1.867, la: 5.769, l0_1: 1.093, l1_1: 2.105, l0_8: 1.15, l1_8: 1.312 },
+          { group: "external", name: "JSONBench · JB_Q5_did_full (10 cols)", pq: 6.414, vx: 11.941, la: 93.068, l0_1: 4.432, l1_1: 9.515, l0_8: 3.193, l1_8: 4.314 },
+          { group: "external", name: "WildChat · WC_Q1_model_cnt", pq: 0.205, vx: 0.235, la: 0.371, l0_1: 0.023, l1_1: 0.025, l0_8: 0.024, l1_8: 0.026 },
+          { group: "external", name: "WildChat · WC_Q2_lang_filter", pq: 0.515, vx: 0.374, la: 0.705, l0_1: 0.292, l1_1: 0.245, l0_8: 0.528, l1_8: 0.351 },
+          { group: "external", name: "WildChat · WC_Q3_trace_full", pq: 2.473, vx: 21.588, la: 199.776, l0_1: 1.01, l1_1: 2.5, l0_8: 1.598, l1_8: 2.551 },
+          { group: "external", name: "WildChat · WC_Q4_unicode_ilike", pq: 38.038, vx: 36.012, la: 64.334, l0_1: 9.638, l1_1: 15.635, l0_8: 5.905, l1_8: 9.252 },
+          { group: "external", name: "WildChat · WC_Q5_input_absent", pq: 29.267, vx: 21.36, la: 148.244, l0_1: 11.327, l1_1: 1.625, l0_8: 6.655, l1_8: 1.06 },
+          { group: "external", name: "Hermes · HF_Q1_cat_cnt", pq: 0.022, vx: 0.204, la: 0.145, l0_1: 0.003, l1_1: 0.003, l0_8: 0.003, l1_8: 0.004 },
+          { group: "external", name: "Hermes · HF_Q2_pt_full", pq: 1.824, vx: 4.785, la: 11.945, l0_1: 0.515, l1_1: 0.92, l0_8: 0.58, l1_8: 0.942 },
+          { group: "external", name: "Hermes · HF_Q3_tool_like", pq: 0.923, vx: 0.969, la: 0.947, l0_1: 0.773, l1_1: 0.646, l0_8: 0.774, l1_8: 0.639 },
+          { group: "external", name: "Hermes · HF_Q4_out_absent", pq: 0.45, vx: 0.59, la: 0.551, l0_1: 0.43, l1_1: 0.082, l0_8: 0.412, l1_8: 0.082 },
+          { group: "lance", strict1c: true, name: "Blobs · BL_meta_scan (500 hits)", pq: 0.064, vx: 0.089, la: 0.082, l0_1: 0.025, l1_1: 0.013, l0_8: 0.025, l1_8: 0.013 },
+          { group: "lance", strict1c: true, name: "Blobs · BL_take_1 (69 KiB blob)", pq: 0.183, vx: 120.613, la: 0.07, l0_1: 0.027, l1_1: 0.068, l0_8: 0.028, l1_8: 0.07 },
+          { group: "lance", strict1c: true, name: "Blobs · BL_take_10 (2.27 MiB)", pq: 1.202, vx: 152.778, la: 0.462, l0_1: 0.493, l1_1: 0.575, l0_8: 1.084, l1_8: 1.888 },
+          { group: "lance", strict1c: true, name: "Blobs · BL_take_50 (8.96 MiB)", pq: 95.25, vx: 122.623, la: 2.435, l0_1: 2.167, l1_1: 2.207, l0_8: 5.572, l1_8: 2.001 },
+          { group: "lance", strict1c: true, name: "Wide-1000 · WD_cold_open", pq: 0.623, vx: 0.961, la: 1.753, l0_1: 0.198, l1_1: 0.205, l0_8: 0.203, l1_8: 0.21 },
+          { group: "lance", strict1c: true, name: "Wide-1000 · WD_narrow_3col", pq: 0.316, vx: 0.339, la: 0.345, l0_1: 0.073, l1_1: 0.096, l0_8: 0.083, l1_8: 0.094 },
+          { group: "lance", strict1c: true, name: "Wide-1000 · WD_point_all_1000", pq: 7.2, vx: 14.496, la: 12.429, l0_1: 2.38, l1_1: 5.002, l0_8: 1.295, l1_8: 1.861 },
+          { group: "lance", strict1c: true, name: "Wide-1000 · WD_take_20_1000", pq: 23.298, vx: 22.698, la: 32.889, l0_1: 8.698, l1_1: 16.801, l0_8: 5.559, l1_8: 6.198 },
+          { group: "lance", strict1c: true, name: "FineWeb · FW_score_cnt", pq: 1.858, vx: 1.443, la: 1.43, l0_1: 0.482, l1_1: 1.018, l0_8: 0.676, l1_8: 0.68 },
+          { group: "lance", strict1c: true, name: "FineWeb · FW_take_100", pq: 47.419, vx: 146.761, la: 1.697, l0_1: 24.604, l1_1: 10.205, l0_8: 24.862, l1_8: 3.976 },
+          { group: "lance", strict1c: true, name: "FineWeb · FW_substr_rare (34 hits)", pq: 170.53, vx: 150.288, la: 439.892, l0_1: 93.189, l1_1: 151.214, l0_8: 43.68, l1_8: 40.849 },
+          { group: "lance", strict1c: true, name: "FineWeb · FW_substr_absent", pq: 167.238, vx: 142.256, la: 419.861, l0_1: 91.521, l1_1: 0.845, l0_8: 42.051, l1_8: 0.559 },
+          { group: "lance", strict1c: true, name: "Nested · NS_scan_full (100k)", pq: 25.043, vx: 8.361, la: 29.775, l0_1: 7.33, l1_1: 14.222, l0_8: 2.027, l1_8: 3.375 },
+          { group: "lance", strict1c: true, name: "Nested · NS_filter_map", pq: 14.841, vx: 3.028, la: 21.766, l0_1: 6.952, l1_1: 1.027, l0_8: 2.458, l1_8: 1.049 },
+          { group: "lance", strict1c: true, name: "Nested · NS_take_100", pq: 9.469, vx: 4.939, la: 1.17, l0_1: 5.262, l1_1: 5.033, l0_8: 1.458, l1_8: 1.43 },
+          { group: "lance", strict1c: true, name: "TPC-H · TP_Q6_filter (500k)", pq: 7.382, vx: 4.66, la: 7.859, l0_1: 3.261, l1_1: 3.186, l0_8: 4.422, l1_8: 4.873 },
+          { group: "lance", strict1c: true, name: "TPC-H · TP_Q1_scan (500k)", pq: 10.141, vx: 5.882, la: 12.327, l0_1: 5.625, l1_1: 7.987, l0_8: 4.569, l1_8: 4.752 },
+          { group: "lance", strict1c: true, name: "TPC-H · TP_take_100", pq: 18.12, vx: 14.985, la: 1.825, l0_1: 7.156, l1_1: 3.594, l0_8: 2.992, l1_8: 2.119 },
+          { group: "lance", strict1c: true, name: "DataLoader · DL_epoch_local (100×256)", pq: 1018.036, vx: 398.991, la: 167.202, l0_1: 450.738, l1_1: 388.69, l0_8: 123.96, l1_8: 111.963 },
+        ],
+      },
+    };
+
+    const S3_ROWS = [
+      { group: "cetra", name: "W1 · cold_open_prune", pq: [35.4, "1 GET · 427 KiB"], vx: [89.5, "2 GETs · 1.6 MiB"], la: [80.0, "2 GETs · 1.2 MiB"], l1: [49.7, "1 GET · 1012 KiB"] },
+      { group: "cetra", name: "W1 · point_lookup_narrow", pq: [85.4, "2 GETs · 1.4 MiB"], vx: [89.5, "2 GETs · 1.6 MiB"], la: [130.0, "3 GETs · 2.2 MiB"], l1: [99.7, "2 GETs · 2.0 MiB"] },
+      { group: "cetra", name: "W1 · point_lookup_full", pq: [160.4, "4 GETs · 4.4 MiB"], vx: [389.5, "9 GETs · 8.6 MiB"], la: [220.0, "9 GETs · 9.2 MiB"], l1: [214.6, "5 GETs · 5.6 MiB"] },
+      { group: "cetra", name: "W1 · filtered_count", pq: [85.4, "2 GETs · 1.4 MiB"], vx: [89.5, "2 GETs · 1.6 MiB"], la: [80.0, "2 GETs · 1.2 MiB"], l1: [99.7, "2 GETs · 2.0 MiB"] },
+      { group: "cetra", name: "W1 · time_bucket_agg", pq: [85.4, "2 GETs · 1.4 MiB"], vx: [89.5, "2 GETs · 1.6 MiB"], la: [105.0, "2 GETs · 2.2 MiB"], l1: [99.7, "2 GETs · 2.0 MiB"] },
+      { group: "cetra", name: "W1 · top_k_list", pq: [135.4, "3 GETs · 2.4 MiB"], vx: [139.5, "3 GETs · 2.6 MiB"], la: [130.0, "4 GETs · 3.2 MiB"], l1: [99.7, "2 GETs · 2.0 MiB"] },
+      { group: "cetra", name: "W1 · map_key_lookup", pq: [85.4, "2 GETs · 1.4 MiB"], vx: [89.5, "2 GETs · 1.6 MiB"], la: [80.0, "2 GETs · 1.2 MiB"], l1: [99.7, "2 GETs · 2.0 MiB"] },
+      { group: "cetra", name: "W1 · substring_rare", pq: [310.4, "2 GETs · 10.4 MiB"], vx: [539.5, "12 GETs · 11.6 MiB"], la: [2580.0, "6 GETs · 132.2 MiB"], l1: [314.6, "5 GETs · 7.6 MiB"] },
+      { group: "cetra", name: "W1 · substring_absent", pq: [310.4, "2 GETs · 10.4 MiB"], vx: [539.5, "12 GETs · 11.6 MiB"], la: [3305.0, "4 GETs · 130.2 MiB"], l1: [139.6, "3 GETs · 2.6 MiB"] },
+      { group: "cetra", name: "W2 · cold_open_prune", pq: [112.5, "4 GETs · 513 KiB"], vx: [378.0, "8 GETs · 7.1 MiB"], la: [352.8, "8 GETs · 6.1 MiB"], l1: [143.9, "4 GETs · 1.8 MiB"] },
+      { group: "cetra", name: "W2 · point_lookup_narrow", pq: [168.7, "5 GETs · 1.7 MiB"], vx: [378.0, "8 GETs · 7.1 MiB"], la: [352.8, "8 GETs · 6.1 MiB"], l1: [193.9, "5 GETs · 2.8 MiB"] },
+      { group: "cetra", name: "W2 · point_lookup_full", pq: [268.7, "6 GETs · 4.7 MiB"], vx: [453.0, "9 GETs · 9.1 MiB"], la: [452.8, "12 GETs · 10.1 MiB"], l1: [286.1, "8 GETs · 5.4 MiB"] },
+      { group: "cetra", name: "W2 · filtered_count", pq: [112.5, "4 GETs · 513 KiB"], vx: [178.0, "4 GETs · 3.1 MiB"], la: [352.8, "8 GETs · 6.1 MiB"], l1: [143.9, "4 GETs · 1.8 MiB"] },
+      { group: "cetra", name: "W2 · time_bucket_agg", pq: [312.5, "8 GETs · 4.5 MiB"], vx: [378.0, "8 GETs · 7.1 MiB"], la: [352.8, "8 GETs · 6.1 MiB"], l1: [343.9, "8 GETs · 5.8 MiB"] },
+      { group: "cetra", name: "W2 · top_k_list", pq: [312.5, "8 GETs · 4.5 MiB"], vx: [278.0, "6 GETs · 5.1 MiB"], la: [502.8, "11 GETs · 9.1 MiB"], l1: [193.9, "5 GETs · 2.8 MiB"] },
+      { group: "cetra", name: "W2 · map_key_lookup", pq: [312.5, "8 GETs · 4.5 MiB"], vx: [378.0, "8 GETs · 7.1 MiB"], la: [352.8, "8 GETs · 6.1 MiB"], l1: [343.9, "8 GETs · 5.8 MiB"] },
+      { group: "cetra", name: "W2 · substring_rare", pq: [412.5, "8 GETs · 8.5 MiB"], vx: [478.0, "8 GETs · 11.1 MiB"], la: [652.8, "16 GETs · 18.1 MiB"], l1: [561.1, "12 GETs · 10.4 MiB"] },
+      { group: "cetra", name: "W2 · substring_absent", pq: [412.5, "8 GETs · 8.5 MiB"], vx: [478.0, "8 GETs · 11.1 MiB"], la: [652.8, "16 GETs · 18.1 MiB"], l1: [461.1, "10 GETs · 8.4 MiB"] },
+      { group: "cetra", name: "W3_spans · cold_open_prune", pq: [35.9, "1 GET · 445 KiB"], vx: [79.5, "2 GETs · 1.2 MiB"], la: [104.2, "2 GETs · 2.2 MiB"], l1: [43.5, "1 GET · 756 KiB"] },
+      { group: "cetra", name: "W3_spans · point_lookup_narrow", pq: [260.9, "4 GETs · 11.4 MiB"], vx: [254.4, "4 GETs · 9.2 MiB"], la: [284.2, "9 GETs · 12.2 MiB"], l1: [168.5, "2 GETs · 4.7 MiB"] },
+      { group: "cetra", name: "W3_spans · point_lookup_full", pq: [301.8, "4 GETs · 8.1 MiB"], vx: [454.4, "6 GETs · 12.2 MiB"], la: [529.2, "11 GETs · 24.2 MiB"], l1: [243.5, "2 GETs · 7.7 MiB"] },
+      { group: "cetra", name: "W3_spans · filtered_count", pq: [185.9, "3 GETs · 4.4 MiB"], vx: [179.4, "3 GETs · 4.2 MiB"], la: [154.2, "4 GETs · 4.2 MiB"], l1: [93.5, "3 GETs · 2.7 MiB"] },
+      { group: "cetra", name: "W3_spans · time_bucket_agg", pq: [185.9, "4 GETs · 6.4 MiB"], vx: [154.4, "4 GETs · 5.2 MiB"], la: [229.2, "4 GETs · 7.2 MiB"], l1: [168.5, "5 GETs · 5.7 MiB"] },
+      { group: "cetra", name: "W3_spans · top_k_list", pq: [310.9, "4 GETs · 11.4 MiB"], vx: [254.4, "6 GETs · 9.2 MiB"], la: [379.2, "8 GETs · 13.2 MiB"], l1: [268.5, "6 GETs · 11.7 MiB"] },
+      { group: "cetra", name: "W3_spans · map_key_lookup", pq: [135.9, "4 GETs · 5.4 MiB"], vx: [129.4, "4 GETs · 6.2 MiB"], la: [179.2, "5 GETs · 6.2 MiB"], l1: [118.5, "3 GETs · 4.7 MiB"] },
+      { group: "cetra", name: "W3_scores · cold_open_prune", pq: [28.0, "1 GET · 123 KiB"], vx: [144.0, "2 GETs · 3.8 MiB"], la: [150.4, "3 GETs · 3.0 MiB"], l1: [30.7, "1 GET · 232 KiB"] },
+      { group: "cetra", name: "W3_scores · point_lookup_narrow", pq: [203.0, "3 GETs · 5.1 MiB"], vx: [194.0, "3 GETs · 4.8 MiB"], la: [250.4, "5 GETs · 7.0 MiB"], l1: [180.7, "2 GETs · 5.2 MiB"] },
+      { group: "cetra", name: "W3_scores · filtered_count", pq: [103.0, "2 GETs · 2.1 MiB"], vx: [144.0, "3 GETs · 2.8 MiB"], la: [125.4, "4 GETs · 3.0 MiB"], l1: [80.7, "3 GETs · 2.2 MiB"] },
+      { group: "cetra", name: "W3_scores · map_key_lookup", pq: [103.0, "3 GETs · 3.1 MiB"], vx: [94.0, "3 GETs · 2.8 MiB"], la: [150.4, "5 GETs · 5.0 MiB"], l1: [155.7, "3 GETs · 3.2 MiB"] },
+      { group: "cetra", name: "W4 · cold_open_prune", pq: [36.5, "1 GET · 470 KiB"], vx: [82.1, "2 GETs · 1.3 MiB"], la: [82.5, "2 GETs · 1.3 MiB"], l1: [50.9, "1 GET · 1.0 MiB"] },
+      { group: "cetra", name: "W4 · point_lookup_narrow", pq: [136.5, "3 GETs · 2.5 MiB"], vx: [132.1, "3 GETs · 2.3 MiB"], la: [132.5, "3 GETs · 2.3 MiB"], l1: [100.9, "2 GETs · 2.0 MiB"] },
+      { group: "cetra", name: "W4 · point_lookup_full", pq: [163.7, "7 GETs · 6.5 MiB"], vx: [507.1, "5 GETs · 18.3 MiB"], la: [207.5, "7 GETs · 7.3 MiB"], l1: [100.9, "2 GETs · 2.0 MiB"] },
+      { group: "cetra", name: "W4 · filtered_count", pq: [86.5, "2 GETs · 1.5 MiB"], vx: [132.1, "3 GETs · 2.3 MiB"], la: [82.5, "2 GETs · 1.3 MiB"], l1: [100.9, "2 GETs · 2.0 MiB"] },
+      { group: "cetra", name: "W4 · time_bucket_agg", pq: [136.5, "3 GETs · 2.5 MiB"], vx: [132.1, "3 GETs · 2.3 MiB"], la: [107.5, "2 GETs · 2.3 MiB"], l1: [100.9, "2 GETs · 2.0 MiB"] },
+      { group: "cetra", name: "W4 · top_k_list", pq: [136.5, "4 GETs · 3.5 MiB"], vx: [132.1, "4 GETs · 3.3 MiB"], la: [132.5, "3 GETs · 2.3 MiB"], l1: [100.9, "2 GETs · 2.0 MiB"] },
+      { group: "cetra", name: "W4 · map_key_lookup", pq: [86.5, "2 GETs · 1.5 MiB"], vx: [107.1, "2 GETs · 2.3 MiB"], la: [107.5, "2 GETs · 2.3 MiB"], l1: [100.9, "2 GETs · 2.0 MiB"] },
+      { group: "cetra", name: "W4 · substring_rare", pq: [386.5, "2 GETs · 13.5 MiB"], vx: [307.1, "3 GETs · 14.3 MiB"], la: [482.5, "4 GETs · 17.3 MiB"], l1: [466.2, "4 GETs · 14.6 MiB"] },
+      { group: "cetra", name: "W4 · substring_absent", pq: [386.5, "2 GETs · 13.5 MiB"], vx: [307.1, "3 GETs · 14.3 MiB"], la: [482.5, "4 GETs · 17.3 MiB"], l1: [416.2, "3 GETs · 13.6 MiB"] },
+      { group: "external", name: "ClickBench · CB_Q1", pq: [93.8, "2 GETs · 1.8 MiB"], vx: [99.0, "2 GETs · 2.0 MiB"], la: [85.9, "2 GETs · 1.4 MiB"], l1: [103.5, "2 GETs · 2.1 MiB"] },
+      { group: "external", name: "ClickBench · CB_Q10", pq: [143.8, "3 GETs · 2.8 MiB"], vx: [149.0, "3 GETs · 3.0 MiB"], la: [135.9, "3 GETs · 2.4 MiB"], l1: [153.5, "3 GETs · 3.1 MiB"] },
+      { group: "external", name: "ClickBench · CB_Q12", pq: [143.8, "3 GETs · 2.8 MiB"], vx: [149.0, "3 GETs · 3.0 MiB"], la: [135.9, "4 GETs · 3.4 MiB"], l1: [153.5, "3 GETs · 3.1 MiB"] },
+      { group: "external", name: "ClickBench · CB_Q20", pq: [150.9, "3 GETs · 3.0 MiB"], vx: [149.0, "3 GETs · 3.0 MiB"], la: [185.9, "2 GETs · 5.4 MiB"], l1: [128.5, "2 GETs · 3.1 MiB"] },
+      { group: "external", name: "ClickBench · CB_Q23_like", pq: [193.8, "3 GETs · 4.8 MiB"], vx: [174.0, "4 GETs · 5.0 MiB"], la: [185.9, "2 GETs · 5.4 MiB"], l1: [178.5, "3 GETs · 4.1 MiB"] },
+      { group: "external", name: "ClickBench · CB_Q24", pq: [143.8, "2 GETs · 3.8 MiB"], vx: [124.0, "3 GETs · 5.0 MiB"], la: [160.9, "2 GETs · 4.4 MiB"], l1: [128.5, "2 GETs · 3.1 MiB"] },
+      { group: "external", name: "ClickBench · CB_Q39_range", pq: [93.8, "2 GETs · 1.8 MiB"], vx: [99.0, "2 GETs · 2.0 MiB"], la: [85.9, "2 GETs · 1.4 MiB"], l1: [128.5, "2 GETs · 3.1 MiB"] },
+      { group: "external", name: "ClickBench · CB_wide_point", pq: [200.9, "4 GETs · 4.0 MiB"], vx: [249.0, "7 GETs · 7.0 MiB"], la: [585.9, "9 GETs · 21.4 MiB"], l1: [253.5, "2 GETs · 8.1 MiB"] },
+      { group: "external", name: "RowFilter · RF_pt_0_001pct", pq: [80.7, "2 GETs · 1.2 MiB"], vx: [46.8, "1 GET · 894 KiB"], la: [89.0, "2 GETs · 1.6 MiB"], l1: [51.3, "1 GET · 1.1 MiB"] },
+      { group: "external", name: "RowFilter · RF_sel_1pct_unclustered", pq: [80.7, "2 GETs · 1.2 MiB"], vx: [46.8, "1 GET · 894 KiB"], la: [89.0, "2 GETs · 1.6 MiB"], l1: [51.3, "1 GET · 1.1 MiB"] },
+      { group: "external", name: "RowFilter · RF_mod_10pct_clustered", pq: [80.7, "2 GETs · 1.2 MiB"], vx: [46.8, "1 GET · 894 KiB"], la: [89.0, "2 GETs · 1.6 MiB"], l1: [51.3, "1 GET · 1.1 MiB"] },
+      { group: "external", name: "RowFilter · RF_mod_10pct_unclustered", pq: [80.7, "2 GETs · 1.2 MiB"], vx: [46.8, "1 GET · 894 KiB"], la: [89.0, "2 GETs · 1.6 MiB"], l1: [51.3, "1 GET · 1.1 MiB"] },
+      { group: "external", name: "RowFilter · RF_unsel_99pct_unclustered", pq: [80.7, "2 GETs · 1.2 MiB"], vx: [46.8, "1 GET · 894 KiB"], la: [89.0, "2 GETs · 1.6 MiB"], l1: [51.3, "1 GET · 1.1 MiB"] },
+      { group: "external", name: "RowFilter · RF_unsel_90pct_clustered", pq: [80.7, "2 GETs · 1.2 MiB"], vx: [46.8, "1 GET · 894 KiB"], la: [89.0, "2 GETs · 1.6 MiB"], l1: [51.3, "1 GET · 1.1 MiB"] },
+      { group: "external", name: "RandomAccess · RA_take_100", pq: [364.8, "2 GETs · 12.6 MiB"], vx: [267.0, "5 GETs · 9.7 MiB"], la: [632.1, "16 GETs · 20.9 MiB"], l1: [290.1, "2 GETs · 9.6 MiB"] },
+      { group: "external", name: "RandomAccess · RA_take_1000", pq: [364.8, "2 GETs · 12.6 MiB"], vx: [267.0, "5 GETs · 9.7 MiB"], la: [482.1, "18 GETs · 19.9 MiB"], l1: [290.1, "2 GETs · 9.6 MiB"] },
+      { group: "external", name: "JSONBench · JB_Q1_posts", pq: [101.0, "2 GETs · 2.0 MiB"], vx: [92.6, "2 GETs · 1.7 MiB"], la: [93.1, "2 GETs · 1.7 MiB"], l1: [79.8, "2 GETs · 1.2 MiB"] },
+      { group: "external", name: "JSONBench · JB_Q2_did_pt", pq: [176.0, "3 GETs · 4.0 MiB"], vx: [167.6, "3 GETs · 3.7 MiB"], la: [168.1, "6 GETs · 6.7 MiB"], l1: [129.8, "3 GETs · 4.2 MiB"] },
+      { group: "external", name: "JSONBench · JB_Q3_map_type", pq: [276.0, "3 GETs · 8.0 MiB"], vx: [167.6, "4 GETs · 9.7 MiB"], la: [293.1, "11 GETs · 16.7 MiB"], l1: [279.9, "3 GETs · 8.2 MiB"] },
+      { group: "external", name: "JSONBench · JB_Q4_text_like", pq: [176.0, "3 GETs · 4.0 MiB"], vx: [142.6, "2 GETs · 3.7 MiB"], la: [168.1, "5 GETs · 5.7 MiB"], l1: [154.8, "4 GETs · 4.2 MiB"] },
+      { group: "external", name: "JSONBench · JB_Q5_did_full", pq: [345.3, "8 GETs · 10.8 MiB"], vx: [272.6, "7 GETs · 12.7 MiB"], la: [818.1, "11 GETs · 41.7 MiB"], l1: [434.8, "5 GETs · 14.4 MiB"] },
+      { group: "external", name: "WildChat · WC_Q1_model_cnt", pq: [81.6, "2 GETs · 1.3 MiB"], vx: [76.8, "2 GETs · 1.1 MiB"], la: [83.0, "2 GETs · 1.3 MiB"], l1: [38.1, "1 GET · 537 KiB"] },
+      { group: "external", name: "WildChat · WC_Q2_lang_filter", pq: [81.6, "2 GETs · 1.3 MiB"], vx: [76.8, "2 GETs · 1.1 MiB"], la: [83.0, "2 GETs · 1.3 MiB"], l1: [38.1, "1 GET · 537 KiB"] },
+      { group: "external", name: "WildChat · WC_Q3_trace_full", pq: [136.6, "5 GETs · 4.3 MiB"], vx: [226.8, "4 GETs · 9.1 MiB"], la: [633.0, "5 GETs · 36.3 MiB"], l1: [143.6, "5 GETs · 4.5 MiB"] },
+      { group: "external", name: "WildChat · WC_Q4_unicode_ilike", pq: [267.6, "3 GETs · 7.7 MiB"], vx: [226.8, "3 GETs · 8.1 MiB"], la: [458.0, "3 GETs · 15.3 MiB"], l1: [363.6, "4 GETs · 10.5 MiB"] },
+      { group: "external", name: "WildChat · WC_Q5_input_absent", pq: [242.6, "2 GETs · 7.7 MiB"], vx: [201.8, "2 GETs · 6.1 MiB"], la: [633.0, "4 GETs · 23.3 MiB"], l1: [163.6, "3 GETs · 3.5 MiB"] },
+      { group: "external", name: "Hermes · HF_Q1_cat_cnt", pq: [77.3, "2 GETs · 1.1 MiB"], vx: [94.7, "2 GETs · 1.8 MiB"], la: [85.5, "2 GETs · 1.4 MiB"], l1: [27.7, "1 GET · 111 KiB"] },
+      { group: "external", name: "Hermes · HF_Q2_pt_full", pq: [127.3, "3 GETs · 2.1 MiB"], vx: [94.7, "2 GETs · 1.8 MiB"], la: [310.5, "3 GETs · 9.4 MiB"], l1: [118.2, "3 GETs · 1.7 MiB"] },
+      { group: "external", name: "Hermes · HF_Q3_tool_like", pq: [77.3, "2 GETs · 1.1 MiB"], vx: [94.7, "2 GETs · 1.8 MiB"], la: [85.5, "2 GETs · 1.4 MiB"], l1: [118.2, "3 GETs · 1.7 MiB"] },
+      { group: "external", name: "Hermes · HF_Q4_out_absent", pq: [39.0, "1 GET · 575 KiB"], vx: [94.7, "2 GETs · 1.8 MiB"], la: [85.5, "2 GETs · 1.4 MiB"], l1: [68.2, "2 GETs · 744 KiB"] },
+      { group: "lance", name: "Blobs · BL_meta_scan", pq: [78.7, "2 GETs · 1.1 MiB"], vx: [82.5, "2 GETs · 1.3 MiB"], la: [90.5, "2 GETs · 1.6 MiB"], l1: [25.4, "1 GET · 15 KiB"] },
+      { group: "lance", name: "Blobs · BL_take_1", pq: [111.5, "3 GETs · 4.5 MiB"], vx: [4607.6, "2 GETs · 182.3 MiB"], la: [190.5, "4 GETs · 3.6 MiB"], l1: [115.2, "3 GETs · 1.6 MiB"] },
+      { group: "lance", name: "Blobs · BL_take_10", pq: [561.5, "17 GETs · 26.5 MiB"], vx: [4607.6, "2 GETs · 182.3 MiB"], la: [225.5, "12 GETs · 12.6 MiB"], l1: [200.2, "12 GETs · 11.6 MiB"] },
+      { group: "lance", name: "Blobs · BL_take_50", pq: [1036.5, "31 GETs · 68.5 MiB"], vx: [4607.6, "2 GETs · 182.3 MiB"], la: [605.5, "27 GETs · 50.6 MiB"], l1: [570.2, "29 GETs · 48.6 MiB"] },
+      { group: "lance", name: "Wide-1000 · WD_cold_open", pq: [46.6, "1 GET · 883 KiB"], vx: [47.3, "1 GET · 912 KiB"], la: [128.7, "3 GETs · 2.1 MiB"], l1: [42.4, "1 GET · 714 KiB"] },
+      { group: "lance", name: "Wide-1000 · WD_narrow_3col", pq: [96.6, "2 GETs · 1.9 MiB"], vx: [97.3, "2 GETs · 1.9 MiB"], la: [128.7, "3 GETs · 2.1 MiB"], l1: [92.4, "2 GETs · 1.7 MiB"] },
+      { group: "lance", name: "Wide-1000 · WD_point_all_1000", pq: [246.6, "3 GETs · 6.9 MiB"], vx: [297.3, "6 GETs · 5.9 MiB"], la: [1303.7, "20 GETs · 41.1 MiB"], l1: [267.4, "2 GETs · 8.7 MiB"] },
+      { group: "lance", name: "Wide-1000 · WD_take_20_1000", pq: [221.6, "2 GETs · 6.9 MiB"], vx: [297.3, "6 GETs · 5.9 MiB"], la: [978.7, "16 GETs · 38.1 MiB"], l1: [267.4, "2 GETs · 8.7 MiB"] },
+      { group: "lance", name: "FineWeb · FW_score_cnt", pq: [103.2, "2 GETs · 2.1 MiB"], vx: [86.0, "2 GETs · 1.4 MiB"], la: [127.2, "3 GETs · 2.1 MiB"], l1: [98.0, "2 GETs · 1.9 MiB"] },
+      { group: "lance", name: "FineWeb · FW_take_100", pq: [910.7, "15 GETs · 60.4 MiB"], vx: [1811.0, "2 GETs · 70.4 MiB"], la: [1027.2, "32 GETs · 65.1 MiB"], l1: [772.2, "13 GETs · 62.3 MiB"] },
+      { group: "lance", name: "FineWeb · FW_substr_rare", pq: [1853.2, "3 GETs · 71.1 MiB"], vx: [1811.0, "2 GETs · 70.4 MiB"], la: [1477.2, "7 GETs · 86.1 MiB"], l1: [2357.2, "6 GETs · 88.3 MiB"] },
+      { group: "lance", name: "FineWeb · FW_substr_absent", pq: [1778.2, "2 GETs · 69.1 MiB"], vx: [1786.0, "2 GETs · 69.4 MiB"], la: [2152.2, "4 GETs · 84.1 MiB"], l1: [432.2, "3 GETs · 14.3 MiB"] },
+      { group: "lance", name: "Nested · NS_scan_full", pq: [177.1, "3 GETs · 4.1 MiB"], vx: [151.7, "3 GETs · 3.1 MiB"], la: [171.2, "2 GETs · 4.8 MiB"], l1: [135.1, "2 GETs · 3.4 MiB"] },
+      { group: "lance", name: "Nested · NS_filter_map", pq: [177.1, "4 GETs · 3.1 MiB"], vx: [151.7, "3 GETs · 3.1 MiB"], la: [96.2, "3 GETs · 2.8 MiB"], l1: [85.0, "2 GETs · 1.4 MiB"] },
+      { group: "lance", name: "Nested · NS_take_100", pq: [152.1, "2 GETs · 4.1 MiB"], vx: [126.7, "2 GETs · 3.1 MiB"], la: [221.2, "3 GETs · 5.8 MiB"], l1: [135.1, "2 GETs · 3.4 MiB"] },
+      { group: "lance", name: "TPC-H · TP_Q6_filter", pq: [253.8, "5 GETs · 5.2 MiB"], vx: [240.9, "5 GETs · 4.6 MiB"], la: [181.5, "6 GETs · 7.1 MiB"], l1: [148.6, "5 GETs · 8.1 MiB"] },
+      { group: "lance", name: "TPC-H · TP_Q1_scan", pq: [203.8, "3 GETs · 5.2 MiB"], vx: [215.9, "4 GETs · 4.6 MiB"], la: [191.5, "9 GETs · 11.1 MiB"], l1: [173.6, "8 GETs · 8.1 MiB"] },
+      { group: "lance", name: "TPC-H · TP_take_100", pq: [378.8, "2 GETs · 13.2 MiB"], vx: [340.9, "4 GETs · 9.6 MiB"], la: [526.5, "12 GETs · 22.1 MiB"], l1: [328.6, "2 GETs · 11.1 MiB"] },
+      { group: "lance", name: "DataLoader · DL_epoch_s3_cached", pq: [189.5, "2 GETs · 5.6 MiB"], vx: [147.1, "2 GETs · 3.9 MiB"], la: [222.2, "4 GETs · 6.9 MiB"], l1: [147.3, "2 GETs · 3.9 MiB"] },
+    ];
+
+    function fmtKib(v) {
+      return v >= 100 ? Math.round(v).toLocaleString("en-US") : v.toFixed(1);
+    }
+
+    function fmtMs(v) {
+      if (v <= 0.0005) return "<0.001 ms";
+      if (v >= 100) return Math.round(v).toLocaleString("en-US") + " ms";
+      if (v >= 10) return v.toFixed(1) + " ms";
+      if (v >= 1) return v.toFixed(2) + " ms";
+      return v.toFixed(3) + " ms";
+    }
+
+    const LIVE_S3 = {"readcache": [{"group": "cetra", "name": "W1 · cold_open_prune", "pq": [59.6, "1 GET · 427 KiB"], "vx": [130.8, "2 GETs · 1.6 MiB"], "la": [129.1, "2 GETs · 1.4 MiB"], "l1": [96.8, "1 GET · 561 KiB"]}, {"group": "cetra", "name": "W1 · point_lookup_narrow", "pq": [126.9, "2 GETs · 1.4 MiB"], "vx": [119.7, "2 GETs · 1.6 MiB"], "la": [188.9, "3 GETs · 2.4 MiB"], "l1": [123.8, "2 GETs · 1.5 MiB"]}, {"group": "cetra", "name": "W1 · point_lookup_full", "pq": [213.3, "4 GETs · 4.4 MiB"], "vx": [467.6, "9 GETs · 8.6 MiB"], "la": [309.2, "8 GETs · 8.4 MiB"], "l1": [251.7, "5 GETs · 7.6 MiB"]}, {"group": "cetra", "name": "W1 · filtered_count", "pq": [125.4, "2 GETs · 1.4 MiB"], "vx": [127.2, "2 GETs · 1.6 MiB"], "la": [127.8, "2 GETs · 1.4 MiB"], "l1": [127.5, "2 GETs · 1.5 MiB"]}, {"group": "cetra", "name": "W1 · time_bucket_agg", "pq": [127.0, "2 GETs · 1.4 MiB"], "vx": [134.4, "2 GETs · 1.6 MiB"], "la": [171.0, "3 GETs · 2.4 MiB"], "l1": [126.9, "2 GETs · 1.5 MiB"]}, {"group": "cetra", "name": "W1 · top_k_list", "pq": [190.7, "3 GETs · 2.4 MiB"], "vx": [202.7, "3 GETs · 2.6 MiB"], "la": [208.5, "4 GETs · 3.4 MiB"], "l1": [129.8, "2 GETs · 2.5 MiB"]}, {"group": "cetra", "name": "W1 · map_key_lookup", "pq": [127.4, "2 GETs · 1.4 MiB"], "vx": [131.6, "2 GETs · 1.6 MiB"], "la": [132.6, "2 GETs · 1.4 MiB"], "l1": [130.0, "2 GETs · 1.5 MiB"]}, {"group": "cetra", "name": "W1 · substring_rare", "pq": [1553.9, "2 GETs · 10.4 MiB"], "vx": [1590.5, "12 GETs · 11.6 MiB"], "la": [9171.5, "11 GETs · 130.4 MiB"], "l1": [287.7, "4 GETs · 7.6 MiB"]}, {"group": "cetra", "name": "W1 · substring_absent", "pq": [2069.6, "2 GETs · 10.4 MiB"], "vx": [2787.8, "12 GETs · 11.6 MiB"], "la": [5625.0, "11 GETs · 130.4 MiB"], "l1": [144.4, "3 GETs · 3.6 MiB"]}, {"group": "cetra", "name": "W2 · cold_open_prune", "pq": [214.2, "4 GETs · 765 KiB"], "vx": [864.5, "8 GETs · 7.1 MiB"], "la": [652.3, "8 GETs · 4.7 MiB"], "l1": [219.2, "4 GETs · 931 KiB"]}, {"group": "cetra", "name": "W2 · point_lookup_narrow", "pq": [324.3, "5 GETs · 1.7 MiB"], "vx": [780.4, "8 GETs · 7.1 MiB"], "la": [491.2, "8 GETs · 4.7 MiB"], "l1": [285.8, "5 GETs · 1.9 MiB"]}, {"group": "cetra", "name": "W2 · point_lookup_full", "pq": [443.7, "6 GETs · 4.7 MiB"], "vx": [1130.0, "10 GETs · 9.1 MiB"], "la": [1138.2, "13 GETs · 9.7 MiB"], "l1": [370.8, "8 GETs · 4.2 MiB"]}, {"group": "cetra", "name": "W2 · filtered_count", "pq": [213.8, "4 GETs · 513 KiB"], "vx": [252.6, "4 GETs · 3.1 MiB"], "la": [497.1, "8 GETs · 4.7 MiB"], "l1": [219.1, "4 GETs · 931 KiB"]}, {"group": "cetra", "name": "W2 · time_bucket_agg", "pq": [481.7, "8 GETs · 4.7 MiB"], "vx": [525.5, "8 GETs · 7.1 MiB"], "la": [510.1, "8 GETs · 4.7 MiB"], "l1": [489.3, "8 GETs · 4.9 MiB"]}, {"group": "cetra", "name": "W2 · top_k_list", "pq": [478.3, "8 GETs · 4.5 MiB"], "vx": [396.0, "6 GETs · 5.1 MiB"], "la": [795.7, "12 GETs · 8.7 MiB"], "l1": [349.0, "6 GETs · 2.9 MiB"]}, {"group": "cetra", "name": "W2 · map_key_lookup", "pq": [486.0, "8 GETs · 4.5 MiB"], "vx": [531.1, "8 GETs · 7.1 MiB"], "la": [496.2, "8 GETs · 4.7 MiB"], "l1": [492.8, "8 GETs · 4.9 MiB"]}, {"group": "cetra", "name": "W2 · substring_rare", "pq": [567.9, "8 GETs · 8.5 MiB"], "vx": [818.4, "12 GETs · 11.1 MiB"], "la": [997.0, "16 GETs · 16.7 MiB"], "l1": [855.7, "12 GETs · 11.2 MiB"]}, {"group": "cetra", "name": "W2 · substring_absent", "pq": [573.2, "8 GETs · 8.5 MiB"], "vx": [649.2, "12 GETs · 11.1 MiB"], "la": [1026.0, "16 GETs · 16.7 MiB"], "l1": [670.0, "10 GETs · 7.2 MiB"]}, {"group": "cetra", "name": "W3 spans · cold_open_prune", "pq": [58.6, "1 GET · 445 KiB"], "vx": [122.9, "2 GETs · 1.2 MiB"], "la": [139.7, "2 GETs · 2.2 MiB"], "l1": [64.6, "1 GET · 687 KiB"]}, {"group": "cetra", "name": "W3 spans · point_lookup_narrow", "pq": [352.9, "4 GETs · 11.4 MiB"], "vx": [555.0, "9 GETs · 9.2 MiB"], "la": [457.4, "12 GETs · 12.2 MiB"], "l1": [183.9, "2 GETs · 4.7 MiB"]}, {"group": "cetra", "name": "W3 spans · point_lookup_full", "pq": [427.5, "4 GETs · 8.1 MiB"], "vx": [462.8, "12 GETs · 12.2 MiB"], "la": [1158.6, "23 GETs · 24.2 MiB"], "l1": [233.5, "2 GETs · 7.7 MiB"]}, {"group": "cetra", "name": "W3 spans · filtered_count", "pq": [836.0, "3 GETs · 4.4 MiB"], "vx": [485.6, "4 GETs · 4.2 MiB"], "la": [635.9, "4 GETs · 4.2 MiB"], "l1": [140.3, "3 GETs · 2.7 MiB"]}, {"group": "cetra", "name": "W3 spans · time_bucket_agg", "pq": [733.5, "4 GETs · 6.4 MiB"], "vx": [465.2, "6 GETs · 5.2 MiB"], "la": [619.2, "7 GETs · 7.2 MiB"], "l1": [236.9, "5 GETs · 6.7 MiB"]}, {"group": "cetra", "name": "W3 spans · top_k_list", "pq": [1148.1, "10 GETs · 16.1 MiB"], "vx": [481.6, "8 GETs · 9.2 MiB"], "la": [801.9, "11 GETs · 12.2 MiB"], "l1": [312.4, "6 GETs · 11.7 MiB"]}, {"group": "cetra", "name": "W3 spans · map_key_lookup", "pq": [355.7, "4 GETs · 5.4 MiB"], "vx": [269.6, "6 GETs · 6.2 MiB"], "la": [392.9, "6 GETs · 6.2 MiB"], "l1": [217.4, "4 GETs · 4.7 MiB"]}, {"group": "cetra", "name": "W3 scores · cold_open_prune", "pq": [53.0, "1 GET · 123 KiB"], "vx": [418.4, "3 GETs · 3.8 MiB"], "la": [239.5, "3 GETs · 3.1 MiB"], "l1": [56.3, "1 GET · 202 KiB"]}, {"group": "cetra", "name": "W3 scores · point_lookup_narrow", "pq": [278.2, "3 GETs · 5.1 MiB"], "vx": [203.5, "5 GETs · 4.8 MiB"], "la": [440.8, "7 GETs · 7.1 MiB"], "l1": [185.1, "2 GETs · 5.2 MiB"]}, {"group": "cetra", "name": "W3 scores · filtered_count", "pq": [204.4, "2 GETs · 2.1 MiB"], "vx": [199.7, "3 GETs · 2.8 MiB"], "la": [263.1, "4 GETs · 3.1 MiB"], "l1": [137.4, "3 GETs · 2.2 MiB"]}, {"group": "cetra", "name": "W3 scores · map_key_lookup", "pq": [184.9, "3 GETs · 3.5 MiB"], "vx": [148.4, "3 GETs · 2.8 MiB"], "la": [326.2, "6 GETs · 5.1 MiB"], "l1": [143.8, "3 GETs · 3.2 MiB"]}, {"group": "cetra", "name": "W4 · cold_open_prune", "pq": [59.1, "1 GET · 470 KiB"], "vx": [126.1, "2 GETs · 1.3 MiB"], "la": [132.1, "2 GETs · 1.3 MiB"], "l1": [64.3, "1 GET · 814 KiB"]}, {"group": "cetra", "name": "W4 · point_lookup_narrow", "pq": [183.9, "3 GETs · 2.5 MiB"], "vx": [184.2, "3 GETs · 2.3 MiB"], "la": [208.0, "3 GETs · 2.3 MiB"], "l1": [133.8, "2 GETs · 1.8 MiB"]}, {"group": "cetra", "name": "W4 · point_lookup_full", "pq": [277.9, "7 GETs · 8.5 MiB"], "vx": [529.9, "7 GETs · 18.3 MiB"], "la": [324.5, "8 GETs · 7.3 MiB"], "l1": [146.8, "3 GETs · 2.6 MiB"]}, {"group": "cetra", "name": "W4 · filtered_count", "pq": [129.0, "2 GETs · 1.5 MiB"], "vx": [195.9, "3 GETs · 2.3 MiB"], "la": [130.7, "2 GETs · 1.3 MiB"], "l1": [130.8, "2 GETs · 1.8 MiB"]}, {"group": "cetra", "name": "W4 · time_bucket_agg", "pq": [197.2, "3 GETs · 2.6 MiB"], "vx": [192.5, "3 GETs · 2.3 MiB"], "la": [167.3, "3 GETs · 2.3 MiB"], "l1": [132.6, "2 GETs · 1.8 MiB"]}, {"group": "cetra", "name": "W4 · top_k_list", "pq": [204.8, "4 GETs · 3.6 MiB"], "vx": [206.9, "4 GETs · 3.3 MiB"], "la": [191.1, "3 GETs · 2.3 MiB"], "l1": [123.8, "2 GETs · 1.8 MiB"]}, {"group": "cetra", "name": "W4 · map_key_lookup", "pq": [127.7, "2 GETs · 1.5 MiB"], "vx": [157.4, "3 GETs · 2.3 MiB"], "la": [141.3, "3 GETs · 2.3 MiB"], "l1": [135.2, "2 GETs · 1.8 MiB"]}, {"group": "cetra", "name": "W4 · substring_rare", "pq": [351.9, "2 GETs · 13.5 MiB"], "vx": [335.7, "4 GETs · 14.3 MiB"], "la": [501.0, "4 GETs · 17.3 MiB"], "l1": [440.4, "4 GETs · 14.6 MiB"]}, {"group": "cetra", "name": "W4 · substring_absent", "pq": [342.3, "2 GETs · 13.5 MiB"], "vx": [335.4, "4 GETs · 14.3 MiB"], "la": [485.1, "4 GETs · 17.3 MiB"], "l1": [362.3, "3 GETs · 13.6 MiB"]}, {"group": "external", "name": "CB · CB_Q1", "pq": [132.4, "2 GETs · 1.8 MiB"], "vx": [139.1, "2 GETs · 2.0 MiB"], "la": [130.3, "2 GETs · 1.4 MiB"], "l1": [140.5, "2 GETs · 2.1 MiB"]}, {"group": "external", "name": "CB · CB_Q10", "pq": [200.5, "3 GETs · 2.8 MiB"], "vx": [203.7, "3 GETs · 3.0 MiB"], "la": [189.1, "3 GETs · 2.4 MiB"], "l1": [209.6, "3 GETs · 3.1 MiB"]}, {"group": "external", "name": "CB · CB_Q12", "pq": [201.1, "3 GETs · 2.8 MiB"], "vx": [207.6, "3 GETs · 3.0 MiB"], "la": [209.9, "4 GETs · 3.4 MiB"], "l1": [149.1, "3 GETs · 3.1 MiB"]}, {"group": "external", "name": "CB · CB_Q20", "pq": [210.4, "3 GETs · 3.0 MiB"], "vx": [205.2, "3 GETs · 3.0 MiB"], "la": [516.9, "4 GETs · 5.4 MiB"], "l1": [155.3, "2 GETs · 3.1 MiB"]}, {"group": "external", "name": "CB · CB_Q23_like", "pq": [334.6, "3 GETs · 4.8 MiB"], "vx": [401.4, "5 GETs · 5.0 MiB"], "la": [262.5, "4 GETs · 5.4 MiB"], "l1": [226.0, "3 GETs · 4.1 MiB"]}, {"group": "external", "name": "CB · CB_Q24", "pq": [183.1, "2 GETs · 3.8 MiB"], "vx": [226.0, "5 GETs · 5.0 MiB"], "la": [196.2, "3 GETs · 4.4 MiB"], "l1": [153.1, "2 GETs · 3.1 MiB"]}, {"group": "external", "name": "CB · CB_Q39_range", "pq": [134.4, "2 GETs · 1.8 MiB"], "vx": [137.3, "2 GETs · 2.0 MiB"], "la": [133.3, "2 GETs · 1.4 MiB"], "l1": [152.2, "2 GETs · 3.1 MiB"]}, {"group": "external", "name": "CB · CB_wide_point", "pq": [276.6, "4 GETs · 4.0 MiB"], "vx": [333.6, "6 GETs · 7.0 MiB"], "la": [1147.7, "18 GETs · 19.4 MiB"], "l1": [243.8, "2 GETs · 8.1 MiB"]}, {"group": "external", "name": "RF · RF_pt_0_001pct", "pq": [159.8, "2 GETs · 1.3 MiB"], "vx": [66.7, "1 GET · 894 KiB"], "la": [140.6, "2 GETs · 1.6 MiB"], "l1": [74.8, "1 GET · 1.0 MiB"]}, {"group": "external", "name": "RF · RF_sel_1pct_unclustered", "pq": [126.4, "2 GETs · 1.2 MiB"], "vx": [67.5, "1 GET · 894 KiB"], "la": [130.9, "2 GETs · 1.6 MiB"], "l1": [73.9, "1 GET · 1.0 MiB"]}, {"group": "external", "name": "RF · RF_mod_10pct_clustered", "pq": [126.9, "2 GETs · 1.2 MiB"], "vx": [69.8, "1 GET · 894 KiB"], "la": [128.0, "2 GETs · 1.6 MiB"], "l1": [74.4, "1 GET · 1.0 MiB"]}, {"group": "external", "name": "RF · RF_mod_10pct_unclustered", "pq": [127.9, "2 GETs · 1.2 MiB"], "vx": [68.5, "1 GET · 894 KiB"], "la": [129.1, "2 GETs · 1.6 MiB"], "l1": [73.6, "1 GET · 1.0 MiB"]}, {"group": "external", "name": "RF · RF_unsel_99pct_unclustered", "pq": [124.5, "2 GETs · 1.3 MiB"], "vx": [68.8, "1 GET · 894 KiB"], "la": [139.1, "2 GETs · 1.6 MiB"], "l1": [73.3, "1 GET · 1.0 MiB"]}, {"group": "external", "name": "RF · RF_unsel_90pct_clustered", "pq": [127.2, "2 GETs · 1.2 MiB"], "vx": [68.4, "1 GET · 894 KiB"], "la": [136.5, "2 GETs · 1.6 MiB"], "l1": [73.2, "1 GET · 1.0 MiB"]}, {"group": "external", "name": "RA · RA_take_100", "pq": [642.1, "2 GETs · 12.6 MiB"], "vx": [557.9, "9 GETs · 9.7 MiB"], "la": [838.3, "19 GETs · 18.9 MiB"], "l1": [263.8, "2 GETs · 9.6 MiB"]}, {"group": "external", "name": "RA · RA_take_1000", "pq": [1172.8, "2 GETs · 12.6 MiB"], "vx": [563.1, "9 GETs · 9.7 MiB"], "la": [946.0, "19 GETs · 18.9 MiB"], "l1": [262.1, "2 GETs · 9.6 MiB"]}, {"group": "external", "name": "JB · JB_Q1_posts", "pq": [219.1, "2 GETs · 2.0 MiB"], "vx": [212.8, "2 GETs · 1.7 MiB"], "la": [177.1, "2 GETs · 1.5 MiB"], "l1": [139.2, "2 GETs · 2.0 MiB"]}, {"group": "external", "name": "JB · JB_Q2_did_pt", "pq": [372.9, "3 GETs · 4.0 MiB"], "vx": [288.7, "4 GETs · 3.7 MiB"], "la": [448.2, "7 GETs · 6.5 MiB"], "l1": [163.0, "2 GETs · 4.0 MiB"]}, {"group": "external", "name": "JB · JB_Q3_map_type", "pq": [1032.0, "3 GETs · 8.0 MiB"], "vx": [362.9, "9 GETs · 9.7 MiB"], "la": [516.5, "17 GETs · 16.5 MiB"], "l1": [218.4, "2 GETs · 8.0 MiB"]}, {"group": "external", "name": "JB · JB_Q4_text_like", "pq": [519.9, "4 GETs · 4.8 MiB"], "vx": [210.6, "4 GETs · 3.7 MiB"], "la": [361.4, "5 GETs · 5.5 MiB"], "l1": [164.1, "2 GETs · 4.0 MiB"]}, {"group": "external", "name": "JB · JB_Q5_did_full", "pq": [716.1, "8 GETs · 10.8 MiB"], "vx": [577.1, "10 GETs · 12.7 MiB"], "la": [1122.3, "21 GETs · 41.5 MiB"], "l1": [348.5, "5 GETs · 14.1 MiB"]}, {"group": "external", "name": "WC · WC_Q1_model_cnt", "pq": [126.8, "2 GETs · 1.3 MiB"], "vx": [120.8, "2 GETs · 1.1 MiB"], "la": [142.3, "2 GETs · 2.0 MiB"], "l1": [59.2, "1 GET · 493 KiB"]}, {"group": "external", "name": "WC · WC_Q2_lang_filter", "pq": [125.8, "2 GETs · 1.3 MiB"], "vx": [120.9, "2 GETs · 1.1 MiB"], "la": [141.9, "2 GETs · 2.0 MiB"], "l1": [59.4, "1 GET · 493 KiB"]}, {"group": "external", "name": "WC · WC_Q3_trace_full", "pq": [283.4, "5 GETs · 4.3 MiB"], "vx": [415.3, "4 GETs · 9.1 MiB"], "la": [995.7, "6 GETs · 37.0 MiB"], "l1": [272.7, "5 GETs · 3.8 MiB"]}, {"group": "external", "name": "WC · WC_Q4_unicode_ilike", "pq": [353.6, "3 GETs · 8.3 MiB"], "vx": [338.7, "4 GETs · 8.1 MiB"], "la": [513.1, "3 GETs · 16.0 MiB"], "l1": [373.4, "4 GETs · 9.8 MiB"]}, {"group": "external", "name": "WC · WC_Q5_input_absent", "pq": [295.6, "2 GETs · 8.3 MiB"], "vx": [203.2, "4 GETs · 6.1 MiB"], "la": [746.3, "5 GETs · 24.0 MiB"], "l1": [187.0, "3 GETs · 2.8 MiB"]}, {"group": "external", "name": "HF · HF_Q1_cat_cnt", "pq": [119.4, "2 GETs · 1.1 MiB"], "vx": [128.7, "2 GETs · 1.8 MiB"], "la": [134.3, "2 GETs · 1.6 MiB"], "l1": [52.2, "1 GET · 110 KiB"]}, {"group": "external", "name": "HF · HF_Q2_pt_full", "pq": [175.5, "3 GETs · 2.1 MiB"], "vx": [135.4, "2 GETs · 1.8 MiB"], "la": [361.0, "3 GETs · 9.6 MiB"], "l1": [183.8, "3 GETs · 1.8 MiB"]}, {"group": "external", "name": "HF · HF_Q3_tool_like", "pq": [111.4, "2 GETs · 1.6 MiB"], "vx": [113.5, "2 GETs · 1.8 MiB"], "la": [112.4, "2 GETs · 1.6 MiB"], "l1": [187.6, "3 GETs · 1.8 MiB"]}, {"group": "external", "name": "HF · HF_Q4_out_absent", "pq": [61.1, "1 GET · 575 KiB"], "vx": [113.1, "2 GETs · 1.8 MiB"], "la": [113.5, "2 GETs · 1.6 MiB"], "l1": [117.6, "2 GETs · 870 KiB"]}, {"group": "lance", "name": "Suite G · BL_meta_scan", "pq": [157.9, "2 GETs · 1.1 MiB"], "vx": [124.3, "2 GETs · 1.3 MiB"], "la": [131.2, "2 GETs · 1.6 MiB"], "l1": [49.3, "1 GET · 15 KiB"]}, {"group": "lance", "name": "Suite G · BL_take_1", "pq": [204.6, "3 GETs · 4.5 MiB"], "vx": [3541.7, "3 GETs · 182.3 MiB"], "la": [191.9, "3 GETs · 2.6 MiB"], "l1": [178.8, "3 GETs · 1.6 MiB"]}, {"group": "lance", "name": "Suite G · BL_take_10", "pq": [751.5, "17 GETs · 26.5 MiB"], "vx": [3572.9, "3 GETs · 182.3 MiB"], "la": [574.7, "12 GETs · 12.6 MiB"], "l1": [497.2, "12 GETs · 11.6 MiB"]}, {"group": "lance", "name": "Suite G · BL_take_50", "pq": [1883.0, "31 GETs · 68.5 MiB"], "vx": [4708.3, "3 GETs · 182.3 MiB"], "la": [1426.0, "45 GETs · 50.6 MiB"], "l1": [1159.8, "29 GETs · 48.6 MiB"]}, {"group": "lance", "name": "Suite H · WD_cold_open", "pq": [239.1, "1 GET · 883 KiB"], "vx": [235.0, "1 GET · 912 KiB"], "la": [527.8, "3 GETs · 2.1 MiB"], "l1": [191.9, "1 GET · 708 KiB"]}, {"group": "lance", "name": "Suite H · WD_narrow_3col", "pq": [384.8, "2 GETs · 1.9 MiB"], "vx": [286.8, "2 GETs · 1.9 MiB"], "la": [310.2, "3 GETs · 2.1 MiB"], "l1": [254.7, "2 GETs · 1.7 MiB"]}, {"group": "lance", "name": "Suite H · WD_point_all_1000", "pq": [553.5, "5 GETs · 5.7 MiB"], "vx": [634.4, "6 GETs · 5.9 MiB"], "la": [2098.6, "39 GETs · 38.1 MiB"], "l1": [435.4, "2 GETs · 8.7 MiB"]}, {"group": "lance", "name": "Suite H · WD_take_20_1000", "pq": [711.0, "2 GETs · 6.9 MiB"], "vx": [687.3, "6 GETs · 5.9 MiB"], "la": [1399.5, "39 GETs · 38.1 MiB"], "l1": [273.2, "2 GETs · 8.7 MiB"]}, {"group": "lance", "name": "Suite I · FW_score_cnt", "pq": [248.2, "2 GETs · 2.1 MiB"], "vx": [164.3, "2 GETs · 1.4 MiB"], "la": [272.2, "3 GETs · 2.1 MiB"], "l1": [134.7, "2 GETs · 1.7 MiB"]}, {"group": "lance", "name": "Suite I · FW_take_100", "pq": [1464.7, "15 GETs · 60.4 MiB"], "vx": [1378.7, "8 GETs · 70.4 MiB"], "la": [1510.1, "63 GETs · 62.1 MiB"], "l1": [2409.0, "15 GETs · 59.0 MiB"]}, {"group": "lance", "name": "Suite I · FW_substr_rare", "pq": [2399.2, "6 GETs · 73.4 MiB"], "vx": [4747.2, "8 GETs · 70.4 MiB"], "la": [4144.9, "10 GETs · 86.1 MiB"], "l1": [5423.2, "6 GETs · 91.0 MiB"]}, {"group": "lance", "name": "Suite I · FW_substr_absent", "pq": [2222.3, "4 GETs · 73.4 MiB"], "vx": [1366.0, "7 GETs · 69.4 MiB"], "la": [2304.0, "9 GETs · 84.1 MiB"], "l1": [541.6, "3 GETs · 13.0 MiB"]}, {"group": "lance", "name": "Suite J · NS_scan_full", "pq": [273.3, "3 GETs · 4.1 MiB"], "vx": [283.1, "4 GETs · 3.1 MiB"], "la": [230.9, "5 GETs · 4.8 MiB"], "l1": [173.9, "2 GETs · 3.4 MiB"]}, {"group": "lance", "name": "Suite J · NS_filter_map", "pq": [284.0, "4 GETs · 3.1 MiB"], "vx": [235.8, "4 GETs · 3.1 MiB"], "la": [193.4, "3 GETs · 2.8 MiB"], "l1": [124.0, "2 GETs · 1.4 MiB"]}, {"group": "lance", "name": "Suite J · NS_take_100", "pq": [189.5, "2 GETs · 4.1 MiB"], "vx": [176.2, "4 GETs · 3.1 MiB"], "la": [175.6, "5 GETs · 4.8 MiB"], "l1": [178.1, "2 GETs · 3.4 MiB"]}, {"group": "lance", "name": "Suite K · TP_Q6_filter", "pq": [371.6, "5 GETs · 5.2 MiB"], "vx": [311.5, "5 GETs · 4.6 MiB"], "la": [310.9, "6 GETs · 7.9 MiB"], "l1": [536.6, "5 GETs · 8.0 MiB"]}, {"group": "lance", "name": "Suite K · TP_Q1_scan", "pq": [265.5, "3 GETs · 5.2 MiB"], "vx": [464.9, "4 GETs · 4.6 MiB"], "la": [366.4, "9 GETs · 11.9 MiB"], "l1": [642.6, "7 GETs · 8.0 MiB"]}, {"group": "lance", "name": "Suite K · TP_take_100", "pq": [345.8, "2 GETs · 13.2 MiB"], "vx": [289.1, "10 GETs · 9.6 MiB"], "la": [687.5, "22 GETs · 21.9 MiB"], "l1": [1132.5, "2 GETs · 11.0 MiB"]}, {"group": "lance", "name": "Suite L · DL_epoch_s3_cached", "pq": [2449.3, "2 GETs · 5.6 MiB"], "vx": [1313.1, "4 GETs · 3.9 MiB"], "la": [693.4, "7 GETs · 6.9 MiB"], "l1": [496.0, "2 GETs · 3.9 MiB"]}], "direct": [{"group": "cetra", "name": "W1 · cold_open_prune", "pq": [57.2, "1 GET · 64 KiB"], "vx": [239.4, "5 GETs · 85 KiB"], "la": [234.4, "5 GETs · 35 KiB"], "l1": [98.4, "1 GET · 192 KiB"]}, {"group": "cetra", "name": "W1 · point_lookup_narrow", "pq": [307.6, "6 GETs · 720 KiB"], "vx": [431.5, "18 GETs · 468 KiB"], "la": [451.9, "24 GETs · 97 KiB"], "l1": [118.5, "2 GETs · 734 KiB"]}, {"group": "cetra", "name": "W1 · point_lookup_full", "pq": [355.2, "3 GETs · 11.4 MiB"], "vx": [1767.0, "332 GETs · 7.2 MiB"], "la": [816.3, "60 GETs · 1.1 MiB"], "l1": [422.6, "7 GETs · 3.1 MiB"]}, {"group": "cetra", "name": "W1 · filtered_count", "pq": [174.9, "3 GETs · 199 KiB"], "vx": [352.2, "7 GETs · 153 KiB"], "la": [286.4, "6 GETs · 177 KiB"], "l1": [114.4, "2 GETs · 294 KiB"]}, {"group": "cetra", "name": "W1 · time_bucket_agg", "pq": [233.7, "6 GETs · 368 KiB"], "vx": [299.3, "8 GETs · 208 KiB"], "la": [337.3, "10 GETs · 373 KiB"], "l1": [118.3, "2 GETs · 491 KiB"]}, {"group": "cetra", "name": "W1 · top_k_list", "pq": [357.4, "10 GETs · 606 KiB"], "vx": [473.6, "19 GETs · 414 KiB"], "la": [509.1, "28 GETs · 289 KiB"], "l1": [122.7, "4 GETs · 715 KiB"]}, {"group": "cetra", "name": "W1 · map_key_lookup", "pq": [123.5, "4 GETs · 250 KiB"], "vx": [237.0, "7 GETs · 206 KiB"], "la": [341.6, "11 GETs · 240 KiB"], "l1": [114.5, "2 GETs · 341 KiB"]}, {"group": "cetra", "name": "W1 · substring_rare", "pq": [1687.9, "3 GETs · 8.5 MiB"], "vx": [4316.8, "842 GETs · 9.1 MiB"], "la": [5738.0, "14 GETs · 128.1 MiB"], "l1": [698.7, "12 GETs · 2.4 MiB"]}, {"group": "cetra", "name": "W1 · substring_absent", "pq": [2103.1, "3 GETs · 8.5 MiB"], "vx": [4550.2, "842 GETs · 9.1 MiB"], "la": [5467.1, "14 GETs · 128.1 MiB"], "l1": [269.9, "4 GETs · 1.1 MiB"]}, {"group": "cetra", "name": "W2 · cold_open_prune", "pq": [211.8, "4 GETs · 256 KiB"], "vx": [453.9, "8 GETs · 570 KiB"], "la": [974.4, "16 GETs · 403 KiB"], "l1": [219.4, "4 GETs · 768 KiB"]}, {"group": "cetra", "name": "W2 · point_lookup_narrow", "pq": [510.7, "9 GETs · 756 KiB"], "vx": [614.0, "19 GETs · 668 KiB"], "la": [1249.1, "28 GETs · 432 KiB"], "l1": [280.9, "5 GETs · 953 KiB"]}, {"group": "cetra", "name": "W2 · point_lookup_full", "pq": [765.2, "10 GETs · 4.6 MiB"], "vx": [978.5, "57 GETs · 4.4 MiB"], "la": [1262.7, "53 GETs · 582 KiB"], "l1": [394.5, "8 GETs · 2.4 MiB"]}, {"group": "cetra", "name": "W2 · filtered_count", "pq": [209.7, "4 GETs · 256 KiB"], "vx": [230.8, "4 GETs · 256 KiB"], "la": [1006.0, "20 GETs · 242 KiB"], "l1": [215.0, "4 GETs · 768 KiB"]}, {"group": "cetra", "name": "W2 · time_bucket_agg", "pq": [683.2, "16 GETs · 433 KiB"], "vx": [834.5, "28 GETs · 373 KiB"], "la": [1024.7, "24 GETs · 259 KiB"], "l1": [444.0, "8 GETs · 885 KiB"]}, {"group": "cetra", "name": "W2 · top_k_list", "pq": [599.3, "14 GETs · 1.3 MiB"], "vx": [937.6, "32 GETs · 1.1 MiB"], "la": [1791.4, "116 GETs · 687 KiB"], "l1": [357.2, "6 GETs · 2.2 MiB"]}, {"group": "cetra", "name": "W2 · map_key_lookup", "pq": [461.5, "12 GETs · 943 KiB"], "vx": [498.3, "16 GETs · 727 KiB"], "la": [1207.2, "36 GETs · 632 KiB"], "l1": [457.8, "8 GETs · 1.2 MiB"]}, {"group": "cetra", "name": "W2 · substring_rare", "pq": [556.9, "12 GETs · 6.1 MiB"], "vx": [938.9, "22 GETs · 6.0 MiB"], "la": [1264.6, "24 GETs · 13.1 MiB"], "l1": [1024.1, "17 GETs · 4.0 MiB"]}, {"group": "cetra", "name": "W2 · substring_absent", "pq": [569.0, "12 GETs · 6.2 MiB"], "vx": [974.8, "22 GETs · 6.0 MiB"], "la": [1274.4, "24 GETs · 13.1 MiB"], "l1": [638.1, "11 GETs · 2.5 MiB"]}, {"group": "cetra", "name": "W3 spans · cold_open_prune", "pq": [56.3, "1 GET · 64 KiB"], "vx": [116.3, "2 GETs · 185 KiB"], "la": [245.9, "5 GETs · 1.3 MiB"], "l1": [62.7, "1 GET · 192 KiB"]}, {"group": "cetra", "name": "W3 spans · point_lookup_narrow", "pq": [380.7, "11 GETs · 789 KiB"], "vx": [395.8, "14 GETs · 2.5 MiB"], "la": [729.0, "28 GETs · 2.3 MiB"], "l1": [160.6, "2 GETs · 3.9 MiB"]}, {"group": "cetra", "name": "W3 spans · point_lookup_full", "pq": [378.4, "25 GETs · 1.8 MiB"], "vx": [567.9, "67 GETs · 5.3 MiB"], "la": [956.5, "78 GETs · 5.9 MiB"], "l1": [216.9, "3 GETs · 7.1 MiB"]}, {"group": "cetra", "name": "W3 spans · filtered_count", "pq": [214.3, "3 GETs · 2.0 MiB"], "vx": [387.4, "6 GETs · 1.5 MiB"], "la": [290.4, "7 GETs · 1.9 MiB"], "l1": [166.9, "3 GETs · 1.7 MiB"]}, {"group": "cetra", "name": "W3 spans · time_bucket_agg", "pq": [339.4, "6 GETs · 2.5 MiB"], "vx": [429.8, "11 GETs · 1.9 MiB"], "la": [427.1, "14 GETs · 2.9 MiB"], "l1": [247.9, "7 GETs · 2.6 MiB"]}, {"group": "cetra", "name": "W3 spans · top_k_list", "pq": [552.1, "9 GETs · 6.7 MiB"], "vx": [544.3, "31 GETs · 5.8 MiB"], "la": [1176.4, "239 GETs · 4.3 MiB"], "l1": [391.1, "9 GETs · 6.8 MiB"]}, {"group": "cetra", "name": "W3 spans · map_key_lookup", "pq": [172.1, "4 GETs · 3.3 MiB"], "vx": [311.4, "25 GETs · 2.8 MiB"], "la": [457.6, "12 GETs · 3.7 MiB"], "l1": [245.5, "7 GETs · 3.1 MiB"]}, {"group": "cetra", "name": "W3 scores · cold_open_prune", "pq": [52.6, "1 GET · 64 KiB"], "vx": [177.7, "5 GETs · 2.0 MiB"], "la": [252.2, "4 GETs · 1.9 MiB"], "l1": [56.3, "1 GET · 192 KiB"]}, {"group": "cetra", "name": "W3 scores · point_lookup_narrow", "pq": [325.7, "5 GETs · 3.5 MiB"], "vx": [343.7, "12 GETs · 2.6 MiB"], "la": [433.7, "18 GETs · 1.9 MiB"], "l1": [293.6, "3 GETs · 3.4 MiB"]}, {"group": "cetra", "name": "W3 scores · filtered_count", "pq": [183.3, "3 GETs · 278 KiB"], "vx": [194.8, "4 GETs · 571 KiB"], "la": [297.3, "7 GETs · 1000 KiB"], "l1": [162.8, "4 GETs · 337 KiB"]}, {"group": "cetra", "name": "W3 scores · map_key_lookup", "pq": [146.9, "3 GETs · 1.6 MiB"], "vx": [256.1, "14 GETs · 1.1 MiB"], "la": [304.0, "8 GETs · 2.7 MiB"], "l1": [133.6, "3 GETs · 1.3 MiB"]}, {"group": "cetra", "name": "W4 · cold_open_prune", "pq": [58.9, "1 GET · 64 KiB"], "vx": [117.9, "2 GETs · 222 KiB"], "la": [237.3, "4 GETs · 184 KiB"], "l1": [60.1, "1 GET · 192 KiB"]}, {"group": "cetra", "name": "W4 · point_lookup_narrow", "pq": [238.3, "5 GETs · 709 KiB"], "vx": [338.2, "13 GETs · 571 KiB"], "la": [458.0, "21 GETs · 223 KiB"], "l1": [116.5, "2 GETs · 740 KiB"]}, {"group": "cetra", "name": "W4 · point_lookup_full", "pq": [412.5, "11 GETs · 1.5 MiB"], "vx": [1095.2, "63 GETs · 16.1 MiB"], "la": [550.0, "51 GETs · 408 KiB"], "l1": [177.5, "3 GETs · 2.0 MiB"]}, {"group": "cetra", "name": "W4 · filtered_count", "pq": [176.6, "3 GETs · 135 KiB"], "vx": [198.7, "4 GETs · 122 KiB"], "la": [229.0, "6 GETs · 107 KiB"], "l1": [119.8, "2 GETs · 254 KiB"]}, {"group": "cetra", "name": "W4 · time_bucket_agg", "pq": [179.7, "4 GETs · 245 KiB"], "vx": [216.8, "7 GETs · 151 KiB"], "la": [280.0, "8 GETs · 214 KiB"], "l1": [112.6, "3 GETs · 311 KiB"]}, {"group": "cetra", "name": "W4 · top_k_list", "pq": [290.7, "7 GETs · 624 KiB"], "vx": [341.7, "14 GETs · 554 KiB"], "la": [554.0, "38 GETs · 637 KiB"], "l1": [131.9, "3 GETs · 734 KiB"]}, {"group": "cetra", "name": "W4 · map_key_lookup", "pq": [123.6, "4 GETs · 327 KiB"], "vx": [122.8, "4 GETs · 299 KiB"], "la": [387.4, "10 GETs · 295 KiB"], "l1": [120.7, "2 GETs · 425 KiB"]}, {"group": "cetra", "name": "W4 · substring_rare", "pq": [320.6, "3 GETs · 12.0 MiB"], "vx": [311.7, "4 GETs · 12.0 MiB"], "la": [515.1, "6 GETs · 15.2 MiB"], "l1": [532.2, "5 GETs · 12.3 MiB"]}, {"group": "cetra", "name": "W4 · substring_absent", "pq": [317.2, "3 GETs · 12.0 MiB"], "vx": [302.9, "4 GETs · 12.0 MiB"], "la": [508.6, "6 GETs · 15.2 MiB"], "l1": [623.5, "4 GETs · 12.2 MiB"]}, {"group": "external", "name": "CB · CB_Q1", "pq": [118.2, "2 GETs · 64 KiB"], "vx": [119.3, "2 GETs · 64 KiB"], "la": [235.7, "4 GETs · 55 KiB"], "l1": [130.2, "2 GETs · 193 KiB"]}, {"group": "external", "name": "CB · CB_Q10", "pq": [178.5, "3 GETs · 171 KiB"], "vx": [245.8, "4 GETs · 122 KiB"], "la": [381.7, "7 GETs · 557 KiB"], "l1": [178.1, "3 GETs · 268 KiB"]}, {"group": "external", "name": "CB · CB_Q12", "pq": [180.3, "3 GETs · 184 KiB"], "vx": [187.0, "4 GETs · 133 KiB"], "la": [341.8, "7 GETs · 953 KiB"], "l1": [189.5, "4 GETs · 284 KiB"]}, {"group": "external", "name": "CB · CB_Q20", "pq": [234.8, "4 GETs · 2.4 MiB"], "vx": [391.2, "8 GETs · 1.0 MiB"], "la": [541.0, "12 GETs · 3.5 MiB"], "l1": [143.1, "3 GETs · 988 KiB"]}, {"group": "external", "name": "CB · CB_Q23_like", "pq": [222.2, "3 GETs · 2.0 MiB"], "vx": [361.2, "9 GETs · 1.8 MiB"], "la": [400.1, "8 GETs · 3.1 MiB"], "l1": [196.8, "5 GETs · 758 KiB"]}, {"group": "external", "name": "CB · CB_Q24", "pq": [155.3, "2 GETs · 1.7 MiB"], "vx": [316.3, "7 GETs · 1.6 MiB"], "la": [294.8, "5 GETs · 2.7 MiB"], "l1": [151.2, "2 GETs · 1.8 MiB"]}, {"group": "external", "name": "CB · CB_Q39_range", "pq": [243.8, "4 GETs · 480 KiB"], "vx": [303.8, "5 GETs · 232 KiB"], "la": [421.4, "7 GETs · 537 KiB"], "l1": [126.8, "2 GETs · 536 KiB"]}, {"group": "external", "name": "CB · CB_wide_point", "pq": [334.6, "4 GETs · 8.8 MiB"], "vx": [904.2, "127 GETs · 4.9 MiB"], "la": [1255.4, "96 GETs · 19.5 MiB"], "l1": [249.1, "2 GETs · 8.1 MiB"]}, {"group": "external", "name": "RF · RF_pt_0_001pct", "pq": [175.0, "3 GETs · 1.3 MiB"], "vx": [261.7, "5 GETs · 939 KiB"], "la": [345.5, "9 GETs · 1.5 MiB"], "l1": [180.9, "3 GETs · 263 KiB"]}, {"group": "external", "name": "RF · RF_sel_1pct_unclustered", "pq": [180.6, "3 GETs · 1.3 MiB"], "vx": [260.9, "5 GETs · 939 KiB"], "la": [350.1, "10 GETs · 1.5 MiB"], "l1": [142.0, "2 GETs · 1.0 MiB"]}, {"group": "external", "name": "RF · RF_mod_10pct_clustered", "pq": [178.7, "3 GETs · 1.3 MiB"], "vx": [258.7, "5 GETs · 939 KiB"], "la": [434.7, "10 GETs · 1.5 MiB"], "l1": [142.4, "2 GETs · 1.0 MiB"]}, {"group": "external", "name": "RF · RF_mod_10pct_unclustered", "pq": [180.7, "3 GETs · 1.3 MiB"], "vx": [258.4, "5 GETs · 939 KiB"], "la": [533.6, "11 GETs · 1.5 MiB"], "l1": [129.9, "2 GETs · 1.0 MiB"]}, {"group": "external", "name": "RF · RF_unsel_99pct_unclustered", "pq": [181.7, "3 GETs · 1.3 MiB"], "vx": [259.4, "5 GETs · 939 KiB"], "la": [475.1, "11 GETs · 1.5 MiB"], "l1": [142.2, "2 GETs · 1.0 MiB"]}, {"group": "external", "name": "RF · RF_unsel_90pct_clustered", "pq": [185.0, "3 GETs · 1.3 MiB"], "vx": [258.6, "5 GETs · 939 KiB"], "la": [436.5, "10 GETs · 1.5 MiB"], "l1": [138.9, "2 GETs · 1.0 MiB"]}, {"group": "external", "name": "RA · RA_take_100", "pq": [376.6, "2 GETs · 12.6 MiB"], "vx": [367.0, "51 GETs · 9.7 MiB"], "la": [980.8, "561 GETs · 3.8 MiB"], "l1": [326.3, "3 GETs · 9.8 MiB"]}, {"group": "external", "name": "RA · RA_take_1000", "pq": [336.8, "2 GETs · 12.6 MiB"], "vx": [393.7, "52 GETs · 9.7 MiB"], "la": [1286.1, "651 GETs · 14.1 MiB"], "l1": [312.5, "3 GETs · 9.8 MiB"]}, {"group": "external", "name": "JB · JB_Q1_posts", "pq": [187.0, "3 GETs · 97 KiB"], "vx": [182.9, "5 GETs · 92 KiB"], "la": [357.7, "6 GETs · 106 KiB"], "l1": [122.5, "2 GETs · 235 KiB"]}, {"group": "external", "name": "JB · JB_Q2_did_pt", "pq": [242.6, "4 GETs · 1.8 MiB"], "vx": [420.9, "8 GETs · 1.4 MiB"], "la": [476.0, "10 GETs · 4.5 MiB"], "l1": [216.3, "3 GETs · 2.5 MiB"]}, {"group": "external", "name": "JB · JB_Q3_map_type", "pq": [333.7, "3 GETs · 6.7 MiB"], "vx": [389.9, "17 GETs · 6.7 MiB"], "la": [792.2, "25 GETs · 15.0 MiB"], "l1": [221.1, "14 GETs · 1.7 MiB"]}, {"group": "external", "name": "JB · JB_Q4_text_like", "pq": [238.7, "3 GETs · 1.4 MiB"], "vx": [342.3, "5 GETs · 1.3 MiB"], "la": [337.3, "6 GETs · 3.8 MiB"], "l1": [222.4, "4 GETs · 1.8 MiB"]}, {"group": "external", "name": "JB · JB_Q5_did_full", "pq": [889.8, "3 GETs · 20.1 MiB"], "vx": [511.9, "23 GETs · 7.4 MiB"], "la": [1838.2, "38 GETs · 41.9 MiB"], "l1": [535.0, "11 GETs · 10.3 MiB"]}, {"group": "external", "name": "WC · WC_Q1_model_cnt", "pq": [118.3, "2 GETs · 66 KiB"], "vx": [113.2, "3 GETs · 66 KiB"], "la": [172.8, "3 GETs · 8 KiB"], "l1": [112.9, "2 GETs · 194 KiB"]}, {"group": "external", "name": "WC · WC_Q2_lang_filter", "pq": [178.4, "3 GETs · 225 KiB"], "vx": [179.2, "7 GETs · 157 KiB"], "la": [227.4, "7 GETs · 220 KiB"], "l1": [113.5, "2 GETs · 323 KiB"]}, {"group": "external", "name": "WC · WC_Q3_trace_full", "pq": [442.5, "7 GETs · 1.0 MiB"], "vx": [720.3, "13 GETs · 6.8 MiB"], "la": [1790.3, "15 GETs · 37.2 MiB"], "l1": [231.9, "6 GETs · 1.4 MiB"]}, {"group": "external", "name": "WC · WC_Q4_unicode_ilike", "pq": [651.2, "3 GETs · 6.7 MiB"], "vx": [552.3, "5 GETs · 6.5 MiB"], "la": [1023.9, "6 GETs · 15.2 MiB"], "l1": [487.5, "6 GETs · 8.6 MiB"]}, {"group": "external", "name": "WC · WC_Q5_input_absent", "pq": [500.0, "2 GETs · 6.1 MiB"], "vx": [417.9, "5 GETs · 5.7 MiB"], "la": [931.4, "7 GETs · 22.1 MiB"], "l1": [277.5, "5 GETs · 2.2 MiB"]}, {"group": "external", "name": "HF · HF_Q1_cat_cnt", "pq": [116.5, "2 GETs · 65 KiB"], "vx": [119.6, "3 GETs · 65 KiB"], "la": [254.4, "4 GETs · 17 KiB"], "l1": [52.6, "1 GET · 110 KiB"]}, {"group": "external", "name": "HF · HF_Q2_pt_full", "pq": [205.8, "3 GETs · 2.6 MiB"], "vx": [450.5, "12 GETs · 1.8 MiB"], "la": [551.2, "13 GETs · 10.0 MiB"], "l1": [181.7, "4 GETs · 846 KiB"]}, {"group": "external", "name": "HF · HF_Q3_tool_like", "pq": [173.4, "3 GETs · 382 KiB"], "vx": [295.1, "6 GETs · 368 KiB"], "la": [275.5, "7 GETs · 860 KiB"], "l1": [179.9, "3 GETs · 844 KiB"]}, {"group": "external", "name": "HF · HF_Q4_out_absent", "pq": [115.0, "2 GETs · 240 KiB"], "vx": [121.8, "3 GETs · 275 KiB"], "la": [279.5, "6 GETs · 476 KiB"], "l1": [116.5, "2 GETs · 494 KiB"]}, {"group": "lance", "name": "Suite G · BL_meta_scan", "pq": [172.3, "3 GETs · 92 KiB"], "vx": [215.0, "4 GETs · 69 KiB"], "la": [185.5, "7 GETs · 13 KiB"], "l1": [49.6, "1 GET · 15 KiB"]}, {"group": "lance", "name": "Suite G · BL_take_1", "pq": [181.1, "3 GETs · 1.1 MiB"], "vx": [3445.1, "7 GETs · 182.4 MiB"], "la": [180.7, "10 GETs · 99 KiB"], "l1": [168.8, "3 GETs · 340 KiB"]}, {"group": "lance", "name": "Suite G · BL_take_10", "pq": [644.4, "17 GETs · 10.0 MiB"], "vx": [3466.3, "7 GETs · 182.4 MiB"], "la": [406.5, "19 GETs · 1.5 MiB"], "l1": [424.8, "12 GETs · 1.7 MiB"]}, {"group": "lance", "name": "Suite G · BL_take_50", "pq": [1159.1, "47 GETs · 31.7 MiB"], "vx": [3449.4, "7 GETs · 182.4 MiB"], "la": [467.7, "56 GETs · 4.0 MiB"], "l1": [492.8, "50 GETs · 4.3 MiB"]}, {"group": "lance", "name": "Suite H · WD_cold_open", "pq": [126.8, "2 GETs · 267 KiB"], "vx": [113.8, "2 GETs · 323 KiB"], "la": [242.2, "4 GETs · 698 KiB"], "l1": [62.2, "1 GET · 192 KiB"]}, {"group": "lance", "name": "Suite H · WD_narrow_3col", "pq": [246.9, "5 GETs · 380 KiB"], "vx": [286.6, "6 GETs · 350 KiB"], "la": [417.7, "8 GETs · 743 KiB"], "l1": [120.4, "2 GETs · 265 KiB"]}, {"group": "lance", "name": "Suite H · WD_point_all_1000", "pq": [362.0, "4 GETs · 6.9 MiB"], "vx": [4747.3, "1199 GETs · 5.4 MiB"], "la": [2713.2, "2004 GETs · 7.1 MiB"], "l1": [247.7, "2 GETs · 8.7 MiB"]}, {"group": "lance", "name": "Suite H · WD_take_20_1000", "pq": [325.4, "3 GETs · 6.8 MiB"], "vx": [4493.4, "1198 GETs · 5.4 MiB"], "la": [3394.3, "2897 GETs · 25.2 MiB"], "l1": [257.1, "2 GETs · 8.7 MiB"]}, {"group": "lance", "name": "Suite I · FW_score_cnt", "pq": [187.2, "3 GETs · 922 KiB"], "vx": [156.6, "3 GETs · 877 KiB"], "la": [311.3, "7 GETs · 1.1 MiB"], "l1": [129.8, "2 GETs · 1.0 MiB"]}, {"group": "lance", "name": "Suite I · FW_take_100", "pq": [1324.5, "2 GETs · 71.2 MiB"], "vx": [2201.8, "20 GETs · 70.5 MiB"], "la": [780.7, "251 GETs · 1.5 MiB"], "l1": [775.1, "86 GETs · 7.2 MiB"]}, {"group": "lance", "name": "Suite I · FW_substr_rare", "pq": [1583.5, "3 GETs · 70.8 MiB"], "vx": [1630.1, "11 GETs · 70.2 MiB"], "la": [2030.5, "11 GETs · 85.4 MiB"], "l1": [1704.2, "6 GETs · 89.5 MiB"]}, {"group": "lance", "name": "Suite I · FW_substr_absent", "pq": [1745.2, "5 GETs · 70.9 MiB"], "vx": [1209.7, "8 GETs · 69.0 MiB"], "la": [2139.1, "10 GETs · 83.5 MiB"], "l1": [349.0, "3 GETs · 11.3 MiB"]}, {"group": "lance", "name": "Suite J · NS_scan_full", "pq": [351.0, "3 GETs · 4.1 MiB"], "vx": [365.9, "36 GETs · 3.1 MiB"], "la": [776.2, "49 GETs · 4.9 MiB"], "l1": [153.9, "2 GETs · 3.4 MiB"]}, {"group": "lance", "name": "Suite J · NS_filter_map", "pq": [322.9, "5 GETs · 1.6 MiB"], "vx": [309.3, "23 GETs · 1.4 MiB"], "la": [514.5, "21 GETs · 1.8 MiB"], "l1": [163.1, "3 GETs · 441 KiB"]}, {"group": "lance", "name": "Suite J · NS_take_100", "pq": [221.6, "2 GETs · 4.1 MiB"], "vx": [323.1, "36 GETs · 3.1 MiB"], "la": [916.4, "327 GETs · 1.8 MiB"], "l1": [155.5, "2 GETs · 3.4 MiB"]}, {"group": "lance", "name": "Suite K · TP_Q6_filter", "pq": [362.0, "5 GETs · 3.6 MiB"], "vx": [359.1, "15 GETs · 2.6 MiB"], "la": [532.1, "9 GETs · 5.2 MiB"], "l1": [186.7, "5 GETs · 3.3 MiB"]}, {"group": "lance", "name": "Suite K · TP_Q1_scan", "pq": [249.1, "3 GETs · 4.0 MiB"], "vx": [406.9, "23 GETs · 2.9 MiB"], "la": [525.3, "11 GETs · 10.3 MiB"], "l1": [231.6, "9 GETs · 3.3 MiB"]}, {"group": "lance", "name": "Suite K · TP_take_100", "pq": [324.1, "2 GETs · 13.2 MiB"], "vx": [459.5, "63 GETs · 9.7 MiB"], "la": [1112.0, "754 GETs · 3.9 MiB"], "l1": [251.5, "3 GETs · 10.9 MiB"]}, {"group": "lance", "name": "Suite L · DL_epoch_s3_cached", "pq": [15212.4, "101 GETs · 557.3 MiB"], "vx": [19187.0, "2498 GETs · 385.8 MiB"], "la": [71744.1, "26317 GETs · 429.1 MiB"], "l1": [10103.7, "101 GETs · 370.4 MiB"]}], "r2_direct": [{"group": "cetra", "name": "W1 · cold_open_prune", "pq": [119.4, "1 GET · 64 KiB"], "vx": [179.5, "5 GETs · 85 KiB"], "la": [151.3, "5 GETs · 35 KiB"], "l1": [143.8, "1 GET · 192 KiB"]}, {"group": "cetra", "name": "W1 · point_lookup_narrow", "pq": [159.2, "6 GETs · 720 KiB"], "vx": [263.8, "18 GETs · 468 KiB"], "la": [307.2, "24 GETs · 97 KiB"], "l1": [102.4, "2 GETs · 734 KiB"]}, {"group": "cetra", "name": "W1 · point_lookup_full", "pq": [276.8, "11 GETs · 1.8 MiB"], "vx": [927.2, "332 GETs · 7.2 MiB"], "la": [319.3, "60 GETs · 1.1 MiB"], "l1": [322.5, "7 GETs · 3.1 MiB"]}, {"group": "cetra", "name": "W1 · filtered_count", "pq": [134.3, "3 GETs · 199 KiB"], "vx": [244.6, "7 GETs · 153 KiB"], "la": [172.6, "6 GETs · 177 KiB"], "l1": [81.3, "2 GETs · 294 KiB"]}, {"group": "cetra", "name": "W1 · time_bucket_agg", "pq": [144.6, "6 GETs · 368 KiB"], "vx": [180.7, "8 GETs · 208 KiB"], "la": [174.3, "10 GETs · 373 KiB"], "l1": [97.1, "2 GETs · 491 KiB"]}, {"group": "cetra", "name": "W1 · top_k_list", "pq": [199.1, "9 GETs · 592 KiB"], "vx": [272.0, "19 GETs · 414 KiB"], "la": [269.3, "28 GETs · 289 KiB"], "l1": [91.7, "4 GETs · 715 KiB"]}, {"group": "cetra", "name": "W1 · map_key_lookup", "pq": [113.7, "4 GETs · 250 KiB"], "vx": [127.7, "7 GETs · 206 KiB"], "la": [211.9, "11 GETs · 240 KiB"], "l1": [77.2, "2 GETs · 341 KiB"]}, {"group": "cetra", "name": "W1 · substring_rare", "pq": [1254.6, "3 GETs · 8.5 MiB"], "vx": [2491.4, "842 GETs · 9.1 MiB"], "la": [2971.2, "14 GETs · 128.1 MiB"], "l1": [380.5, "12 GETs · 2.4 MiB"]}, {"group": "cetra", "name": "W1 · substring_absent", "pq": [1722.9, "3 GETs · 8.5 MiB"], "vx": [2669.8, "842 GETs · 9.1 MiB"], "la": [3459.5, "14 GETs · 128.1 MiB"], "l1": [165.4, "4 GETs · 1.1 MiB"]}, {"group": "cetra", "name": "W2 · cold_open_prune", "pq": [323.4, "8 GETs · 288 KiB"], "vx": [1017.1, "8 GETs · 570 KiB"], "la": [645.9, "16 GETs · 403 KiB"], "l1": [392.8, "4 GETs · 768 KiB"]}, {"group": "cetra", "name": "W2 · point_lookup_narrow", "pq": [345.6, "9 GETs · 756 KiB"], "vx": [465.7, "19 GETs · 668 KiB"], "la": [799.5, "28 GETs · 432 KiB"], "l1": [219.3, "5 GETs · 953 KiB"]}, {"group": "cetra", "name": "W2 · point_lookup_full", "pq": [447.0, "10 GETs · 4.6 MiB"], "vx": [542.0, "57 GETs · 4.4 MiB"], "la": [839.5, "53 GETs · 582 KiB"], "l1": [622.2, "8 GETs · 2.4 MiB"]}, {"group": "cetra", "name": "W2 · filtered_count", "pq": [156.2, "4 GETs · 256 KiB"], "vx": [171.9, "4 GETs · 256 KiB"], "la": [648.2, "20 GETs · 242 KiB"], "l1": [150.8, "4 GETs · 768 KiB"]}, {"group": "cetra", "name": "W2 · time_bucket_agg", "pq": [484.5, "16 GETs · 433 KiB"], "vx": [527.8, "28 GETs · 373 KiB"], "la": [673.3, "24 GETs · 259 KiB"], "l1": [328.6, "8 GETs · 885 KiB"]}, {"group": "cetra", "name": "W2 · top_k_list", "pq": [476.1, "14 GETs · 1.5 MiB"], "vx": [503.8, "32 GETs · 1.1 MiB"], "la": [1033.4, "116 GETs · 688 KiB"], "l1": [274.2, "6 GETs · 2.2 MiB"]}, {"group": "cetra", "name": "W2 · map_key_lookup", "pq": [317.8, "12 GETs · 979 KiB"], "vx": [366.6, "16 GETs · 727 KiB"], "la": [662.0, "36 GETs · 632 KiB"], "l1": [352.5, "8 GETs · 1.2 MiB"]}, {"group": "cetra", "name": "W2 · substring_rare", "pq": [515.0, "12 GETs · 7.0 MiB"], "vx": [763.5, "22 GETs · 6.0 MiB"], "la": [940.8, "24 GETs · 12.3 MiB"], "l1": [674.0, "17 GETs · 4.0 MiB"]}, {"group": "cetra", "name": "W2 · substring_absent", "pq": [512.6, "12 GETs · 6.2 MiB"], "vx": [568.6, "22 GETs · 6.0 MiB"], "la": [934.8, "24 GETs · 12.3 MiB"], "l1": [481.7, "11 GETs · 2.5 MiB"]}, {"group": "cetra", "name": "W3 spans · cold_open_prune", "pq": [77.4, "1 GET · 64 KiB"], "vx": [194.6, "2 GETs · 185 KiB"], "la": [197.4, "5 GETs · 1.3 MiB"], "l1": [142.1, "1 GET · 192 KiB"]}, {"group": "cetra", "name": "W3 spans · point_lookup_narrow", "pq": [190.1, "11 GETs · 789 KiB"], "vx": [299.7, "14 GETs · 2.5 MiB"], "la": [474.0, "28 GETs · 2.3 MiB"], "l1": [113.1, "2 GETs · 3.9 MiB"]}, {"group": "cetra", "name": "W3 spans · point_lookup_full", "pq": [246.3, "25 GETs · 1.8 MiB"], "vx": [340.3, "67 GETs · 5.3 MiB"], "la": [444.2, "78 GETs · 5.9 MiB"], "l1": [165.3, "3 GETs · 7.1 MiB"]}, {"group": "cetra", "name": "W3 spans · filtered_count", "pq": [166.5, "3 GETs · 2.0 MiB"], "vx": [121.2, "5 GETs · 1.5 MiB"], "la": [228.6, "7 GETs · 1.9 MiB"], "l1": [112.9, "3 GETs · 1.7 MiB"]}, {"group": "cetra", "name": "W3 spans · time_bucket_agg", "pq": [221.0, "6 GETs · 2.5 MiB"], "vx": [190.7, "11 GETs · 1.9 MiB"], "la": [251.2, "14 GETs · 2.9 MiB"], "l1": [163.6, "7 GETs · 2.6 MiB"]}, {"group": "cetra", "name": "W3 spans · top_k_list", "pq": [282.3, "9 GETs · 6.7 MiB"], "vx": [282.5, "30 GETs · 5.8 MiB"], "la": [502.6, "239 GETs · 4.3 MiB"], "l1": [256.3, "9 GETs · 6.8 MiB"]}, {"group": "cetra", "name": "W3 spans · map_key_lookup", "pq": [131.2, "4 GETs · 3.3 MiB"], "vx": [146.6, "25 GETs · 2.8 MiB"], "la": [254.4, "12 GETs · 3.7 MiB"], "l1": [175.8, "7 GETs · 3.1 MiB"]}, {"group": "cetra", "name": "W3 scores · cold_open_prune", "pq": [88.0, "2 GETs · 128 KiB"], "vx": [341.8, "5 GETs · 2.0 MiB"], "la": [206.5, "4 GETs · 1.9 MiB"], "l1": [82.2, "1 GET · 192 KiB"]}, {"group": "cetra", "name": "W3 scores · point_lookup_narrow", "pq": [212.2, "5 GETs · 3.5 MiB"], "vx": [183.4, "12 GETs · 2.6 MiB"], "la": [299.3, "18 GETs · 1.9 MiB"], "l1": [230.7, "3 GETs · 3.4 MiB"]}, {"group": "cetra", "name": "W3 scores · filtered_count", "pq": [117.5, "3 GETs · 278 KiB"], "vx": [183.1, "4 GETs · 571 KiB"], "la": [222.6, "7 GETs · 1000 KiB"], "l1": [78.2, "4 GETs · 337 KiB"]}, {"group": "cetra", "name": "W3 scores · map_key_lookup", "pq": [125.2, "3 GETs · 1.6 MiB"], "vx": [141.7, "14 GETs · 1.1 MiB"], "la": [248.4, "8 GETs · 2.7 MiB"], "l1": [92.1, "3 GETs · 1.3 MiB"]}, {"group": "cetra", "name": "W4 · cold_open_prune", "pq": [95.6, "2 GETs · 68 KiB"], "vx": [214.8, "2 GETs · 222 KiB"], "la": [296.4, "4 GETs · 184 KiB"], "l1": [115.0, "1 GET · 192 KiB"]}, {"group": "cetra", "name": "W4 · point_lookup_narrow", "pq": [138.4, "4 GETs · 770 KiB"], "vx": [261.9, "13 GETs · 571 KiB"], "la": [395.5, "21 GETs · 223 KiB"], "l1": [90.2, "2 GETs · 740 KiB"]}, {"group": "cetra", "name": "W4 · point_lookup_full", "pq": [228.7, "9 GETs · 4.2 MiB"], "vx": [509.5, "63 GETs · 16.1 MiB"], "la": [373.1, "51 GETs · 408 KiB"], "l1": [203.9, "3 GETs · 2.0 MiB"]}, {"group": "cetra", "name": "W4 · filtered_count", "pq": [107.6, "3 GETs · 151 KiB"], "vx": [109.8, "4 GETs · 122 KiB"], "la": [174.2, "6 GETs · 107 KiB"], "l1": [83.7, "2 GETs · 254 KiB"]}, {"group": "cetra", "name": "W4 · time_bucket_agg", "pq": [118.9, "4 GETs · 245 KiB"], "vx": [169.2, "7 GETs · 151 KiB"], "la": [193.8, "8 GETs · 214 KiB"], "l1": [78.4, "3 GETs · 311 KiB"]}, {"group": "cetra", "name": "W4 · top_k_list", "pq": [162.5, "7 GETs · 684 KiB"], "vx": [216.6, "14 GETs · 554 KiB"], "la": [275.7, "38 GETs · 637 KiB"], "l1": [88.9, "3 GETs · 734 KiB"]}, {"group": "cetra", "name": "W4 · map_key_lookup", "pq": [79.2, "4 GETs · 327 KiB"], "vx": [95.6, "4 GETs · 299 KiB"], "la": [177.6, "10 GETs · 295 KiB"], "l1": [91.2, "2 GETs · 425 KiB"]}, {"group": "cetra", "name": "W4 · substring_rare", "pq": [220.7, "3 GETs · 12.0 MiB"], "vx": [202.8, "4 GETs · 12.0 MiB"], "la": [474.0, "6 GETs · 15.2 MiB"], "l1": [640.8, "5 GETs · 12.3 MiB"]}, {"group": "cetra", "name": "W4 · substring_absent", "pq": [206.9, "3 GETs · 12.0 MiB"], "vx": [212.3, "4 GETs · 12.0 MiB"], "la": [371.1, "6 GETs · 15.2 MiB"], "l1": [236.9, "4 GETs · 12.2 MiB"]}, {"group": "external", "name": "CB · CB_Q1", "pq": [155.5, "2 GETs · 64 KiB"], "vx": [167.7, "2 GETs · 64 KiB"], "la": [209.9, "4 GETs · 55 KiB"], "l1": [280.0, "2 GETs · 193 KiB"]}, {"group": "external", "name": "CB · CB_Q10", "pq": [139.9, "3 GETs · 171 KiB"], "vx": [127.4, "4 GETs · 122 KiB"], "la": [263.7, "7 GETs · 557 KiB"], "l1": [127.4, "3 GETs · 268 KiB"]}, {"group": "external", "name": "CB · CB_Q12", "pq": [116.1, "3 GETs · 184 KiB"], "vx": [131.8, "4 GETs · 133 KiB"], "la": [198.9, "7 GETs · 953 KiB"], "l1": [77.1, "4 GETs · 284 KiB"]}, {"group": "external", "name": "CB · CB_Q20", "pq": [207.8, "6 GETs · 604 KiB"], "vx": [262.4, "8 GETs · 1.0 MiB"], "la": [302.9, "12 GETs · 3.5 MiB"], "l1": [138.9, "3 GETs · 988 KiB"]}, {"group": "external", "name": "CB · CB_Q23_like", "pq": [173.8, "3 GETs · 2.0 MiB"], "vx": [133.6, "9 GETs · 1.8 MiB"], "la": [242.4, "8 GETs · 3.1 MiB"], "l1": [152.2, "5 GETs · 758 KiB"]}, {"group": "external", "name": "CB · CB_Q24", "pq": [99.7, "2 GETs · 1.7 MiB"], "vx": [116.9, "7 GETs · 1.6 MiB"], "la": [231.2, "5 GETs · 2.7 MiB"], "l1": [117.4, "2 GETs · 1.8 MiB"]}, {"group": "external", "name": "CB · CB_Q39_range", "pq": [169.0, "4 GETs · 480 KiB"], "vx": [184.2, "5 GETs · 232 KiB"], "la": [206.1, "7 GETs · 537 KiB"], "l1": [87.1, "2 GETs · 536 KiB"]}, {"group": "external", "name": "CB · CB_wide_point", "pq": [209.5, "4 GETs · 8.8 MiB"], "vx": [521.9, "127 GETs · 4.9 MiB"], "la": [827.1, "96 GETs · 19.5 MiB"], "l1": [175.4, "2 GETs · 8.1 MiB"]}, {"group": "external", "name": "RF · RF_pt_0_001pct", "pq": [156.1, "3 GETs · 490 KiB"], "vx": [103.2, "5 GETs · 939 KiB"], "la": [251.8, "9 GETs · 1.5 MiB"], "l1": [135.9, "3 GETs · 263 KiB"]}, {"group": "external", "name": "RF · RF_sel_1pct_unclustered", "pq": [137.1, "3 GETs · 1.3 MiB"], "vx": [112.8, "5 GETs · 939 KiB"], "la": [233.9, "10 GETs · 1.5 MiB"], "l1": [90.1, "2 GETs · 1.0 MiB"]}, {"group": "external", "name": "RF · RF_mod_10pct_clustered", "pq": [157.0, "3 GETs · 1.3 MiB"], "vx": [91.6, "5 GETs · 939 KiB"], "la": [216.5, "10 GETs · 1.5 MiB"], "l1": [89.5, "2 GETs · 1.0 MiB"]}, {"group": "external", "name": "RF · RF_mod_10pct_unclustered", "pq": [149.5, "3 GETs · 1.3 MiB"], "vx": [119.0, "5 GETs · 939 KiB"], "la": [260.7, "11 GETs · 1.5 MiB"], "l1": [94.4, "2 GETs · 1.0 MiB"]}, {"group": "external", "name": "RF · RF_unsel_99pct_unclustered", "pq": [139.7, "3 GETs · 1.3 MiB"], "vx": [149.2, "5 GETs · 939 KiB"], "la": [327.9, "11 GETs · 1.5 MiB"], "l1": [98.7, "2 GETs · 1.0 MiB"]}, {"group": "external", "name": "RF · RF_unsel_90pct_clustered", "pq": [161.1, "3 GETs · 1.3 MiB"], "vx": [105.5, "5 GETs · 939 KiB"], "la": [293.8, "10 GETs · 1.5 MiB"], "l1": [117.6, "2 GETs · 1.0 MiB"]}, {"group": "external", "name": "RA · RA_take_100", "pq": [474.3, "2 GETs · 12.6 MiB"], "vx": [277.7, "51 GETs · 9.7 MiB"], "la": [546.2, "561 GETs · 3.8 MiB"], "l1": [202.0, "3 GETs · 9.8 MiB"]}, {"group": "external", "name": "RA · RA_take_1000", "pq": [263.5, "2 GETs · 12.6 MiB"], "vx": [225.0, "52 GETs · 9.7 MiB"], "la": [677.0, "651 GETs · 14.1 MiB"], "l1": [212.4, "3 GETs · 9.8 MiB"]}, {"group": "external", "name": "JB · JB_Q1_posts", "pq": [177.4, "3 GETs · 97 KiB"], "vx": [280.3, "5 GETs · 92 KiB"], "la": [239.4, "6 GETs · 106 KiB"], "l1": [181.5, "2 GETs · 235 KiB"]}, {"group": "external", "name": "JB · JB_Q2_did_pt", "pq": [226.6, "4 GETs · 1.8 MiB"], "vx": [220.2, "8 GETs · 1.4 MiB"], "la": [283.8, "10 GETs · 4.5 MiB"], "l1": [122.4, "3 GETs · 2.5 MiB"]}, {"group": "external", "name": "JB · JB_Q3_map_type", "pq": [238.2, "3 GETs · 6.7 MiB"], "vx": [377.1, "17 GETs · 6.7 MiB"], "la": [780.3, "25 GETs · 14.9 MiB"], "l1": [142.1, "14 GETs · 1.7 MiB"]}, {"group": "external", "name": "JB · JB_Q4_text_like", "pq": [176.5, "3 GETs · 1.4 MiB"], "vx": [144.7, "5 GETs · 1.3 MiB"], "la": [273.8, "6 GETs · 3.8 MiB"], "l1": [123.0, "4 GETs · 1.8 MiB"]}, {"group": "external", "name": "JB · JB_Q5_did_full", "pq": [507.1, "3 GETs · 20.1 MiB"], "vx": [374.7, "23 GETs · 7.4 MiB"], "la": [897.0, "38 GETs · 41.9 MiB"], "l1": [513.7, "11 GETs · 10.3 MiB"]}, {"group": "external", "name": "WC · WC_Q1_model_cnt", "pq": [126.7, "3 GETs · 66 KiB"], "vx": [128.1, "3 GETs · 66 KiB"], "la": [181.1, "3 GETs · 8 KiB"], "l1": [83.8, "2 GETs · 194 KiB"]}, {"group": "external", "name": "WC · WC_Q2_lang_filter", "pq": [129.9, "3 GETs · 225 KiB"], "vx": [151.1, "7 GETs · 157 KiB"], "la": [142.9, "7 GETs · 220 KiB"], "l1": [75.1, "2 GETs · 323 KiB"]}, {"group": "external", "name": "WC · WC_Q3_trace_full", "pq": [225.2, "7 GETs · 1.0 MiB"], "vx": [300.8, "13 GETs · 6.8 MiB"], "la": [1136.8, "15 GETs · 37.5 MiB"], "l1": [415.3, "6 GETs · 1.4 MiB"]}, {"group": "external", "name": "WC · WC_Q4_unicode_ilike", "pq": [260.5, "3 GETs · 6.7 MiB"], "vx": [249.7, "5 GETs · 6.5 MiB"], "la": [391.8, "6 GETs · 15.5 MiB"], "l1": [350.3, "6 GETs · 8.6 MiB"]}, {"group": "external", "name": "WC · WC_Q5_input_absent", "pq": [213.3, "2 GETs · 6.1 MiB"], "vx": [178.7, "5 GETs · 5.7 MiB"], "la": [621.9, "7 GETs · 22.1 MiB"], "l1": [212.4, "5 GETs · 2.2 MiB"]}, {"group": "external", "name": "HF · HF_Q1_cat_cnt", "pq": [105.5, "3 GETs · 65 KiB"], "vx": [146.4, "3 GETs · 65 KiB"], "la": [183.2, "4 GETs · 17 KiB"], "l1": [38.2, "1 GET · 110 KiB"]}, {"group": "external", "name": "HF · HF_Q2_pt_full", "pq": [202.6, "6 GETs · 840 KiB"], "vx": [224.4, "12 GETs · 1.8 MiB"], "la": [384.4, "13 GETs · 9.7 MiB"], "l1": [119.5, "4 GETs · 846 KiB"]}, {"group": "external", "name": "HF · HF_Q3_tool_like", "pq": [118.4, "3 GETs · 382 KiB"], "vx": [90.2, "6 GETs · 368 KiB"], "la": [189.2, "7 GETs · 852 KiB"], "l1": [138.7, "3 GETs · 844 KiB"]}, {"group": "external", "name": "HF · HF_Q4_out_absent", "pq": [76.1, "2 GETs · 240 KiB"], "vx": [132.6, "3 GETs · 275 KiB"], "la": [169.4, "6 GETs · 456 KiB"], "l1": [79.0, "2 GETs · 494 KiB"]}, {"group": "lance", "name": "Suite G · BL_meta_scan", "pq": [184.3, "3 GETs · 92 KiB"], "vx": [176.5, "4 GETs · 69 KiB"], "la": [387.0, "7 GETs · 13 KiB"], "l1": [77.7, "1 GET · 15 KiB"]}, {"group": "lance", "name": "Suite G · BL_take_1", "pq": [130.7, "3 GETs · 1.1 MiB"], "vx": [4700.4, "7 GETs · 182.4 MiB"], "la": [131.7, "10 GETs · 99 KiB"], "l1": [265.5, "3 GETs · 340 KiB"]}, {"group": "lance", "name": "Suite G · BL_take_10", "pq": [510.1, "17 GETs · 10.0 MiB"], "vx": [2077.1, "7 GETs · 182.4 MiB"], "la": [188.5, "19 GETs · 1.5 MiB"], "l1": [143.6, "12 GETs · 1.7 MiB"]}, {"group": "lance", "name": "Suite G · BL_take_50", "pq": [2770.2, "2 GETs · 183.2 MiB"], "vx": [2031.1, "7 GETs · 182.4 MiB"], "la": [189.7, "56 GETs · 4.0 MiB"], "l1": [261.6, "50 GETs · 4.3 MiB"]}, {"group": "lance", "name": "Suite H · WD_cold_open", "pq": [104.1, "2 GETs · 267 KiB"], "vx": [99.7, "2 GETs · 323 KiB"], "la": [305.3, "4 GETs · 698 KiB"], "l1": [81.0, "1 GET · 192 KiB"]}, {"group": "lance", "name": "Suite H · WD_narrow_3col", "pq": [186.6, "5 GETs · 380 KiB"], "vx": [241.9, "6 GETs · 350 KiB"], "la": [255.8, "8 GETs · 743 KiB"], "l1": [91.5, "2 GETs · 265 KiB"]}, {"group": "lance", "name": "Suite H · WD_point_all_1000", "pq": [264.6, "4 GETs · 6.9 MiB"], "vx": [2833.8, "1199 GETs · 5.4 MiB"], "la": [1522.7, "2004 GETs · 7.1 MiB"], "l1": [163.4, "2 GETs · 8.7 MiB"]}, {"group": "lance", "name": "Suite H · WD_take_20_1000", "pq": [235.1, "3 GETs · 6.8 MiB"], "vx": [2770.5, "1198 GETs · 5.4 MiB"], "la": [1929.6, "2897 GETs · 25.2 MiB"], "l1": [204.1, "2 GETs · 8.7 MiB"]}, {"group": "lance", "name": "Suite I · FW_score_cnt", "pq": [140.3, "3 GETs · 922 KiB"], "vx": [290.4, "3 GETs · 877 KiB"], "la": [194.8, "7 GETs · 1.1 MiB"], "l1": [327.1, "2 GETs · 1.0 MiB"]}, {"group": "lance", "name": "Suite I · FW_take_100", "pq": [942.3, "68 GETs · 24.4 MiB"], "vx": [881.5, "20 GETs · 70.5 MiB"], "la": [471.0, "251 GETs · 1.5 MiB"], "l1": [407.0, "86 GETs · 7.2 MiB"]}, {"group": "lance", "name": "Suite I · FW_substr_rare", "pq": [1076.4, "3 GETs · 70.8 MiB"], "vx": [958.7, "11 GETs · 70.2 MiB"], "la": [1890.0, "11 GETs · 85.4 MiB"], "l1": [1334.9, "6 GETs · 89.5 MiB"]}, {"group": "lance", "name": "Suite I · FW_substr_absent", "pq": [1171.4, "2 GETs · 68.7 MiB"], "vx": [906.7, "8 GETs · 69.0 MiB"], "la": [1806.8, "10 GETs · 83.5 MiB"], "l1": [239.8, "3 GETs · 11.3 MiB"]}, {"group": "lance", "name": "Suite J · NS_scan_full", "pq": [337.1, "3 GETs · 4.1 MiB"], "vx": [264.9, "36 GETs · 3.1 MiB"], "la": [418.8, "49 GETs · 4.9 MiB"], "l1": [262.1, "2 GETs · 3.4 MiB"]}, {"group": "lance", "name": "Suite J · NS_filter_map", "pq": [274.1, "5 GETs · 1.6 MiB"], "vx": [186.0, "23 GETs · 1.4 MiB"], "la": [322.9, "21 GETs · 1.8 MiB"], "l1": [80.5, "3 GETs · 441 KiB"]}, {"group": "lance", "name": "Suite J · NS_take_100", "pq": [135.8, "2 GETs · 4.1 MiB"], "vx": [166.8, "36 GETs · 3.1 MiB"], "la": [386.5, "327 GETs · 1.8 MiB"], "l1": [113.3, "2 GETs · 3.4 MiB"]}, {"group": "lance", "name": "Suite K · TP_Q6_filter", "pq": [521.5, "5 GETs · 3.6 MiB"], "vx": [317.7, "15 GETs · 2.6 MiB"], "la": [260.0, "9 GETs · 5.2 MiB"], "l1": [505.2, "5 GETs · 3.3 MiB"]}, {"group": "lance", "name": "Suite K · TP_Q1_scan", "pq": [225.4, "3 GETs · 4.0 MiB"], "vx": [196.3, "23 GETs · 2.9 MiB"], "la": [330.9, "11 GETs · 10.3 MiB"], "l1": [185.9, "9 GETs · 3.3 MiB"]}, {"group": "lance", "name": "Suite K · TP_take_100", "pq": [254.7, "2 GETs · 13.2 MiB"], "vx": [274.6, "63 GETs · 9.7 MiB"], "la": [657.9, "754 GETs · 3.9 MiB"], "l1": [184.1, "3 GETs · 10.9 MiB"]}, {"group": "lance", "name": "Suite L · DL_epoch_s3_cached", "pq": [13237.1, "101 GETs · 557.3 MiB"], "vx": [13270.0, "2498 GETs · 385.8 MiB"], "la": [29819.6, "26317 GETs · 429.1 MiB"], "l1": [8948.4, "101 GETs · 370.4 MiB"]}]};
+    let currentS3Mode = "r2_direct";
+    let currentHost = "big";
+    let currentThreads = "both";
+    let currentTab = "all";
+    let showL0 = true;
+
+    function syncSuiteFilterOptions() {
+      const sel = document.getElementById("suite-filter");
+      const hasLance = DATA[currentHost].hasLanceSuites;
+      const lanceOpt = sel.querySelector('option[value="lance"]');
+      lanceOpt.disabled = !hasLance;
+      lanceOpt.textContent = hasLance
+        ? "Lance / Vortex / F3 Suites (G–L · Strict 1C)"
+        : "Lance / Vortex / F3 Suites (G–L · x86 only)";
+      if (!hasLance && sel.value === "lance") sel.value = "all";
+      const allOpt = sel.querySelector('option[value="all"]');
+      allOpt.textContent = hasLance ? "All 17 Workloads" : "All 11 Workloads";
+    }
+
+    function render() {
+      syncSuiteFilterOptions();
+      const suiteFilter = document.getElementById("suite-filter").value;
+      const ds = DATA[currentHost];
+      const show1 = currentThreads === "both" || currentThreads === "1t";
+      const show8 = currentThreads === "both" || currentThreads === "8t";
+      document.getElementById("host-subtitle").textContent = ds.subtitle;
+      document.getElementById("read-note").textContent = ds.readNote;
+
+      const sizeRows = ds.size.filter((r) => suiteFilter === "all" || r.group === suiteFilter);
+      const readRows = ds.read.filter((r) => suiteFilter === "all" || r.group === suiteFilter);
+      const s3Source = currentS3Mode === "r2_direct"
+        ? LIVE_S3.r2_direct
+        : (currentS3Mode === "live_rc"
+          ? LIVE_S3.readcache
+          : (currentS3Mode === "live_direct" ? LIVE_S3.direct : S3_ROWS));
+      const s3Rows = s3Source.filter((r) => {
+        if (!ds.hasLanceSuites && r.group === "lance") return false;
+        return suiteFilter === "all" || r.group === suiteFilter;
+      });
+      if (currentS3Mode === "r2_direct") {
+        document.getElementById("s3-title").textContent = "3. Live Cloudflare R2 S3 Latency & GETs (Direct Range GET, 0 Cache)";
+        document.getElementById("s3-note").textContent = "Real HTTP Range GETs against Cloudflare R2 from big-server-vm (zero block cache, 64 KiB coalescing) · All 17 workloads (87 queries) · Pass 24 · Geomean: 1.33× vs Parquet, 1.72× vs Vortex, 2.28× vs Lance, 2.00× vs Strata";
+      } else if (currentS3Mode === "live_rc") {
+        document.getElementById("s3-title").textContent = "3. Live Garage S3 Latency & GETs (https://s3.chapu.is:8443 — 1 MiB ReadCache)";
+        document.getElementById("s3-note").textContent = "Real HTTP Range GETs against Garage v2.3.0 (~50 ms RTT, 1 MiB ReadCache + single-flight) · All 17 workloads (87 queries) · Pass 13";
+      } else if (currentS3Mode === "live_direct") {
+        document.getElementById("s3-title").textContent = "3. Live Garage S3 Latency & GETs (https://s3.chapu.is:8443 — Direct Range GET, 0 Cache)";
+        document.getElementById("s3-note").textContent = "Real HTTP Range GETs against Garage v2.3.0 (~50 ms RTT, zero block cache, 64 KiB coalescing) · All 17 workloads (87 queries) · Pass 13";
+      } else {
+        document.getElementById("s3-title").textContent = "3. Simulated S3 Latency & GETs (Deterministic — sim-readcache-1mib, 25 ms RTT, 100/40 MiB/s, Pass 27d · All 87 Queries)";
+        document.getElementById("s3-note").textContent = "Fastest S3 latency highlighted in green (identical across CPUs & thread counts)";
+      }
+
+      let statamSizeWins = 0;
+      let statamWriteWins = 0;
+      let statamReadWins = 0;
+      let statamS3Wins = 0;
+      let statamS3VsLanceWins = 0;
+
+      // Section 1 header
+      const writeTag = currentThreads === "both" ? "1W / 8W" : (show1 ? "1W" : "8W");
+      document.getElementById("size-thead").innerHTML = `
+        <tr class="border-b border-[var(--border)] text-[var(--muted-foreground)] text-right">
+          <th class="text-left py-2.5 px-3 font-medium">Workload (Raw)</th>
+          <th class="py-2.5 px-2.5 font-medium">Best Parquet</th>
+          <th class="py-2.5 px-2.5 font-medium">Vortex</th>
+          <th class="py-2.5 px-2.5 font-medium">Lance V2.2</th>
+          ${showL0 ? `<th class="py-2.5 px-2.5 font-medium">Statam L0 (${writeTag})</th>` : ""}
+          <th class="py-2.5 px-3 font-medium">Statam L1 (${writeTag})</th>
+        </tr>
+      `;
+
+      document.getElementById("size-tbody").innerHTML = sizeRows.map((r) => {
+        const visibleSizes = [r.pq[0], r.vx[0], r.la[0], r.l1[0]];
+        if (showL0) visibleSizes.push(r.l0[0]);
+        const minSize = Math.min(...visibleSizes);
+        if ((showL0 && r.l0[0] === minSize) || r.l1[0] === minSize) statamSizeWins++;
+
+        const visibleWrites = [r.pq[1], r.vx[1], r.la[1]];
+        if (show1) {
+          if (showL0) visibleWrites.push(r.l0[1]);
+          visibleWrites.push(r.l1[1]);
+        }
+        if (show8) {
+          if (showL0) visibleWrites.push(r.l0[2]);
+          visibleWrites.push(r.l1[2]);
+        }
+        const validWrites = visibleWrites.filter((w) => w !== null && w !== undefined);
+        const minWrite = validWrites.length ? Math.min(...validWrites) : null;
+
+        const statamVisibleWrites = [];
+        if (show1) {
+          if (showL0) statamVisibleWrites.push(r.l0[1]);
+          statamVisibleWrites.push(r.l1[1]);
+        }
+        if (show8) {
+          if (showL0) statamVisibleWrites.push(r.l0[2]);
+          statamVisibleWrites.push(r.l1[2]);
+        }
+        if (minWrite !== null && statamVisibleWrites.includes(minWrite)) statamWriteWins++;
+
+        const fmtCompetitor = (c) => {
+          const isMinSize = c[0] === minSize;
+          const isMinWrite = minWrite !== null && c[1] === minWrite;
+          const dag = c[2] ? "†" : "";
+          return `<td class="py-2 px-2.5 text-right num align-top">
+            <span class="${isMinSize ? "win-cell px-1.5 py-0.5" : ""}">${fmtKib(c[0])} KiB</span>
+            ${c[1] !== null ? `<div class="mt-0.5 text-[11px] ${isMinWrite ? "win-sub" : "text-[var(--muted-foreground)]"}">${fmtMs(c[1])}${dag}</div>` : ""}
+          </td>`;
+        };
+
+        const fmtStatam = (c) => {
+          const isMinSize = c[0] === minSize;
+          const lines = [];
+          if (show1) {
+            const w = c[1];
+            const isWin = minWrite !== null && w === minWrite;
+            const label = currentThreads === "both" ? "1W: " : "";
+            lines.push(`<div class="mt-0.5 text-[11px] ${isWin ? "win-sub" : "text-[var(--muted-foreground)]"}">${label}${w !== null ? fmtMs(w) : "—"}</div>`);
+          }
+          if (show8) {
+            const w = c[2];
+            const isWin = minWrite !== null && w === minWrite;
+            const label = currentThreads === "both" ? "8W: " : "";
+            lines.push(`<div class="mt-0.5 text-[11px] ${isWin ? "win-sub" : "text-[var(--muted-foreground)]"}">${label}${w !== null ? fmtMs(w) : "—"}</div>`);
+          }
+          return `<td class="py-2 px-2.5 text-right num align-top">
+            <span class="${isMinSize ? "win-cell px-1.5 py-0.5" : ""}">${fmtKib(c[0])} KiB</span>
+            ${lines.join("")}
+          </td>`;
+        };
+
+        const badge = r.strict1c ? ` <span class="badge-1c">1C</span>` : "";
+        return `<tr class="hover:bg-[var(--background)]/50">
+          <td class="py-2 px-3 font-medium">
+            <div>${r.name}${badge}</div>
+            <div class="text-[11px] text-[var(--muted-foreground)]">${r.raw}</div>
+          </td>
+          ${fmtCompetitor(r.pq)}
+          ${fmtCompetitor(r.vx)}
+          ${fmtCompetitor(r.la)}
+          ${showL0 ? fmtStatam(r.l0) : ""}
+          ${fmtStatam(r.l1)}
+        </tr>`;
+      }).join("");
+
+      // Section 2 header & body
+      const readCols = [
+        { key: "pq", label: "Best Parquet", isStatam: false },
+        { key: "vx", label: "Vortex", isStatam: false },
+        { key: "la", label: "Lance V2.2", isStatam: false },
+      ];
+      if (show1) {
+        if (showL0) readCols.push({ key: "l0_1", label: "Statam L0 (1R)", isStatam: true });
+        readCols.push({ key: "l1_1", label: "Statam L1 (1R)", isStatam: true });
+      }
+      if (show8) {
+        if (showL0) readCols.push({ key: "l0_8", label: "Statam L0 (8R)", isStatam: true });
+        readCols.push({ key: "l1_8", label: "Statam L1 (8R)", isStatam: true });
+      }
+
+      document.getElementById("read-thead").innerHTML = `
+        <tr class="border-b border-[var(--border)] text-[var(--muted-foreground)] text-right">
+          <th class="text-left py-2.5 px-3 font-medium">Suite / Query</th>
+          ${readCols.map((c) => `<th class="py-2.5 px-2.5 font-medium">${c.label}</th>`).join("")}
+        </tr>
+      `;
+
+      document.getElementById("read-tbody").innerHTML = readRows.map((r) => {
+        const vals = readCols.map((c) => r[c.key]);
+        const valid = vals.filter((v) => v !== null && v !== undefined);
+        const minVal = Math.min(...valid);
+        const statamWon = readCols.some((c, i) => c.isStatam && vals[i] === minVal);
+        if (statamWon) statamReadWins++;
+
+        const cells = readCols.map((c, idx) => {
+          const v = vals[idx];
+          if (v === null || v === undefined) {
+            return `<td class="py-2 px-2.5 text-right text-[var(--muted-foreground)]">—</td>`;
+          }
+          const isWin = v === minVal;
+          const dag = c.key === "la" && r.laDag ? "†" : "";
+          return `<td class="py-2 px-2.5 text-right num">
+            <span class="${isWin ? "win-cell px-1.5 py-0.5" : ""}">${fmtMs(v)}${dag}</span>
+          </td>`;
+        }).join("");
+
+        const badge = r.strict1c ? ` <span class="badge-1c">1C</span>` : "";
+        return `<tr class="hover:bg-[var(--background)]/50">
+          <td class="py-2 px-3 font-medium">${r.name}${badge}</td>
+          ${cells}
+        </tr>`;
+      }).join("");
+
+      // Section 3: S3
+      document.getElementById("s3-tbody").innerHTML = s3Rows.map((r) => {
+        const cols = [r.pq, r.vx, r.la, r.l1];
+        const minMs = Math.min(...cols.map((c) => c[0]));
+        if (r.l1[0] === minMs) statamS3Wins++;
+        if (r.l1[0] <= r.la[0]) statamS3VsLanceWins++;
+
+        const cells = cols.map((c) => {
+          const isWin = c[0] === minMs;
+          return `<td class="py-2 px-2.5 text-right num">
+            <span class="${isWin ? "win-cell px-1.5 py-0.5" : ""}">${c[0].toFixed(1)} ms</span>
+            <div class="text-[11px] text-[var(--muted-foreground)] mt-0.5">${c[1]}</div>
+          </td>`;
+        }).join("");
+
+        return `<tr class="hover:bg-[var(--background)]/50">
+          <td class="py-2 px-3 font-medium">${r.name}</td>
+          ${cells}
+        </tr>`;
+      }).join("");
+
+      const modeLabel = currentThreads === "both" ? "1T/8T" : (show1 ? "1T" : "8T");
+      document.getElementById("win-pills").innerHTML = `
+        <span class="px-2.5 py-1 rounded-md bg-[var(--card)] border border-[var(--border)]">
+          Local Read Wins (${modeLabel}): <strong class="win-sub">${statamReadWins} / ${readRows.length}</strong>
+        </span>
+        <span class="px-2.5 py-1 rounded-md bg-[var(--card)] border border-[var(--border)]">
+          Fastest Write (${modeLabel}): <strong class="win-sub">${statamWriteWins} / ${sizeRows.length}</strong>
+        </span>
+        <span class="px-2.5 py-1 rounded-md bg-[var(--card)] border border-[var(--border)]">
+          Smallest Size: <strong class="win-sub">${statamSizeWins} / ${sizeRows.length}</strong>
+        </span>
+        <span class="px-2.5 py-1 rounded-md bg-[var(--card)] border border-[var(--border)]">
+          ${currentS3Mode === 'r2_direct' ? 'Cloudflare R2 (Direct)' : (currentS3Mode === 'live_rc' ? 'Live Garage (Cache)' : (currentS3Mode === 'live_direct' ? 'Live Garage (Direct)' : 'Sim S3'))} Wins: <strong class="win-sub">${statamS3Wins} / ${s3Rows.length}</strong>
+          <span class="text-[var(--muted-foreground)]">(${statamS3VsLanceWins}/${s3Rows.length} vs Lance)</span>
+        </span>
+      `;
+    }
+
+    function updateButtons() {
+      document.querySelectorAll(".host-btn").forEach((btn) => {
+        const active = btn.dataset.host === currentHost;
+        btn.className = "host-btn px-3 py-1.5 rounded-md font-medium transition " +
+          (active ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]");
+      });
+      document.querySelectorAll(".thread-btn").forEach((btn) => {
+        const active = btn.dataset.threads === currentThreads;
+        btn.className = "thread-btn px-2.5 py-1.5 rounded-md font-medium transition " +
+          (active ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]");
+      });
+      document.querySelectorAll(".tab-btn").forEach((btn) => {
+        const active = btn.dataset.tab === currentTab;
+        btn.className = "tab-btn px-2.5 py-1.5 rounded-md font-medium transition " +
+          (active ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]");
+      });
+      document.querySelectorAll(".s3mode-btn").forEach((btn) => {
+        const active = btn.dataset.s3mode === currentS3Mode;
+        btn.className = "s3mode-btn px-2.5 py-1 rounded-md font-medium transition " +
+          (active ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]");
+      });
+      document.getElementById("sec-size").style.display = (currentTab === "all" || currentTab === "size") ? "" : "none";
+      document.getElementById("sec-read").style.display = (currentTab === "all" || currentTab === "read") ? "" : "none";
+      document.getElementById("sec-s3").style.display = (currentTab === "all" || currentTab === "s3") ? "" : "none";
+    }
+
+    document.querySelectorAll(".host-btn").forEach((btn) => {
+      btn.addEventListener("click", () => { currentHost = btn.dataset.host; updateButtons(); render(); });
+    });
+    document.querySelectorAll(".thread-btn").forEach((btn) => {
+      btn.addEventListener("click", () => { currentThreads = btn.dataset.threads; updateButtons(); render(); });
+    });
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+      btn.addEventListener("click", () => { currentTab = btn.dataset.tab; updateButtons(); });
+    });
+    document.querySelectorAll(".s3mode-btn").forEach((btn) => {
+      btn.addEventListener("click", () => { currentS3Mode = btn.dataset.s3mode; updateButtons(); render(); });
+    });
+    document.getElementById("suite-filter").addEventListener("change", render);
+    document.getElementById("toggle-l0").addEventListener("change", (e) => {
+      showL0 = e.target.checked;
+      render();
+    });
+
+    updateButtons();
+    render();
+  </script>
+</body>
+</html>

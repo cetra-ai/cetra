@@ -2646,6 +2646,7 @@ impl StatamPartitionStream {
                     substrings: classified.substrings,
                     sort_desc_hint,
                     limit: req_limit,
+                    top_k: None,
                     coalesce_mode: CoalesceMode::Auto,
                     read_threads: self.read_threads,
                     rg_indices,

@@ -1791,16 +1791,12 @@ struct SubchunkMeta {
 }
 
 struct SubchunkDecompressor {
-    #[cfg(not(miri))]
-    zstd: Option<zstd::bulk::Decompressor<'static>>,
     scratch: Vec<u8>,
 }
 
 impl SubchunkDecompressor {
     fn new() -> Self {
         Self {
-            #[cfg(not(miri))]
-            zstd: None,
             scratch: Vec::new(),
         }
     }
@@ -1811,64 +1807,13 @@ impl SubchunkDecompressor {
         payload: &'a [u8],
     ) -> Result<&'a [u8], StatamError> {
         let stored = &payload[meta.stored_start as usize..meta.stored_end as usize];
-        let raw_len = meta.raw_len as usize;
-        check_decompress_bounds(raw_len, stored.len(), MAX_BLOCK_RAW_BYTES)?;
-        match meta.codec {
-            Codec::None => {
-                if stored.len() != raw_len {
-                    return Err(StatamError::Corrupt {
-                        reason: "uncompressed fsst subchunk raw_len mismatch",
-                    });
-                }
-                Ok(stored)
-            }
-            Codec::Lz4 => {
-                self.scratch.resize(raw_len, 0);
-                let written =
-                    lz4_flex::block::decompress_into(stored, &mut self.scratch).map_err(|_| {
-                        StatamError::Corrupt {
-                            reason: "fsst subchunk lz4 decompression failed",
-                        }
-                    })?;
-                if written != raw_len {
-                    return Err(StatamError::Corrupt {
-                        reason: "fsst subchunk lz4 decompressed length mismatch",
-                    });
-                }
-                Ok(&self.scratch[..raw_len])
-            }
-            Codec::Zstd => {
-                #[cfg(miri)]
-                {
-                    Err(StatamError::UnsupportedFeature { mask: 0x02 })
-                }
-                #[cfg(not(miri))]
-                {
-                    if self.zstd.is_none() {
-                        let decomp =
-                            zstd::bulk::Decompressor::new().map_err(|_| StatamError::Corrupt {
-                                reason: "fsst subchunk zstd decompressor init failed",
-                            })?;
-                        self.zstd = Some(decomp);
-                    }
-                    let decomp = self.zstd.as_mut().ok_or(StatamError::Corrupt {
-                        reason: "fsst subchunk zstd decompressor missing",
-                    })?;
-                    self.scratch.resize(raw_len, 0);
-                    let written = decomp
-                        .decompress_to_buffer(stored, &mut self.scratch)
-                        .map_err(|_| StatamError::Corrupt {
-                            reason: "fsst subchunk zstd decompression failed",
-                        })?;
-                    if written != raw_len {
-                        return Err(StatamError::Corrupt {
-                            reason: "fsst subchunk zstd decompressed length mismatch",
-                        });
-                    }
-                    Ok(&self.scratch[..raw_len])
-                }
-            }
-        }
+        crate::format::decompress_checked_into(
+            stored,
+            meta.codec,
+            meta.raw_len as usize,
+            MAX_BLOCK_RAW_BYTES,
+            &mut self.scratch,
+        )
     }
 }
 

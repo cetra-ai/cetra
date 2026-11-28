@@ -9443,15 +9443,10 @@ fn pass22_resolved_chunks_dense_and_sparse_and_parallel_reconstruct() {
 
     for dt in [DataType::Utf8, DataType::Binary] {
         for mask in [&all_mask, &partial_mask] {
-            let f1 = reconstruct_payload_column_from_flat(&flat_refs, mask, &recon_chunks, &dt, 1)
+            let f1 = reconstruct_payload_column_from_flat(&flat_refs, mask, &recon_chunks, &dt)
                 .unwrap()
                 .materialize(None)
                 .unwrap();
-            let f8 = reconstruct_payload_column_from_flat(&flat_refs, mask, &recon_chunks, &dt, 8)
-                .unwrap()
-                .materialize(None)
-                .unwrap();
-            assert_eq!(f1, f8);
 
             let s1 = reconstruct_payload_column_selected(
                 rows.len(),
@@ -9459,29 +9454,16 @@ fn pass22_resolved_chunks_dense_and_sparse_and_parallel_reconstruct() {
                 mask,
                 &recon_chunks,
                 &dt,
-                1,
-            )
-            .unwrap()
-            .materialize(None)
-            .unwrap();
-            let s8 = reconstruct_payload_column_selected(
-                rows.len(),
-                &selected_refs,
-                mask,
-                &recon_chunks,
-                &dt,
-                8,
             )
             .unwrap()
             .materialize(None)
             .unwrap();
             assert_eq!(f1, s1);
-            assert_eq!(s1, s8);
         }
 
         // Direct compact take: empty, all-null, sorted, unsorted + duplicate indices (>= 1 MiB).
         assert_eq!(
-            reconstruct_payload_column_take_from_flat(&flat_refs, &[], &recon_chunks, &dt, 8)
+            reconstruct_payload_column_take_from_flat(&flat_refs, &[], &recon_chunks, &dt)
                 .unwrap()
                 .len(),
             0
@@ -9493,7 +9475,6 @@ fn pass22_resolved_chunks_dense_and_sparse_and_parallel_reconstruct() {
                 &[],
                 &recon_chunks,
                 &dt,
-                8
             )
             .unwrap()
             .len(),
@@ -9505,57 +9486,27 @@ fn pass22_resolved_chunks_dense_and_sparse_and_parallel_reconstruct() {
             &[0, 4, 8, 12],
             &recon_chunks,
             &dt,
-            8,
         )
         .unwrap();
         assert!(matches!(null_only, Column::Const { len: 4, .. }));
 
         let take_idxs = vec![15, 3, 2, 3, 0, 7, 11, 14, 1, 15, 6, 10];
-        let tf1 = reconstruct_payload_column_take_from_flat(
-            &flat_refs,
-            &take_idxs,
-            &recon_chunks,
-            &dt,
-            1,
-        )
-        .unwrap()
-        .materialize(None)
-        .unwrap();
-        let tf8 = reconstruct_payload_column_take_from_flat(
-            &flat_refs,
-            &take_idxs,
-            &recon_chunks,
-            &dt,
-            8,
-        )
-        .unwrap()
-        .materialize(None)
-        .unwrap();
-        let ts1 = reconstruct_payload_column_take_selected(
+        let tf =
+            reconstruct_payload_column_take_from_flat(&flat_refs, &take_idxs, &recon_chunks, &dt)
+                .unwrap()
+                .materialize(None)
+                .unwrap();
+        let ts = reconstruct_payload_column_take_selected(
             rows.len(),
             &selected_refs,
             &take_idxs,
             &recon_chunks,
             &dt,
-            1,
         )
         .unwrap()
         .materialize(None)
         .unwrap();
-        let ts8 = reconstruct_payload_column_take_selected(
-            rows.len(),
-            &selected_refs,
-            &take_idxs,
-            &recon_chunks,
-            &dt,
-            8,
-        )
-        .unwrap()
-        .materialize(None)
-        .unwrap();
-        assert_eq!(tf1, tf8);
-        assert_eq!(tf1, ts1);
-        assert_eq!(ts1, ts8);
+        assert_eq!(tf, ts);
     }
 
     // 5. Enforce MAX_ROW_PAYLOAD_BYTES and MAX_BATCH_DECODED_BYTES in Pass 1.
@@ -9570,7 +9521,6 @@ fn pass22_resolved_chunks_dense_and_sparse_and_parallel_reconstruct() {
             &Bitmap::new_ones(1),
             &limit_chunks,
             &DataType::Binary,
-            4,
         ),
         Err(StatamError::BoundsExceeded { .. })
     ));
@@ -9585,7 +9535,6 @@ fn pass22_resolved_chunks_dense_and_sparse_and_parallel_reconstruct() {
             &Bitmap::new_ones(5),
             &limit_chunks,
             &DataType::Binary,
-            4,
         ),
         Err(StatamError::BoundsExceeded { .. })
     ));
@@ -10076,7 +10025,7 @@ fn pass23_hash_free_wave_plan_parity_and_multiwave_fallback() {
             p_small2_vals.push(Vec::new());
             p_mix_vals.push(String::new());
         } else {
-            // ~12 KiB per row -> 128 rows = ~1.5 MiB >= PARALLEL_RECONSTRUCT_MIN_BYTES (1 MiB).
+            // ~12 KiB per row -> 128 rows = ~1.5 MiB (single-copy Stage B reconstruction, well above the 64 KiB parallel threshold).
             p_big_vals.push(format!("BIG_{i:03}_") + &"B".repeat(12 * 1024));
             // Mix ~240 B inline payloads (<= INLINE_PAYLOAD_THRESHOLD = 256 B) + ~2 KiB chunked
             // payloads so `PayloadRefs` raw_len exceeds `MIN_PARALLEL_WORK_BYTES` (48 KiB) while
@@ -10911,7 +10860,7 @@ fn pass24_fused_take_rg_and_lpt_pack_frames_parity() {
         StatamReader::open(s3_file.clone(), Some(Arc::new(remote_resolver))).unwrap();
 
     // Multi-MB take across all 8 MBs (6 rows/MB = 48 rows, > 150 KiB payloads -> parallel Step 4)
-    // + single-MB take (Step 4 sequential with `recon_threads = threads`)
+    // + single-MB take (`mb_jobs.len() == 1` -> sequential single-copy Step 4 `assemble_fused_take_mb`)
     // + duplicate `proj_indices`.
     let multi_mb_rows: Vec<u64> = (0..8u64)
         .flat_map(|mb| {

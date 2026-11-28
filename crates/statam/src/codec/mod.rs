@@ -793,6 +793,90 @@ pub(crate) fn decode_mini_block_selected_parallel_bytes(
     decode_mini_block_selected(&raw_body, entry, dt, file_dict, mask)
 }
 
+/// Parallel `Bytes`-backed variant of [`decode_mini_block_take`] that parallelizes
+/// `BLOCK_FLAG_PLAIN_SUBCHUNKED` (`Utf8` / `Binary`) sub-chunk decompression across `threads`
+/// when `>= 2` sub-chunks are touched outside an existing parallel scope.
+pub(crate) fn decode_mini_block_take_parallel_bytes(
+    raw_body: Bytes,
+    entry: &BlockEntry,
+    dt: &DataType,
+    file_dict: Option<&FileDict>,
+    indices: &[usize],
+    threads: usize,
+) -> Result<Column, StatamError> {
+    if threads > 1
+        && !crate::parallel::in_parallel_scope()
+        && entry.row_count > 0
+        && indices.len() >= 2
+        && entry.encoding == Encoding::Plain
+        && (entry.block_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0
+        && matches!(dt, DataType::Utf8 | DataType::Binary)
+    {
+        validate_block_entry_flags(entry, dt)?;
+        dt.validate(MAX_NESTING_DEPTH)?;
+        let row_count = entry.row_count as usize;
+        if indices
+            .len()
+            .checked_mul(16)
+            .is_none_or(|b| b > crate::MAX_BLOCK_RAW_BYTES)
+        {
+            return Err(StatamError::BoundsExceeded {
+                reason: "mini-block take indices exceed MAX_BLOCK_RAW_BYTES",
+            });
+        }
+        for &row in indices {
+            if row >= row_count {
+                return Err(StatamError::Corrupt {
+                    reason: "mini-block take index out of bounds",
+                });
+            }
+        }
+        let (full_nulls, after_nulls) =
+            read_optional_nulls(&raw_body, row_count, entry.block_flags)?;
+        let nulls_prefix_len = raw_body.len() - after_nulls.len();
+        let compact_nulls = if let Some(ref bm) = full_nulls {
+            let mut out = Bitmap::new_zeroed(indices.len());
+            let mut valid_cnt = 0usize;
+            for (pos, &row) in indices.iter().enumerate() {
+                if bm.get(row) {
+                    let _ = out.set(pos, true);
+                    valid_cnt += 1;
+                }
+            }
+            if valid_cnt == 0 {
+                let _ = PlainSubchunkedView::parse(after_nulls, row_count)?;
+                return Ok(Column::Const {
+                    value: ScalarValue::Null(dt.clone()),
+                    len: indices.len(),
+                });
+            }
+            if valid_cnt == indices.len() {
+                None
+            } else {
+                Some(out)
+            }
+        } else {
+            None
+        };
+        let (offsets, bytes) = PlainSubchunkedView::decode_take_parallel_bytes(
+            raw_body,
+            nulls_prefix_len,
+            row_count,
+            indices,
+            compact_nulls.as_ref(),
+            crate::MAX_BLOCK_RAW_BYTES,
+            threads,
+        )?;
+        let data = match dt {
+            DataType::Utf8 => FlatData::Utf8(Utf8Data::try_new(offsets, bytes)?),
+            DataType::Binary => FlatData::Binary(BinaryData::try_new(offsets, bytes)?),
+            _ => unreachable!(),
+        };
+        return Ok(Column::Flat(FlatColumn::try_new(data, compact_nulls)?));
+    }
+    decode_mini_block_take(&raw_body, entry, dt, file_dict, indices)
+}
+
 /// Decodes only `indices` of one mini-block into a compact `indices.len()`-row [`Column`].
 pub(crate) fn decode_mini_block_take(
     raw_body: &[u8],

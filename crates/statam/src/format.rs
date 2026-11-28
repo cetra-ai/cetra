@@ -2277,6 +2277,58 @@ pub fn decompress_checked(
     }
 }
 
+/// Decompresses a payload into `scratch` (reusing its allocation without zero-filling on Zstd
+/// or same/smaller LZ4), or borrows `stored` directly with zero copy when `codec == Codec::None`.
+pub(crate) fn decompress_checked_into<'a>(
+    stored: &'a [u8],
+    codec: Codec,
+    raw_len: usize,
+    max_raw: usize,
+    scratch: &'a mut Vec<u8>,
+) -> Result<&'a [u8], StatamError> {
+    check_decompress_bounds(raw_len, stored.len(), max_raw)?;
+    match codec {
+        Codec::None => {
+            if stored.len() != raw_len {
+                return Err(StatamError::Corrupt {
+                    reason: "uncompressed payload length mismatch",
+                });
+            }
+            Ok(stored)
+        }
+        Codec::Lz4 => {
+            if scratch.capacity() > raw_len.saturating_add(256 * 1024) {
+                *scratch = vec![0u8; raw_len];
+            } else {
+                scratch.resize(raw_len, 0);
+            }
+            let written = lz4_flex::block::decompress_into(stored, scratch).map_err(|_| {
+                StatamError::Corrupt {
+                    reason: "lz4 block decompression failed",
+                }
+            })?;
+            if written != raw_len {
+                return Err(StatamError::Corrupt {
+                    reason: "lz4 decompressed length mismatch",
+                });
+            }
+            Ok(&scratch[..raw_len])
+        }
+        Codec::Zstd => {
+            #[cfg(not(miri))]
+            {
+                decompress_zstd_into(stored, raw_len, None, scratch)?;
+                Ok(&scratch[..raw_len])
+            }
+            #[cfg(miri)]
+            {
+                let _ = (stored, raw_len, scratch);
+                Err(StatamError::UnsupportedFeature { mask: 0x02 })
+            }
+        }
+    }
+}
+
 /// Checks decompression size and zip-bomb ratio bounds before allocating.
 pub fn check_decompress_bounds(
     raw_len: usize,
@@ -2333,29 +2385,79 @@ fn compress_zstd(_raw: &[u8], _level: i32) -> Result<Vec<u8>, StatamError> {
 }
 
 #[cfg(not(miri))]
-fn decompress_zstd(stored: &[u8], raw_len: usize) -> Result<Vec<u8>, StatamError> {
+fn decompress_zstd_into(
+    stored: &[u8],
+    raw_len: usize,
+    dict: Option<&PackDecoderDict>,
+    out: &mut Vec<u8>,
+) -> Result<(), StatamError> {
     use std::cell::RefCell;
     thread_local! {
-        static DECOMP: RefCell<Option<zstd::bulk::Decompressor<'static>>> =
+        static DCTX: RefCell<Option<zstd::zstd_safe::DCtx<'static>>> =
             const { RefCell::new(None) };
     }
-    DECOMP.with(|cell| {
+    DCTX.with(|cell| {
         let mut guard = cell.borrow_mut();
         if guard.is_none() {
-            let decomp = zstd::bulk::Decompressor::new().map_err(|_| StatamError::Corrupt {
-                reason: "zstd decompressor init failed",
-            })?;
-            *guard = Some(decomp);
+            *guard = Some(
+                zstd::zstd_safe::DCtx::try_create().ok_or(StatamError::Corrupt {
+                    reason: "zstd decompressor init failed",
+                })?,
+            );
         }
-        let decomp = guard.as_mut().ok_or(StatamError::Corrupt {
-            reason: "zstd decompressor missing",
-        })?;
-        decomp
-            .decompress(stored, raw_len)
-            .map_err(|_| StatamError::Corrupt {
-                reason: "zstd decompression failed",
-            })
+        let Some(dctx) = guard.as_mut() else {
+            return Err(StatamError::Corrupt {
+                reason: "zstd decompressor init failed",
+            });
+        };
+        out.clear();
+        // Reuse existing scratch without zero-filling; round upward allocations to the next
+        // 16 KiB bucket via `reserve_exact` so monotonically varying frames (e.g. 28-45 KiB)
+        // do not thrash reallocations while keeping `dstCapacity` strictly bounded within
+        // `raw_len + 256 KiB` (never doubling to 2x `raw_len`).
+        let target_cap = if raw_len >= 4096 {
+            raw_len
+                .checked_next_multiple_of(16 * 1024)
+                .unwrap_or(raw_len)
+                .min(MAX_BLOCK_RAW_BYTES)
+                .max(raw_len)
+        } else {
+            raw_len
+        };
+        if out.capacity() > raw_len.saturating_add(256 * 1024) {
+            *out = Vec::with_capacity(target_cap);
+        } else if out.capacity() < raw_len {
+            out.reserve_exact(target_cap);
+        }
+        let written = if let Some(d) = dict {
+            dctx.decompress_using_ddict(out, stored, d.inner.as_ddict())
+                .map_err(|_| StatamError::Corrupt {
+                    reason: "zstd dict decompression failed",
+                })?
+        } else {
+            dctx.decompress(out, stored)
+                .map_err(|_| StatamError::Corrupt {
+                    reason: "zstd decompression failed",
+                })?
+        };
+        if written != raw_len || out.len() != raw_len {
+            return Err(StatamError::Corrupt {
+                reason: if dict.is_some() {
+                    "zstd dict decompressed length mismatch"
+                } else {
+                    "zstd decompressed length mismatch"
+                },
+            });
+        }
+        Ok(())
     })
+}
+
+#[cfg(not(miri))]
+fn decompress_zstd(stored: &[u8], raw_len: usize) -> Result<Vec<u8>, StatamError> {
+    let mut out = Vec::with_capacity(raw_len);
+    decompress_zstd_into(stored, raw_len, None, &mut out)?;
+    Ok(out)
 }
 
 #[cfg(miri)]
@@ -2526,43 +2628,35 @@ impl PackDecoderDict {
     }
 }
 
-/// Reusable per-worker Zstd dictionary decompressor for `.stpk` pack frames.
+/// Reusable per-worker scratch buffer for `.stpk` pack frame decompression.
 ///
-/// Reuses the underlying `ZSTD_DCtx` across frames and switches prepared dictionaries in O(1)
-/// via `set_prepared_dictionary` whenever the borrowed [`PackDecoderDict`] pointer changes.
+/// Backed by a thread-local `ZSTD_DCtx` so dict and non-dict Zstd frames reuse one context per
+/// thread with zero `ZSTD_createDCtx`/`ZSTD_freeDCtx` per query, while `scratch` avoids repeated
+/// per-frame heap allocations during sparse takes and streaming substring scans.
 pub(crate) struct PackFrameDecompressor<'a> {
-    #[cfg(not(miri))]
-    inner: Option<(&'a PackDecoderDict, zstd::bulk::Decompressor<'a>)>,
-    #[cfg(miri)]
+    scratch: Vec<u8>,
     _marker: std::marker::PhantomData<&'a PackDecoderDict>,
 }
 
 impl fmt::Debug for PackFrameDecompressor<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        #[cfg(not(miri))]
-        let has_dict = self.inner.is_some();
-        #[cfg(miri)]
-        let has_dict = false;
         f.debug_struct("PackFrameDecompressor")
-            .field("has_dict", &has_dict)
+            .field("scratch_cap", &self.scratch.capacity())
             .finish()
     }
 }
 
 impl<'a> PackFrameDecompressor<'a> {
-    /// Creates an empty reusable dictionary decompressor.
+    /// Creates an empty reusable pack frame decompressor.
     #[inline]
     pub(crate) fn new() -> Self {
         Self {
-            #[cfg(not(miri))]
-            inner: None,
-            #[cfg(miri)]
+            scratch: Vec::new(),
             _marker: std::marker::PhantomData,
         }
     }
 
-    /// Decompresses a Zstd dictionary-compressed frame payload using `dict`, reusing or
-    /// switching the prepared dictionary on the underlying `ZSTD_DCtx` in O(1).
+    /// Decompresses a Zstd dictionary-compressed frame payload into a freshly owned `Vec<u8>`.
     #[cfg(not(miri))]
     pub(crate) fn decompress_with_dict(
         &mut self,
@@ -2570,33 +2664,8 @@ impl<'a> PackFrameDecompressor<'a> {
         raw_len: usize,
         dict: &'a PackDecoderDict,
     ) -> Result<Vec<u8>, StatamError> {
-        if let Some((prev, decomp)) = &mut self.inner {
-            if !std::ptr::eq(*prev, dict) {
-                decomp
-                    .set_prepared_dictionary(&dict.inner)
-                    .map_err(|_| StatamError::Corrupt {
-                        reason: "zstd dict decompressor switch failed",
-                    })?;
-                *prev = dict;
-            }
-            return decomp
-                .decompress(stored, raw_len)
-                .map_err(|_| StatamError::Corrupt {
-                    reason: "zstd dict decompression failed",
-                });
-        }
-        let mut decomp =
-            zstd::bulk::Decompressor::with_prepared_dictionary(&dict.inner).map_err(|_| {
-                StatamError::Corrupt {
-                    reason: "zstd dict decompressor init failed",
-                }
-            })?;
-        let out = decomp
-            .decompress(stored, raw_len)
-            .map_err(|_| StatamError::Corrupt {
-                reason: "zstd dict decompression failed",
-            })?;
-        self.inner = Some((dict, decomp));
+        let mut out = Vec::with_capacity(raw_len);
+        decompress_zstd_into(stored, raw_len, Some(dict), &mut out)?;
         Ok(out)
     }
 
@@ -2609,6 +2678,70 @@ impl<'a> PackFrameDecompressor<'a> {
         _dict: &'a PackDecoderDict,
     ) -> Result<Vec<u8>, StatamError> {
         Err(StatamError::UnsupportedFeature { mask: 0x02 })
+    }
+
+    /// Verifies and decompresses a `.stpk` `PF` pack frame into the internal reusable `scratch`
+    /// buffer, returning a borrowed slice of the decoded frame bytes.
+    #[cfg(test)]
+    pub(crate) fn read_frame_into_scratch(
+        &mut self,
+        frame: &[u8],
+        max_raw: usize,
+        dict: Option<&'a PackDecoderDict>,
+    ) -> Result<(Codec, u8, &[u8]), StatamError> {
+        let vf = parse_verified_pack_frame(frame, max_raw)?;
+        let codec = vf.codec;
+        let flags = vf.flags;
+        let decoded = self.decompress_verified_frame_into_scratch(vf, max_raw, dict)?;
+        Ok((codec, flags, decoded))
+    }
+
+    /// Decompresses a pack frame whose header and CRC-32C have already been verified via
+    /// [`VerifiedPackFrame`] into the internal reusable `scratch` buffer, avoiding a duplicate
+    /// CRC pass.
+    pub(crate) fn decompress_verified_frame_into_scratch(
+        &mut self,
+        vf: VerifiedPackFrame<'_>,
+        max_raw: usize,
+        dict: Option<&'a PackDecoderDict>,
+    ) -> Result<&[u8], StatamError> {
+        check_decompress_bounds(vf.raw_len, vf.stored.len(), max_raw)?;
+        if (vf.flags & PACK_FRAME_FLAG_USES_DICT) != 0 {
+            if vf.codec != Codec::Zstd {
+                return Err(StatamError::Corrupt {
+                    reason: "pack frame dict flag requires zstd codec",
+                });
+            }
+            let dict = dict.ok_or(StatamError::Corrupt {
+                reason: "pack frame requires dictionary but none provided",
+            })?;
+            #[cfg(not(miri))]
+            {
+                decompress_zstd_into(vf.stored, vf.raw_len, Some(dict), &mut self.scratch)?;
+            }
+            #[cfg(miri)]
+            {
+                let _ = (vf.stored, vf.raw_len, dict);
+                return Err(StatamError::UnsupportedFeature { mask: 0x02 });
+            }
+        } else if vf.codec == Codec::None {
+            if vf.stored.len() != vf.raw_len {
+                return Err(StatamError::Corrupt {
+                    reason: "uncompressed payload length mismatch",
+                });
+            }
+            self.scratch.clear();
+            self.scratch.extend_from_slice(vf.stored);
+        } else {
+            let _ = decompress_checked_into(
+                vf.stored,
+                vf.codec,
+                vf.raw_len,
+                max_raw,
+                &mut self.scratch,
+            )?;
+        }
+        Ok(&self.scratch[..vf.raw_len])
     }
 }
 
@@ -2789,6 +2922,52 @@ pub fn write_framed_block_adaptive(
     }
 
     write_framed_block_with_min_savings(encoding, raw, codec, zstd_level, min_savings_pct, out)
+}
+
+/// Writes an already-compressed (or uncompressed) `.statam` `SB` data block frame directly
+/// without re-compressing `stored`. Caller must ensure `stored` already satisfies all
+/// decompression ratio/size invariants for `(codec, raw_len)`.
+pub(crate) fn write_precompressed_framed_block(
+    encoding: Encoding,
+    codec: Codec,
+    raw_len: u32,
+    stored: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<FramedWriteInfo, StatamError> {
+    let raw_len_usize = raw_len as usize;
+    if raw_len_usize > MAX_BLOCK_RAW_BYTES {
+        return Err(StatamError::BoundsExceeded {
+            reason: "precompressed block raw_len exceeds MAX_BLOCK_RAW_BYTES",
+        });
+    }
+    check_decompress_bounds(raw_len_usize, stored.len(), MAX_BLOCK_RAW_BYTES)?;
+    if codec == Codec::None && stored.len() != raw_len_usize {
+        return Err(StatamError::Corrupt {
+            reason: "precompressed uncompressed block length mismatch",
+        });
+    }
+    let stored_len = u32::try_from(stored.len()).map_err(|_| StatamError::BoundsExceeded {
+        reason: "block stored_len overflows u32",
+    })?;
+    let mut header_prefix = [0u8; 12];
+    header_prefix[0..2].copy_from_slice(&BLOCK_MAGIC);
+    header_prefix[2] = encoding as u8;
+    header_prefix[3] = codec as u8;
+    header_prefix[4..8].copy_from_slice(&raw_len.to_le_bytes());
+    header_prefix[8..12].copy_from_slice(&stored_len.to_le_bytes());
+    let crc = block_frame_crc(&header_prefix, stored);
+
+    out.reserve(BLOCK_FRAME_HEADER_LEN + stored.len());
+    out.extend_from_slice(&header_prefix);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(stored);
+
+    Ok(FramedWriteInfo {
+        codec,
+        stored_len,
+        raw_len,
+        crc32c: crc,
+    })
 }
 
 /// Reads, checksum-verifies, and decompresses a framed `.statam` `SB` data block,
@@ -3075,7 +3254,71 @@ fn emit_pack_frame_bytes(
     })
 }
 
-fn parse_verified_pack_frame(frame: &[u8]) -> Result<(Codec, u8, usize, &[u8]), StatamError> {
+/// Proof token produced only after verifying a `.stpk` `PF` pack frame's magic, codec,
+/// known flags, exact byte length, CRC-32C checksum, caller-supplied `max_raw` bound,
+/// dict-codec compatibility, and uncompressed length invariant.
+///
+/// All fields are private to `format.rs` so no other module can bypass verification.
+#[derive(Clone, Copy)]
+pub(crate) struct VerifiedPackFrame<'a> {
+    codec: Codec,
+    flags: u8,
+    raw_len: usize,
+    header_crc: u32,
+    stored: &'a [u8],
+}
+
+impl fmt::Debug for VerifiedPackFrame<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VerifiedPackFrame")
+            .field("codec", &self.codec)
+            .field("flags", &self.flags)
+            .field("raw_len", &self.raw_len)
+            .field("header_crc", &self.header_crc)
+            .field("stored_len", &self.stored.len())
+            .finish()
+    }
+}
+
+impl<'a> VerifiedPackFrame<'a> {
+    #[inline]
+    pub(crate) fn codec(&self) -> Codec {
+        self.codec
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn flags(&self) -> u8 {
+        self.flags
+    }
+
+    #[inline]
+    pub(crate) fn raw_len(&self) -> usize {
+        self.raw_len
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn stored(&self) -> &'a [u8] {
+        self.stored
+    }
+}
+
+/// Parses and checksum-verifies a `.stpk` `PF` pack frame in one pass, enforcing `raw_len <= max_raw`
+/// (e.g. `MAX_FRAME_RAW_BYTES` for chunk frames, `MAX_BLOCK_RAW_BYTES` for 64 MiB `EdgeTable` frames).
+///
+/// Exact validation order (preserves existing CRC-before-semantic test contracts):
+/// 1. Header length (`>= PACK_FRAME_HEADER_LEN`), `PACK_FRAME_MAGIC`, `Codec::from_u8`,
+///    `flags & !PACK_FRAME_FLAG_USES_DICT == 0`, exact `PACK_FRAME_HEADER_LEN + stored_len == frame.len()`.
+/// 2. CRC-32C (`pack_frame_crc(&frame[0..12], stored) == header_crc`, else `StatamError::ChecksumMismatch`).
+/// 3. Post-CRC semantic checks:
+///    - `raw_len > max_raw` -> `StatamError::BoundsExceeded`
+///    - `(flags & PACK_FRAME_FLAG_USES_DICT) != 0 && codec != Codec::Zstd` -> `StatamError::Corrupt`
+///    - `codec == Codec::None && stored.len() != raw_len` -> `StatamError::Corrupt`
+pub(crate) fn parse_verified_pack_frame(
+    frame: &[u8],
+    max_raw: usize,
+) -> Result<VerifiedPackFrame<'_>, StatamError> {
     if frame.len() < PACK_FRAME_HEADER_LEN {
         return Err(StatamError::Corrupt {
             reason: "truncated pack frame header",
@@ -3095,7 +3338,7 @@ fn parse_verified_pack_frame(frame: &[u8]) -> Result<(Codec, u8, usize, &[u8]), 
     }
     let raw_len = read_u32_le(frame, 4) as usize;
     let stored_len = read_u32_le(frame, 8) as usize;
-    let expected_crc = read_u32_le(frame, 12);
+    let header_crc = read_u32_le(frame, 12);
 
     let total_len =
         PACK_FRAME_HEADER_LEN
@@ -3110,12 +3353,63 @@ fn parse_verified_pack_frame(frame: &[u8]) -> Result<(Codec, u8, usize, &[u8]), 
     }
     let stored = &frame[PACK_FRAME_HEADER_LEN..total_len];
     let actual_crc = pack_frame_crc(&frame[0..12], stored);
-    if actual_crc != expected_crc {
+    if actual_crc != header_crc {
         return Err(StatamError::ChecksumMismatch {
             context: "pack frame",
         });
     }
-    Ok((codec, flags, raw_len, stored))
+    if raw_len > max_raw {
+        return Err(StatamError::BoundsExceeded {
+            reason: "decompressed length exceeds maximum allowed",
+        });
+    }
+    if (flags & PACK_FRAME_FLAG_USES_DICT) != 0 && codec != Codec::Zstd {
+        return Err(StatamError::Corrupt {
+            reason: "pack frame dict flag requires zstd codec",
+        });
+    }
+    if codec == Codec::None && stored.len() != raw_len {
+        return Err(StatamError::Corrupt {
+            reason: "uncompressed payload length mismatch",
+        });
+    }
+    Ok(VerifiedPackFrame {
+        codec,
+        flags,
+        raw_len,
+        header_crc,
+        stored,
+    })
+}
+
+/// Verifies that `raw` is a valid chunk `PF` frame (`max_raw = MAX_FRAME_RAW_BYTES`) matching
+/// `entry` (`codec`, `flags`, `raw_len`, `stored_len`, `crc32c`) with a single CRC-32C pass.
+pub(crate) fn verify_pack_frame_matches_entry<'a>(
+    raw: &'a [u8],
+    entry: &FrameEntry,
+) -> Result<VerifiedPackFrame<'a>, StatamError> {
+    let expected_total = PACK_FRAME_HEADER_LEN
+        .checked_add(entry.stored_len as usize)
+        .ok_or(StatamError::BoundsExceeded {
+            reason: "raw frame expected length overflow",
+        })?;
+    if raw.len() != expected_total {
+        return Err(StatamError::Corrupt {
+            reason: "raw frame byte length mismatch",
+        });
+    }
+    let vf = parse_verified_pack_frame(raw, MAX_FRAME_RAW_BYTES)?;
+    if vf.codec != entry.codec
+        || vf.flags != entry.flags
+        || vf.raw_len != entry.raw_len as usize
+        || vf.stored.len() != entry.stored_len as usize
+        || vf.header_crc != entry.crc32c
+    {
+        return Err(StatamError::Corrupt {
+            reason: "raw frame PF header does not match FrameEntry",
+        });
+    }
+    Ok(vf)
 }
 
 /// Reads, checksum-verifies, and decompresses a framed `.stpk` `PF` pack frame.
@@ -3134,10 +3428,22 @@ pub(crate) fn read_framed_pack_frame_with_decompressor<'a>(
     dict: Option<&'a PackDecoderDict>,
     dict_decomp: &mut PackFrameDecompressor<'a>,
 ) -> Result<(Codec, u8, Vec<u8>), StatamError> {
-    let (codec, flags, raw_len, stored) = parse_verified_pack_frame(frame)?;
-    check_decompress_bounds(raw_len, stored.len(), max_raw)?;
-    if (flags & PACK_FRAME_FLAG_USES_DICT) != 0 {
-        if codec != Codec::Zstd {
+    let vf = parse_verified_pack_frame(frame, max_raw)?;
+    let decoded = decompress_verified_pack_frame_with_decompressor(vf, max_raw, dict, dict_decomp)?;
+    Ok((vf.codec, vf.flags, decoded))
+}
+
+/// Decompresses a `.stpk` `PF` pack frame whose header and CRC-32C have already been verified via
+/// [`VerifiedPackFrame`], returning an owned `Vec<u8>` without computing a duplicate CRC-32C pass.
+pub(crate) fn decompress_verified_pack_frame_with_decompressor<'a>(
+    vf: VerifiedPackFrame<'_>,
+    max_raw: usize,
+    dict: Option<&'a PackDecoderDict>,
+    dict_decomp: &mut PackFrameDecompressor<'a>,
+) -> Result<Vec<u8>, StatamError> {
+    check_decompress_bounds(vf.raw_len, vf.stored.len(), max_raw)?;
+    if (vf.flags & PACK_FRAME_FLAG_USES_DICT) != 0 {
+        if vf.codec != Codec::Zstd {
             return Err(StatamError::Corrupt {
                 reason: "pack frame dict flag requires zstd codec",
             });
@@ -3145,16 +3451,15 @@ pub(crate) fn read_framed_pack_frame_with_decompressor<'a>(
         let dict = dict.ok_or(StatamError::Corrupt {
             reason: "pack frame requires dictionary but none provided",
         })?;
-        let decoded = dict_decomp.decompress_with_dict(stored, raw_len, dict)?;
-        if decoded.len() != raw_len {
+        let decoded = dict_decomp.decompress_with_dict(vf.stored, vf.raw_len, dict)?;
+        if decoded.len() != vf.raw_len {
             return Err(StatamError::Corrupt {
                 reason: "zstd dict decompressed length mismatch",
             });
         }
-        Ok((codec, flags, decoded))
+        Ok(decoded)
     } else {
-        let decompressed = decompress_checked(stored, codec, raw_len, max_raw)?;
-        Ok((codec, flags, decompressed))
+        decompress_checked(vf.stored, vf.codec, vf.raw_len, max_raw)
     }
 }
 
@@ -4646,5 +4951,369 @@ mod tests {
         .unwrap();
         assert_eq!(info_a, info_b);
         assert_eq!(framed_a, framed_b);
+    }
+
+    #[test]
+    fn verified_pack_frame_rejects_unknown_flags_and_oversize_raw_len() {
+        let build_pf_frame = |codec: Codec, flags: u8, raw_len: u32, stored: &[u8]| -> Vec<u8> {
+            let mut out = Vec::with_capacity(PACK_FRAME_HEADER_LEN + stored.len());
+            out.extend_from_slice(&PACK_FRAME_MAGIC);
+            out.push(codec as u8);
+            out.push(flags);
+            out.extend_from_slice(&raw_len.to_le_bytes());
+            out.extend_from_slice(&(stored.len() as u32).to_le_bytes());
+            let crc = pack_frame_crc(&out[0..12], stored);
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(stored);
+            out
+        };
+
+        let raw = vec![b'p'; 512];
+        let mut framed = Vec::new();
+        let info = write_framed_pack_frame(&raw, Codec::Lz4, 0, 3, &mut framed).unwrap();
+        let entry = FrameEntry {
+            offset: PACK_HEADER_LEN as u64,
+            stored_len: info.stored_len,
+            raw_len: info.raw_len,
+            first_chunk_id: 0,
+            chunk_count: 1,
+            filter_off: 0,
+            filter_len: 0,
+            codec: info.codec,
+            flags: 0,
+            dict_id: 0,
+            crc32c: info.crc32c,
+        };
+
+        let vf = parse_verified_pack_frame(&framed, MAX_FRAME_RAW_BYTES).unwrap();
+        assert_eq!(vf.codec(), info.codec);
+        assert_eq!(vf.flags(), 0);
+        assert_eq!(vf.raw_len(), 512);
+        assert_eq!(vf.stored(), &framed[PACK_FRAME_HEADER_LEN..]);
+
+        let mut scratch_decomp = PackFrameDecompressor::new();
+        let (sc, sf, sdec) = scratch_decomp
+            .read_frame_into_scratch(&framed, MAX_FRAME_RAW_BYTES, None)
+            .unwrap();
+        assert_eq!(sc, info.codec);
+        assert_eq!(sf, 0);
+        assert_eq!(sdec, raw.as_slice());
+
+        let vf_entry = verify_pack_frame_matches_entry(&framed, &entry).unwrap();
+        assert_eq!(vf_entry.codec(), entry.codec);
+        assert_eq!(vf_entry.raw_len(), entry.raw_len as usize);
+
+        // 1. Unknown flags (0x02) rejected as Corrupt by both helpers.
+        let mut unknown_flags = framed.clone();
+        unknown_flags[3] = 0x02;
+        assert!(matches!(
+            parse_verified_pack_frame(&unknown_flags, MAX_FRAME_RAW_BYTES),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            verify_pack_frame_matches_entry(&unknown_flags, &entry),
+            Err(StatamError::Corrupt { .. })
+        ));
+        let unknown_with_crc = build_pf_frame(
+            info.codec,
+            0x02,
+            info.raw_len,
+            &framed[PACK_FRAME_HEADER_LEN..],
+        );
+        let unknown_entry = FrameEntry {
+            flags: 0x02,
+            crc32c: read_u32_le(&unknown_with_crc, 12),
+            ..entry
+        };
+        assert!(matches!(
+            parse_verified_pack_frame(&unknown_with_crc, MAX_FRAME_RAW_BYTES),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            verify_pack_frame_matches_entry(&unknown_with_crc, &unknown_entry),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // 2. Flipping codec byte without updating CRC preserves ChecksumMismatch.
+        let mut flipped_codec = framed.clone();
+        flipped_codec[2] = Codec::None as u8;
+        assert!(matches!(
+            parse_verified_pack_frame(&flipped_codec, MAX_FRAME_RAW_BYTES),
+            Err(StatamError::ChecksumMismatch { .. })
+        ));
+        assert!(matches!(
+            verify_pack_frame_matches_entry(&flipped_codec, &entry),
+            Err(StatamError::ChecksumMismatch { .. })
+        ));
+
+        // 3. Mismatched FrameEntry metadata on a self-consistent PF frame returns Corrupt.
+        let bad_entry = FrameEntry {
+            crc32c: entry.crc32c ^ 1,
+            ..entry
+        };
+        assert!(matches!(
+            verify_pack_frame_matches_entry(&framed, &bad_entry),
+            Err(StatamError::Corrupt { .. })
+        ));
+
+        // 4. raw_len > max_raw rejected as BoundsExceeded, while 16 MiB..=64 MiB is allowed when
+        // max_raw == MAX_BLOCK_RAW_BYTES (EdgeTable contract).
+        assert!(matches!(
+            parse_verified_pack_frame(&framed, 511),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+        let edge_raw_len = (MAX_FRAME_RAW_BYTES + 4096) as u32;
+        let edge_frame = build_pf_frame(Codec::Lz4, 0, edge_raw_len, &[0xAA; 32]);
+        let edge_entry = FrameEntry {
+            offset: PACK_HEADER_LEN as u64,
+            stored_len: 32,
+            raw_len: edge_raw_len,
+            first_chunk_id: 0,
+            chunk_count: 1,
+            filter_off: 0,
+            filter_len: 0,
+            codec: Codec::Lz4,
+            flags: 0,
+            dict_id: 0,
+            crc32c: read_u32_le(&edge_frame, 12),
+        };
+        let vf_edge = parse_verified_pack_frame(&edge_frame, MAX_BLOCK_RAW_BYTES).unwrap();
+        assert_eq!(vf_edge.raw_len(), edge_raw_len as usize);
+        assert!(matches!(
+            parse_verified_pack_frame(&edge_frame, MAX_FRAME_RAW_BYTES),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+        assert!(matches!(
+            verify_pack_frame_matches_entry(&edge_frame, &edge_entry),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+
+        #[cfg(not(miri))]
+        {
+            let large_edge = vec![b'E'; MAX_FRAME_RAW_BYTES + 1024];
+            let mut large_framed = Vec::new();
+            write_framed_pack_frame_with_limit(
+                &large_edge,
+                Codec::Lz4,
+                0,
+                3,
+                MAX_BLOCK_RAW_BYTES,
+                &mut large_framed,
+            )
+            .unwrap();
+            let (_, _, decoded_edge) =
+                read_framed_pack_frame(&large_framed, MAX_BLOCK_RAW_BYTES).unwrap();
+            assert_eq!(decoded_edge.len(), large_edge.len());
+            assert!(matches!(
+                read_framed_pack_frame(&large_framed, MAX_FRAME_RAW_BYTES),
+                Err(StatamError::BoundsExceeded { .. })
+            ));
+        }
+
+        // 5. PACK_FRAME_FLAG_USES_DICT with Codec::None or Codec::Lz4 rejected as Corrupt.
+        for bad_codec in [Codec::None, Codec::Lz4] {
+            let stored = b"payload";
+            let bad_dict_frame = build_pf_frame(
+                bad_codec,
+                PACK_FRAME_FLAG_USES_DICT,
+                stored.len() as u32,
+                stored,
+            );
+            let bad_dict_entry = FrameEntry {
+                offset: PACK_HEADER_LEN as u64,
+                stored_len: stored.len() as u32,
+                raw_len: stored.len() as u32,
+                first_chunk_id: 0,
+                chunk_count: 1,
+                filter_off: 0,
+                filter_len: 0,
+                codec: bad_codec,
+                flags: PACK_FRAME_FLAG_USES_DICT,
+                dict_id: 0,
+                crc32c: read_u32_le(&bad_dict_frame, 12),
+            };
+            assert!(matches!(
+                parse_verified_pack_frame(&bad_dict_frame, MAX_FRAME_RAW_BYTES),
+                Err(StatamError::Corrupt { .. })
+            ));
+            assert!(matches!(
+                verify_pack_frame_matches_entry(&bad_dict_frame, &bad_dict_entry),
+                Err(StatamError::Corrupt { .. })
+            ));
+        }
+
+        // 6. Privacy: Debug formatting logs stored_len and never leaks payload bytes.
+        let secret = b"SECRET_PROMPT_CONTENT_123";
+        let secret_frame = build_pf_frame(Codec::None, 0, secret.len() as u32, secret);
+        let vf_secret = parse_verified_pack_frame(&secret_frame, MAX_FRAME_RAW_BYTES).unwrap();
+        let dbg = format!("{vf_secret:?}");
+        assert!(dbg.contains("stored_len"), "expected stored_len in {dbg}");
+        assert!(
+            !dbg.contains("SECRET_PROMPT_CONTENT_123"),
+            "Debug leaked payload ASCII: {dbg}"
+        );
+        assert!(
+            !dbg.contains("[83, 69, 67"),
+            "Debug leaked payload raw bytes: {dbg}"
+        );
+    }
+
+    #[test]
+    fn decompress_checked_into_reuses_capacity_and_handles_huge_raw_len() {
+        // 1. Codec::None borrows `stored` directly with zero copy and zero scratch allocation.
+        let raw_none = b"zero-copy-none-payload";
+        let mut scratch = Vec::new();
+        let out_none = decompress_checked_into(
+            raw_none,
+            Codec::None,
+            raw_none.len(),
+            MAX_BLOCK_RAW_BYTES,
+            &mut scratch,
+        )
+        .unwrap();
+        assert_eq!(out_none, raw_none);
+        assert_eq!(out_none.as_ptr(), raw_none.as_ptr());
+        assert_eq!(scratch.capacity(), 0);
+
+        // 2. Codec::Lz4 reuses scratch allocation for same/smaller frames without reallocating.
+        let p_32k = vec![b'L'; 32 * 1024];
+        let p_16k = vec![b'S'; 16 * 1024];
+        let (c32, s32) = compress_guarded(&p_32k, Codec::Lz4, 0).unwrap();
+        let (c16, s16) = compress_guarded(&p_16k, Codec::Lz4, 0).unwrap();
+        assert_eq!(c32, Codec::Lz4);
+        assert_eq!(c16, Codec::Lz4);
+
+        let out_32k = decompress_checked_into(
+            &s32,
+            Codec::Lz4,
+            p_32k.len(),
+            MAX_BLOCK_RAW_BYTES,
+            &mut scratch,
+        )
+        .unwrap();
+        assert_eq!(out_32k, p_32k.as_slice());
+        let cap_32k = scratch.capacity();
+        let ptr_32k = scratch.as_ptr();
+
+        let out_16k = decompress_checked_into(
+            &s16,
+            Codec::Lz4,
+            p_16k.len(),
+            MAX_BLOCK_RAW_BYTES,
+            &mut scratch,
+        )
+        .unwrap();
+        assert_eq!(out_16k, p_16k.as_slice());
+        assert_eq!(scratch.capacity(), cap_32k);
+        assert_eq!(scratch.as_ptr(), ptr_32k);
+
+        // 3. Huge `raw_len` near `usize::MAX` fails cleanly without arithmetic overflow or panic.
+        for codec in [Codec::None, Codec::Lz4, Codec::Zstd] {
+            for huge in [usize::MAX, usize::MAX - 1, usize::MAX - 15] {
+                assert!(matches!(
+                    decompress_checked_into(
+                        &[1, 2, 3, 4],
+                        codec,
+                        huge,
+                        MAX_BLOCK_RAW_BYTES,
+                        &mut scratch
+                    ),
+                    Err(StatamError::BoundsExceeded { .. })
+                ));
+                assert!(matches!(
+                    decompress_checked_into(&[1, 2, 3, 4], codec, huge, usize::MAX, &mut scratch),
+                    Err(StatamError::BoundsExceeded { .. })
+                ));
+            }
+        }
+
+        // 4. Zstd scratch capacity stays stable across alternating 32 KiB <-> 128 KiB frames
+        // and shrinks when jumping from 512 KiB down to 32 KiB.
+        #[cfg(not(miri))]
+        {
+            let make_zstd_payload = |len: usize| -> Vec<u8> {
+                (0..len)
+                    .map(|i| {
+                        if i % 16 < 2 {
+                            ((i >> 4) ^ (i >> 12)) as u8
+                        } else {
+                            b'Z'
+                        }
+                    })
+                    .collect()
+            };
+            let z_32k_raw = make_zstd_payload(32 * 1024);
+            let z_128k_raw = make_zstd_payload(128 * 1024);
+            let z_512k_raw = make_zstd_payload(512 * 1024);
+            let (zc32, zs32) = compress_guarded(&z_32k_raw, Codec::Zstd, 1).unwrap();
+            let (zc128, zs128) = compress_guarded(&z_128k_raw, Codec::Zstd, 1).unwrap();
+            let (zc512, zs512) = compress_guarded(&z_512k_raw, Codec::Zstd, 1).unwrap();
+            assert_eq!(zc32, Codec::Zstd);
+            assert_eq!(zc128, Codec::Zstd);
+            assert_eq!(zc512, Codec::Zstd);
+
+            let mut z_scratch = Vec::new();
+            let dec = decompress_checked_into(
+                &zs128,
+                Codec::Zstd,
+                z_128k_raw.len(),
+                MAX_BLOCK_RAW_BYTES,
+                &mut z_scratch,
+            )
+            .unwrap();
+            assert_eq!(dec, z_128k_raw.as_slice());
+            let cap_128k = z_scratch.capacity();
+            let ptr_128k = z_scratch.as_ptr();
+
+            for _ in 0..3 {
+                let dec32 = decompress_checked_into(
+                    &zs32,
+                    Codec::Zstd,
+                    z_32k_raw.len(),
+                    MAX_BLOCK_RAW_BYTES,
+                    &mut z_scratch,
+                )
+                .unwrap();
+                assert_eq!(dec32, z_32k_raw.as_slice());
+                assert_eq!(z_scratch.capacity(), cap_128k);
+                assert_eq!(z_scratch.as_ptr(), ptr_128k);
+
+                let dec128 = decompress_checked_into(
+                    &zs128,
+                    Codec::Zstd,
+                    z_128k_raw.len(),
+                    MAX_BLOCK_RAW_BYTES,
+                    &mut z_scratch,
+                )
+                .unwrap();
+                assert_eq!(dec128, z_128k_raw.as_slice());
+                assert_eq!(z_scratch.capacity(), cap_128k);
+                assert_eq!(z_scratch.as_ptr(), ptr_128k);
+            }
+
+            let dec512 = decompress_checked_into(
+                &zs512,
+                Codec::Zstd,
+                z_512k_raw.len(),
+                MAX_BLOCK_RAW_BYTES,
+                &mut z_scratch,
+            )
+            .unwrap();
+            assert_eq!(dec512, z_512k_raw.as_slice());
+            let cap_512k = z_scratch.capacity();
+            assert!(cap_512k >= 512 * 1024);
+
+            let dec32_after = decompress_checked_into(
+                &zs32,
+                Codec::Zstd,
+                z_32k_raw.len(),
+                MAX_BLOCK_RAW_BYTES,
+                &mut z_scratch,
+            )
+            .unwrap();
+            assert_eq!(dec32_after, z_32k_raw.as_slice());
+            assert!(z_scratch.capacity() < cap_512k);
+            assert!(z_scratch.capacity() <= 32 * 1024 + 256 * 1024);
+        }
     }
 }

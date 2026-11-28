@@ -9,7 +9,10 @@ mod plan;
 mod stream;
 #[cfg(test)]
 mod tests;
+mod top_k;
 mod verify;
+
+pub use top_k::TopKSpec;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -349,6 +352,8 @@ pub struct ScanRequest {
     pub sort_desc_hint: bool,
     /// Maximum active rows to return.
     pub limit: Option<usize>,
+    /// Optional native late-materialized Top-K pushdown (`ORDER BY col DESC|ASC LIMIT k`, `NULLS LAST`).
+    pub top_k: Option<TopKSpec>,
     /// I/O coalescing mode (`Auto`, `Point`, or `Scan`).
     pub coalesce_mode: CoalesceMode,
     /// Number of worker threads for parallel `.stpk` frame scanning and Phase-2 column decoding
@@ -372,6 +377,7 @@ impl fmt::Debug for ScanRequest {
             .field("substrings", &self.substrings)
             .field("sort_desc_hint", &self.sort_desc_hint)
             .field("limit", &self.limit)
+            .field("top_k", &self.top_k)
             .field("coalesce_mode", &self.coalesce_mode)
             .field("read_threads", &self.read_threads)
             .field("rg_indices", &self.rg_indices)
@@ -391,6 +397,7 @@ impl PartialEq for ScanRequest {
             && self.substrings == other.substrings
             && self.sort_desc_hint == other.sort_desc_hint
             && self.limit == other.limit
+            && self.top_k == other.top_k
             && self.coalesce_mode == other.coalesce_mode
             && self.read_threads == other.read_threads
             && self.rg_indices == other.rg_indices
@@ -882,6 +889,12 @@ impl StatamReader {
         let mut early_empty = req.time_range.is_empty()
             || self.meta.postscript.row_count == 0
             || req.limit == Some(0);
+        if let Some(spec) = req.top_k {
+            self.validate_top_k_spec(spec)?;
+            if spec.limit == 0 {
+                early_empty = true;
+            }
+        }
 
         let mut resolved_lookups = Vec::with_capacity(req.id_lookups.len());
         for lk in &req.id_lookups {
@@ -1092,6 +1105,30 @@ impl StatamReader {
 
         // Precompute matching-code Bitmap for any already-cached dict-encoded substring query.
         let mut dict_sub_bitmaps = self.build_dict_sub_bitmaps(&resolved_subs);
+
+        if let Some(spec) = req.top_k {
+            let effective_k = top_k::effective_top_k_limit(req, spec);
+            let (batches, _) = self.scan_top_k_with_limits(
+                spec,
+                effective_k,
+                &rg_order,
+                &proj_indices,
+                &proj_schema,
+                &map_proj_by_col,
+                time_col_idx,
+                req.time_range,
+                &resolved_lookups,
+                &lookup_hashes,
+                &resolved_preds,
+                &resolved_filter_exprs,
+                &resolved_subs,
+                &mut dict_sub_bitmaps,
+                req.read_threads,
+                None,
+                None,
+            )?;
+            return Ok(batches);
+        }
 
         let has_filters = time_col_idx.is_some()
             || !resolved_lookups.is_empty()
@@ -1317,6 +1354,25 @@ impl StatamReader {
         projection: Option<&[usize]>,
         read_threads: usize,
         cancel: Option<&CancelToken>,
+        res: Option<&mut Reservation>,
+    ) -> Result<Vec<Batch>, StatamError> {
+        self.take_rows_with_limits_and_map_proj(
+            row_indices,
+            projection,
+            &Arc::new(HashMap::new()),
+            read_threads,
+            cancel,
+            res,
+        )
+    }
+
+    pub(super) fn take_rows_with_limits_and_map_proj(
+        &self,
+        row_indices: &[u64],
+        projection: Option<&[usize]>,
+        map_proj_by_col: &Arc<HashMap<usize, MapReadMode>>,
+        read_threads: usize,
+        cancel: Option<&CancelToken>,
         mut res: Option<&mut Reservation>,
     ) -> Result<Vec<Batch>, StatamError> {
         let _exec_guard = enter_executor_scope(self.executor.as_ref());
@@ -1324,6 +1380,7 @@ impl StatamReader {
         let outcome = self.take_rows_inner(
             row_indices,
             projection,
+            map_proj_by_col,
             read_threads,
             cancel,
             res.as_deref_mut(),
@@ -1338,10 +1395,12 @@ impl StatamReader {
         outcome
     }
 
-    fn take_rows_inner(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn take_rows_inner(
         &self,
         row_indices: &[u64],
         projection: Option<&[usize]>,
+        empty_map_proj: &Arc<HashMap<usize, MapReadMode>>,
         read_threads: usize,
         cancel: Option<&CancelToken>,
         mut res: Option<&mut Reservation>,
@@ -1461,7 +1520,6 @@ impl StatamReader {
             dict_cols: Vec<usize>,
         }
 
-        let empty_map_proj: Arc<HashMap<usize, MapReadMode>> = Arc::new(HashMap::new());
         let mut touched_with_plans: Vec<TouchedRgPlan> = Vec::with_capacity(touched_rgs.len());
         for (rg_idx, mb_rows) in touched_rgs {
             let surviving_mbs: Vec<usize> = mb_rows.iter().map(|(mb, _)| *mb).collect();
@@ -1469,7 +1527,7 @@ impl StatamReader {
                 rg_idx,
                 &surviving_mbs,
                 &proj_indices,
-                &empty_map_proj,
+                empty_map_proj,
                 None,
                 TimeRange::ALL,
                 &[],
@@ -1617,7 +1675,6 @@ impl StatamReader {
                 &wave_dict_cols,
                 eligible_for_pack_prefetch,
             )?);
-
             let block_reader = BlockCacheReader::Map {
                 primary: Arc::clone(&block_cache),
                 fallback: None,
@@ -1644,7 +1701,7 @@ impl StatamReader {
                         &item.plan,
                         &proj_indices,
                         &proj_schema,
-                        &empty_map_proj,
+                        empty_map_proj,
                         &empty_chunks,
                         &block_reader,
                         read_threads,
@@ -1914,7 +1971,7 @@ impl StatamReader {
                     &prep.plan,
                     &proj_indices,
                     &proj_schema,
-                    &empty_map_proj,
+                    empty_map_proj,
                     ext_chunks,
                     &block_reader,
                     read_threads,
@@ -1943,6 +2000,7 @@ impl StatamReader {
                     && prepared[0].l0_cids.is_empty()
                     && !merged_ext_by_pack.is_empty()
                     && !proj_indices.is_empty()
+                    && empty_map_proj.is_empty()
                 {
                     let prep = prepared.pop().ok_or(StatamError::Corrupt {
                         reason: "missing single prepared take RG",
@@ -1954,7 +2012,7 @@ impl StatamReader {
                         &prep.plan,
                         &proj_indices,
                         &proj_schema,
-                        &empty_map_proj,
+                        empty_map_proj,
                         merged_ext_by_pack,
                         &block_reader,
                         threads,
@@ -2103,7 +2161,7 @@ impl StatamReader {
                                 &prep.plan,
                                 &proj_indices,
                                 &proj_schema,
-                                &empty_map_proj,
+                                empty_map_proj,
                                 &chunks,
                                 &block_reader,
                                 read_threads,

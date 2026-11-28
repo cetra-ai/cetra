@@ -25,7 +25,7 @@ use crate::codec::{EncodedMiniBlock, WriteProfile, preferred_block_codec};
 use crate::format::{
     BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_CONST_EMPTY_COLLECTION, BLOCK_FLAG_FSST_SUBCHUNKED,
     BLOCK_FLAG_HAS_NULLS, BLOCK_FLAG_PLAIN_SUBCHUNKED, BlockEntry, Codec, Encoding,
-    MAX_DECOMPRESS_RATIO, MAX_DECOMPRESS_SLACK, check_decompress_bounds, decompress_checked,
+    MAX_DECOMPRESS_RATIO, MAX_DECOMPRESS_SLACK, check_decompress_bounds, decompress_checked_into,
 };
 use crate::parallel::{in_parallel_scope, parallel_map_in_order_static_with_ctx};
 use crate::simd::bitpack::{
@@ -3652,17 +3652,19 @@ impl<'a> PlainSubchunkedView<'a> {
         })
     }
 
-    fn decompress_chunk(
-        payload: &[u8],
+    fn decompress_chunk_into<'b>(
+        payload: &'b [u8],
         meta: PlainSubchunkMeta,
         chunk_rows: usize,
-    ) -> Result<(Vec<u8>, usize), StatamError> {
+        scratch: &'b mut Vec<u8>,
+    ) -> Result<(&'b [u8], usize), StatamError> {
         let stored = &payload[meta.stored_start as usize..meta.stored_end as usize];
-        let raw = decompress_checked(
+        let raw = decompress_checked_into(
             stored,
             meta.codec,
             meta.raw_len as usize,
             MAX_BLOCK_RAW_BYTES,
+            scratch,
         )?;
         let offs_bytes = chunk_rows
             .checked_add(1)
@@ -3696,12 +3698,14 @@ impl<'a> PlainSubchunkedView<'a> {
         let mut out_offsets = Vec::with_capacity(self.row_count + 1);
         out_offsets.push(0u32);
         let mut out_bytes = Vec::with_capacity(est_bytes);
+        let mut scratch = Vec::new();
 
         for (chunk_idx, &meta) in self.chunks.iter().enumerate() {
             let r_start = chunk_idx * self.rows_per_chunk;
             let r_end = (r_start + self.rows_per_chunk).min(self.row_count);
             let chunk_rows = r_end - r_start;
-            let (raw, offs_bytes) = Self::decompress_chunk(self.payload, meta, chunk_rows)?;
+            let (raw, offs_bytes) =
+                Self::decompress_chunk_into(self.payload, meta, chunk_rows, &mut scratch)?;
             let data = &raw[offs_bytes..];
             if out_bytes
                 .len()
@@ -3753,6 +3757,7 @@ impl<'a> PlainSubchunkedView<'a> {
         let mut out_offsets = Vec::with_capacity(self.row_count + 1);
         out_offsets.push(0u32);
         let mut out_bytes = Vec::new();
+        let mut scratch = Vec::new();
         let mut chunk_rows_buf: Vec<usize> = Vec::with_capacity(self.rows_per_chunk.min(64));
 
         let mut iter = mask
@@ -3778,10 +3783,11 @@ impl<'a> PlainSubchunkedView<'a> {
             }
 
             if any_non_null {
-                let (raw, offs_bytes) = Self::decompress_chunk(
+                let (raw, offs_bytes) = Self::decompress_chunk_into(
                     self.payload,
                     self.chunks[chunk_idx],
                     chunk_end - chunk_start,
+                    &mut scratch,
                 )?;
                 let off_raw = &raw[..offs_bytes];
                 let data = &raw[offs_bytes..];
@@ -3846,18 +3852,90 @@ impl<'a> PlainSubchunkedView<'a> {
         indices: &[usize],
         nulls: NullRef<'_>,
     ) -> Result<(Vec<u32>, Vec<u8>), StatamError> {
-        let mut cache: HashMap<usize, (Vec<u8>, usize)> = HashMap::new();
-        let mut cached_bytes = 0usize;
-        let mut out_offsets = Vec::with_capacity(indices.len() + 1);
-        out_offsets.push(0u32);
-        let mut out_bytes = Vec::new();
-
         for &row in indices {
             if row >= self.row_count {
                 return Err(StatamError::Corrupt {
                     reason: "plain subchunked take index out of bounds",
                 });
             }
+        }
+
+        let mut out_offsets = Vec::with_capacity(indices.len() + 1);
+        out_offsets.push(0u32);
+        let mut out_bytes = Vec::new();
+        let mut scratch = Vec::new();
+
+        // Fast path: chunk indices are non-decreasing (100% of `take_rows_inner` calls).
+        let chunks_monotonic = indices
+            .windows(2)
+            .all(|w| w[0] / self.rows_per_chunk <= w[1] / self.rows_per_chunk);
+
+        if chunks_monotonic {
+            let mut i = 0usize;
+            while i < indices.len() {
+                let chunk_idx = indices[i] / self.rows_per_chunk;
+                let chunk_start = chunk_idx * self.rows_per_chunk;
+                let chunk_end = (chunk_start + self.rows_per_chunk).min(self.row_count);
+
+                let group_start = i;
+                let mut any_valid = false;
+                while i < indices.len() && indices[i] / self.rows_per_chunk == chunk_idx {
+                    if nulls.is_valid(indices[i]) {
+                        any_valid = true;
+                    }
+                    i += 1;
+                }
+                let group = &indices[group_start..i];
+
+                if any_valid {
+                    let (raw, offs_bytes) = Self::decompress_chunk_into(
+                        self.payload,
+                        self.chunks[chunk_idx],
+                        chunk_end - chunk_start,
+                        &mut scratch,
+                    )?;
+                    let off_raw = &raw[..offs_bytes];
+                    let data = &raw[offs_bytes..];
+                    for &row in group {
+                        if nulls.is_valid(row) {
+                            let local = row - chunk_start;
+                            let s = read_u32_le_at(off_raw, local);
+                            let e = read_u32_le_at(off_raw, local + 1);
+                            let vlen = e - s;
+                            if out_bytes
+                                .len()
+                                .checked_add(vlen)
+                                .is_none_or(|n| n > MAX_BLOCK_RAW_BYTES)
+                            {
+                                return Err(StatamError::BoundsExceeded {
+                                    reason: "plain subchunked take decoded bytes exceed MAX_BLOCK_RAW_BYTES",
+                                });
+                            }
+                            out_bytes.extend_from_slice(&data[s..e]);
+                        }
+                        let end_off = u32::try_from(out_bytes.len()).map_err(|_| {
+                            StatamError::BoundsExceeded {
+                                reason: "plain subchunked take offset exceeds u32::MAX",
+                            }
+                        })?;
+                        out_offsets.push(end_off);
+                    }
+                } else {
+                    let cur_off = u32::try_from(out_bytes.len()).map_err(|_| {
+                        StatamError::BoundsExceeded {
+                            reason: "plain subchunked take offset exceeds u32::MAX",
+                        }
+                    })?;
+                    out_offsets.resize(out_offsets.len() + group.len(), cur_off);
+                }
+            }
+            return Ok((out_offsets, out_bytes));
+        }
+
+        // General path: unsorted or repeated indices across arbitrary chunks.
+        let mut cache: HashMap<usize, (Vec<u8>, usize)> = HashMap::new();
+        let mut cached_bytes = 0usize;
+        for &row in indices {
             if nulls.is_valid(row) {
                 let chunk_idx = row / self.rows_per_chunk;
                 let chunk_start = chunk_idx * self.rows_per_chunk;
@@ -3876,9 +3954,15 @@ impl<'a> PlainSubchunkedView<'a> {
                             reason: "plain subchunked take cache exceeds MAX_BLOCK_RAW_BYTES",
                         });
                     }
-                    let decoded =
-                        Self::decompress_chunk(self.payload, meta, chunk_end - chunk_start)?;
-                    cache.entry(chunk_idx).or_insert(decoded)
+                    let (raw_slice, offs_bytes) = Self::decompress_chunk_into(
+                        self.payload,
+                        meta,
+                        chunk_end - chunk_start,
+                        &mut scratch,
+                    )?;
+                    cache
+                        .entry(chunk_idx)
+                        .or_insert_with(|| (raw_slice.to_vec(), offs_bytes))
                 };
                 let local = row - chunk_start;
                 let off_raw = &raw[..*offs_bytes];
@@ -3922,7 +4006,8 @@ impl<'a> PlainSubchunkedView<'a> {
         let mut out_bytes = Vec::new();
         let mut out_nulls: Option<Bitmap> = None;
         let mut active_idx = 0usize;
-        let mut cur_chunk: Option<(usize, Vec<u8>, usize)> = None;
+        let mut scratch = Vec::new();
+        let mut cur_chunk: Option<(usize, usize)> = None;
 
         for row in mask.iter_ones() {
             if row >= row_count {
@@ -3941,23 +4026,27 @@ impl<'a> PlainSubchunkedView<'a> {
                     let chunk_idx = idx / self.rows_per_chunk;
                     let chunk_start = chunk_idx * self.rows_per_chunk;
                     let chunk_end = (chunk_start + self.rows_per_chunk).min(self.row_count);
-                    if cur_chunk
-                        .as_ref()
-                        .is_none_or(|(cid, _, _)| *cid != chunk_idx)
-                    {
-                        let (raw, offs_bytes) = Self::decompress_chunk(
+                    if cur_chunk.is_none_or(|(cid, _)| cid != chunk_idx) {
+                        let (_, offs_bytes) = Self::decompress_chunk_into(
                             self.payload,
                             self.chunks[chunk_idx],
                             chunk_end - chunk_start,
+                            &mut scratch,
                         )?;
-                        cur_chunk = Some((chunk_idx, raw, offs_bytes));
+                        cur_chunk = Some((chunk_idx, offs_bytes));
                     }
-                    let (_, raw, offs_bytes) = cur_chunk.as_ref().ok_or(StatamError::Corrupt {
+                    let (_, offs_bytes) = cur_chunk.ok_or(StatamError::Corrupt {
                         reason: "plain subchunked range chunk missing",
                     })?;
+                    let meta = self.chunks[chunk_idx];
+                    let raw = if meta.codec == Codec::None {
+                        &self.payload[meta.stored_start as usize..meta.stored_end as usize]
+                    } else {
+                        &scratch[..meta.raw_len as usize]
+                    };
                     let local = idx - chunk_start;
-                    let off_raw = &raw[..*offs_bytes];
-                    let data = &raw[*offs_bytes..];
+                    let off_raw = &raw[..offs_bytes];
+                    let data = &raw[offs_bytes..];
                     let s = read_u32_le_at(off_raw, local);
                     let e = read_u32_le_at(off_raw, local + 1);
                     let vlen = e - s;
@@ -4006,6 +4095,7 @@ impl<'a> PlainSubchunkedView<'a> {
         F: FnMut(&[u8]) -> bool,
     {
         let mut out = Bitmap::new_zeroed(self.row_count);
+        let mut scratch = Vec::new();
         let mut chunk_rows_buf: Vec<usize> = Vec::with_capacity(self.rows_per_chunk.min(64));
         let mut iter = active_mask
             .iter_ones()
@@ -4029,10 +4119,11 @@ impl<'a> PlainSubchunkedView<'a> {
             if chunk_rows_buf.is_empty() {
                 continue;
             }
-            let (raw, offs_bytes) = Self::decompress_chunk(
+            let (raw, offs_bytes) = Self::decompress_chunk_into(
                 self.payload,
                 self.chunks[chunk_idx],
                 chunk_end - chunk_start,
+                &mut scratch,
             )?;
             let off_raw = &raw[..offs_bytes];
             let data = &raw[offs_bytes..];
@@ -4113,16 +4204,20 @@ impl<'a> PlainSubchunkedView<'a> {
         let parts: Vec<(Vec<u32>, Vec<u8>)> =
             parallel_map_in_order_static_with_ctx(ctx, tasks, threads, |ctx, worker| {
                 worker.run_with_init(
-                    || Ok(()),
-                    |(), task| {
+                    || Ok(Vec::new()),
+                    |scratch, task| {
                         let payload =
                             ctx.body
                                 .get(ctx.payload_start..)
                                 .ok_or(StatamError::Corrupt {
                                     reason: "plain subchunked parallel payload out of bounds",
                                 })?;
-                        let (raw, offs_bytes) =
-                            Self::decompress_chunk(payload, task.meta, task.chunk_rows)?;
+                        let (raw, offs_bytes) = Self::decompress_chunk_into(
+                            payload,
+                            task.meta,
+                            task.chunk_rows,
+                            scratch,
+                        )?;
                         let data_len = raw.len() - offs_bytes;
                         let prev = ctx.decoded_total.fetch_add(data_len, Ordering::AcqRel);
                         if prev.saturating_add(data_len) > ctx.max_bytes {
@@ -4283,16 +4378,20 @@ impl<'a> PlainSubchunkedView<'a> {
         let parts: Vec<SelectedOut> =
             parallel_map_in_order_static_with_ctx(ctx, tasks, threads, |ctx, worker| {
                 worker.run_with_init(
-                    || Ok(()),
-                    |(), task| {
+                    || Ok(Vec::new()),
+                    |scratch, task| {
                         let payload =
                             ctx.body
                                 .get(ctx.payload_start..)
                                 .ok_or(StatamError::Corrupt {
                                     reason: "plain subchunked parallel payload out of bounds",
                                 })?;
-                        let (raw, offs_bytes) =
-                            Self::decompress_chunk(payload, task.meta, task.chunk_rows)?;
+                        let (raw, offs_bytes) = Self::decompress_chunk_into(
+                            payload,
+                            task.meta,
+                            task.chunk_rows,
+                            scratch,
+                        )?;
                         let off_raw = &raw[..offs_bytes];
                         let data = &raw[offs_bytes..];
 
@@ -4373,6 +4472,318 @@ impl<'a> PlainSubchunkedView<'a> {
         }
         if out_offsets.len() < row_count + 1 {
             out_offsets.resize(row_count + 1, cur_off);
+        }
+        Ok((out_offsets, out_bytes))
+    }
+
+    /// Parallel `Bytes`-backed `take` decoder for `PlainSubchunked` blocks: decompresses
+    /// `>= 2` touched sub-chunks concurrently across `threads` outside an existing parallel scope
+    /// and stitches the compact `indices.len()`-row result in exact `indices` order.
+    pub(crate) fn decode_take_parallel_bytes(
+        body: Bytes,
+        payload_base: usize,
+        row_count: usize,
+        indices: &[usize],
+        compact_nulls: Option<&Bitmap>,
+        max_total_bytes: usize,
+        threads: usize,
+    ) -> Result<(Vec<u32>, Vec<u8>), StatamError> {
+        struct TakeChunkTask {
+            chunk_idx: usize,
+            meta: PlainSubchunkMeta,
+            chunk_rows: usize,
+            /// Unique local row indices requested inside this chunk.
+            locals: Vec<u16>,
+        }
+        struct TakeChunkOut {
+            chunk_idx: usize,
+            /// `(local_u16, start, end)` in `chunk_bytes`.
+            spans: Vec<(u16, u32, u32)>,
+            chunk_bytes: Vec<u8>,
+        }
+        struct Ctx {
+            body: Bytes,
+            payload_start: usize,
+        }
+
+        if compact_nulls.is_some_and(|bm| bm.len() != indices.len()) {
+            return Err(StatamError::Corrupt {
+                reason: "plain subchunked take null bitmap length mismatch",
+            });
+        }
+        let max_bytes = max_total_bytes.min(MAX_BLOCK_RAW_BYTES);
+        let (tasks, rows_per_chunk, payload_start) = {
+            let src = body.get(payload_base..).ok_or(StatamError::Corrupt {
+                reason: "plain subchunked take payload base out of bounds",
+            })?;
+            let view = PlainSubchunkedView::parse(src, row_count)?;
+            let mut by_chunk: std::collections::BTreeMap<usize, Vec<u16>> =
+                std::collections::BTreeMap::new();
+            for (pos, &row) in indices.iter().enumerate() {
+                if row >= row_count {
+                    return Err(StatamError::Corrupt {
+                        reason: "plain subchunked take index out of bounds",
+                    });
+                }
+                if compact_nulls.is_some_and(|bm| !bm.get(pos)) {
+                    continue;
+                }
+                let ci = row / view.rows_per_chunk;
+                let local = (row - ci * view.rows_per_chunk) as u16;
+                by_chunk.entry(ci).or_default().push(local);
+            }
+            if by_chunk.is_empty() {
+                return Ok((vec![0u32; indices.len() + 1], Vec::new()));
+            }
+            if threads <= 1 || in_parallel_scope() || by_chunk.len() < 2 {
+                // Build full-length null bitmap only if needed; otherwise fall back to `NullRef::None`
+                // and zero out null positions using `compact_nulls`.
+                let mut scratch = Vec::new();
+                let mut out_offsets = Vec::with_capacity(indices.len() + 1);
+                out_offsets.push(0u32);
+                let mut out_bytes = Vec::new();
+                let chunks_monotonic = indices
+                    .windows(2)
+                    .all(|w| w[0] / view.rows_per_chunk <= w[1] / view.rows_per_chunk);
+                if chunks_monotonic {
+                    let mut i = 0usize;
+                    while i < indices.len() {
+                        let ci = indices[i] / view.rows_per_chunk;
+                        let chunk_start = ci * view.rows_per_chunk;
+                        let chunk_end = (chunk_start + view.rows_per_chunk).min(row_count);
+                        let group_start = i;
+                        let mut any_valid = false;
+                        while i < indices.len() && indices[i] / view.rows_per_chunk == ci {
+                            if compact_nulls.is_none_or(|bm| bm.get(i)) {
+                                any_valid = true;
+                            }
+                            i += 1;
+                        }
+                        let group_len = i - group_start;
+                        if any_valid {
+                            let (raw, offs_bytes) = Self::decompress_chunk_into(
+                                view.payload,
+                                view.chunks[ci],
+                                chunk_end - chunk_start,
+                                &mut scratch,
+                            )?;
+                            let off_raw = &raw[..offs_bytes];
+                            let data = &raw[offs_bytes..];
+                            for (offset_in_group, &row) in
+                                indices[group_start..i].iter().enumerate()
+                            {
+                                let pos = group_start + offset_in_group;
+                                if compact_nulls.is_none_or(|bm| bm.get(pos)) {
+                                    let local = row - chunk_start;
+                                    let s = read_u32_le_at(off_raw, local);
+                                    let e = read_u32_le_at(off_raw, local + 1);
+                                    let vlen = e - s;
+                                    if out_bytes
+                                        .len()
+                                        .checked_add(vlen)
+                                        .is_none_or(|n| n > max_bytes)
+                                    {
+                                        return Err(StatamError::BoundsExceeded {
+                                            reason: "plain subchunked take decoded bytes exceed MAX_BLOCK_RAW_BYTES",
+                                        });
+                                    }
+                                    out_bytes.extend_from_slice(&data[s..e]);
+                                }
+                                let end_off = u32::try_from(out_bytes.len()).map_err(|_| {
+                                    StatamError::BoundsExceeded {
+                                        reason: "plain subchunked take offset exceeds u32::MAX",
+                                    }
+                                })?;
+                                out_offsets.push(end_off);
+                            }
+                        } else {
+                            let cur_off = u32::try_from(out_bytes.len()).map_err(|_| {
+                                StatamError::BoundsExceeded {
+                                    reason: "plain subchunked take offset exceeds u32::MAX",
+                                }
+                            })?;
+                            out_offsets.resize(out_offsets.len() + group_len, cur_off);
+                        }
+                    }
+                    return Ok((out_offsets, out_bytes));
+                }
+
+                let mut cache: HashMap<usize, (Vec<u8>, usize)> = HashMap::new();
+                let mut cached_bytes = 0usize;
+                for (pos, &row) in indices.iter().enumerate() {
+                    if compact_nulls.is_none_or(|bm| bm.get(pos)) {
+                        let ci = row / view.rows_per_chunk;
+                        let chunk_start = ci * view.rows_per_chunk;
+                        let chunk_end = (chunk_start + view.rows_per_chunk).min(row_count);
+                        let (raw, offs_bytes) = if let Some(entry) = cache.get(&ci) {
+                            entry
+                        } else {
+                            let meta = view.chunks[ci];
+                            cached_bytes = cached_bytes.checked_add(meta.raw_len as usize).ok_or(
+                                StatamError::BoundsExceeded {
+                                    reason: "plain subchunked take cache overflow",
+                                },
+                            )?;
+                            if cached_bytes > MAX_BLOCK_RAW_BYTES {
+                                return Err(StatamError::BoundsExceeded {
+                                    reason: "plain subchunked take cache exceeds MAX_BLOCK_RAW_BYTES",
+                                });
+                            }
+                            let (raw_slice, offs_bytes) = Self::decompress_chunk_into(
+                                view.payload,
+                                meta,
+                                chunk_end - chunk_start,
+                                &mut scratch,
+                            )?;
+                            cache
+                                .entry(ci)
+                                .or_insert_with(|| (raw_slice.to_vec(), offs_bytes))
+                        };
+                        let local = row - chunk_start;
+                        let off_raw = &raw[..*offs_bytes];
+                        let data = &raw[*offs_bytes..];
+                        let s = read_u32_le_at(off_raw, local);
+                        let e = read_u32_le_at(off_raw, local + 1);
+                        let vlen = e - s;
+                        if out_bytes
+                            .len()
+                            .checked_add(vlen)
+                            .is_none_or(|n| n > max_bytes)
+                        {
+                            return Err(StatamError::BoundsExceeded {
+                                reason: "plain subchunked take decoded bytes exceed MAX_BLOCK_RAW_BYTES",
+                            });
+                        }
+                        out_bytes.extend_from_slice(&data[s..e]);
+                    }
+                    let end_off = u32::try_from(out_bytes.len()).map_err(|_| {
+                        StatamError::BoundsExceeded {
+                            reason: "plain subchunked take offset exceeds u32::MAX",
+                        }
+                    })?;
+                    out_offsets.push(end_off);
+                }
+                return Ok((out_offsets, out_bytes));
+            }
+            let mut tasks = Vec::with_capacity(by_chunk.len());
+            for (ci, mut locals) in by_chunk {
+                locals.sort_unstable();
+                locals.dedup();
+                let chunk_start = ci * view.rows_per_chunk;
+                let chunk_end = (chunk_start + view.rows_per_chunk).min(row_count);
+                tasks.push(TakeChunkTask {
+                    chunk_idx: ci,
+                    meta: view.chunks[ci],
+                    chunk_rows: chunk_end - chunk_start,
+                    locals,
+                });
+            }
+            let payload_rel =
+                src.len()
+                    .checked_sub(view.payload.len())
+                    .ok_or(StatamError::Corrupt {
+                        reason: "plain subchunked payload relative offset underflow",
+                    })?;
+            let payload_start =
+                payload_base
+                    .checked_add(payload_rel)
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "plain subchunked payload start overflow",
+                    })?;
+            (tasks, view.rows_per_chunk, payload_start)
+        };
+
+        let workers = threads.min(tasks.len());
+        let ctx = Ctx {
+            body,
+            payload_start,
+        };
+        let parts: Vec<TakeChunkOut> =
+            parallel_map_in_order_static_with_ctx(ctx, tasks, workers, |ctx, worker| {
+                worker.run_with_init(
+                    || Ok(Vec::new()),
+                    |scratch, task| {
+                        let payload =
+                            ctx.body
+                                .get(ctx.payload_start..)
+                                .ok_or(StatamError::Corrupt {
+                                    reason: "plain subchunked take parallel payload out of bounds",
+                                })?;
+                        let (raw, offs_bytes) = Self::decompress_chunk_into(
+                            payload,
+                            task.meta,
+                            task.chunk_rows,
+                            scratch,
+                        )?;
+                        let off_raw = &raw[..offs_bytes];
+                        let data = &raw[offs_bytes..];
+                        let mut spans = Vec::with_capacity(task.locals.len());
+                        let mut chunk_bytes = Vec::new();
+                        for &local_u16 in &task.locals {
+                            let local = usize::from(local_u16);
+                            let s = read_u32_le_at(off_raw, local);
+                            let e = read_u32_le_at(off_raw, local + 1);
+                            let dst_s = u32::try_from(chunk_bytes.len()).map_err(|_| {
+                                StatamError::BoundsExceeded {
+                                    reason: "plain subchunked take chunk offset exceeds u32::MAX",
+                                }
+                            })?;
+                            chunk_bytes.extend_from_slice(&data[s..e]);
+                            let dst_e = u32::try_from(chunk_bytes.len()).map_err(|_| {
+                                StatamError::BoundsExceeded {
+                                    reason: "plain subchunked take chunk offset exceeds u32::MAX",
+                                }
+                            })?;
+                            spans.push((local_u16, dst_s, dst_e));
+                        }
+                        Ok(TakeChunkOut {
+                            chunk_idx: task.chunk_idx,
+                            spans,
+                            chunk_bytes,
+                        })
+                    },
+                )
+            })?;
+
+        let mut by_chunk_idx: HashMap<usize, usize> = HashMap::with_capacity(parts.len());
+        for (slot, part) in parts.iter().enumerate() {
+            by_chunk_idx.insert(part.chunk_idx, slot);
+        }
+
+        let mut out_offsets = Vec::with_capacity(indices.len() + 1);
+        out_offsets.push(0u32);
+        let mut out_bytes = Vec::new();
+        for (pos, &row) in indices.iter().enumerate() {
+            if compact_nulls.is_none_or(|bm| bm.get(pos)) {
+                let ci = row / rows_per_chunk;
+                let local_u16 = (row - ci * rows_per_chunk) as u16;
+                let part = &parts[*by_chunk_idx.get(&ci).ok_or(StatamError::Corrupt {
+                    reason: "missing plain subchunked take part",
+                })?];
+                let idx = part
+                    .spans
+                    .binary_search_by_key(&local_u16, |&(l, _, _)| l)
+                    .map_err(|_| StatamError::Corrupt {
+                        reason: "missing plain subchunked take local row",
+                    })?;
+                let (_, s, e) = part.spans[idx];
+                let slice = &part.chunk_bytes[s as usize..e as usize];
+                if out_bytes
+                    .len()
+                    .checked_add(slice.len())
+                    .is_none_or(|n| n > max_bytes)
+                {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "plain subchunked take decoded bytes exceed MAX_BLOCK_RAW_BYTES",
+                    });
+                }
+                out_bytes.extend_from_slice(slice);
+            }
+            let end_off =
+                u32::try_from(out_bytes.len()).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "plain subchunked take offset exceeds u32::MAX",
+                })?;
+            out_offsets.push(end_off);
         }
         Ok((out_offsets, out_bytes))
     }
@@ -5691,6 +6102,136 @@ mod tests {
         .unwrap();
         for (pos, &r) in idxs.iter().enumerate() {
             assert_eq!(taken.get_scalar(pos).unwrap(), flat.get_scalar(r).unwrap());
+        }
+    }
+
+    #[test]
+    fn plain_subchunked_decode_take_monotonic_and_unsorted_parity() {
+        let rows_per_chunk = 8usize;
+        let row_count = 28usize; // 4 chunks: [0..8, 8..16, 16..24, 24..28]
+        let rows: Vec<String> = (0..row_count)
+            .map(|i| {
+                format!(
+                    "row_{i:02}_repeating_prefix_for_lz4_and_zstd_compression_0123456789abcdef_0123456789abcdef_{}",
+                    "x".repeat((i % 7) * 11 + 16)
+                )
+            })
+            .collect();
+
+        let codecs = [
+            Codec::None,
+            Codec::Lz4,
+            #[cfg(not(miri))]
+            Codec::Zstd,
+            #[cfg(miri)]
+            Codec::Lz4,
+            Codec::None,
+        ];
+
+        #[cfg(not(miri))]
+        let mut zstd_comp = zstd::bulk::Compressor::new(3).unwrap();
+
+        let chunk_count = row_count.div_ceil(rows_per_chunk);
+        let mut entries = Vec::with_capacity(chunk_count);
+        let mut payloads = Vec::new();
+        for (ci, &codec) in codecs.iter().enumerate() {
+            let start = ci * rows_per_chunk;
+            let end = (start + rows_per_chunk).min(row_count);
+            let mut sub_raw = Vec::new();
+            let mut rel_off = 0u32;
+            sub_raw.extend_from_slice(&rel_off.to_le_bytes());
+            for row in &rows[start..end] {
+                rel_off += row.len() as u32;
+                sub_raw.extend_from_slice(&rel_off.to_le_bytes());
+            }
+            for row in &rows[start..end] {
+                sub_raw.extend_from_slice(row.as_bytes());
+            }
+            let raw_len = sub_raw.len() as u32;
+            let stored = match codec {
+                Codec::None => sub_raw,
+                Codec::Lz4 => lz4_flex::block::compress(&sub_raw),
+                Codec::Zstd => {
+                    #[cfg(not(miri))]
+                    {
+                        zstd_comp.compress(&sub_raw).unwrap()
+                    }
+                    #[cfg(miri)]
+                    {
+                        unreachable!()
+                    }
+                }
+            };
+            entries.push((codec, raw_len, stored.len() as u32));
+            payloads.extend_from_slice(&stored);
+        }
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&(chunk_count as u32).to_le_bytes());
+        body.extend_from_slice(&(rows_per_chunk as u16).to_le_bytes());
+        for (codec, raw_len, stored_len) in entries {
+            body.push(codec as u8);
+            body.extend_from_slice(&raw_len.to_le_bytes());
+            body.extend_from_slice(&stored_len.to_le_bytes());
+        }
+        body.extend_from_slice(&payloads);
+
+        let view = PlainSubchunkedView::parse(&body, row_count).unwrap();
+        assert_eq!(view.chunks.len(), 4);
+        assert_eq!(view.chunks[0].codec, Codec::None);
+        assert_eq!(view.chunks[1].codec, Codec::Lz4);
+        #[cfg(not(miri))]
+        assert_eq!(view.chunks[2].codec, Codec::Zstd);
+        assert_eq!(view.chunks[3].codec, Codec::None);
+
+        let check_take = |indices: &[usize], nulls: Option<&Bitmap>| {
+            let null_ref = nulls.map_or(NullRef::None, NullRef::Bitmap);
+            let (offs, data) = view.decode_take(indices, null_ref).unwrap();
+            assert_eq!(offs.len(), indices.len() + 1);
+            assert_eq!(offs[0], 0);
+            for (pos, &row) in indices.iter().enumerate() {
+                let s = offs[pos] as usize;
+                let e = offs[pos + 1] as usize;
+                if nulls.is_some_and(|bm| !bm.get(row)) {
+                    assert_eq!(s, e, "null row {row} at pos {pos} must have empty slice");
+                } else {
+                    assert_eq!(
+                        &data[s..e],
+                        rows[row].as_bytes(),
+                        "value mismatch for row {row} at pos {pos}"
+                    );
+                }
+            }
+        };
+
+        // 1. Empty indices.
+        check_take(&[], None);
+
+        // 2. Monotonic sorted indices spanning None, Lz4, Zstd, and partial trailing None chunks.
+        let mono_sorted = [0, 3, 7, 8, 11, 15, 16, 20, 23, 24, 27];
+        check_take(&mono_sorted, None);
+
+        // 3. Monotonic indices with duplicates and nulls (including an all-null group in chunk 2).
+        let mut nulls = Bitmap::new_ones(row_count);
+        for r in [3usize, 10, 16, 17, 18, 25] {
+            let _ = nulls.set(r, false);
+        }
+        let mono_dups_nulls = [0, 0, 3, 3, 8, 10, 11, 11, 16, 17, 18, 24, 25, 25, 27, 27];
+        check_take(&mono_dups_nulls, Some(&nulls));
+
+        // 4. Unsorted / reverse indices with duplicates (both non-null and with nulls).
+        let unsorted_dups = [27, 2, 20, 9, 27, 0, 16, 8, 20, 24, 2, 15, 19, 0];
+        check_take(&unsorted_dups, None);
+        check_take(&unsorted_dups, Some(&nulls));
+
+        // 5. Out-of-bounds error handling (monotonic and unsorted).
+        for bad in [&[row_count][..], &[0, row_count], &[row_count + 5, 1]] {
+            assert!(matches!(
+                view.decode_take(bad, NullRef::None),
+                Err(StatamError::Corrupt {
+                    reason: "plain subchunked take index out of bounds",
+                })
+            ));
         }
     }
 }

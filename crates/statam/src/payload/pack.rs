@@ -20,10 +20,12 @@ use crate::format::{
     PACK_FLAG_TOC_ZSTD, PACK_FRAME_FLAG_USES_DICT, PACK_FRAME_HEADER_LEN, PACK_FRAME_MAGIC,
     PACK_HEADER_LEN, PACK_POSTSCRIPT_LEN, PackDecoderDict, PackDictCompressor, PackEncoderDict,
     PackFrameDecompressor, PackHeader, PackPostscript, compress_guarded, decompress_checked,
-    pack_frame_crc, read_framed_pack_frame, read_framed_pack_frame_with_decompressor,
-    read_framed_pack_frame_with_dict, write_framed_pack_frame,
+    decompress_verified_pack_frame_with_decompressor, pack_frame_crc, read_framed_pack_frame,
+    verify_pack_frame_matches_entry, write_framed_pack_frame,
     write_framed_pack_frame_with_compressor_min_savings, write_framed_pack_frame_with_limit,
 };
+#[cfg(test)]
+use crate::format::{read_framed_pack_frame_with_decompressor, read_framed_pack_frame_with_dict};
 use crate::io::{RangeReader, S3_CACHE_BLOCK_BYTES};
 use crate::parallel::{
     MAX_PARALLEL_THREADS, parallel_map_in_order_static_with_ctx, parallel_map_in_order_with_init,
@@ -2840,7 +2842,7 @@ impl ChunkPackReader {
             })?;
         let range = frame_byte_range(entry)?;
         let raw = self.reader.read_range(range)?;
-        verify_raw_frame_matches_entry(&raw, entry)?;
+        let _ = verify_pack_frame_matches_entry(&raw, entry)?;
         Ok(raw)
     }
 
@@ -2858,9 +2860,15 @@ impl ChunkPackReader {
         } else {
             None
         };
-        let raw = self.read_frame_raw(frame_id)?;
-        let (_, _, decoded) =
-            read_framed_pack_frame_with_dict(&raw, MAX_FRAME_RAW_BYTES, dict.as_deref())?;
+        let raw = self.reader.read_range(frame_byte_range(entry)?)?;
+        let vf = verify_pack_frame_matches_entry(&raw, entry)?;
+        let mut dict_decomp = PackFrameDecompressor::new();
+        let decoded = decompress_verified_pack_frame_with_decompressor(
+            vf,
+            MAX_FRAME_RAW_BYTES,
+            dict.as_deref(),
+            &mut dict_decomp,
+        )?;
         if decoded.len() != entry.raw_len as usize {
             return Err(StatamError::Corrupt {
                 reason: "decompressed frame length does not match FrameEntry",
@@ -2981,9 +2989,9 @@ impl ChunkPackReader {
         let mut dict_decomp = PackFrameDecompressor::new();
         for (&fid, raw) in frame_ids.iter().zip(frame_bytes_list.iter()) {
             let entry = &self.toc.frames[fid as usize];
-            verify_raw_frame_matches_entry(raw, entry)?;
-            let (_, _, decoded) = read_framed_pack_frame_with_decompressor(
-                raw,
+            let vf = verify_pack_frame_matches_entry(raw, entry)?;
+            let decoded = decompress_verified_pack_frame_with_decompressor(
+                vf,
                 MAX_FRAME_RAW_BYTES,
                 dict.as_deref(),
                 &mut dict_decomp,
@@ -3076,7 +3084,7 @@ impl ChunkPackReader {
     pub(crate) fn decompress_frame_chunks_as_bytes<'a>(
         &self,
         fid: u32,
-        raw: &[u8],
+        raw: &Bytes,
         cids: &[u32],
         dict: Option<&'a PackDecoderDict>,
         dict_decomp: &mut PackFrameDecompressor<'a>,
@@ -4197,8 +4205,9 @@ impl ChunkPackReader {
 
         // 3. Decompress and verify CRC + decoded length of every frame.
         let mut dict_decomp = PackFrameDecompressor::new();
-        for (fid, entry) in self.toc.frames.iter().enumerate() {
-            let raw = self.read_frame_raw(fid as u32)?;
+        for entry in &self.toc.frames {
+            let raw = self.reader.read_range(frame_byte_range(entry)?)?;
+            let vf = verify_pack_frame_matches_entry(&raw, entry)?;
             let frame_dict = if (entry.flags & PACK_FRAME_FLAG_USES_DICT) != 0 {
                 Some(dict.as_ref().ok_or(StatamError::Corrupt {
                     reason: "frame requires dict on pack without dict section",
@@ -4206,11 +4215,10 @@ impl ChunkPackReader {
             } else {
                 None
             };
-            let (_, _, decoded) = read_framed_pack_frame_with_decompressor(
-                &raw,
+            let decoded = dict_decomp.decompress_verified_frame_into_scratch(
+                vf,
                 MAX_FRAME_RAW_BYTES,
                 frame_dict,
-                &mut dict_decomp,
             )?;
             if decoded.len() != entry.raw_len as usize {
                 return Err(StatamError::Corrupt {
@@ -4422,9 +4430,9 @@ where
     F: FnMut(u32, &[u8]),
 {
     let entry = &toc.frames[fid as usize];
-    verify_raw_frame_matches_entry(raw, entry)?;
-    let (_, _, decoded) =
-        read_framed_pack_frame_with_decompressor(raw, MAX_FRAME_RAW_BYTES, dict, dict_decomp)?;
+    let vf = verify_pack_frame_matches_entry(raw, entry)?;
+    let decoded =
+        dict_decomp.decompress_verified_frame_into_scratch(vf, MAX_FRAME_RAW_BYTES, dict)?;
     if decoded.len() != entry.raw_len as usize {
         return Err(StatamError::Corrupt {
             reason: "decompressed frame length mismatch",
@@ -4457,34 +4465,28 @@ where
     F: Fn(&mut S, u32, &[u8], &[u32]) -> Result<Option<T>, StatamError>,
 {
     let entry = &toc.frames[fid as usize];
-    verify_raw_frame_matches_entry(raw, entry)?;
-    let (_, _, decoded) =
-        read_framed_pack_frame_with_decompressor(raw, MAX_FRAME_RAW_BYTES, dict, dict_decomp)?;
+    let vf = verify_pack_frame_matches_entry(raw, entry)?;
+    let decoded =
+        dict_decomp.decompress_verified_frame_into_scratch(vf, MAX_FRAME_RAW_BYTES, dict)?;
     if decoded.len() != entry.raw_len as usize {
         return Err(StatamError::Corrupt {
             reason: "decompressed frame length mismatch",
         });
     }
-    f(state, fid, &decoded, cids)
+    f(state, fid, decoded, cids)
 }
 
 fn decompress_frame_chunks_as_bytes_with_toc<'a>(
     toc: &PackToc,
     fid: u32,
-    raw: &[u8],
+    raw: &Bytes,
     cids: &[u32],
     dict: Option<&'a PackDecoderDict>,
     dict_decomp: &mut PackFrameDecompressor<'a>,
 ) -> Result<Vec<(u32, Bytes)>, StatamError> {
     let entry = &toc.frames[fid as usize];
-    verify_raw_frame_matches_entry(raw, entry)?;
-    let (_, _, decoded) =
-        read_framed_pack_frame_with_decompressor(raw, MAX_FRAME_RAW_BYTES, dict, dict_decomp)?;
-    if decoded.len() != entry.raw_len as usize {
-        return Err(StatamError::Corrupt {
-            reason: "decompressed frame length mismatch",
-        });
-    }
+    let vf = verify_pack_frame_matches_entry(raw, entry)?;
+    let expected_raw_len = vf.raw_len();
     let mut used_bytes = 0usize;
     for &cid in cids {
         let loc = toc.chunks.get(cid as usize).ok_or(StatamError::Corrupt {
@@ -4496,7 +4498,7 @@ fn decompress_frame_chunks_as_bytes_with_toc<'a>(
             .ok_or(StatamError::Corrupt {
                 reason: "chunk slice offset overflow",
             })?;
-        if end > decoded.len() {
+        if end > expected_raw_len {
             return Err(StatamError::Corrupt {
                 reason: "chunk slice out of decoded frame bounds",
             });
@@ -4505,9 +4507,38 @@ fn decompress_frame_chunks_as_bytes_with_toc<'a>(
     }
 
     let mut out = Vec::with_capacity(cids.len());
-    if used_bytes.saturating_mul(2) >= decoded.len()
-        || decoded.len().saturating_sub(used_bytes) <= 16 * 1024
-    {
+    let dense = used_bytes.saturating_mul(2) >= expected_raw_len
+        || expected_raw_len.saturating_sub(used_bytes) <= 16 * 1024;
+    // Fast path for uncompressed `Codec::None` frames (e.g., high-entropy binary blobs):
+    // `verify_pack_frame_matches_entry` above already validated magic, codec, flags, lengths,
+    // and CRC-32C in one pass, so slice directly (dense) or copy exact chunks (sparse) without
+    // re-hashing CRC-32C or copying the whole frame into scratch.
+    if vf.codec() == Codec::None {
+        for &cid in cids {
+            let loc = &toc.chunks[cid as usize];
+            let start = PACK_FRAME_HEADER_LEN + loc.offset_in_frame as usize;
+            let end = start + loc.raw_len as usize;
+            let chunk = if dense {
+                raw.slice(start..end)
+            } else {
+                Bytes::copy_from_slice(&raw[start..end])
+            };
+            out.push((cid, chunk));
+        }
+        return Ok(out);
+    }
+    if dense {
+        let decoded = decompress_verified_pack_frame_with_decompressor(
+            vf,
+            MAX_FRAME_RAW_BYTES,
+            dict,
+            dict_decomp,
+        )?;
+        if decoded.len() != expected_raw_len {
+            return Err(StatamError::Corrupt {
+                reason: "decompressed frame length mismatch",
+            });
+        }
         let frame_bytes = Bytes::from(decoded);
         for &cid in cids {
             let loc = &toc.chunks[cid as usize];
@@ -4516,6 +4547,13 @@ fn decompress_frame_chunks_as_bytes_with_toc<'a>(
             out.push((cid, frame_bytes.slice(start..end)));
         }
     } else {
+        let decoded =
+            dict_decomp.decompress_verified_frame_into_scratch(vf, MAX_FRAME_RAW_BYTES, dict)?;
+        if decoded.len() != expected_raw_len {
+            return Err(StatamError::Corrupt {
+                reason: "decompressed frame length mismatch",
+            });
+        }
         for &cid in cids {
             let loc = &toc.chunks[cid as usize];
             let start = loc.offset_in_frame as usize;
@@ -4524,46 +4562,6 @@ fn decompress_frame_chunks_as_bytes_with_toc<'a>(
         }
     }
     Ok(out)
-}
-
-fn verify_raw_frame_matches_entry(raw: &[u8], entry: &FrameEntry) -> Result<(), StatamError> {
-    let expected_total = PACK_FRAME_HEADER_LEN
-        .checked_add(entry.stored_len as usize)
-        .ok_or(StatamError::BoundsExceeded {
-            reason: "raw frame expected length overflow",
-        })?;
-    if raw.len() != expected_total {
-        return Err(StatamError::Corrupt {
-            reason: "raw frame byte length mismatch",
-        });
-    }
-    if raw[0..2] != PACK_FRAME_MAGIC {
-        return Err(StatamError::Corrupt {
-            reason: "invalid PF magic",
-        });
-    }
-    let header_codec = Codec::from_u8(raw[2])?;
-    let header_flags = raw[3];
-    let header_raw_len = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
-    let header_stored_len = u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]);
-    let header_crc = u32::from_le_bytes([raw[12], raw[13], raw[14], raw[15]]);
-    if header_codec != entry.codec
-        || header_flags != entry.flags
-        || header_raw_len != entry.raw_len
-        || header_stored_len != entry.stored_len
-        || header_crc != entry.crc32c
-    {
-        return Err(StatamError::Corrupt {
-            reason: "raw frame PF header does not match FrameEntry",
-        });
-    }
-    let crc = pack_frame_crc(&raw[0..12], &raw[PACK_FRAME_HEADER_LEN..]);
-    if crc != entry.crc32c {
-        return Err(StatamError::ChecksumMismatch {
-            context: "pack frame",
-        });
-    }
-    Ok(())
 }
 
 #[inline]

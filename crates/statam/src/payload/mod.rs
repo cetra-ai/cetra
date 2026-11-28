@@ -10,11 +10,27 @@ use std::fmt;
 use cetra_column::Bitmap;
 
 use crate::StatamError;
+use crate::codec::WriteProfile;
 use crate::format::{
-    MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, MAX_CHUNKS_PER_ROW, MAX_REF_CHAIN_DEPTH,
-    MAX_ROW_PAYLOAD_BYTES, MAX_ROWS_PER_FILE,
+    Codec, MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, MAX_CHUNKS_PER_ROW, MAX_DECOMPRESS_RATIO,
+    MAX_DECOMPRESS_SLACK, MAX_REF_CHAIN_DEPTH, MAX_ROW_PAYLOAD_BYTES, MAX_ROWS_PER_FILE,
+    check_decompress_bounds, decompress_checked_into,
 };
 use crate::simd::bitpack::{zigzag_decode_i64, zigzag_encode_i64};
+
+/// Mode byte at offset 0 of a sub-chunked `PayloadRefs` mini-block body (`0`/`1` = monolithic
+/// null-flag prefix, `2` = independently compressed 1024-row sub-chunks with outer `Codec::None`).
+pub(crate) const PAYLOAD_REFS_MODE_SUBCHUNKED: u8 = 2;
+/// Target row count per independent sub-chunk inside a sub-chunked `PayloadRefs` mini-block.
+const PAYLOAD_REFS_SUBCHUNK_ROWS: u16 = 1024;
+/// Minimum monolithic raw byte size (`64 KiB`) required to attempt sub-chunked `PayloadRefs`.
+const PAYLOAD_REFS_SUBCHUNK_MIN_RAW: usize = 64 * 1024;
+/// Hard per-block overhead ceiling (`16 KiB`) over monolithic Zstd for sub-chunked `PayloadRefs`.
+const PAYLOAD_REFS_SUBCHUNK_MAX_EXTRA_BYTES: usize = 16 * 1024;
+/// Fixed header length (`mode(1) + chunk_count(4) + rows_per_chunk(2)`) of a sub-chunked body.
+const PAYLOAD_REFS_SUBCHUNK_HEADER_LEN: usize = 7;
+/// Per-chunk table entry length (`codec(1) + raw_len(4) + stored_len(4)`).
+const PAYLOAD_REFS_SUBCHUNK_ENTRY_LEN: usize = 9;
 
 /// Maximum lookback distance (`1..=32`) allowed by the wire decoder for `PayloadRefs` delta rows.
 const MAX_TAIL_SHARE_BACK: usize = 32;
@@ -328,6 +344,309 @@ where
     Ok(null_count_u16)
 }
 
+/// Returns `true` if `raw_body` uses the self-framed `PAYLOAD_REFS_MODE_SUBCHUNKED` wire format
+/// (which already compresses each 1024-row sub-chunk independently and must use outer `Codec::None`).
+#[cfg(test)]
+#[inline]
+pub(crate) fn payload_refs_is_subchunked(raw_body: &[u8]) -> bool {
+    raw_body.first() == Some(&PAYLOAD_REFS_MODE_SUBCHUNKED)
+}
+
+/// Result of adaptive `PayloadRefs` mini-block encoding, preserving pre-compressed monolithic
+/// Zstd bytes when sub-chunking is skipped so the writer never Zstd-compresses the same block twice.
+pub(crate) enum EncodedPayloadRefs {
+    /// Uncompressed monolithic `PayloadRefs` body (outer codec chosen by writer).
+    Raw(Vec<u8>),
+    /// Sub-chunked `PayloadRefs` body (`PAYLOAD_REFS_MODE_SUBCHUNKED`, stored with outer `Codec::None`).
+    Subchunked(Vec<u8>),
+    /// Monolithic `PayloadRefs` body already compressed with `Codec::Zstd` at `zstd_level`.
+    PrecompressedZstd { raw_len: u32, stored: Vec<u8> },
+}
+
+impl EncodedPayloadRefs {
+    pub(crate) fn empty() -> Self {
+        Self::Raw(Vec::new())
+    }
+
+    pub(crate) fn byte_len(&self) -> usize {
+        match self {
+            Self::Raw(b) | Self::Subchunked(b) => b.len(),
+            Self::PrecompressedZstd { stored, .. } => stored.len(),
+        }
+    }
+}
+
+/// Encodes `rows`, automatically using 1024-row independently compressed sub-chunks
+/// (`PAYLOAD_REFS_MODE_SUBCHUNKED`) for large `L1Compact` blocks (`> 1024` rows and `>= 64 KiB` raw)
+/// when the sub-chunked representation stays within `115%` and `+16 KiB` of monolithic Zstd.
+/// When monolithic Zstd wins, returns the already-compressed buffer so the writer avoids double Zstd.
+pub(crate) fn encode_payload_refs_adaptive(
+    rows: &[PayloadRefRow],
+    profile: WriteProfile,
+    zstd_level: i32,
+) -> Result<EncodedPayloadRefs, StatamError> {
+    let mut plain_raw = Vec::new();
+    encode_payload_refs(rows, &mut plain_raw)?;
+
+    #[cfg(not(miri))]
+    if profile == WriteProfile::L1Compact
+        && rows.len() > usize::from(PAYLOAD_REFS_SUBCHUNK_ROWS)
+        && plain_raw.len() >= PAYLOAD_REFS_SUBCHUNK_MIN_RAW
+    {
+        return try_encode_payload_refs_subchunked(rows, plain_raw, zstd_level);
+    }
+    #[cfg(miri)]
+    let _ = (profile, zstd_level);
+
+    Ok(EncodedPayloadRefs::Raw(plain_raw))
+}
+
+#[cfg(not(miri))]
+fn try_encode_payload_refs_subchunked(
+    rows: &[PayloadRefRow],
+    plain_raw: Vec<u8>,
+    zstd_level: i32,
+) -> Result<EncodedPayloadRefs, StatamError> {
+    if plain_raw.len() > MAX_BLOCK_RAW_BYTES {
+        return Ok(EncodedPayloadRefs::Raw(plain_raw));
+    }
+    let rows_per_chunk = usize::from(PAYLOAD_REFS_SUBCHUNK_ROWS);
+    let chunk_count = rows.len().div_ceil(rows_per_chunk);
+    let Ok(chunk_count_u32) = u32::try_from(chunk_count) else {
+        return Ok(EncodedPayloadRefs::Raw(plain_raw));
+    };
+
+    let Ok(mut zstd_comp) = zstd::bulk::Compressor::new(zstd_level) else {
+        return Ok(EncodedPayloadRefs::Raw(plain_raw));
+    };
+    let ratio_ok = |raw_len: usize, stored_len: usize| -> bool {
+        (raw_len as u64)
+            <= (stored_len as u64)
+                .saturating_mul(MAX_DECOMPRESS_RATIO)
+                .saturating_add(MAX_DECOMPRESS_SLACK)
+    };
+    let plain_zstd = zstd_comp.compress(&plain_raw).ok().filter(|zb| {
+        zb.len().saturating_add(16) < plain_raw.len() && ratio_ok(plain_raw.len(), zb.len())
+    });
+    let plain_zstd_len = plain_zstd.as_ref().map_or(plain_raw.len(), Vec::len);
+    let fallback_monolithic =
+        |plain_raw: Vec<u8>, plain_zstd: Option<Vec<u8>>| -> EncodedPayloadRefs {
+            if let Some(stored) = plain_zstd
+                && let Ok(raw_len) = u32::try_from(plain_raw.len())
+            {
+                EncodedPayloadRefs::PrecompressedZstd { raw_len, stored }
+            } else {
+                EncodedPayloadRefs::Raw(plain_raw)
+            }
+        };
+
+    let mut meta: Vec<(Codec, u32, u32)> = Vec::with_capacity(chunk_count);
+    let mut payloads: Vec<u8> = Vec::with_capacity(plain_zstd_len);
+    let mut sub_raw: Vec<u8> = Vec::new();
+    let mut total_raw: usize = 0;
+
+    for chunk in rows.chunks(rows_per_chunk) {
+        sub_raw.clear();
+        encode_payload_refs(chunk, &mut sub_raw)?;
+        let raw_len = sub_raw.len();
+        total_raw = total_raw
+            .checked_add(raw_len)
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "subchunked payload refs raw size overflow",
+            })?;
+        if total_raw > MAX_BLOCK_RAW_BYTES {
+            return Ok(fallback_monolithic(plain_raw, plain_zstd));
+        }
+        let Ok(raw_len_u32) = u32::try_from(raw_len) else {
+            return Ok(fallback_monolithic(plain_raw, plain_zstd));
+        };
+
+        let lz4_buf = lz4_flex::block::compress(&sub_raw);
+        let lz4_ok = lz4_buf.len().saturating_add(16) < raw_len && ratio_ok(raw_len, lz4_buf.len());
+        let zstd_buf = zstd_comp
+            .compress(&sub_raw)
+            .ok()
+            .filter(|zb| zb.len().saturating_add(16) < raw_len && ratio_ok(raw_len, zb.len()));
+
+        let use_lz4 = lz4_ok
+            && zstd_buf.as_ref().is_none_or(|zb| {
+                (lz4_buf.len() as u64).saturating_mul(100) <= (zb.len() as u64).saturating_mul(104)
+            });
+
+        let (codec, bytes): (Codec, &[u8]) = if use_lz4 {
+            (Codec::Lz4, &lz4_buf)
+        } else if let Some(ref zb) = zstd_buf {
+            (Codec::Zstd, zb)
+        } else {
+            (Codec::None, &sub_raw)
+        };
+        let Ok(stored_len_u32) = u32::try_from(bytes.len()) else {
+            return Ok(fallback_monolithic(plain_raw, plain_zstd));
+        };
+        meta.push((codec, raw_len_u32, stored_len_u32));
+        payloads.extend_from_slice(bytes);
+    }
+
+    let header_len = PAYLOAD_REFS_SUBCHUNK_HEADER_LEN
+        .saturating_add(chunk_count.saturating_mul(PAYLOAD_REFS_SUBCHUNK_ENTRY_LEN));
+    let sub_total = header_len.saturating_add(payloads.len());
+    if sub_total > MAX_BLOCK_RAW_BYTES
+        || (sub_total as u64).saturating_mul(100) > (plain_zstd_len as u64).saturating_mul(115)
+        || sub_total > plain_zstd_len.saturating_add(PAYLOAD_REFS_SUBCHUNK_MAX_EXTRA_BYTES)
+    {
+        return Ok(fallback_monolithic(plain_raw, plain_zstd));
+    }
+
+    let mut out = Vec::with_capacity(sub_total);
+    out.push(PAYLOAD_REFS_MODE_SUBCHUNKED);
+    out.extend_from_slice(&chunk_count_u32.to_le_bytes());
+    out.extend_from_slice(&PAYLOAD_REFS_SUBCHUNK_ROWS.to_le_bytes());
+    for &(codec, raw_len, stored_len) in &meta {
+        out.push(codec as u8);
+        out.extend_from_slice(&raw_len.to_le_bytes());
+        out.extend_from_slice(&stored_len.to_le_bytes());
+    }
+    out.extend_from_slice(&payloads);
+    Ok(EncodedPayloadRefs::Subchunked(out))
+}
+
+struct PayloadRefsSubchunkMeta {
+    codec: Codec,
+    raw_len: usize,
+    payload_start: usize,
+    payload_end: usize,
+}
+
+struct PayloadRefsSubchunkedView<'a> {
+    src: &'a [u8],
+    rows_per_chunk: usize,
+    chunks: Vec<PayloadRefsSubchunkMeta>,
+}
+
+impl<'a> PayloadRefsSubchunkedView<'a> {
+    fn parse(src: &'a [u8], row_count: usize) -> Result<Self, StatamError> {
+        if row_count == 0 {
+            return Err(StatamError::Corrupt {
+                reason: "subchunked payload refs has zero rows",
+            });
+        }
+        if src.len() < PAYLOAD_REFS_SUBCHUNK_HEADER_LEN || src[0] != PAYLOAD_REFS_MODE_SUBCHUNKED {
+            return Err(StatamError::Corrupt {
+                reason: "truncated subchunked payload refs header",
+            });
+        }
+        let chunk_count = u32::from_le_bytes([src[1], src[2], src[3], src[4]]) as usize;
+        let rows_per_chunk = usize::from(u16::from_le_bytes([src[5], src[6]]));
+        if rows_per_chunk == 0 || rows_per_chunk > row_count {
+            return Err(StatamError::Corrupt {
+                reason: "invalid subchunked payload refs rows_per_chunk",
+            });
+        }
+        let expected_chunks = row_count.div_ceil(rows_per_chunk);
+        if chunk_count != expected_chunks {
+            return Err(StatamError::Corrupt {
+                reason: "subchunked payload refs chunk_count mismatch",
+            });
+        }
+        let table_bytes = chunk_count
+            .checked_mul(PAYLOAD_REFS_SUBCHUNK_ENTRY_LEN)
+            .ok_or(StatamError::Corrupt {
+                reason: "subchunked payload refs table overflow",
+            })?;
+        let header_end = PAYLOAD_REFS_SUBCHUNK_HEADER_LEN
+            .checked_add(table_bytes)
+            .ok_or(StatamError::Corrupt {
+                reason: "subchunked payload refs header overflow",
+            })?;
+        if header_end > src.len() {
+            return Err(StatamError::Corrupt {
+                reason: "truncated subchunked payload refs table",
+            });
+        }
+
+        let mut chunks = Vec::with_capacity(chunk_count);
+        let mut total_raw = 0usize;
+        let mut payload_off = header_end;
+        let mut pos = PAYLOAD_REFS_SUBCHUNK_HEADER_LEN;
+        for _ in 0..chunk_count {
+            let codec = Codec::from_u8(src[pos])?;
+            let raw_len =
+                u32::from_le_bytes([src[pos + 1], src[pos + 2], src[pos + 3], src[pos + 4]])
+                    as usize;
+            let stored_len =
+                u32::from_le_bytes([src[pos + 5], src[pos + 6], src[pos + 7], src[pos + 8]])
+                    as usize;
+            pos += PAYLOAD_REFS_SUBCHUNK_ENTRY_LEN;
+
+            total_raw = total_raw
+                .checked_add(raw_len)
+                .ok_or(StatamError::BoundsExceeded {
+                    reason: "subchunked payload refs raw_len overflow",
+                })?;
+            if total_raw > MAX_BLOCK_RAW_BYTES {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "subchunked payload refs raw_len exceeds MAX_BLOCK_RAW_BYTES",
+                });
+            }
+            check_decompress_bounds(raw_len, stored_len, MAX_BLOCK_RAW_BYTES)?;
+            if codec == Codec::None && stored_len != raw_len {
+                return Err(StatamError::Corrupt {
+                    reason: "uncompressed subchunked payload refs length mismatch",
+                });
+            }
+            let payload_end = payload_off
+                .checked_add(stored_len)
+                .ok_or(StatamError::Corrupt {
+                    reason: "subchunked payload refs stored_len overflow",
+                })?;
+            if payload_end > src.len() {
+                return Err(StatamError::Corrupt {
+                    reason: "truncated subchunked payload refs payload",
+                });
+            }
+            chunks.push(PayloadRefsSubchunkMeta {
+                codec,
+                raw_len,
+                payload_start: payload_off,
+                payload_end,
+            });
+            payload_off = payload_end;
+        }
+        if payload_off != src.len() {
+            return Err(StatamError::Corrupt {
+                reason: "trailing bytes in subchunked payload refs block",
+            });
+        }
+        Ok(Self {
+            src,
+            rows_per_chunk,
+            chunks,
+        })
+    }
+
+    fn decompress_chunk_into<'b>(
+        &'b self,
+        idx: usize,
+        scratch: &'b mut Vec<u8>,
+    ) -> Result<&'b [u8], StatamError> {
+        let meta = &self.chunks[idx];
+        let stored = &self.src[meta.payload_start..meta.payload_end];
+        let raw = decompress_checked_into(
+            stored,
+            meta.codec,
+            meta.raw_len,
+            MAX_BLOCK_RAW_BYTES,
+            scratch,
+        )?;
+        if raw.first() == Some(&PAYLOAD_REFS_MODE_SUBCHUNKED) {
+            return Err(StatamError::Corrupt {
+                reason: "nested subchunked payload refs not allowed",
+            });
+        }
+        Ok(raw)
+    }
+}
+
 /// Decodes `row_count` [`PayloadRefRow`] entries from `src`, enforcing chain-depth,
 /// per-row chunk count, and `max_batch_bytes` bounds BEFORE allocating.
 pub fn decode_payload_refs(
@@ -351,6 +670,37 @@ pub fn decode_payload_refs(
         return Err(StatamError::BoundsExceeded {
             reason: "payload refs row vector exceeds max_batch_bytes",
         });
+    }
+
+    if src.first() == Some(&PAYLOAD_REFS_MODE_SUBCHUNKED) {
+        let view = PayloadRefsSubchunkedView::parse(src, row_count)?;
+        let mut out = Vec::with_capacity(row_count);
+        let mut used_bytes = row_vec_bytes;
+        let mut scratch = Vec::new();
+        for ci in 0..view.chunks.len() {
+            let start = ci * view.rows_per_chunk;
+            let c_rows = view.rows_per_chunk.min(row_count - start);
+            let sub_raw = view.decompress_chunk_into(ci, &mut scratch)?;
+            let sub_budget = effective_max
+                .saturating_sub(used_bytes)
+                .saturating_add(c_rows.saturating_mul(size_of::<PayloadRefRow>()));
+            let sub_rows = decode_payload_refs(sub_raw, c_rows, sub_budget)?;
+            for r in &sub_rows {
+                let extra = match r {
+                    PayloadRefRow::Null => 0,
+                    PayloadRefRow::Inline(b) => b.len(),
+                    PayloadRefRow::Chunks(c) => c.len().saturating_mul(size_of::<(u16, u32)>()),
+                };
+                used_bytes = used_bytes.saturating_add(extra);
+                if used_bytes > effective_max {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "subchunked payload refs decoded bytes exceed max_batch_bytes",
+                    });
+                }
+            }
+            out.extend(sub_rows);
+        }
+        return Ok(out);
     }
 
     let mut cur = RefCursor::new(src);
@@ -714,6 +1064,81 @@ pub fn decode_payload_refs_flat(
     if row_vec_bytes > effective_max {
         return Err(StatamError::BoundsExceeded {
             reason: "payload refs row vector exceeds max_batch_bytes",
+        });
+    }
+
+    if raw.first() == Some(&PAYLOAD_REFS_MODE_SUBCHUNKED) {
+        let view = PayloadRefsSubchunkedView::parse(raw, row_count)?;
+        let mut row_kinds = Vec::with_capacity(row_count);
+        let mut chunk_offsets = Vec::with_capacity(row_count + 1);
+        chunk_offsets.push(0u32);
+        let mut inline_offsets = Vec::with_capacity(row_count + 1);
+        inline_offsets.push(0u32);
+        let mut row_pack_idxs: Vec<u16> = Vec::new();
+        let mut chunk_ids: Vec<u32> = Vec::new();
+        let mut inline_data: Vec<u8> = Vec::new();
+        let mut used_bytes = row_vec_bytes;
+        let mut scratch = Vec::new();
+
+        for ci in 0..view.chunks.len() {
+            let start = ci * view.rows_per_chunk;
+            let c_rows = view.rows_per_chunk.min(row_count - start);
+            let sub_raw = view.decompress_chunk_into(ci, &mut scratch)?;
+            let sub_budget = effective_max
+                .saturating_sub(used_bytes)
+                .saturating_add(c_rows.saturating_mul(size_of::<PayloadRefRow>()));
+            let sub_flat = decode_payload_refs_flat(sub_raw, c_rows, sub_budget)?;
+
+            let extra = sub_flat.inline_data.len().saturating_add(
+                sub_flat
+                    .chunk_ids
+                    .len()
+                    .saturating_mul(size_of::<(u16, u32)>()),
+            );
+            used_bytes = used_bytes.saturating_add(extra);
+            if used_bytes > effective_max {
+                return Err(StatamError::BoundsExceeded {
+                    reason: "subchunked payload refs flat bytes exceed max_batch_bytes",
+                });
+            }
+
+            let base_chunk_off =
+                u32::try_from(chunk_ids.len()).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "subchunked payload refs chunk count overflows u32",
+                })?;
+            let base_inline_off =
+                u32::try_from(inline_data.len()).map_err(|_| StatamError::BoundsExceeded {
+                    reason: "subchunked payload refs inline bytes overflow u32",
+                })?;
+            row_kinds.extend_from_slice(&sub_flat.row_kinds);
+            for &off in &sub_flat.chunk_offsets[1..] {
+                let adj = base_chunk_off
+                    .checked_add(off)
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "subchunked payload refs chunk offset overflows u32",
+                    })?;
+                chunk_offsets.push(adj);
+            }
+            for &off in &sub_flat.inline_offsets[1..] {
+                let adj = base_inline_off
+                    .checked_add(off)
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "subchunked payload refs inline offset overflows u32",
+                    })?;
+                inline_offsets.push(adj);
+            }
+            row_pack_idxs.extend_from_slice(&sub_flat.row_pack_idxs);
+            chunk_ids.extend_from_slice(&sub_flat.chunk_ids);
+            inline_data.extend_from_slice(&sub_flat.inline_data);
+        }
+
+        return Ok(FlatPayloadRefs {
+            row_kinds,
+            chunk_offsets,
+            inline_offsets,
+            row_pack_idxs,
+            chunk_ids,
+            inline_data,
         });
     }
 
@@ -1097,7 +1522,82 @@ fn decode_payload_refs_selected_inner(
     }
 
     let selected_count = mask.count_ones();
-    if selected_count > 0 && (mask.all_ones() || selected_count.saturating_mul(8) >= row_count) {
+    if src.first() == Some(&PAYLOAD_REFS_MODE_SUBCHUNKED) {
+        let view = PayloadRefsSubchunkedView::parse(src, row_count)?;
+        let effective_max = max_batch_bytes.min(MAX_BATCH_DECODED_BYTES);
+        let selected_vec_bytes = selected_count
+            .checked_mul(size_of::<(usize, PayloadRefRow)>())
+            .ok_or(StatamError::BoundsExceeded {
+                reason: "payload refs selected vector size overflow",
+            })?;
+        if selected_vec_bytes > effective_max {
+            return Err(StatamError::BoundsExceeded {
+                reason: "payload refs selected vector exceeds max_batch_bytes",
+            });
+        }
+        if selected_count == 0 {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::with_capacity(selected_count);
+        let mut used_bytes = selected_vec_bytes;
+        let mut scratch = Vec::new();
+        let mut iter = mask.iter_ones().peekable();
+        for ci in 0..view.chunks.len() {
+            let start = ci * view.rows_per_chunk;
+            let end = (start + view.rows_per_chunk).min(row_count);
+            while iter.peek().is_some_and(|&r| r < start) {
+                iter.next();
+            }
+            if iter.peek().is_none_or(|&r| r >= end) {
+                continue;
+            }
+            let c_rows = end - start;
+            let mut sub_mask = Bitmap::new_zeroed(c_rows);
+            let mut sub_sel_count = 0usize;
+            while let Some(&r) = iter.peek() {
+                if r >= end {
+                    break;
+                }
+                iter.next();
+                let _ = sub_mask.set(r - start, true);
+                sub_sel_count += 1;
+            }
+            let sub_raw = view.decompress_chunk_into(ci, &mut scratch)?;
+            let sub_budget = effective_max
+                .saturating_sub(used_bytes)
+                .saturating_add(sub_sel_count.saturating_mul(size_of::<(usize, PayloadRefRow)>()));
+            let sub_selected = decode_payload_refs_selected_inner(
+                sub_raw,
+                c_rows,
+                &sub_mask,
+                sub_budget.min(effective_max),
+                used_fallback,
+            )?;
+            for (local_r, row) in sub_selected {
+                let extra = match &row {
+                    PayloadRefRow::Null => 0,
+                    PayloadRefRow::Inline(b) => b.len(),
+                    PayloadRefRow::Chunks(c) => c.len().saturating_mul(size_of::<(u16, u32)>()),
+                };
+                used_bytes = used_bytes.saturating_add(extra);
+                if used_bytes > effective_max {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "subchunked selected payload refs exceed max_batch_bytes",
+                    });
+                }
+                out.push((start + local_r, row));
+            }
+        }
+        return Ok(out);
+    }
+
+    let effective_max = max_batch_bytes.min(MAX_BATCH_DECODED_BYTES);
+    if selected_count > 0
+        && (mask.all_ones() || selected_count.saturating_mul(8) >= row_count)
+        && row_count
+            .checked_mul(size_of::<PayloadRefRow>())
+            .is_some_and(|b| b <= effective_max)
+    {
         let full = decode_payload_refs(src, row_count, max_batch_bytes)?;
         return Ok(full
             .into_iter()
@@ -1105,8 +1605,6 @@ fn decode_payload_refs_selected_inner(
             .filter(|(r, _)| mask.get(*r))
             .collect());
     }
-
-    let effective_max = max_batch_bytes.min(MAX_BATCH_DECODED_BYTES);
     let selected_vec_bytes = selected_count
         .checked_mul(size_of::<(usize, PayloadRefRow)>())
         .ok_or(StatamError::BoundsExceeded {
@@ -1610,6 +2108,67 @@ pub(crate) fn scan_payload_refs_inline_substring(
         });
     }
 
+    let mut total_decoded_bytes: usize = 0;
+    if src.first() == Some(&PAYLOAD_REFS_MODE_SUBCHUNKED) {
+        let view = PayloadRefsSubchunkedView::parse(src, row_count)?;
+        let mut out = Bitmap::new_zeroed(row_count);
+        let mut scratch = Vec::new();
+        let mut iter = active_mask.iter_ones().peekable();
+        for ci in 0..view.chunks.len() {
+            let start = ci * view.rows_per_chunk;
+            let end = (start + view.rows_per_chunk).min(row_count);
+            while iter.peek().is_some_and(|&r| r < start) {
+                iter.next();
+            }
+            if iter.peek().is_none_or(|&r| r >= end) {
+                continue;
+            }
+            let c_rows = end - start;
+            let mut sub_mask = Bitmap::new_zeroed(c_rows);
+            while let Some(&r) = iter.peek() {
+                if r >= end {
+                    break;
+                }
+                iter.next();
+                let _ = sub_mask.set(r - start, true);
+            }
+            let sub_raw = view.decompress_chunk_into(ci, &mut scratch)?;
+            let sub_hits = scan_payload_refs_inline_substring_monolithic(
+                sub_raw,
+                c_rows,
+                &sub_mask,
+                pack_chunk_counts,
+                pack_has_edges,
+                &mut total_decoded_bytes,
+                &mut match_inline,
+            )?;
+            for local_r in sub_hits.iter_ones() {
+                let _ = out.set(start + local_r, true);
+            }
+        }
+        return Ok(out);
+    }
+
+    scan_payload_refs_inline_substring_monolithic(
+        src,
+        row_count,
+        active_mask,
+        pack_chunk_counts,
+        pack_has_edges,
+        &mut total_decoded_bytes,
+        &mut match_inline,
+    )
+}
+
+fn scan_payload_refs_inline_substring_monolithic(
+    src: &[u8],
+    row_count: usize,
+    active_mask: &Bitmap,
+    pack_chunk_counts: &[usize],
+    pack_has_edges: &[bool],
+    total_decoded_bytes: &mut usize,
+    match_inline: &mut impl FnMut(&[u8]) -> bool,
+) -> Result<Bitmap, StatamError> {
     let mut cur = RefCursor::new(src);
     let has_nulls = cur.read_u8()?;
     let validity = match has_nulls {
@@ -1644,7 +2203,6 @@ pub(crate) fn scan_payload_refs_inline_substring(
     let mut results = Bitmap::new_zeroed(row_count);
     let mut history: VecDeque<ScanHistoryEntry<'_>> = VecDeque::with_capacity(MAX_TAIL_SHARE_BACK);
     let mut recycle_vecs: Vec<Vec<(u16, u32)>> = Vec::new();
-    let mut total_decoded_bytes: usize = 0;
     let any_no_edges = pack_has_edges.iter().any(|&has| !has);
     let mut pack_counts = if any_no_edges {
         vec![0u32; pack_has_edges.len()]
@@ -1667,8 +2225,8 @@ pub(crate) fn scan_payload_refs_inline_substring(
                         reason: "truncated inline payload bytes",
                     });
                 }
-                total_decoded_bytes =
-                    add_budget(total_decoded_bytes, len, MAX_BATCH_DECODED_BYTES)?;
+                *total_decoded_bytes =
+                    add_budget(*total_decoded_bytes, len, MAX_BATCH_DECODED_BYTES)?;
                 let bytes = cur.read_exact(len)?;
                 if active_mask.get(row_idx) && match_inline(bytes) {
                     let _ = results.set(row_idx, true);
@@ -1695,8 +2253,8 @@ pub(crate) fn scan_payload_refs_inline_substring(
                         reason: "keyframe memory size overflow",
                     },
                 )?;
-                total_decoded_bytes =
-                    add_budget(total_decoded_bytes, mem_bytes, MAX_BATCH_DECODED_BYTES)?;
+                *total_decoded_bytes =
+                    add_budget(*total_decoded_bytes, mem_bytes, MAX_BATCH_DECODED_BYTES)?;
                 let raw_pairs = cur.read_exact(wire_bytes)?;
                 let check_edges = any_no_edges && n_chunks > 1;
                 let mut first_pack: Option<u16> = None;
@@ -1800,8 +2358,8 @@ pub(crate) fn scan_payload_refs_inline_substring(
                         reason: "payload ref delta memory size overflow",
                     },
                 )?;
-                total_decoded_bytes =
-                    add_budget(total_decoded_bytes, mem_bytes, MAX_BATCH_DECODED_BYTES)?;
+                *total_decoded_bytes =
+                    add_budget(*total_decoded_bytes, mem_bytes, MAX_BATCH_DECODED_BYTES)?;
 
                 let new_depth = parent_depth + 1;
                 let mut prev = if keep_prefix > 0 {
@@ -2786,5 +3344,109 @@ mod tests {
             scan_payload_refs_inline_substring(&valid, 1, &wrong_mask, &[], &[], |_| false),
             Err(StatamError::Corrupt { .. })
         ));
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn subchunked_payload_refs_roundtrip_selected_inline_and_corrupt_guards() {
+        // > 1024 rows and >= 64 KiB monolithic PayloadRefs mixing Null, Inline, and Chunks.
+        let row_count = 2_400usize;
+        let mut rows = Vec::with_capacity(row_count);
+        for i in 0..row_count {
+            if i % 13 == 0 {
+                rows.push(PayloadRefRow::Null);
+            } else if i % 3 == 0 {
+                let tag = if i == 1_236 { "NEEDLE_HIT" } else { "normal" };
+                let payload = format!("inline-msg-{i:04}-{tag}-{}", "x".repeat(96)).into_bytes();
+                rows.push(PayloadRefRow::Inline(payload));
+            } else {
+                let base = (i / 16) as u32 * 4;
+                rows.push(PayloadRefRow::Chunks(vec![
+                    (0u16, base),
+                    (0u16, base + 1),
+                    (0u16, base + (i % 16) as u32),
+                ]));
+            }
+        }
+
+        let encoded = match encode_payload_refs_adaptive(&rows, WriteProfile::L1Compact, 3).unwrap()
+        {
+            EncodedPayloadRefs::Subchunked(b) => b,
+            _ => panic!(
+                "expected >1024 rows & >=64 KiB L1Compact PayloadRefs to emit MODE_SUBCHUNKED"
+            ),
+        };
+        assert!(payload_refs_is_subchunked(&encoded));
+
+        // Full decode parity (`decode_payload_refs` and `decode_payload_refs_flat`).
+        let decoded = decode_payload_refs(&encoded, row_count, MAX_BATCH_DECODED_BYTES).unwrap();
+        assert_eq!(decoded, rows);
+        let flat = decode_payload_refs_flat(&encoded, row_count, MAX_BATCH_DECODED_BYTES).unwrap();
+        assert_eq!(flat.to_rows(), rows);
+
+        // Empty selection & single-row point lookup across chunk boundaries.
+        let empty = Bitmap::new_zeroed(row_count);
+        assert!(
+            decode_payload_refs_selected(&encoded, row_count, &empty, MAX_BATCH_DECODED_BYTES)
+                .unwrap()
+                .is_empty()
+        );
+        for target in [0usize, 13, 511, 512, 1_236, row_count - 1] {
+            let mut m = Bitmap::new_zeroed(row_count);
+            let _ = m.set(target, true);
+            let sel =
+                decode_payload_refs_selected(&encoded, row_count, &m, MAX_BATCH_DECODED_BYTES)
+                    .unwrap();
+            assert_eq!(sel, vec![(target, rows[target].clone())]);
+        }
+
+        // Sparse multi-chunk selection.
+        let mut multi = Bitmap::new_zeroed(row_count);
+        for idx in [3usize, 515, 1_024, 1_599] {
+            let _ = multi.set(idx, true);
+        }
+        let sel_multi =
+            decode_payload_refs_selected(&encoded, row_count, &multi, MAX_BATCH_DECODED_BYTES)
+                .unwrap();
+        assert_eq!(
+            sel_multi,
+            vec![
+                (3, rows[3].clone()),
+                (515, rows[515].clone()),
+                (1_024, rows[1_024].clone()),
+                (1_599, rows[1_599].clone()),
+            ]
+        );
+
+        // Inline substring scan on sub-chunked PayloadRefs.
+        let all = Bitmap::new_ones(row_count);
+        let hits = scan_payload_refs_inline_substring(
+            &encoded,
+            row_count,
+            &all,
+            &[10_000],
+            &[true],
+            |b| b.windows(10).any(|w| w == b"NEEDLE_HIT"),
+        )
+        .unwrap();
+        assert_eq!(hits.iter_ones().collect::<Vec<_>>(), vec![1_236]);
+
+        // Corrupt / DoS guards: truncated, trailing byte, wrong row_count, nested mode=2.
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert!(decode_payload_refs(&trailing, row_count, MAX_BATCH_DECODED_BYTES).is_err());
+        assert!(decode_payload_refs(&encoded[..6], row_count, MAX_BATCH_DECODED_BYTES).is_err());
+        assert!(decode_payload_refs(&encoded, row_count - 600, MAX_BATCH_DECODED_BYTES).is_err());
+
+        // Nested mode=2 inside uncompressed sub-chunk must be rejected.
+        let mut nested = vec![PAYLOAD_REFS_MODE_SUBCHUNKED];
+        nested.extend_from_slice(&1u32.to_le_bytes()); // chunk_count = 1
+        nested.extend_from_slice(&1u16.to_le_bytes()); // rows_per_chunk = 1
+        nested.push(Codec::None as u8);
+        nested.extend_from_slice(&1u32.to_le_bytes());
+        nested.extend_from_slice(&1u32.to_le_bytes());
+        nested.push(PAYLOAD_REFS_MODE_SUBCHUNKED);
+        assert!(decode_payload_refs(&nested, 1, MAX_BATCH_DECODED_BYTES).is_err());
+        assert!(decode_payload_refs_flat(&nested, 1, MAX_BATCH_DECODED_BYTES).is_err());
     }
 }

@@ -15,17 +15,17 @@ use crate::codec::{
 };
 use crate::format::{
     BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_HAS_NULLS, BLOCK_FLAG_NO_INLINE_PAYLOADS, BlockEntry, Codec,
-    Encoding, LocalityGroup, MAX_BATCH_DECODED_BYTES, MAX_BLOOM_BYTES, MAX_COLUMNS,
-    MAX_FRAME_RAW_BYTES, MAX_ROW_GROUPS, MAX_ROW_PAYLOAD_BYTES, MAX_ROWS_PER_FILE, RowGroupEntry,
-    ShreddedMapDir, ShreddedMapKeyEntry, TableKind, write_framed_block,
-    write_framed_block_adaptive,
+    Encoding, FramedWriteInfo, LocalityGroup, MAX_BATCH_DECODED_BYTES, MAX_BLOOM_BYTES,
+    MAX_COLUMNS, MAX_FRAME_RAW_BYTES, MAX_ROW_GROUPS, MAX_ROW_PAYLOAD_BYTES, MAX_ROWS_PER_FILE,
+    RowGroupEntry, ShreddedMapDir, ShreddedMapKeyEntry, TableKind, write_framed_block,
+    write_framed_block_adaptive, write_precompressed_framed_block,
 };
 use crate::parallel::{enter_executor_scope, parallel_map_in_order_static};
 use crate::payload::chunker::{
     DedupBypassDetector, INLINE_PAYLOAD_THRESHOLD, chunk_json_array_continuation, chunk_payload,
 };
 use crate::payload::{
-    PayloadRefRow, encode_payload_refs, encode_payload_refs_l0_direct,
+    EncodedPayloadRefs, PayloadRefRow, encode_payload_refs_adaptive, encode_payload_refs_l0_direct,
     encode_payload_refs_l0_from_bytes,
 };
 use crate::simd::bloom::{BloomIndex, Sbbf, statam_bloom_hash};
@@ -1206,14 +1206,15 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                     .count();
                 let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
                 let (extra_flags, raw_body) = if null_count_usize == mb_len {
-                    (0u8, Vec::new())
+                    (0u8, EncodedPayloadRefs::empty())
                 } else {
-                    let mut rb = Vec::new();
-                    if self.options.profile == WriteProfile::L0Fast {
-                        encode_payload_refs_l0_direct(&partial, &mut rb)?;
+                    let rb = if self.options.profile == WriteProfile::L0Fast {
+                        let mut v = Vec::new();
+                        encode_payload_refs_l0_direct(&partial, &mut v)?;
+                        EncodedPayloadRefs::Raw(v)
                     } else {
-                        encode_payload_refs(&partial, &mut rb)?;
-                    }
+                        encode_payload_refs_adaptive(&partial, self.options.profile, zstd_level)?
+                    };
                     let f = if payload_ref_rows_all_external_or_null(&partial) {
                         BLOCK_FLAG_NO_INLINE_PAYLOADS
                     } else {
@@ -1225,7 +1226,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
             }
 
             let mut cur_first = first_row_u32;
-            for (mb_len_u16, null_count, extra_flags, raw_body) in mbs {
+            for (mb_len_u16, null_count, extra_flags, encoded) in mbs {
                 self.phys_col_meta[cidx].null_count_total = self.phys_col_meta[cidx]
                     .null_count_total
                     .saturating_add(u32::from(null_count));
@@ -1247,16 +1248,11 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                         max_inline: [0; 16],
                     });
                 } else {
-                    let block_codec = payload_refs_block_codec(
+                    let blk_off = base_offset + wide_buf.len() as u64;
+                    let info = write_encoded_payload_refs_block(
+                        &encoded,
                         self.options.profile,
                         preferred_codec,
-                        raw_body.len(),
-                    );
-                    let blk_off = base_offset + wide_buf.len() as u64;
-                    let info = write_framed_block(
-                        Encoding::PayloadRefs,
-                        &raw_body,
-                        block_codec,
                         zstd_level,
                         wide_buf,
                     )?;
@@ -1507,19 +1503,18 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                     max_inline: [0; 16],
                 });
             } else {
-                let mut raw_body = Vec::new();
-                if self.options.profile == WriteProfile::L0Fast {
+                let encoded = if self.options.profile == WriteProfile::L0Fast {
+                    let mut raw_body = Vec::new();
                     encode_payload_refs_l0_direct(&ref_rows, &mut raw_body)?;
+                    EncodedPayloadRefs::Raw(raw_body)
                 } else {
-                    encode_payload_refs(&ref_rows, &mut raw_body)?;
-                }
-                let block_codec =
-                    payload_refs_block_codec(self.options.profile, preferred_codec, raw_body.len());
+                    encode_payload_refs_adaptive(&ref_rows, self.options.profile, zstd_level)?
+                };
                 let blk_off = base_offset + wide_buf.len() as u64;
-                let info = write_framed_block(
-                    Encoding::PayloadRefs,
-                    &raw_body,
-                    block_codec,
+                let info = write_encoded_payload_refs_block(
+                    &encoded,
+                    self.options.profile,
+                    preferred_codec,
                     zstd_level,
                     wide_buf,
                 )?;
@@ -2874,4 +2869,31 @@ fn build_narrow_trigram_for_mb(col: &Column, stored_len: usize) -> Option<Vec<u8
         return None;
     }
     Some(bloom.as_bytes().to_vec())
+}
+
+fn write_encoded_payload_refs_block(
+    encoded: &EncodedPayloadRefs,
+    profile: WriteProfile,
+    preferred_codec: Codec,
+    zstd_level: i32,
+    out: &mut Vec<u8>,
+) -> Result<FramedWriteInfo, StatamError> {
+    match encoded {
+        EncodedPayloadRefs::Subchunked(raw) => {
+            write_framed_block(Encoding::PayloadRefs, raw, Codec::None, zstd_level, out)
+        }
+        EncodedPayloadRefs::PrecompressedZstd { raw_len, stored } => {
+            write_precompressed_framed_block(
+                Encoding::PayloadRefs,
+                Codec::Zstd,
+                *raw_len,
+                stored,
+                out,
+            )
+        }
+        EncodedPayloadRefs::Raw(raw) => {
+            let block_codec = payload_refs_block_codec(profile, preferred_codec, raw.len());
+            write_framed_block(Encoding::PayloadRefs, raw, block_codec, zstd_level, out)
+        }
+    }
 }
