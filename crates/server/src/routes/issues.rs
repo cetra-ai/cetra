@@ -2055,10 +2055,6 @@ mod tests {
             .send()
             .await;
         assert_eq!(gone.status, 404, "{}", text(&gone));
-        assert!(
-            app.state.analytics.counters.get("issue_source.created") >= 1,
-            "issue_source.created not counted"
-        );
     }
 
     #[tokio::test]

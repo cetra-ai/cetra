@@ -1,6 +1,5 @@
 //! The daily anonymous heartbeat (D-TL-8): a fixed type whose every value is a constant, a bucket or a boolean. It never carries emails, domains, names, URLs, host names, ids of orgs or projects, exact counts or licence state, and this module reads nothing of the licence code (D172).
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use cetra_storage::config::ObjectStoreUrl;
@@ -9,7 +8,6 @@ use serde::Serialize;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::analytics::counters::{self, Counts, UsageBucket, usage_buckets};
 use crate::config::ServerConfig;
 use crate::http::AppState;
 use crate::meta::instance_settings::{TELEMETRY_LAST_HEARTBEAT_AT, get_setting, put_setting};
@@ -95,17 +93,6 @@ pub(crate) struct Heartbeat {
     pub(crate) scores_per_day: VolumeBucket,
     /// Feature booleans.
     pub(crate) features: Features,
-    /// Catalog events counted since the last accepted heartbeat, bucketed (track TL M6). Every
-    /// catalog name is present; `0` when none.
-    pub(crate) usage: BTreeMap<&'static str, UsageBucket>,
-}
-
-impl Heartbeat {
-    /// The heartbeat with `usage` from `counts`.
-    pub(crate) fn with_usage(mut self, counts: &Counts) -> Self {
-        self.usage = usage_buckets(counts);
-        self
-    }
 }
 
 /// Whether each feature table has a row.
@@ -172,8 +159,7 @@ async fn table_flags(meta: &MetaDb) -> Result<TableFlags, MetaError> {
     })
 }
 
-/// The heartbeat as it would be sent now, without feature counts: `Sender::tick` and the
-/// debug bundle's preview apply those with [`Heartbeat::with_usage`]. Reads `meta.db` only.
+/// The heartbeat as it would be sent now. Reads `meta.db` only.
 ///
 /// # Errors
 ///
@@ -236,7 +222,6 @@ pub(crate) async fn collect(
         spans_per_day: volume_bucket(count(spans)),
         scores_per_day: volume_bucket(count(scores)),
         features: features(config, flags),
-        usage: usage_buckets(&Counts::new()),
     })
 }
 
@@ -390,8 +375,6 @@ impl Sender {
                 return PERIOD;
             }
         };
-        let snapshot = state.analytics.counters.snapshot();
-        let payload = payload.with_usage(&snapshot);
         if let Err(error) = self.send(&payload).await {
             tracing::debug!(error = %error, "telemetry: heartbeat not sent");
             return PERIOD;
@@ -407,8 +390,6 @@ impl Sender {
         if let Err(error) = recorded {
             tracing::debug!(error = %error, "telemetry: heartbeat time not recorded");
         }
-        state.analytics.counters.subtract(&snapshot);
-        counters::save(state).await;
         tracing::debug!("telemetry: heartbeat sent");
         PERIOD
     }
@@ -486,10 +467,7 @@ mod tests {
     use axum::response::{IntoResponse, Response};
     use axum::routing::{get, post};
 
-    use crate::analytics::actor::{Actor, Via};
-    use crate::analytics::catalog::{CATALOG, Event};
-    use crate::analytics::record;
-    use crate::meta::instance_settings::{TELEMETRY_INSTANCE_ID, TELEMETRY_USAGE_COUNTS};
+    use crate::meta::instance_settings::TELEMETRY_INSTANCE_ID;
     use crate::observability::switchboard::OffReason;
     use crate::test_support::{TestApp, capture_logs};
 
@@ -497,7 +475,7 @@ mod tests {
     const GOLDEN_ID: &str = "8f14e45f-ceea-4e7a-9d2b-1c3f5a6b7c8d";
 
     /// The top-level keys of the heartbeat, in order.
-    const KEYS: [&str; 16] = [
+    const KEYS: [&str; 15] = [
         "schema",
         "instance_id",
         "version",
@@ -513,7 +491,6 @@ mod tests {
         "spans_per_day",
         "scores_per_day",
         "features",
-        "usage",
     ];
 
     /// The keys of `features`, in order.
@@ -561,12 +538,6 @@ mod tests {
                 self_monitoring: false,
                 crash_reports_on: false,
             },
-            usage: usage_buckets(&Counts::from([
-                ("dataset.created", 3),
-                ("page.viewed", 250),
-                ("sql_console.run", 12),
-                ("trace.viewed", 1500),
-            ])),
         }
     }
 
@@ -618,48 +589,6 @@ mod tests {
     "annotation_queues": false,
     "self_monitoring": false,
     "crash_reports_on": false
-  },
-  "usage": {
-    "alert_rule.created": "0",
-    "annotation_queue.created": "0",
-    "annotation_queue.item_completed": "0",
-    "api_key.created": "0",
-    "assistant.panel_opened": "0",
-    "assistant.turn_sent": "0",
-    "backfill.started": "0",
-    "channel.created": "0",
-    "command_palette.opened": "0",
-    "dashboard.created": "0",
-    "dashboard.edited": "0",
-    "dataset.created": "1-9",
-    "dataset.exported": "0",
-    "dataset.imported": "0",
-    "dataset.items_added": "0",
-    "deletion.requested": "0",
-    "device.approved": "0",
-    "evaluator.created": "0",
-    "evaluator.run": "0",
-    "experiment.created": "0",
-    "invite.created": "0",
-    "issue_source.created": "0",
-    "list_layout.changed": "0",
-    "live_tail.toggled": "0",
-    "llm_connection.created": "0",
-    "mcp.tool_called": "0",
-    "online_rule.created": "0",
-    "org.created": "0",
-    "page.viewed": "100-999",
-    "personal_token.created": "0",
-    "playground.run": "0",
-    "project.created": "0",
-    "prompt.created": "0",
-    "prompt.version_created": "0",
-    "saved_view.created": "0",
-    "scores.created": "0",
-    "sql_console.run": "10-99",
-    "theme.changed": "0",
-    "trace.viewed": "1000+",
-    "user.signed_in": "0"
   }
 }"#;
         assert_eq!(
@@ -677,10 +606,6 @@ mod tests {
         let features = object["features"].as_object().expect("an object");
         let feature_keys: Vec<&str> = features.keys().map(String::as_str).collect();
         assert_eq!(feature_keys, FEATURE_KEYS);
-        let usage = object["usage"].as_object().expect("an object");
-        let usage_keys: Vec<&str> = usage.keys().map(String::as_str).collect();
-        let names: Vec<&str> = CATALOG.iter().map(|spec| spec.name).collect();
-        assert_eq!(usage_keys, names);
         assert!(!value.to_string().contains("licen"));
     }
 
@@ -711,35 +636,6 @@ mod tests {
         assert!(!heartbeat.features.datasets);
         assert!(!heartbeat.features.prompts);
         assert!(!heartbeat.features.annotation_queues);
-        assert!(
-            heartbeat
-                .usage
-                .values()
-                .all(|bucket| *bucket == UsageBucket::Zero)
-        );
-    }
-
-    #[tokio::test]
-    async fn with_usage_buckets_the_counts() {
-        let app = TestApp::new().await;
-        let heartbeat = collect(
-            &app.state.meta,
-            &app.state.config,
-            Uuid::parse_str(GOLDEN_ID).expect("a fixed UUID"),
-            Deployment::Binary,
-            Duration::ZERO,
-            app.state.clock.now_ns(),
-        )
-        .await
-        .expect("collects")
-        .with_usage(&Counts::from([("org.created", 1)]));
-        assert_eq!(heartbeat.usage["org.created"], UsageBucket::UnderTen);
-        let zeros = heartbeat
-            .usage
-            .values()
-            .filter(|bucket| **bucket == UsageBucket::Zero)
-            .count();
-        assert_eq!(zeros, CATALOG.len() - 1);
     }
 
     #[tokio::test]
@@ -1374,44 +1270,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored, Some(now.to_string()));
-    }
-
-    #[tokio::test]
-    async fn tick_sends_usage_and_subtracts_it() {
-        let app = TestApp::new().await;
-        let receiver = Receiver::start(204, Duration::ZERO).await;
-        let sender = sender_for(&receiver);
-        for _ in 0..3 {
-            record(
-                &app.state,
-                &Event::DatasetCreated,
-                &Actor::user(Uuid::now_v7(), Via::Session),
-            );
-        }
-        assert_eq!(sender.tick(&app.state).await, PERIOD);
-        let requests = receiver.requests();
-        assert_eq!(requests.len(), 1);
-        let body: serde_json::Value = serde_json::from_slice(&requests[0].1).unwrap();
-        assert_eq!(body["usage"]["dataset.created"], "1-9");
-        assert_eq!(app.state.analytics.counters.get("dataset.created"), 0);
-        let saved = get_setting(app.state.meta.reader(), TELEMETRY_USAGE_COUNTS)
-            .await
-            .unwrap();
-        assert_eq!(saved.as_deref(), Some("{}"));
-    }
-
-    #[tokio::test]
-    async fn tick_keeps_counts_on_failure() {
-        let app = TestApp::new().await;
-        let receiver = Receiver::start(503, Duration::ZERO).await;
-        let sender = sender_for(&receiver);
-        record(
-            &app.state,
-            &Event::DatasetCreated,
-            &Actor::user(Uuid::now_v7(), Via::Session),
-        );
-        assert_eq!(sender.tick(&app.state).await, PERIOD);
-        assert_eq!(app.state.analytics.counters.get("dataset.created"), 1);
     }
 
     #[tokio::test]

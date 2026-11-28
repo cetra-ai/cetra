@@ -484,10 +484,6 @@ mod tests {
             assert_eq!(detail.trace.scores.len(), 1);
             assert_eq!(detail.trace.scores[0].value, ScoreValue::Numeric(0.9));
         }
-        assert!(
-            app.state.analytics.counters.get("trace.viewed") >= 1,
-            "trace.viewed not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

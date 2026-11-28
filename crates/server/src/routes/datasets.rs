@@ -3128,10 +3128,6 @@ mod tests {
             .await;
         assert_eq!(deleted.status, 204);
         assert_eq!(get(&app, &seeded, &id).await.status, 404);
-        assert!(
-            app.state.analytics.counters.get("dataset.created") >= 1,
-            "dataset.created not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3652,10 +3648,6 @@ mod tests {
             json!({ "t": "x" })
         );
         assert_eq!(records[1..].iter().filter(|r| r[2].is_empty()).count(), 1);
-        assert!(
-            app.state.analytics.counters.get("dataset.exported") >= 1,
-            "dataset.exported not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4954,10 +4946,6 @@ mod tests {
             .send()
             .await;
         assert_eq!(refused.status, 403);
-        assert!(
-            app.state.analytics.counters.get("dataset.items_added") >= 1,
-            "dataset.items_added not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5481,10 +5469,6 @@ mod tests {
             versions["data"][0]["description"],
             "import data.csv (2 items)"
         );
-        assert!(
-            app.state.analytics.counters.get("dataset.imported") >= 1,
-            "dataset.imported not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5931,10 +5915,6 @@ mod tests {
             versions["data"][0]["description"],
             "add from trace a1000000000000000000000000000001"
         );
-        assert!(
-            app.state.analytics.counters.get("dataset.items_added") >= 1,
-            "dataset.items_added not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -6269,10 +6249,6 @@ mod tests {
         let dataset: Value = get(&app, &seeded, "faq").await.json();
         assert_eq!(dataset["current_version"], 1);
         assert_eq!(dataset["item_count"], 2);
-        assert!(
-            app.state.analytics.counters.get("dataset.items_added") >= 1,
-            "dataset.items_added not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

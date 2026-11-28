@@ -649,10 +649,6 @@ async fn bind_inner(config: ServerConfig, ui: Option<axum::Router>) -> Result<Ru
     if let Some(task) = crate::observability::crash::start(&state, decision).await {
         tasks.push(task);
     }
-    // Feature counts for the heartbeat's `usage` (track TL M6), loaded and saved while it runs.
-    if let Some(task) = crate::analytics::counters::start(&state, decision).await {
-        tasks.push(task);
-    }
     // Per-user product events to the operator's PostHog, when `[analytics]` is set (D-TL-14).
     if let Some(worker) = analytics_worker {
         tasks.push(tokio::spawn(worker.run()));

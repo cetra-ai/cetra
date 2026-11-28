@@ -128,7 +128,7 @@ async fn config(State(state): State<AppState>) -> Result<error::Json<AuthConfig>
         org_create_allowed: state.config.orgs.user_create,
         org_create_url: state.config.orgs.create_url.clone(),
         sso_discovery: state.org_sso.discovery_enabled(),
-        analytics: state.analytics.ui_events_wanted(),
+        analytics: state.analytics.posthog_enabled(),
     }))
 }
 
@@ -3301,10 +3301,8 @@ mod tests {
 
     #[tokio::test]
     async fn auth_config_says_analytics_is_off_when_nothing_runs() {
-        // `TestApp` counts by default so handler tests can assert the counters; a real debug
-        // build counts nothing, and with no PostHog sink the flag is off.
+        // A test app has no PostHog sink, so the flag is off.
         let app = TestApp::new().await;
-        app.state.analytics.set_counting(false);
         let config: AuthConfig = app
             .request(Method::GET, "/api/auth/config")
             .send()
@@ -3325,26 +3323,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_config_says_analytics_is_on_while_counting() {
-        let app = TestApp::new().await;
-        app.state.analytics.set_counting(true);
-        let config: AuthConfig = app
-            .request(Method::GET, "/api/auth/config")
-            .send()
-            .await
-            .json();
-        assert!(config.analytics);
-    }
-
-    #[tokio::test]
     async fn auth_config_says_analytics_is_off_in_restore_mode() {
         let app = TestApp::with_config(|config| {
             posthog(config);
             config.restore_mode = true;
         })
         .await;
-        // Restore mode leaves no sink; counting must be off too for the flag to be off.
-        app.state.analytics.set_counting(false);
         let config: AuthConfig = app
             .request(Method::GET, "/api/auth/config")
             .send()

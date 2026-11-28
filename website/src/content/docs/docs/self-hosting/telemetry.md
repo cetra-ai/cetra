@@ -74,7 +74,6 @@ The request is `POST https://telemetry.cetra.sh/v1/heartbeat` with a JSON body a
 | `features.alert_rules`, `features.online_rules`, `features.datasets`, `features.prompts`, `features.annotation_queues` | `true`, `false` | At least one alert rule, online rule, dataset, prompt or annotation queue exists. |
 | `features.self_monitoring` | `true`, `false` | cetra exports its own logs or traces to an OTLP endpoint of yours. |
 | `features.crash_reports_on` | `true`, `false` | Crash reports are on. |
-| `usage` | an object, one key per event below, each `0`, `1-9`, `10-99`, `100-999` or `1000+` | How often each feature was used since the last heartbeat, see [Feature usage](#feature-usage). |
 
 An example:
 
@@ -106,48 +105,6 @@ An example:
     "annotation_queues": false,
     "self_monitoring": false,
     "crash_reports_on": false
-  },
-  "usage": {
-    "alert_rule.created": "0",
-    "annotation_queue.created": "0",
-    "annotation_queue.item_completed": "0",
-    "api_key.created": "0",
-    "assistant.panel_opened": "0",
-    "assistant.turn_sent": "0",
-    "backfill.started": "0",
-    "channel.created": "0",
-    "command_palette.opened": "0",
-    "dashboard.created": "0",
-    "dashboard.edited": "0",
-    "dataset.created": "1-9",
-    "dataset.exported": "0",
-    "dataset.imported": "0",
-    "dataset.items_added": "0",
-    "deletion.requested": "0",
-    "device.approved": "0",
-    "evaluator.created": "0",
-    "evaluator.run": "0",
-    "experiment.created": "0",
-    "invite.created": "0",
-    "issue_source.created": "0",
-    "list_layout.changed": "0",
-    "live_tail.toggled": "0",
-    "llm_connection.created": "0",
-    "mcp.tool_called": "0",
-    "online_rule.created": "0",
-    "org.created": "0",
-    "page.viewed": "100-999",
-    "personal_token.created": "0",
-    "playground.run": "0",
-    "project.created": "0",
-    "prompt.created": "0",
-    "prompt.version_created": "0",
-    "saved_view.created": "0",
-    "scores.created": "0",
-    "sql_console.run": "10-99",
-    "theme.changed": "0",
-    "trace.viewed": "1000+",
-    "user.signed_in": "0"
   }
 }
 ```
@@ -213,13 +170,19 @@ A report never contains the panic or error message, field values, error texts, t
 - Writing a report takes a moment the first time in a process, while cetra reads its own function names. Error-level events of libraries that log through the `log` crate are not reported, since they carry no code location, and neither are errors of the HTTP stack that exports cetra's own logs to your OTLP endpoint (a down endpoint is not a cetra bug).
 - Turning crash reports off deletes the spool at the next start. Backups do not include it.
 
-## Feature usage
+## Product analytics
 
-cetra counts how often each product event happens, whoever does it: the web UI, the CLI, an SDK, an agent over MCP, or the API. The heartbeat's `usage` field sends each count since the last heartbeat as a bucket: `0`, `1-9`, `10-99`, `100-999` or `1000+`. It never says who did what, in which organization or project, in what order, or when. cetra keeps the counts in `meta.db` while the heartbeat is on, saved once an hour, and clears what the relay accepted. When the heartbeat is off, nothing is counted, saved or sent.
+A self-hosted cetra sends no product-analytics events. Nothing about pages, actions or users leaves it: the heartbeat and the crash reports above are all it sends.
 
-While the heartbeat is on, the web UI reports its own events (marked "UI" below) to your server, through `POST /api/v1/analytics/events` on its own origin, only so that they are counted: your server keeps no per-user record of them and sends nothing about them except the buckets. The UI loads no analytics script and sets no cookie. When the heartbeat is off and [product analytics](#product-analytics) are not set up, the UI reports nothing.
+cetra can send per-user product events to a PostHog project, set with [`[analytics]`](/docs/self-hosting/configuration-reference/#analytics). It is off unless you set it, and restore mode turns it off. cetra's own cloud sets it to a PostHog project of ours in the EU. When it is on, the events of the table below are sent, whoever does the action: the web UI, the CLI, an SDK, an agent over MCP or the API. When it is on:
 
-| Event | Counted when |
+- The web UI tells the server which page it shows and the UI events of the table, through `POST /api/v1/analytics/events` on its own origin. The UI loads no analytics script, sets no cookie, and records no clicks or screens: only the events of the table.
+- The server sends each event to PostHog with the user's id (a random UUID), the organization's id, the project's id for project pages, and the event's own values (such as the page's route template, `/$org/$project/traces/`, never its address). It adds the user's role in the organization and the organization's plan.
+- It never sends emails, names, organization or project names, addresses of pages, IP addresses, filters, queries, prompts or any trace data, and it asks PostHog not to geolocate events.
+- A browser that sends `DNT: 1` (Do Not Track) or `Sec-GPC: 1` (Global Privacy Control) keeps its events out of PostHog.
+- Events made with an API key, which has no user, are not sent.
+
+| Event | Happens when |
 |---|---|
 | `alert_rule.created` | an alert rule is created |
 | `annotation_queue.created` | an annotation queue is created |
@@ -246,7 +209,7 @@ While the heartbeat is on, the web UI reports its own events (marked "UI" below)
 | `list_layout.changed` | UI: the list layout changes |
 | `live_tail.toggled` | UI: a list's Live switch is flipped |
 | `llm_connection.created` | an LLM connection is created |
-| `mcp.tool_called` | an MCP tool call ends (`query_sql` also counts as `sql_console.run`, `get_trace` as `trace.viewed`) |
+| `mcp.tool_called` | an MCP tool call ends (`query_sql` is also recorded as `sql_console.run`, `get_trace` as `trace.viewed`) |
 | `online_rule.created` | an online rule is created |
 | `org.created` | an organization is created |
 | `page.viewed` | UI: a page is shown |
@@ -263,16 +226,3 @@ While the heartbeat is on, the web UI reports its own events (marked "UI" below)
 | `user.signed_in` | someone signs in to the web UI |
 
 New events are only ever added to this list; an event keeps its name.
-
-## Product analytics
-
-A self-hosted cetra sends us no per-user events: only the bucketed counts above, inside the heartbeat. Events are counted whether a person or a program did them, so an action made in the UI, the CLI, an SDK or over MCP counts once.
-
-cetra can send per-user product events to a PostHog project, set with [`[analytics]`](/docs/self-hosting/configuration-reference/#analytics). It is off unless you set it, and restore mode turns it off. cetra's own cloud sets it to a PostHog project of ours in the EU. When it is on:
-
-- The web UI tells the server which page it shows and the UI events above, through `POST /api/v1/analytics/events` on its own origin. The UI loads no analytics script, sets no cookie, and records no clicks or screens: only the events of the list above.
-- The server sends each event to PostHog with the user's id (a random UUID), the organization's id, the project's id for project pages, and the event's own values (such as the page's route template, `/$org/$project/traces/`, never its address). It adds the user's role in the organization and the organization's plan.
-- It never sends emails, names, organization or project names, addresses of pages, IP addresses, filters, queries, prompts or any trace data, and it asks PostHog not to geolocate events.
-- A browser that sends `DNT: 1` (Do Not Track) or `Sec-GPC: 1` (Global Privacy Control) keeps its events out of PostHog; they still count toward the feature counts.
-- Events made with an API key, which has no user, are only counted.
-

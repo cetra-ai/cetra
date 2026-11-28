@@ -789,10 +789,6 @@ mod tests {
             .json();
         assert_eq!(got["status"], "pending");
         assert_eq!(got["trace_count"], 2);
-        assert!(
-            app.state.analytics.counters.get("deletion.requested") >= 1,
-            "deletion.requested not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

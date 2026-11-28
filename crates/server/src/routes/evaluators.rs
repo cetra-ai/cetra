@@ -1242,10 +1242,6 @@ mod tests {
             .await
             .json::<Value>();
         assert_eq!(page["data"], json!([created]));
-        assert!(
-            app.state.analytics.counters.get("evaluator.created") >= 1,
-            "evaluator.created not counted"
-        );
     }
 
     #[tokio::test]

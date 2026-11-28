@@ -117,7 +117,7 @@ pub(crate) struct AppInner {
     pub(crate) issue_workers: Arc<tokio::sync::Semaphore>,
     /// Wakes the IC candidate loop: a candidate was queued, or a worker finished.
     pub(crate) issue_wake: tokio::sync::Notify,
-    /// Product analytics: feature counters and the PostHog sink (track TL M6).
+    /// Product analytics: the PostHog sink (track TL M6).
     pub(crate) analytics: crate::analytics::Analytics,
 }
 

@@ -753,10 +753,6 @@ mod tests {
         assert_eq!(page.data[1].header_names, ["X-Team"]);
         assert_eq!(page.data[2].target_hint, "hooks.slack.com/…/abcd");
         assert!(page.next_cursor.is_none());
-        assert!(
-            app.state.analytics.counters.get("channel.created") >= 1,
-            "channel.created not counted"
-        );
     }
 
     #[tokio::test]

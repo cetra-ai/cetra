@@ -625,10 +625,6 @@ mod tests {
         assert_eq!(deleted.status, StatusCode::NO_CONTENT);
         let after = list_of(&call(&app, Method::GET, &base, &seeded.cookie, None).await);
         assert!(after.data.is_empty());
-        assert!(
-            app.state.analytics.counters.get("saved_view.created") >= 1,
-            "saved_view.created not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

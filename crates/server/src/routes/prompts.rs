@@ -1436,10 +1436,6 @@ mod tests {
             page_len(&app, auth, &format!("{list}?label=latest")).await,
             1
         );
-        assert!(
-            app.state.analytics.counters.get("prompt.created") >= 1,
-            "prompt.created not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1537,10 +1533,6 @@ mod tests {
 
         let one = call(&app, Method::GET, &format!("{path}/versions/2"), auth, None).await;
         assert_eq!(one.json::<PromptVersion>().version, 2);
-        assert!(
-            app.state.analytics.counters.get("prompt.version_created") >= 1,
-            "prompt.version_created not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -724,10 +724,6 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(stored, hash);
-        assert!(
-            app.state.analytics.counters.get("personal_token.created") >= 1,
-            "personal_token.created not counted"
-        );
     }
 
     #[tokio::test]

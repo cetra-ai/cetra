@@ -9,7 +9,7 @@ Today `cetra serve` sends nothing anywhere: it writes logs to stdout and serves 
 3. **Opt-in crash reports to us.** One switch, off by default, sends panics and ERROR events to `telemetry.cetra.sh`, with code-defined facts only (user).
 4. **`cetra debug-bundle`.** One local JSON file with build info, the config with secrets removed, recent logs and storage stats, for a GitHub issue.
 5. **An anonymous daily heartbeat** from self-hosted installs, on by default (user), off with `CETRA_TELEMETRY=off`, `DO_NOT_TRACK` or in CI.
-6. **Product analytics (user).** One typed catalog of product events: on our cloud, per-user events go to PostHog through the server; everywhere, bucketed feature counts ride on the heartbeat.
+6. **Product analytics (user).** One typed catalog of product events: on our cloud, per-user events go to PostHog through the server; self-hosted installs send no product events.
 
 Research: `side-session-notes/…/tl-competitors.md` (Langfuse, Laminar, Opik, MLflow, Helicone).
 
@@ -32,7 +32,7 @@ Research: `side-session-notes/…/tl-competitors.md` (Langfuse, Laminar, Opik, M
 - **Remote configuration** of telemetry (MLflow fetches a config file each start). The binary does what its config says.
 - **Server-side symbolication** of crash backtraces (§ 3).
 - **Session replay, autocapture and any analytics script in the browser** (§ 6).
-- **Per-user analytics on self-hosted installs** sent to us: only anonymous bucketed feature counts (§ 6).
+- **Product analytics on self-hosted installs** sent to us: none (§ 6).
 - **Our cloud's deploy wiring and the relay service** themselves: track Q.
 
 ## What competitors do (summary)
@@ -194,23 +194,21 @@ Never: emails, domains, names, URLs, host names, licence keys or licence state, 
 
 ### 6. Product analytics (user)
 
-The user wants to know what people do in the product: which features they use and how. One typed event catalog feeds two sinks (D-TL-14):
+The user wants to know what people do in the product: which features they use and how. One typed event catalog feeds one sink, PostHog (D-TL-14):
 
 ```
  web UI ── POST /api/v1/analytics/events ──┐
-                                           ├─► catalog check ─┬─► PostHog sender (only when [analytics] is set: our cloud cells)
- API handlers ── analytics::record(...) ───┘                  └─► feature counters ─► heartbeat `usage` buckets (self-hosted)
+                                           ├─► catalog check ─► PostHog sender (only when [analytics] is set: our cloud cells)
+ API handlers ── analytics::record(...) ───┘
 ```
 
 **The catalog (D-TL-15).** One Rust enum, one variant per event, with a dotted append-only name (`sql_console.run`, `evaluator.created`, `playground.run`, `dataset.imported`, `dashboard.edited`, `trace.viewed`, `page.viewed`, …) and typed properties: enums, booleans, counts, durations, and our entity ids (project id). Never names, free text, URLs, filter values, attribute keys or payload. `page.viewed` carries the router's route template (`/orgs/$org/projects/$project/traces`), never the URL. The list is written in M6's plan from the pages and routes of the day (about 30–40 events) and is the same idea as the audit log's typed catalog (D-EA-4). A golden test fixes the names and property keys, so every addition shows in review.
 
-**Web events go through the server.** The UI sends catalog events to `POST /api/v1/analytics/events` on its own origin (session cookie, at most 50 events per request, answered `204` whatever happens). The server drops a name or property the catalog does not know, adds the user id and org id from the session (the browser cannot claim another user), and hands the event to the sinks. Consequences: no third-party script in the UI, the CSP stays `default-src 'self'`, no cookie of ours or PostHog's is set, ad blockers do not distort the numbers, and autocapture and session replay are impossible by construction. A request carrying `DNT: 1` or `Sec-GPC: 1` is dropped for the PostHog sink (it still counts toward the anonymous feature counters). The UI sends nothing when `GET /api/auth/config` says analytics is off: when neither the PostHog sink nor the heartbeat runs.
+**Web events go through the server.** The UI sends catalog events to `POST /api/v1/analytics/events` on its own origin (session cookie, at most 50 events per request, answered `204` whatever happens). The server drops a name or property the catalog does not know, adds the user id and org id from the session (the browser cannot claim another user), and hands the event to the sink. Consequences: no third-party script in the UI, the CSP stays `default-src 'self'`, no cookie of ours or PostHog's is set, ad blockers do not distort the numbers, and autocapture and session replay are impossible by construction. A request carrying `DNT: 1` or `Sec-GPC: 1` is dropped for the PostHog sink. The UI sends nothing when `GET /api/auth/config` says analytics is off: when the PostHog sink does not run.
 
-**Server events.** API handlers record the events whose truth is on the server (an evaluator created through the API or MCP, an export downloaded, a backfill started) with the same `record` function, so an action counts once whether the UI, the CLI, the SDK or an agent did it.
+**Server events.** API handlers record the events whose truth is on the server (an evaluator created through the API or MCP, an export downloaded, a backfill started) with the same `record` function, so an action is recorded once whether the UI, the CLI, the SDK or an agent did it.
 
 **PostHog sink (cloud).** `[analytics]` with `posthog_host` (e.g. `https://eu.i.posthog.com`) and `posthog_key` (a secret path); off when unset. A self-hosted operator may point it at their own PostHog; nothing in the binary names ours. Each event goes to PostHog's capture API in batches (every 10 s or 100 events, bounded queue of 10 000, dropped when full, failures logged at `debug` once a minute): `distinct_id` = the user's UUID, `$groups` = `{ "org": <org id> }`, the catalog properties, `$ip` = null, `$process_person_profile` true. No email, name or org name is ever sent; PostHog person and group properties are limited to the user's org role and the org's plan name. Our cloud's PostHog is self-hosted on our ovh-us server (Virginia) and reached over the tailnet.
-
-**Feature counters (self-hosted).** Every catalog event, from any source, increments an in-memory counter per event name; counters are saved hourly to `instance_settings['telemetry.usage_counts']` and reset when a heartbeat is sent. The heartbeat gains `usage`: for each event name, the count since the last heartbeat in the buckets `0`, `1-9`, `10-99`, `100-999`, `1000+`. No users, orgs, sequences or timings. Turned off with the heartbeat (the switchboard).
 
 ### Details settled while planning (coordinator, 2026-11-23)
 
@@ -232,7 +230,7 @@ Smaller choices the milestone plans needed, within the approved design:
 
 - **Debug bundle (M3).** `config` shows the keys the user set (file and environment) plus the names of the `CETRA_*` variables present; serde defaults are left out. Shown values include domains, the OIDC issuer and client id, and the `init` org and project names (with host names, bucket names and paths). `config_error` carries the key path, the error kind and its static reason, never figment or serde text. Catalog file counts come from a read-only query of `catalog.db`, as backups already read versions. `--output -` writes to stdout, for distroless containers. The golden server scenario records one `debug_info` exchange. Host facts use `sysinfo` (already a workspace dependency).
 
-- **Product analytics (M6).** The `analytics` flag of `GET /api/auth/config` is true when either sink runs (the PostHog sink or the heartbeat's feature counters), so self-hosted installs count page views and UI-only events too; the server still sends per-user events to PostHog only when `[analytics]` is set. A web event carries the leaf route's org and project slugs, which the server resolves with the normal access checks (a resolution failure drops only the event's PostHog delivery; the feature counter still counts it) and never forwards. The PostHog sink depends on `[analytics]` and restore mode only, not on the switchboard; the counters count only while the heartbeat runs (`analytics::record` skips them when it is off) and are saved hourly and after an accepted heartbeat, so a restart can lose up to an hour. Events without a user (API keys, the control plane) go to the counters only. Outside a request the DNT/Sec-GPC signal counts as opted out. `org_role` is sent only when known without an extra query, and org group properties at most once an hour per org. `trace.viewed` counts the server's trace-detail reads, router preloads included.
+- **Product analytics (M6).** The `analytics` flag of `GET /api/auth/config` is true only when the PostHog sink runs (`[analytics]` set, not restore mode), so self-hosted installs send no UI events; the server sends per-user events to PostHog only when `[analytics]` is set. A web event carries the leaf route's org and project slugs, which the server resolves with the normal access checks (a resolution failure drops the event's PostHog delivery) and never forwards. The PostHog sink depends on `[analytics]` and restore mode only, not on the switchboard. Events without a user (API keys, the control plane) are not sent. Outside a request the DNT/Sec-GPC signal counts as opted out. `org_role` is sent only when known without an extra query, and org group properties at most once an hour per org. `trace.viewed` is recorded for the server's trace-detail reads, router preloads included.
 
 - **Server spans (M2).** Events recorded on spans pass the export filter (`self_monitoring.level`, the `rmcp` cap, the dropped exporter crates). An ERROR event marks its span failed (`tracing-opentelemetry` 0.34 does it whatever `with_error_events_to_status` says; the flag stays off, so a message-less `error` field at WARN does not mark the span or copy its text into the status). `/healthz` and `/readyz` get no `http.request` span. Read API routes get no separate `query` span (the request span with its route template covers them); the SQL console and MCP tool calls do. Spans cover units of work: one per deletion, alert rule, delivery and issue candidate (`issues.candidate`, not `issues.pass`). `trace_sample_ratio = 0` builds no span layer. Trace ids in log records are out of scope. `http.request` ends at the response head; a 5xx marks it failed. `trace_sample_ratio` is a validated newtype, since `ServerConfig` derives `Eq`.
 
@@ -288,7 +286,7 @@ All are MIT or Apache-2.0 (on the `deny.toml` allow-list).
 | D-TL-11 | One switchboard: `CETRA_TELEMETRY`, `DO_NOT_TRACK`, restore mode, then CI and debug builds for the heartbeat, then config; fail closed. | Licence-dependent rules; no CI detection. |
 | D-TL-12 | Crash reports are spooled to disk before sending. | An in-memory queue: a panic that ends the process would never be reported. |
 | D-TL-13 | Our errors go to a self-hosted GlitchTip (user, 2026-11-24; replaces Sentry EU); heartbeats stay in the relay's own storage; the relay sends no instance id to GlitchTip. | Sentry EU (OTLP logs land in Logs, not Issues; 30-day retention on the free plan); a cetra project only (no log records, weak triage); SigNoz, Grafana Cloud; a product-analytics SaaS for heartbeats. |
-| D-TL-14 | Product analytics (user): one event catalog, two sinks: per-user events to PostHog when `[analytics]` is set (our cloud), bucketed feature counts in the heartbeat (self-hosted). Web events go through the server. | posthog-js in the UI (third-party script, CSP change, cookies, autocapture and replay would capture prompts shown on screen); per-user analytics on self-hosted installs. |
+| D-TL-14 | Product analytics (user): one event catalog, one sink: per-user events to PostHog when `[analytics]` is set (our cloud); self-hosted installs send no product events. Web events go through the server. | posthog-js in the UI (third-party script, CSP change, cookies, autocapture and replay would capture prompts shown on screen); per-user analytics on self-hosted installs. |
 | D-TL-15 | A typed catalog with dotted names and code-defined properties; page views by route template; the user and org from the session; `DNT`/`Sec-GPC` honoured. | Free-form event names and properties (unreviewable, leak user text). |
 
 ## Requests to track Q
@@ -327,7 +325,7 @@ Delivers: `telemetry.crash_reports`, the report type, the crash layer, the panic
 
 ### M6 — Product analytics
 
-Delivers: the event catalog, `analytics::record` in the API handlers, `POST /api/v1/analytics/events` and its OpenAPI entry, the `analytics` flag in `GET /api/auth/config`, the web client (page views by route template and UI-only events), the PostHog sink and `[analytics]` config, the feature counters and the heartbeat's `usage` field, the leak and golden tests, the Telemetry docs page section, TL-Q4. Depends on M4 (heartbeat, switchboard). Leaves out: dashboards in PostHog (Q).
+Delivers: the event catalog, `analytics::record` in the API handlers, `POST /api/v1/analytics/events` and its OpenAPI entry, the `analytics` flag in `GET /api/auth/config`, the web client (page views by route template and UI-only events), the PostHog sink and `[analytics]` config, the leak and golden tests, the Telemetry docs page section, TL-Q4. Depends on M4 (heartbeat, switchboard). Leaves out: dashboards in PostHog (Q).
 
 ## Answers (user, 2026-11-23)
 

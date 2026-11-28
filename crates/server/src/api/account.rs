@@ -35,8 +35,8 @@ pub struct AuthConfig {
     /// provider (D-P-60).
     pub sso_discovery: bool,
     /// Product analytics are on: the UI sends its catalog events to
-    /// `POST /api/v1/analytics/events` (track TL M6, D-TL-14). True when either sink runs: the
-    /// PostHog sink (`[analytics]` set, not restore mode) or the heartbeat's feature counters.
+    /// `POST /api/v1/analytics/events` (track TL M6, D-TL-14). True only when the PostHog sink
+    /// runs (`[analytics]` set, not restore mode); self-hosted installs send no events.
     pub analytics: bool,
 }
 

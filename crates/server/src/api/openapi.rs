@@ -1512,7 +1512,7 @@ fn admin_paths(paths: PathsBuilder) -> PathsBuilder {
 fn analytics_paths(paths: PathsBuilder) -> PathsBuilder {
     let events = operation("post_analytics_events", "analytics", "Send product analytics events")
         .description(Some(
-            "Session only. Web events of the catalog (`page.viewed` with a route template, `command_palette.opened`, `live_tail.toggled`, `list_layout.changed`, `theme.changed`, `assistant.panel_opened`). At most 50 events and 64 KiB are read, and 60 requests a minute per user. Unknown names and properties and invalid values are dropped; when a PostHog sink runs, events of orgs or projects the user cannot read are dropped too. The user comes from the session. `DNT: 1` or `Sec-GPC: 1` keeps the events out of PostHog; they still count toward the anonymous feature counts. Always 204 once signed in.",
+            "Session only. Web events of the catalog (`page.viewed` with a route template, `command_palette.opened`, `live_tail.toggled`, `list_layout.changed`, `theme.changed`, `assistant.panel_opened`). At most 50 events and 64 KiB are read, and 60 requests a minute per user. Unknown names and properties and invalid values are dropped; when a PostHog sink runs, events of orgs or projects the user cannot read are dropped too. The user comes from the session. `DNT: 1` or `Sec-GPC: 1` keeps the events out of PostHog. With no PostHog sink the events are dropped. Always 204 once signed in.",
         ))
         .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
         .request_body(Some(json_body("AnalyticsEventsRequest")))

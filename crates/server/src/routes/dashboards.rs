@@ -1615,14 +1615,6 @@ mod tests {
         assert_eq!(missing.status, StatusCode::NOT_FOUND);
         let again = send(&app, Method::DELETE, &item, &seeded.cookie, None).await;
         assert_eq!(again.status, StatusCode::NOT_FOUND);
-        assert!(
-            app.state.analytics.counters.get("dashboard.created") >= 1,
-            "dashboard.created not counted"
-        );
-        assert!(
-            app.state.analytics.counters.get("dashboard.edited") >= 1,
-            "dashboard.edited not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2864,10 +2856,6 @@ mod tests {
         assert_eq!(updated.status, StatusCode::OK, "{:?}", updated.body);
         let updated: Dashboard = updated.json();
         assert_eq!(updated.version, 2);
-        assert!(
-            app.state.analytics.counters.get("dashboard.edited") >= 1,
-            "dashboard.edited not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

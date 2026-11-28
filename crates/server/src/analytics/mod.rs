@@ -1,28 +1,24 @@
 //! Product analytics (track TL M6, D-TL-14, D-TL-15): one typed catalog of product events,
-//! recorded once wherever an action happens (web UI, API, CLI, SDK, MCP), feeding two sinks:
-//! per-event feature counters for the heartbeat's `usage` buckets, and per-user events to the
-//! operator's PostHog when `[analytics]` is set.
+//! recorded once wherever an action happens (web UI, API, CLI, SDK, MCP), feeding per-user
+//! events to the operator's PostHog when `[analytics]` is set. Without a sink, recording an
+//! event does nothing.
 
 pub(crate) mod actor;
 pub(crate) mod catalog;
-pub(crate) mod counters;
 pub(crate) mod posthog;
 #[cfg(test)]
 pub(crate) mod test_receiver;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use uuid::Uuid;
 
 use crate::analytics::actor::Actor;
 use crate::analytics::catalog::Event;
-use crate::analytics::counters::Counters;
 use crate::analytics::posthog::{FLUSH_INTERVAL, PosthogSink, SinkWorker, capture, group_identify};
 use crate::auth::limits::{Bucket, KeyedLimiter};
 use crate::config::ServerConfig;
 use crate::http::AppState;
-use crate::observability::switchboard::{Switch, for_config};
 
 /// Requests to `POST /api/v1/analytics/events` per user and minute; more are dropped.
 pub(crate) const EVENTS_PER_MINUTE: u32 = 60;
@@ -31,10 +27,6 @@ const LIMITER_KEYS: usize = 100_000;
 
 /// The analytics state on `AppInner`.
 pub(crate) struct Analytics {
-    /// Feature counters for the heartbeat's `usage`.
-    pub(crate) counters: Counters,
-    /// The heartbeat (and so the feature counts) runs: the switchboard's heartbeat decision.
-    counting: AtomicBool,
     /// `None` unless `[analytics]` is set and restore mode is off.
     sink: Option<PosthogSink>,
     /// The per-user limit of the events endpoint.
@@ -42,19 +34,15 @@ pub(crate) struct Analytics {
 }
 
 impl Analytics {
-    /// The state for `config`, and the sink's worker for `serve` to spawn. Counting follows
-    /// the switchboard's heartbeat decision for `config` (the same pure function `serve`
-    /// calls).
+    /// The state for `config`, and the sink's worker for `serve` to spawn.
     pub(crate) fn new(config: &ServerConfig) -> (Self, Option<SinkWorker>) {
-        let counting = matches!(for_config(config).heartbeat, Switch::On);
-        Self::with_flush_interval(config, FLUSH_INTERVAL, counting)
+        Self::with_flush_interval(config, FLUSH_INTERVAL)
     }
 
-    /// [`Analytics::new`] with another flush interval and an explicit counting flag (tests).
+    /// [`Analytics::new`] with another flush interval (tests).
     pub(crate) fn with_flush_interval(
         config: &ServerConfig,
         flush_interval: Duration,
-        counting: bool,
     ) -> (Self, Option<SinkWorker>) {
         let (sink, worker) = match config.analytics.posthog() {
             Some((host, key)) if !config.restore_mode => {
@@ -77,48 +65,27 @@ impl Analytics {
             },
             LIMITER_KEYS,
         );
-        let analytics = Self {
-            counters: Counters::default(),
-            counting: AtomicBool::new(counting),
-            sink,
-            limiter,
-        };
+        let analytics = Self { sink, limiter };
         (analytics, worker)
     }
 
-    /// Whether per-user events go to PostHog.
+    /// Whether per-user events go to PostHog: `[analytics]` is set and restore mode is off.
+    /// This is also the `analytics` flag of `GET /api/auth/config`: the UI sends its events
+    /// only then.
     pub(crate) fn posthog_enabled(&self) -> bool {
         self.sink.is_some()
-    }
-
-    /// `analytics` in `GET /api/auth/config`: the UI sends its events when either sink runs,
-    /// the PostHog sink or the heartbeat's feature counters.
-    pub(crate) fn ui_events_wanted(&self) -> bool {
-        self.counting.load(Ordering::Relaxed) || self.sink.is_some()
     }
 
     /// Takes one request of `user` from the events endpoint's limit.
     pub(crate) fn admit(&self, user: Uuid, now_ns: i64) -> bool {
         self.limiter.check(&user, now_ns).is_ok()
     }
-
-    /// Turns counting on or off. `Analytics::new` follows the switchboard's heartbeat
-    /// decision (off in a debug build), while `TestApp` counts by default so handler tests
-    /// can assert the counters; tests that need it off set it by hand.
-    #[cfg(test)]
-    pub(crate) fn set_counting(&self, on: bool) {
-        self.counting.store(on, Ordering::Relaxed);
-    }
 }
 
-/// Records one catalog event (design § 6): counts it while the heartbeat runs (the `counting`
-/// flag; when the heartbeat is off nothing is counted, saved or sent), and when the PostHog
-/// sink runs, the actor has a user and the request did not opt out, queues it (after the
-/// org's `$groupidentify` when due). Never fails and never blocks.
+/// Records one catalog event (design § 6): when the PostHog sink runs, the actor has a user
+/// and the request did not opt out, queues it (after the org's `$groupidentify` when due).
+/// With no sink it does nothing. Never fails and never blocks.
 pub(crate) fn record(state: &AppState, event: &Event, actor: &Actor) {
-    if state.analytics.counting.load(Ordering::Relaxed) {
-        state.analytics.counters.increment(event.name());
-    }
     let Some(sink) = state.analytics.sink.as_ref() else {
         return;
     };
@@ -180,60 +147,12 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn record_counts_without_a_sink() {
-        let app = TestApp::new().await;
-        assert!(!app.state.analytics.posthog_enabled());
-        record(&app.state, &Event::DatasetCreated, &no_actor());
-        record(&app.state, &Event::DatasetCreated, &no_actor());
-        assert_eq!(app.state.analytics.counters.get("dataset.created"), 2);
-    }
-
-    #[tokio::test]
-    async fn counting_off_leaves_the_counters_at_zero() {
-        // `TestApp` counts by default; a real debug build does not, so the hook turns it off.
-        // The PostHog sink does not depend on counting: the event still reaches it.
-        let app = TestApp::new().await;
-        app.state.analytics.set_counting(false);
-        assert!(!app.state.analytics.ui_events_wanted());
-        record(&app.state, &Event::DatasetCreated, &no_actor());
-        assert_eq!(app.state.analytics.counters.get("dataset.created"), 0);
-
-        let receiver = Receiver::start(200).await;
-        let with_sink = posthog_app(&receiver).await;
-        with_sink.state.analytics.set_counting(false);
-        assert!(with_sink.state.analytics.posthog_enabled());
-        let actor = Actor {
-            user_id: Some(Uuid::now_v7()),
-            ..no_actor()
-        };
-        record(&with_sink.state, &Event::DatasetCreated, &actor);
-        assert_eq!(with_sink.state.analytics.counters.get("dataset.created"), 0);
-        assert_eq!(receiver.wait_for(1, Duration::from_secs(2)).await.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn ui_events_follow_either_sink() {
-        let app = TestApp::new().await;
-        app.state.analytics.set_counting(false);
-        assert!(!app.state.analytics.ui_events_wanted());
-        app.state.analytics.set_counting(true);
-        assert!(app.state.analytics.ui_events_wanted());
-
-        let receiver = Receiver::start(200).await;
-        // With counting off, the PostHog sink alone makes the flag true.
-        let with_sink = posthog_app(&receiver).await;
-        with_sink.state.analytics.set_counting(false);
-        assert!(with_sink.state.analytics.ui_events_wanted());
-    }
-
     #[test]
-    fn new_counts_only_when_the_heartbeat_runs() {
+    fn new_without_analytics_builds_no_sink() {
         let dir = tempfile::tempdir().expect("temp dir");
         let (analytics, worker) = Analytics::new(&config(dir.path()));
         assert!(worker.is_none());
-        // The switchboard's heartbeat is off in a test build, so counting is off.
-        assert!(!analytics.ui_events_wanted());
+        assert!(!analytics.posthog_enabled());
     }
 
     #[test]
@@ -345,7 +264,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_opted_out_actor_is_counted_but_not_sent() {
+    async fn an_opted_out_actor_is_not_sent() {
         let receiver = Receiver::start(200).await;
         let app = posthog_app(&receiver).await;
         let actor = Actor {
@@ -354,13 +273,12 @@ mod tests {
             ..no_actor()
         };
         record(&app.state, &Event::DatasetCreated, &actor);
-        assert_eq!(app.state.analytics.counters.get("dataset.created"), 1);
         let sent = receiver.wait_for(1, Duration::from_millis(300)).await;
         assert!(sent.is_empty(), "an opted-out event is not sent");
     }
 
     #[tokio::test]
-    async fn an_actor_without_a_user_is_counted_but_not_sent() {
+    async fn an_actor_without_a_user_is_not_sent() {
         let receiver = Receiver::start(200).await;
         let app = posthog_app(&receiver).await;
         let principal = Principal::ApiKey {
@@ -371,7 +289,6 @@ mod tests {
         };
         let actor = Actor::principal(&principal);
         record(&app.state, &Event::DatasetCreated, &actor);
-        assert_eq!(app.state.analytics.counters.get("dataset.created"), 1);
         let sent = receiver.wait_for(1, Duration::from_millis(300)).await;
         assert!(sent.is_empty(), "an event without a user is not sent");
     }

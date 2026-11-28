@@ -724,10 +724,6 @@ mod tests {
             .await;
         let after: Page<ApiKey> = after.json();
         assert!(after.data[0].last_used_at.is_some());
-        assert!(
-            app.state.analytics.counters.get("api_key.created") >= 1,
-            "api_key.created not counted"
-        );
     }
 
     #[tokio::test]

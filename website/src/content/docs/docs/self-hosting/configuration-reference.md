@@ -235,7 +235,7 @@ What cetra sends to us: an anonymous heartbeat once a day, and crash reports if 
 
 ## `[analytics]`
 
-Per-user product events sent through the server to a PostHog project of yours. Off while unset; restore mode turns it off. cetra's own cloud sets it. A self-hosted install sends us only bucketed feature counts in the heartbeat: see [Telemetry](/docs/self-hosting/telemetry/#product-analytics).
+Per-user product events sent through the server to a PostHog project of yours. Off while unset; restore mode turns it off. cetra's own cloud sets it. A self-hosted install sends us no product events: see [Telemetry](/docs/self-hosting/telemetry/#product-analytics).
 
 | Key | Environment | Type | Default | Description |
 |---|---|---|---|---|

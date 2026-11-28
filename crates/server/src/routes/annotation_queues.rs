@@ -1778,10 +1778,6 @@ mod tests {
         assert_eq!(gone.status, StatusCode::NOT_FOUND);
         let again = send(&app, Method::DELETE, &path, &seeded.cookie, None).await;
         assert_eq!(again.status, StatusCode::NOT_FOUND);
-        assert!(
-            app.state.analytics.counters.get("annotation_queue.created") >= 1,
-            "annotation_queue.created not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2970,14 +2966,6 @@ mod tests {
         let skipped: AnnotationQueueItem = skipped.json();
         assert_eq!(skipped.status, QueueItemStatus::Skipped);
         assert_eq!(skipped.skip_reason.as_deref(), Some("off topic"));
-        assert!(
-            app.state
-                .analytics
-                .counters
-                .get("annotation_queue.item_completed")
-                >= 1,
-            "annotation_queue.item_completed not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

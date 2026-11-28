@@ -1063,10 +1063,6 @@ mod tests {
                 .iter()
                 .all(|row| row["environment"] != "cetra-playground")
         );
-        assert!(
-            app.state.analytics.counters.get("playground.run") >= 1,
-            "playground.run not counted"
-        );
     }
 
     #[tokio::test]

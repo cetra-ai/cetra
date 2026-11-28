@@ -27,8 +27,8 @@ pub(crate) const MAX_EVENTS: usize = 50;
 pub(crate) const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Longest `org` or `project` value looked up.
 const MAX_KEY_BYTES: usize = 256;
-/// Distinct `(org, project)` pairs resolved per request; events of further pairs are counted
-/// but not sent to PostHog.
+/// Distinct `(org, project)` pairs resolved per request; events of further pairs are not
+/// sent to PostHog.
 const MAX_CONTEXTS: usize = 5;
 
 /// The analytics route.
@@ -100,9 +100,8 @@ async fn post_events(
         } else {
             Some(Context::default())
         };
-        // A context that resolved feeds both sinks; without one the event is only counted
-        // (`record` skips the PostHog sink for an actor without a user), so the heartbeat's
-        // feature counts do not depend on `[analytics]`.
+        // A context that resolved feeds the sink; without one the actor has no user, so
+        // `record` drops the event.
         let actor = match context {
             Some(context) => Actor {
                 user_id: Some(user.id),
@@ -126,8 +125,8 @@ async fn post_events(
     StatusCode::NO_CONTENT
 }
 
-/// `None`: the event is counted but not sent to PostHog (the org or project is unknown,
-/// inactive, or not readable by the user, or a lookup failed).
+/// `None`: the event is not sent to PostHog (the org or project is unknown, inactive, or
+/// not readable by the user, or a lookup failed).
 async fn resolve(
     state: &AppState,
     user: &AuthUser,
@@ -233,7 +232,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_posthog_events_are_counted_without_lookups() {
+    async fn a_handler_event_reaches_posthog() {
+        // Server events are recorded by the handlers, not by the events endpoint: creating a
+        // project through the API must reach the PostHog sink too.
+        let receiver = Receiver::start(200).await;
+        let app = posthog_app(&receiver).await;
+        let seeded = app.seed().await;
+        let created = app
+            .request(Method::POST, "/api/v1/orgs/acme/projects")
+            .header("cookie", &seeded.cookie)
+            .json(&json!({ "name": "Handler", "slug": "handler" }))
+            .send()
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        let bodies = receiver.wait_for(1, Duration::from_secs(2)).await;
+        let events = batch_events(&bodies);
+        assert!(
+            events
+                .iter()
+                .any(|event| event["event"] == "project.created"),
+            "project.created did not reach PostHog: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_posthog_events_are_dropped_without_lookups() {
+        // No sink: the events are validated and answered 204, and no org or project is
+        // looked up.
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let body = json!({ "events": [page(TRACES, "nope", Some("missing"))] });
@@ -241,7 +266,6 @@ mod tests {
             post(&app, &seeded.cookie, &body).await,
             StatusCode::NO_CONTENT
         );
-        assert_eq!(app.state.analytics.counters.get("page.viewed"), 1);
     }
 
     #[tokio::test]
@@ -254,7 +278,6 @@ mod tests {
             post(&app, &seeded.cookie, &body).await,
             StatusCode::NO_CONTENT
         );
-        assert_eq!(app.state.analytics.counters.get("page.viewed"), 1);
 
         let bodies = receiver.wait_for(1, Duration::from_secs(2)).await;
         let events = batch_events(&bodies);
@@ -335,7 +358,8 @@ mod tests {
 
     #[tokio::test]
     async fn server_event_names_are_refused() {
-        let app = TestApp::new().await;
+        let receiver = Receiver::start(200).await;
+        let app = posthog_app(&receiver).await;
         let seeded = app.seed().await;
         let body = json!({ "events": [
             { "name": "dataset.created" },
@@ -345,12 +369,12 @@ mod tests {
             post(&app, &seeded.cookie, &body).await,
             StatusCode::NO_CONTENT
         );
-        assert_eq!(app.state.analytics.counters.get("dataset.created"), 0);
-        assert_eq!(app.state.analytics.counters.get("org.created"), 0);
+        let sent = receiver.wait_for(1, Duration::from_millis(300)).await;
+        assert!(sent.is_empty(), "a server event name reached PostHog");
     }
 
     #[tokio::test]
-    async fn dnt_and_gpc_skip_posthog_but_count() {
+    async fn dnt_and_gpc_skip_posthog() {
         let receiver = Receiver::start(200).await;
         let app = posthog_app(&receiver).await;
         let seeded = app.seed().await;
@@ -366,14 +390,14 @@ mod tests {
                 .status;
             assert_eq!(status, StatusCode::NO_CONTENT);
         }
-        assert_eq!(app.state.analytics.counters.get("page.viewed"), 2);
         let sent = receiver.wait_for(1, Duration::from_millis(300)).await;
         assert!(sent.is_empty(), "an opted-out request reached PostHog");
     }
 
     #[tokio::test]
     async fn at_most_50_events_are_read() {
-        let app = TestApp::new().await;
+        let receiver = Receiver::start(200).await;
+        let app = posthog_app(&receiver).await;
         let seeded = app.seed().await;
         let events: Vec<Value> = (0..60)
             .map(|_| json!({ "name": "command_palette.opened" }))
@@ -383,26 +407,30 @@ mod tests {
             post(&app, &seeded.cookie, &body).await,
             StatusCode::NO_CONTENT
         );
+        let bodies = receiver.wait_for(1, Duration::from_secs(2)).await;
+        let events = batch_events(&bodies);
         assert_eq!(
-            app.state.analytics.counters.get("command_palette.opened"),
+            events
+                .iter()
+                .filter(|event| event["event"] == "command_palette.opened")
+                .count(),
             50
         );
     }
 
     #[tokio::test]
-    async fn a_foreign_org_is_counted_but_not_sent() {
+    async fn a_foreign_org_is_not_sent() {
         let receiver = Receiver::start(200).await;
         let app = posthog_app(&receiver).await;
         let seeded = app.seed().await;
         second_org(&app, "other", "bob@example.com").await;
 
-        // The org does not resolve for this user: the event reaches the feature counter only.
+        // The org does not resolve for this user: the event is dropped.
         let foreign = json!({ "events": [page(TRACES, "other", None)] });
         assert_eq!(
             post(&app, &seeded.cookie, &foreign).await,
             StatusCode::NO_CONTENT
         );
-        assert_eq!(app.state.analytics.counters.get("page.viewed"), 1);
         let sent = receiver.wait_for(1, Duration::from_millis(300)).await;
         assert!(sent.is_empty(), "a foreign org's event reached PostHog");
 
@@ -411,7 +439,6 @@ mod tests {
             post(&app, &seeded.cookie, &own).await,
             StatusCode::NO_CONTENT
         );
-        assert_eq!(app.state.analytics.counters.get("page.viewed"), 2);
         let bodies = receiver.wait_for(1, Duration::from_secs(2)).await;
         let events = batch_events(&bodies);
         assert_eq!(
@@ -424,7 +451,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unknown_project_is_counted_but_not_sent() {
+    async fn an_unknown_project_is_not_sent() {
         let receiver = Receiver::start(200).await;
         let app = posthog_app(&receiver).await;
         let seeded = app.seed().await;
@@ -433,7 +460,6 @@ mod tests {
             post(&app, &seeded.cookie, &body).await,
             StatusCode::NO_CONTENT
         );
-        assert_eq!(app.state.analytics.counters.get("page.viewed"), 1);
         let sent = receiver.wait_for(1, Duration::from_millis(300)).await;
         assert!(
             sent.is_empty(),
@@ -447,8 +473,7 @@ mod tests {
         let app = posthog_app(&receiver).await;
         let seeded = app.seed().await;
         // `acme` resolves; the next four unknown orgs take the remaining context slots and
-        // do not resolve; the last two never get a lookup. Every valid event is counted;
-        // only the resolved one goes to PostHog.
+        // do not resolve; the last two never get a lookup. Only the resolved one is sent.
         let mut events = vec![page(TRACES, "acme", None)];
         for index in 1..=6 {
             events.push(page(TRACES, &format!("unknown-{index}"), None));
@@ -458,7 +483,6 @@ mod tests {
             post(&app, &seeded.cookie, &body).await,
             StatusCode::NO_CONTENT
         );
-        assert_eq!(app.state.analytics.counters.get("page.viewed"), 7);
         let bodies = receiver.wait_for(1, Duration::from_secs(2)).await;
         let events = batch_events(&bodies);
         assert_eq!(
@@ -472,7 +496,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_per_user_limit_drops_requests() {
-        let app = TestApp::new().await;
+        let receiver = Receiver::start(200).await;
+        let app = posthog_app(&receiver).await;
         let seeded = app.seed().await;
         let body = json!({ "events": [{ "name": "command_palette.opened" }] });
         for _ in 0..EVENTS_PER_MINUTE {
@@ -481,18 +506,24 @@ mod tests {
                 StatusCode::NO_CONTENT
             );
         }
-        let counted = u64::from(EVENTS_PER_MINUTE);
-        assert_eq!(
-            app.state.analytics.counters.get("command_palette.opened"),
-            counted
-        );
+        let bodies = receiver.wait_for(1, Duration::from_secs(2)).await;
+        let events = batch_events(&bodies);
+        let sent = events
+            .iter()
+            .filter(|event| event["event"] == "command_palette.opened")
+            .count();
+        assert_eq!(sent, usize::from(EVENTS_PER_MINUTE));
         assert_eq!(
             post(&app, &seeded.cookie, &body).await,
             StatusCode::NO_CONTENT
         );
+        let events = batch_events(&receiver.wait_for(1, Duration::from_millis(300)).await);
         assert_eq!(
-            app.state.analytics.counters.get("command_palette.opened"),
-            counted
+            events
+                .iter()
+                .filter(|event| event["event"] == "command_palette.opened")
+                .count(),
+            sent
         );
     }
 
@@ -564,10 +595,6 @@ mod tests {
                 .status;
             assert_eq!(status, StatusCode::NO_CONTENT);
         }
-        assert_eq!(
-            app.state.analytics.counters.get("command_palette.opened"),
-            0
-        );
     }
 
     #[tokio::test]
@@ -593,9 +620,5 @@ mod tests {
             .await
             .status;
         assert_eq!(with_token, StatusCode::FORBIDDEN);
-        assert_eq!(
-            app.state.analytics.counters.get("command_palette.opened"),
-            0
-        );
     }
 }

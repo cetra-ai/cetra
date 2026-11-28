@@ -632,10 +632,6 @@ mod tests {
             .send()
             .await;
         assert_eq!(read.status, StatusCode::FORBIDDEN);
-        assert!(
-            app.state.analytics.counters.get("scores.created") >= 1,
-            "scores.created not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

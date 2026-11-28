@@ -847,10 +847,6 @@ mod tests {
         assert_eq!(loaded.status, 200);
         let loaded: AlertRule = loaded.json();
         assert_eq!(loaded, created);
-        assert!(
-            app.state.analytics.counters.get("alert_rule.created") >= 1,
-            "alert_rule.created not counted"
-        );
     }
 
     #[tokio::test]

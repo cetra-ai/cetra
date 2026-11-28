@@ -834,10 +834,6 @@ mod tests {
         assert_eq!(listed.data.len(), 1);
         assert_eq!(listed.data[0].id, second.invite.id);
         assert!(listed.next_cursor.is_none());
-        assert!(
-            app.state.analytics.counters.get("invite.created") >= 1,
-            "invite.created not counted"
-        );
     }
 
     #[tokio::test]

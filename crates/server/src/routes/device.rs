@@ -693,10 +693,6 @@ mod tests {
 
         let again = poll(&app, &code.device_code).await;
         assert_eq!(error_code(&again), "expired_token");
-        assert!(
-            app.state.analytics.counters.get("device.approved") >= 1,
-            "device.approved not counted"
-        );
     }
 
     #[tokio::test]

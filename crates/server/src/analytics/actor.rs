@@ -32,7 +32,7 @@ pub(crate) enum Via {
     ApiKey,
     /// The cloud control plane.
     ControlPlane,
-    /// A SCIM bearer token of an org (provisioning; no user, so counters only).
+    /// A SCIM bearer token of an org (provisioning; no user, so no event is sent).
     Scim,
 }
 
@@ -40,7 +40,7 @@ pub(crate) enum Via {
 /// reach a sink through it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Actor {
-    /// The user; `None` for API keys and the control plane (counters only).
+    /// The user; `None` for API keys and the control plane (no event is sent).
     pub(crate) user_id: Option<Uuid>,
     /// How a server event's caller authenticated; `None` for web events.
     pub(crate) via: Option<Via>,
@@ -50,7 +50,7 @@ pub(crate) struct Actor {
     pub(crate) org_role: Option<OrgRole>,
     /// The project, when the action has one.
     pub(crate) project_id: Option<ProjectId>,
-    /// The request opted out of per-user analytics: no PostHog event, counters only.
+    /// The request opted out of per-user analytics: no PostHog event.
     pub(crate) opted_out: bool,
 }
 

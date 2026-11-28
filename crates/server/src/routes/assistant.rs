@@ -2233,10 +2233,6 @@ mod turn_tests {
         assert_eq!(messages[0]["role"], "user");
         assert_eq!(messages[1]["role"], "assistant");
         assert_eq!(messages[1]["status"], "complete");
-        assert!(
-            app.state.analytics.counters.get("assistant.turn_sent") >= 1,
-            "assistant.turn_sent not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

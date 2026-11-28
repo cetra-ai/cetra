@@ -677,7 +677,6 @@ mod tests {
         assert_eq!(body["error"]["code"], json!(-32602));
         assert_eq!(body["error"]["message"], json!("unknown tool"));
         assert!(body.get("result").is_none());
-        assert_eq!(app.state.analytics.counters.get("mcp.tool_called"), 0);
     }
 
     #[test]
@@ -1187,10 +1186,6 @@ mod tests {
         let (is_error, body) = call(&app, &token, "query_sql", &select_one).await;
         assert!(!is_error, "{body}");
         assert_eq!(body["rows"], json!([{"one": 1}]));
-        assert!(
-            app.state.analytics.counters.get("sql_console.run") >= 1,
-            "sql_console.run not counted"
-        );
     }
 
     // Tools
@@ -1213,10 +1208,6 @@ mod tests {
                 "truncated": false,
                 "notes": [],
             })
-        );
-        assert!(
-            app.state.analytics.counters.get("mcp.tool_called") >= 1,
-            "mcp.tool_called not counted"
         );
     }
 

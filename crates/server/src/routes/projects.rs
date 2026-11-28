@@ -586,10 +586,6 @@ mod tests {
         }))
         .await;
         assert_eq!(zero.status, 400);
-        assert!(
-            app.state.analytics.counters.get("project.created") >= 1,
-            "project.created not counted"
-        );
     }
 
     #[tokio::test]

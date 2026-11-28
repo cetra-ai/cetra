@@ -844,10 +844,6 @@ mod tests {
                 {"span_kind": "tool", "spans": 1, "first_start": "2026-01-01T10:00:01.950000000Z"}
             ])
         );
-        assert!(
-            app.state.analytics.counters.get("sql_console.run") >= 1,
-            "sql_console.run not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

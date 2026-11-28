@@ -17,10 +17,6 @@ pub(crate) const TELEMETRY_INSTANCE_ID: &str = "telemetry.instance_id";
 /// the Unix epoch, as decimal text.
 pub(crate) const TELEMETRY_LAST_HEARTBEAT_AT: &str = "telemetry.last_heartbeat_at";
 
-/// Key of the feature counts not yet sent in a heartbeat (track TL M6): a JSON object of
-/// catalog event name to count.
-pub(crate) const TELEMETRY_USAGE_COUNTS: &str = "telemetry.usage_counts";
-
 /// The value of `key`, or `None`.
 ///
 /// # Errors

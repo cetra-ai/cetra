@@ -1273,10 +1273,6 @@ mod tests {
         let latest = create_ok(&app, &seeded, json!({ "name": "latest", "dataset": "faq" })).await;
         assert_eq!(latest.experiment.dataset_version, 2);
         assert_eq!(latest.experiment.item_count, 4);
-        assert!(
-            app.state.analytics.counters.get("experiment.created") >= 1,
-            "experiment.created not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

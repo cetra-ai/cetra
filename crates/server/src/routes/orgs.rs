@@ -460,10 +460,6 @@ mod tests {
         let fetched: OrgMembership = fetched.json();
         assert_eq!(fetched.role, OrgRole::Owner);
         assert_eq!(fetched.id, org.id);
-        assert!(
-            app.state.analytics.counters.get("org.created") >= 1,
-            "org.created not counted"
-        );
     }
 
     #[tokio::test]

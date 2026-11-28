@@ -357,10 +357,6 @@ mod tests {
         assert_eq!(trace_ids(&result), vec![trace(1), trace(2)]);
         assert_eq!(result["items"][0]["source_span_id"], span(1));
         assert_eq!(result["skipped"], json!([]));
-        assert!(
-            app.state.analytics.counters.get("dataset.items_added") >= 1,
-            "dataset.items_added not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

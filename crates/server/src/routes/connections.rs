@@ -2247,10 +2247,6 @@ mod tests {
         assert_eq!(list.status, 200);
         let page: Page<LlmConnection> = list.json();
         assert_eq!(page.data, vec![connection]);
-        assert!(
-            app.state.analytics.counters.get("llm_connection.created") >= 1,
-            "llm_connection.created not counted"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

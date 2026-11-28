@@ -1412,10 +1412,6 @@ mod tests {
         assert_eq!(page["data"], json!([created]));
         assert_eq!(page["org_enabled_rules"], 1);
         assert!(page["next_cursor"].is_null());
-        assert!(
-            app.state.analytics.counters.get("online_rule.created") >= 1,
-            "online_rule.created not counted"
-        );
     }
 
     /// D-T-8: a write waits while a price write holds the lock, so the price table it checks

@@ -456,10 +456,6 @@ mod tests {
                 .unwrap()
                 .contains("Secure")
         );
-        assert!(
-            app.state.analytics.counters.get("user.signed_in") >= 1,
-            "user.signed_in not counted"
-        );
     }
 
     #[tokio::test]

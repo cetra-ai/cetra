@@ -550,10 +550,6 @@ mod tests {
                 .expect("row");
         assert_eq!(priority, 0);
         assert_eq!(dedup, format!("manual:{id}"));
-        assert!(
-            app.state.analytics.counters.get("evaluator.run") >= 1,
-            "evaluator.run not counted"
-        );
     }
 
     #[tokio::test]

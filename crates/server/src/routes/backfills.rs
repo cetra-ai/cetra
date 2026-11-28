@@ -954,10 +954,6 @@ mod tests {
         let details: Value = serde_json::from_str(&rows[0].2).unwrap();
         assert_eq!(details["backfill_id"], backfill.to_string());
         assert_eq!(details["max_targets"], 10);
-        assert!(
-            app.state.analytics.counters.get("backfill.started") >= 1,
-            "backfill.started not counted"
-        );
     }
 
     #[tokio::test]
