@@ -111,9 +111,17 @@ async function main(): Promise<void> {
           {import.meta.env.MODE === "demo" ? (
             <div
               role="status"
-              className="pointer-events-none fixed bottom-3 left-1/2 z-50 -translate-x-1/2 rounded-full border bg-muted px-3 py-1 text-caption text-muted-foreground shadow-sm"
+              className="fixed bottom-3 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2 rounded-full border bg-muted px-3 py-1 text-caption text-muted-foreground shadow-sm"
             >
-              Demo, sample data
+              <span>Demo, sample data</span>
+              <a
+                href="https://app.cetra.sh/signup"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-medium text-foreground underline underline-offset-4"
+              >
+                Start free on your own traces
+              </a>
             </div>
           ) : null}
         </ThemeProvider>

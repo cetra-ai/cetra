@@ -57,6 +57,7 @@ export interface NavItem {
 export const NAV: NavItem[] = [
   { label: "Product", href: "/", route: "/" },
   { label: "Pricing", href: "/pricing/", route: "/pricing/" },
+  { label: "Demo", href: DEMO_URL },
   { label: "Integrations", href: "/integrations/", route: "/integrations/" },
   { label: "Compare", href: "/compare/", route: "/compare/" },
   { label: "Docs", href: DOCS_URL },

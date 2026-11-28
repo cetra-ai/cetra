@@ -1,7 +1,7 @@
 ---
 import { formatStars, starsOnce } from "../lib/github-stars.mjs";
 import { MARKETING_ROUTES } from "../routes.mjs";
-import { CLOUD, DEMO_URL, GITHUB_REPO, GITHUB_URL, MIN_STARS_SHOWN, NAV } from "../site";
+import { CLOUD, GITHUB_REPO, GITHUB_URL, MIN_STARS_SHOWN, NAV } from "../site";
 import Button from "./Button.astro";
 import Logo from "./Logo.astro";
 
@@ -33,7 +33,7 @@ const shown = stars !== null && stars >= MIN_STARS_SHOWN ? stars : null;
         <span class="visually-hidden">{shown !== null ? ` ${shown} stars, cetra on GitHub` : " (cetra on GitHub)"}</span>
       </a>
       <a class="login" href={CLOUD.login}>Log in</a>
-      <Button href={DEMO_URL} external>Try the demo</Button>
+      <Button href={CLOUD.signup} external>Start free</Button>
       <details class="menu">
         <summary aria-label="Menu">
           <span class="bar"></span>

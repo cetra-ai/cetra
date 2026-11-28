@@ -1,6 +1,6 @@
 ---
 // The docs' header is the site's (design §5, the user 2026-11-26): the logo, the site's links with
-// Docs as the current page, GitHub, Log in and "Try the demo", plus Starlight's search and theme
+// Docs as the current page, GitHub, Log in and "Start free", plus Starlight's search and theme
 // switch. It stays dark in both themes, as a brand bar over the docs.
 import "@fontsource-variable/inter";
 import Search from "@astrojs/starlight/components/Search.astro";
@@ -8,7 +8,7 @@ import ThemeSelect from "@astrojs/starlight/components/ThemeSelect.astro";
 import Button from "../marketing/components/Button.astro";
 import Logo from "../marketing/components/Logo.astro";
 import { MARKETING_ROUTES } from "../marketing/routes.mjs";
-import { CLOUD, DEMO_URL, DOCS_URL, GITHUB_URL, NAV } from "../marketing/site";
+import { CLOUD, DOCS_URL, GITHUB_URL, NAV } from "../marketing/site";
 
 const items = NAV.filter((item) => !item.route || MARKETING_ROUTES.includes(item.route));
 ---
@@ -33,7 +33,7 @@ const items = NAV.filter((item) => !item.route || MARKETING_ROUTES.includes(item
     <a class="quiet wide-only" href={GITHUB_URL} rel="noopener">GitHub</a>
     <a class="quiet wide-only" href={CLOUD.login}>Log in</a>
     <span class="wide-only"><ThemeSelect /></span>
-    <Button href={DEMO_URL} external>Try the demo</Button>
+    <Button href={CLOUD.signup} external>Start free</Button>
   </div>
 </div>
 
