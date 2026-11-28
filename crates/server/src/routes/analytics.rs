@@ -512,7 +512,7 @@ mod tests {
             .iter()
             .filter(|event| event["event"] == "command_palette.opened")
             .count();
-        assert_eq!(sent, usize::from(EVENTS_PER_MINUTE));
+        assert_eq!(sent, usize::try_from(EVENTS_PER_MINUTE).expect("fits"));
         assert_eq!(
             post(&app, &seeded.cookie, &body).await,
             StatusCode::NO_CONTENT

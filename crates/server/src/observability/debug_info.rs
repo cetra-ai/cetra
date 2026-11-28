@@ -478,9 +478,6 @@ pub(crate) fn sample() -> DebugInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analytics::actor::{Actor, Via};
-    use crate::analytics::catalog::Event;
-    use crate::analytics::record;
     use crate::config::parse_otlp_endpoint;
     use crate::meta::instance_settings::{TELEMETRY_INSTANCE_ID, get_setting};
     use crate::test_support::TestApp;
