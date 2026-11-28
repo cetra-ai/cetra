@@ -5143,18 +5143,21 @@ mod tests {
         }
 
         // 6. Privacy: Debug formatting logs stored_len and never leaks payload bytes.
-        let secret = b"SECRET_PROMPT_CONTENT_123";
-        let secret_frame = build_pf_frame(Codec::None, 0, secret.len() as u32, secret);
-        let vf_secret = parse_verified_pack_frame(&secret_frame, MAX_FRAME_RAW_BYTES).unwrap();
-        let dbg = format!("{vf_secret:?}");
-        assert!(dbg.contains("stored_len"), "expected stored_len in {dbg}");
+        let probe_payload = b"SENSITIVE_PROMPT_PAYLOAD_123";
+        let probe_frame = build_pf_frame(Codec::None, 0, probe_payload.len() as u32, probe_payload);
+        let vf_probe = parse_verified_pack_frame(&probe_frame, MAX_FRAME_RAW_BYTES).unwrap();
+        let dbg = format!("{vf_probe:?}");
         assert!(
-            !dbg.contains("SECRET_PROMPT_CONTENT_123"),
-            "Debug leaked payload ASCII: {dbg}"
+            dbg.contains("stored_len"),
+            "expected stored_len in Debug output"
         );
         assert!(
-            !dbg.contains("[83, 69, 67"),
-            "Debug leaked payload raw bytes: {dbg}"
+            !dbg.contains("SENSITIVE_PROMPT_PAYLOAD_123"),
+            "Debug output leaked payload ASCII"
+        );
+        assert!(
+            !dbg.contains("[83, 69, 78"),
+            "Debug output leaked payload raw bytes"
         );
     }
 
