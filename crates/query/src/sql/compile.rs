@@ -11,11 +11,11 @@ use cetra_column::{Batch, CancelToken, Column, Reservation, Schema, Selection};
 use crate::error::QueryError;
 use crate::eval::{build_flat_from_sources, eval_expr};
 use crate::exec::hash_agg::{HashAggSpec, execute_hash_agg_streams};
-use crate::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join};
+use crate::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join_parallel};
 use crate::exec::pipeline::{
     ControlFlow, ExecContext, PushOperator, run_pipeline_with_stop, transfer_or_grow,
 };
-use crate::exec::sort_window::{ExternalSort, eval_window_group};
+use crate::exec::sort_window::{ExternalSort, eval_window_group_parallel};
 use crate::exec::source::{BatchSource, PartitionStream, ScanSource, ScanSpec};
 use crate::exec::streaming::{FilterOp, LimitOp, ProjectOp, TopKSink, UnionSource, UnnestOp};
 use crate::ir::Expr;
@@ -421,20 +421,20 @@ fn compile_stage(
         } => {
             let stage = compile_stage(input, sources, ctx)?;
             let input_schema = Arc::clone(&stage.schema);
-            let single = stage.into_single_stream(ctx);
-            let stream = eval_window_group(
-                single,
+            let streams = stage.into_streams(ctx);
+            let win_streams = eval_window_group_parallel(
+                streams,
                 input_schema,
                 partition_by.clone(),
                 order_by.clone(),
                 specs.clone(),
                 ctx,
             )?;
-            let stream = retag_stream_to_schema(stream, schema);
-            Ok(CompiledStage::from_streams(
-                vec![stream],
-                Arc::clone(schema),
-            ))
+            let streams = win_streams
+                .into_iter()
+                .map(|s| retag_stream_to_schema(s, schema))
+                .collect();
+            Ok(CompiledStage::from_streams(streams, Arc::clone(schema)))
         }
 
         LogicalPlan::Join {
@@ -471,7 +471,7 @@ fn compile_stage(
                 null_equals_null: *null_equals_null,
                 residual_filter: residual.clone(),
             };
-            let joined = execute_hash_join(
+            let joined = execute_hash_join_parallel(
                 left_streams,
                 left_schema,
                 right_streams,
@@ -479,11 +479,11 @@ fn compile_stage(
                 spec,
                 ctx,
             )?;
-            let joined = retag_stream_to_schema(joined, schema);
-            Ok(CompiledStage::from_streams(
-                vec![joined],
-                Arc::clone(schema),
-            ))
+            let streams = joined
+                .into_iter()
+                .map(|s| retag_stream_to_schema(s, schema))
+                .collect();
+            Ok(CompiledStage::from_streams(streams, Arc::clone(schema)))
         }
 
         LogicalPlan::Union {
@@ -1636,6 +1636,220 @@ mod tests {
 
         // Dropping stream early frees remaining queued memory.
         drop(stream);
+        assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn sql_inner_and_left_join_parallel_execution() {
+        let left_schema = Schema::try_new_arc(vec![
+            Field::new("k", DataType::Utf8, true),
+            Field::new("lv", DataType::I64, false),
+        ])
+        .unwrap();
+        let right_schema = Schema::try_new_arc(vec![
+            Field::new("k", DataType::Utf8, true),
+            Field::new("rv", DataType::I64, false),
+        ])
+        .unwrap();
+
+        let mk_batch = |schema: &Arc<Schema>, keys: &[Option<&str>], vals: &[i64]| -> Batch {
+            let mut raw = Vec::with_capacity(keys.len());
+            let mut valid = cetra_column::Bitmap::new_ones(keys.len());
+            for (i, k) in keys.iter().enumerate() {
+                match k {
+                    Some(s) => raw.push(*s),
+                    None => {
+                        raw.push("");
+                        valid.set(i, false).unwrap();
+                    }
+                }
+            }
+            let nulls = if valid.all_ones() { None } else { Some(valid) };
+            Batch::try_new_all(
+                Arc::clone(schema),
+                vec![
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Utf8(Utf8Data::try_from_slices(raw).unwrap()),
+                            nulls,
+                        )
+                        .unwrap(),
+                    ),
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(vals.to_vec()), None).unwrap()),
+                ],
+                keys.len(),
+            )
+            .unwrap()
+        };
+
+        let left_src = Arc::new(
+            BatchSource::new(
+                Arc::clone(&left_schema),
+                vec![
+                    mk_batch(&left_schema, &[Some("a"), None], &[1, 2]),
+                    mk_batch(&left_schema, &[Some("b"), Some("c")], &[3, 4]),
+                    mk_batch(&left_schema, &[Some("a"), Some("d")], &[5, 6]),
+                ],
+            )
+            .unwrap(),
+        );
+        let right_src = Arc::new(
+            BatchSource::new(
+                Arc::clone(&right_schema),
+                vec![
+                    mk_batch(&right_schema, &[Some("a"), None], &[10, 20]),
+                    mk_batch(&right_schema, &[Some("b"), Some("a")], &[30, 40]),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let mut catalog = SqlCatalog::new(None, None);
+        catalog.register_batch_source("l_tbl", left_src).unwrap();
+        catalog.register_batch_source("r_tbl", right_src).unwrap();
+        let mut sources = SqlSources::new();
+        sources.register_catalog_batches(&catalog);
+
+        let (ctx, _dir) = test_ctx(8 * 1024 * 1024);
+        let ctx = ExecContext {
+            target_partitions: 3,
+            batch_size: 2,
+            ..ctx
+        };
+
+        let params = serde_json::Map::new();
+        for (sql_no_order, sql, expected_rows) in [
+            (
+                "SELECT l.k, l.lv, r.rv FROM l_tbl l INNER JOIN r_tbl r ON l.k = r.k",
+                "SELECT l.k, l.lv, r.rv FROM l_tbl l INNER JOIN r_tbl r ON l.k = r.k ORDER BY l.lv, r.rv",
+                vec![
+                    serde_json::json!({"k": "a", "lv": 1, "rv": 10}),
+                    serde_json::json!({"k": "a", "lv": 1, "rv": 40}),
+                    serde_json::json!({"k": "b", "lv": 3, "rv": 30}),
+                    serde_json::json!({"k": "a", "lv": 5, "rv": 10}),
+                    serde_json::json!({"k": "a", "lv": 5, "rv": 40}),
+                ],
+            ),
+            (
+                "SELECT l.k, l.lv, r.rv FROM l_tbl l LEFT JOIN r_tbl r ON l.k = r.k AND l.lv < 5",
+                "SELECT l.k, l.lv, r.rv FROM l_tbl l LEFT JOIN r_tbl r ON l.k = r.k AND l.lv < 5 ORDER BY l.lv, r.rv",
+                vec![
+                    serde_json::json!({"k": "a", "lv": 1, "rv": 10}),
+                    serde_json::json!({"k": "a", "lv": 1, "rv": 40}),
+                    serde_json::json!({"k": null, "lv": 2, "rv": null}),
+                    serde_json::json!({"k": "b", "lv": 3, "rv": 30}),
+                    serde_json::json!({"k": "c", "lv": 4, "rv": null}),
+                    serde_json::json!({"k": "a", "lv": 5, "rv": null}),
+                    serde_json::json!({"k": "d", "lv": 6, "rv": null}),
+                ],
+            ),
+        ] {
+            let plan = crate::sql::prepare_sql_plan(&catalog, sql_no_order, &params).unwrap();
+            let stage = compile_stage(&plan, &sources, &ctx).unwrap();
+            assert_eq!(
+                stage.streams.len(),
+                3,
+                "expected parallel streams for `{sql_no_order}`"
+            );
+            drop(stage);
+
+            let res = crate::sql::sql_json(&catalog, &sources, &ctx, sql, &params, 100).unwrap();
+            let rows: Vec<serde_json::Value> = res
+                .rows
+                .into_iter()
+                .map(serde_json::Value::Object)
+                .collect();
+            assert_eq!(rows, expected_rows, "SQL output mismatch for `{sql}`");
+            assert_eq!(ctx.pool.reserved(), 0);
+        }
+    }
+
+    #[test]
+    fn sql_window_partition_by_runs_parallel_and_matches_expected() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("model", DataType::Utf8, false),
+            Field::new("duration_ns", DataType::I64, false),
+            Field::new("span_id", DataType::I64, false),
+        ])
+        .unwrap();
+
+        let mk_batch = |models: &[&str], durs: &[i64], ids: &[i64]| -> Batch {
+            Batch::try_new_all(
+                Arc::clone(&schema),
+                vec![
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Utf8(
+                                Utf8Data::try_from_slices(models.iter().copied()).unwrap(),
+                            ),
+                            None,
+                        )
+                        .unwrap(),
+                    ),
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(durs.to_vec()), None).unwrap()),
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(ids.to_vec()), None).unwrap()),
+                ],
+                models.len(),
+            )
+            .unwrap()
+        };
+
+        let src = Arc::new(
+            BatchSource::new(
+                Arc::clone(&schema),
+                vec![
+                    mk_batch(&["gpt-4", "claude-3"], &[100, 300], &[1, 2]),
+                    mk_batch(&["gpt-4", "llama-3"], &[400, 150], &[3, 4]),
+                    mk_batch(&["claude-3", "mistral"], &[200, 250], &[5, 6]),
+                    mk_batch(&["llama-3", "gpt-4"], &[50, 250], &[7, 8]),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let mut catalog = SqlCatalog::new(None, None);
+        catalog.register_batch_source("spans_w", src).unwrap();
+        let mut sources = SqlSources::new();
+        sources.register_catalog_batches(&catalog);
+
+        let (ctx, _dir) = test_ctx(8 * 1024 * 1024);
+        let ctx = ExecContext {
+            target_partitions: 2,
+            batch_size: 4,
+            ..ctx
+        };
+        let params = serde_json::Map::new();
+
+        let sql_no_order = "SELECT model, duration_ns, span_id, ROW_NUMBER() OVER (PARTITION BY model ORDER BY duration_ns DESC) AS rn FROM spans_w";
+        let plan = crate::sql::prepare_sql_plan(&catalog, sql_no_order, &params).unwrap();
+        let stage = compile_stage(&plan, &sources, &ctx).unwrap();
+        assert!(
+            stage.streams.len() > 1,
+            "expected > 1 parallel window streams, got {}",
+            stage.streams.len()
+        );
+        drop(stage);
+
+        let sql = "SELECT model, duration_ns, span_id, ROW_NUMBER() OVER (PARTITION BY model ORDER BY duration_ns DESC) AS rn FROM spans_w ORDER BY model ASC, rn ASC, span_id ASC";
+        let res = crate::sql::sql_json(&catalog, &sources, &ctx, sql, &params, 100).unwrap();
+        let rows: Vec<serde_json::Value> = res
+            .rows
+            .into_iter()
+            .map(serde_json::Value::Object)
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                serde_json::json!({"model": "claude-3", "duration_ns": 300, "span_id": 2, "rn": 1}),
+                serde_json::json!({"model": "claude-3", "duration_ns": 200, "span_id": 5, "rn": 2}),
+                serde_json::json!({"model": "gpt-4", "duration_ns": 400, "span_id": 3, "rn": 1}),
+                serde_json::json!({"model": "gpt-4", "duration_ns": 250, "span_id": 8, "rn": 2}),
+                serde_json::json!({"model": "gpt-4", "duration_ns": 100, "span_id": 1, "rn": 3}),
+                serde_json::json!({"model": "llama-3", "duration_ns": 150, "span_id": 4, "rn": 1}),
+                serde_json::json!({"model": "llama-3", "duration_ns": 50, "span_id": 7, "rn": 2}),
+                serde_json::json!({"model": "mistral", "duration_ns": 250, "span_id": 6, "rn": 1}),
+            ]
+        );
         assert_eq!(ctx.pool.reserved(), 0);
     }
 }

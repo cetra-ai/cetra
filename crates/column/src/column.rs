@@ -207,7 +207,7 @@ pub(crate) fn concat_bitmaps(
 #[derive(Clone, PartialEq, Eq)]
 pub struct Utf8Data {
     offsets: Vec<u32>,
-    bytes: Vec<u8>,
+    bytes: String,
 }
 
 impl fmt::Debug for Utf8Data {
@@ -223,22 +223,23 @@ impl Utf8Data {
     /// Validates UTF-8, offset monotonicity, exact end byte length, and UTF-8 char boundaries on every offset.
     pub fn try_new(offsets: Vec<u32>, bytes: Vec<u8>) -> Result<Self, ColumnError> {
         validate_offsets(&offsets, bytes.len())?;
-        if !bytes.is_ascii() {
-            let s = std::str::from_utf8(&bytes).map_err(|_| ColumnError::InvalidUtf8)?;
+        let is_ascii = bytes.is_ascii();
+        let s = String::from_utf8(bytes).map_err(|_| ColumnError::InvalidUtf8)?;
+        if !is_ascii {
             for &o in &offsets {
                 if !s.is_char_boundary(o as usize) {
                     return Err(ColumnError::InvalidUtf8);
                 }
             }
         }
-        Ok(Self { offsets, bytes })
+        Ok(Self { offsets, bytes: s })
     }
 
     /// Empty string buffer (0 rows).
     pub fn empty() -> Self {
         Self {
             offsets: vec![0],
-            bytes: Vec::new(),
+            bytes: String::new(),
         }
     }
 
@@ -247,7 +248,7 @@ impl Utf8Data {
         iter: impl IntoIterator<Item = &'a str>,
     ) -> Result<Self, ColumnError> {
         let mut offsets = vec![0u32];
-        let mut bytes = Vec::new();
+        let mut bytes = String::new();
         for s in iter {
             let next_len = bytes
                 .len()
@@ -256,7 +257,7 @@ impl Utf8Data {
                     reason: "utf8 byte length overflow",
                 })?;
             let next_u32 = checked_u32(next_len, "utf8 byte length exceeds u32::MAX")?;
-            bytes.extend_from_slice(s.as_bytes());
+            bytes.push_str(s);
             offsets.push(next_u32);
         }
         Ok(Self { offsets, bytes })
@@ -279,21 +280,28 @@ impl Utf8Data {
 
     /// Contiguous UTF-8 bytes.
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+        self.bytes.as_bytes()
     }
 
-    pub(crate) fn into_bytes(self) -> Vec<u8> {
+    pub(crate) fn into_string(self) -> String {
         self.bytes
     }
 
-    /// String slice at `row`, or `None` if out of bounds.
+    /// String slice at `row`, or `None` if out of bounds. O(1) without UTF-8 re-scan.
+    #[inline]
     pub fn get(&self, row: usize) -> Option<&str> {
-        if row >= self.len() {
-            return None;
-        }
-        let start = self.offsets[row] as usize;
-        let end = self.offsets[row + 1] as usize;
-        std::str::from_utf8(&self.bytes[start..end]).ok()
+        let start = *self.offsets.get(row)? as usize;
+        let end = *self.offsets.get(row + 1)? as usize;
+        self.bytes.get(start..end)
+    }
+
+    /// Raw UTF-8 bytes at `row`, or `None` if out of bounds. O(1), suitable for
+    /// lexicographical comparison, equality, and hashing (UTF-8 byte order == `&str` order).
+    #[inline]
+    pub fn get_bytes(&self, row: usize) -> Option<&[u8]> {
+        let start = *self.offsets.get(row)? as usize;
+        let end = *self.offsets.get(row + 1)? as usize;
+        self.bytes.as_bytes().get(start..end)
     }
 
     /// Slices `offset..offset + len`, rebasing offsets to start at 0.
@@ -306,11 +314,16 @@ impl Utf8Data {
         let base = self.offsets[offset];
         let byte_start = base as usize;
         let byte_end = self.offsets[offset + len] as usize;
+        let slice_str = self
+            .bytes
+            .get(byte_start..byte_end)
+            .ok_or(ColumnError::InvalidUtf8)?;
         let offsets = self.offsets[offset..=offset + len]
             .iter()
             .map(|&o| o - base)
             .collect();
-        let bytes = self.bytes[byte_start..byte_end].to_vec();
+        let mut bytes = String::with_capacity(slice_str.len());
+        bytes.push_str(slice_str);
         Ok(Self { offsets, bytes })
     }
 
@@ -346,7 +359,7 @@ impl Utf8Data {
 
         let mut offsets = Vec::with_capacity(indices.len() + 1);
         offsets.push(0);
-        let mut bytes = Vec::with_capacity(total_bytes);
+        let mut bytes = String::with_capacity(total_bytes);
         for (out_pos, &idx) in indices.iter().enumerate() {
             if null_mask.is_some_and(|m| !m.get(out_pos)) {
                 offsets.push(bytes.len() as u32);
@@ -354,7 +367,8 @@ impl Utf8Data {
                 let row = idx as usize;
                 let start = self.offsets[row] as usize;
                 let end = self.offsets[row + 1] as usize;
-                bytes.extend_from_slice(&self.bytes[start..end]);
+                let s = self.bytes.get(start..end).ok_or(ColumnError::InvalidUtf8)?;
+                bytes.push_str(s);
                 offsets.push(bytes.len() as u32);
             }
         }
@@ -377,10 +391,10 @@ impl Utf8Data {
 
         let mut offsets = Vec::with_capacity(total_rows + 1);
         offsets.push(0);
-        let mut bytes = Vec::with_capacity(total_bytes);
+        let mut bytes = String::with_capacity(total_bytes);
         for part in parts {
             let base = bytes.len() as u32;
-            bytes.extend_from_slice(&part.bytes);
+            bytes.push_str(&part.bytes);
             for &o in &part.offsets[1..] {
                 offsets.push(base + o);
             }
@@ -2601,7 +2615,7 @@ impl FlatColumn {
                 ) => a[row] == b[row],
                 (FlatData::Date(a), FlatData::Date(b)) => a[row] == b[row],
                 (FlatData::Interval(a), FlatData::Interval(b)) => a[row] == b[row],
-                (FlatData::Utf8(a), FlatData::Utf8(b)) => a.get(row) == b.get(row),
+                (FlatData::Utf8(a), FlatData::Utf8(b)) => a.get_bytes(row) == b.get_bytes(row),
                 (FlatData::Binary(a), FlatData::Binary(b)) => a.get(row) == b.get(row),
                 (FlatData::FixedBytes8(a), FlatData::FixedBytes8(b)) => a[row] == b[row],
                 (FlatData::FixedBytes16(a), FlatData::FixedBytes16(b)) => a[row] == b[row],
@@ -5100,5 +5114,87 @@ mod tests {
             Utf8Data::try_new(vec![0, 1, 6], "é🦀".as_bytes().to_vec()),
             Err(ColumnError::InvalidUtf8)
         ));
+    }
+
+    #[test]
+    fn utf8_data_get_and_get_bytes_ascii_unicode_and_oob() {
+        let samples = ["", "ascii", "café", "🚀✨", "日本語テスト"];
+        let u = Utf8Data::try_from_slices(samples).unwrap();
+        assert_eq!(u.len(), samples.len());
+
+        for (i, &expected) in samples.iter().enumerate() {
+            assert_eq!(u.get(i), Some(expected));
+            assert_eq!(u.get_bytes(i), Some(expected.as_bytes()));
+        }
+        assert_eq!(u.get(samples.len()), None);
+        assert_eq!(u.get_bytes(samples.len()), None);
+        assert_eq!(u.get(usize::MAX), None);
+        assert_eq!(u.get_bytes(usize::MAX), None);
+
+        // slice
+        let sliced = u.slice(1, 3).unwrap();
+        for (i, &expected) in samples[1..4].iter().enumerate() {
+            assert_eq!(sliced.get(i), Some(expected));
+            assert_eq!(sliced.get_bytes(i), Some(expected.as_bytes()));
+        }
+        assert_eq!(sliced.get(3), None);
+        assert_eq!(sliced.get_bytes(3), None);
+
+        // take (with and without null_mask)
+        let taken = u
+            .take(
+                &[4, 99, 2, 0],
+                Some(&Bitmap::from_bools(&[true, false, true, true])),
+            )
+            .unwrap();
+        assert_eq!(taken.get(0), Some("日本語テスト"));
+        assert_eq!(taken.get_bytes(0), Some("日本語テスト".as_bytes()));
+        assert_eq!(taken.get(1), Some(""));
+        assert_eq!(taken.get_bytes(1), Some(b"".as_slice()));
+        assert_eq!(taken.get(2), Some("café"));
+        assert_eq!(taken.get_bytes(2), Some("café".as_bytes()));
+        assert_eq!(taken.get(3), Some(""));
+        assert_eq!(taken.get_bytes(3), Some(b"".as_slice()));
+        assert_eq!(taken.get(4), None);
+        assert_eq!(taken.get_bytes(4), None);
+
+        // concat
+        let cat = Utf8Data::concat(&[&sliced, &taken]).unwrap();
+        let expected_cat = ["ascii", "café", "🚀✨", "日本語テスト", "", "café", ""];
+        assert_eq!(cat.len(), expected_cat.len());
+        for (i, &expected) in expected_cat.iter().enumerate() {
+            assert_eq!(cat.get(i), Some(expected));
+            assert_eq!(cat.get_bytes(i), Some(expected.as_bytes()));
+        }
+        assert_eq!(cat.get(expected_cat.len()), None);
+        assert_eq!(cat.get_bytes(expected_cat.len()), None);
+
+        // empty
+        let empty = Utf8Data::empty();
+        assert_eq!(empty.get(0), None);
+        assert_eq!(empty.get_bytes(0), None);
+
+        // try_new rejects invalid UTF-8 and non-char-boundary offsets
+        assert_eq!(
+            Utf8Data::try_new(vec![0, 2], vec![0xff, 0xfe]).unwrap_err(),
+            ColumnError::InvalidUtf8
+        );
+        let emoji_bytes = "🚀".as_bytes().to_vec();
+        assert_eq!(emoji_bytes.len(), 4);
+        assert_eq!(
+            Utf8Data::try_new(vec![0, 2, 4], emoji_bytes).unwrap_err(),
+            ColumnError::InvalidUtf8
+        );
+
+        // Debug never leaks payload
+        let secret = "SECRET_UTF8_PAYLOAD_SENTINEL";
+        let secret_u = Utf8Data::try_from_slices([secret]).unwrap();
+        let dbg = format!("{secret_u:?}");
+        assert!(!dbg.contains(secret), "leaked payload in {dbg}");
+        assert!(dbg.contains("len: 1"), "missing len in {dbg}");
+        assert!(
+            dbg.contains(&format!("bytes_len: {}", secret.len())),
+            "missing bytes_len in {dbg}"
+        );
     }
 }

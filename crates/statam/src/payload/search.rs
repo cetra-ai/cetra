@@ -10,8 +10,8 @@ use cetra_column::{Bitmap, CancelToken};
 use memchr::memmem;
 
 use crate::StatamError;
-use crate::format::{ChunkLoc, MAX_ROW_PAYLOAD_BYTES};
-use crate::payload::pack::ChunkPackReader;
+use crate::format::{ChunkLoc, MAX_ROW_PAYLOAD_BYTES, PackPostscript};
+use crate::payload::pack::{ChunkPackReader, PackToc, TrigramSectionData};
 use crate::payload::{
     FLAT_REF_CHUNKS, FLAT_REF_INLINE, FLAT_REF_NULL, FlatPayloadRefs, PayloadRefRow,
 };
@@ -1757,40 +1757,84 @@ pub(crate) fn pack_rejects_boundary_pigeonhole(
     !tail_may && !head_may
 }
 
-pub(crate) fn pack_short_circuits_all(
-    pack: &ChunkPackReader,
+#[inline]
+fn postscript_can_short_circuit_needle(
+    ps: &PackPostscript,
     needle: &[u8],
     case_insensitive: bool,
-) -> Result<bool, StatamError> {
-    if pack.toc().postscript.trigram_len == 0 {
-        return Ok(false);
+) -> bool {
+    if ps.trigram_len == 0 {
+        return false;
     }
-
-    let no_edges = pack.postscript().edge_table_len == 0;
-    if !no_edges
+    if ps.edge_table_len > 0
         && (needle.len() < 5
             || max_haystack_match_bytes(needle, case_insensitive) > MAX_EDGE_NEEDLE_LEN)
     {
-        return Ok(false);
+        return false;
     }
+    true
+}
 
-    let ts = pack.trigram_section_cached()?;
-    if !no_edges
+fn trigram_section_short_circuits_all(
+    ps: &PackPostscript,
+    ts: &TrigramSectionData,
+    needle: &[u8],
+    case_insensitive: bool,
+) -> bool {
+    if ps.edge_table_len > 0
         && !pack_rejects_boundary_pigeonhole(ts.edge_blooms.as_ref(), needle, case_insensitive)
     {
-        return Ok(false);
+        return false;
     }
 
     let hashes = extract_needle_trigram_hashes(needle, case_insensitive);
     if hashes.is_empty() {
-        return Ok(false);
+        return false;
     }
 
     let any_group_may = ts
         .group_blooms
         .iter()
         .any(|opt| opt.as_ref().is_none_or(|b| b.may_contain_hashes(&hashes)));
-    Ok(!any_group_may)
+    !any_group_may
+}
+
+pub(crate) fn pack_short_circuits_all(
+    pack: &ChunkPackReader,
+    needle: &[u8],
+    case_insensitive: bool,
+) -> Result<bool, StatamError> {
+    let ps = pack.postscript();
+    if !postscript_can_short_circuit_needle(ps, needle, case_insensitive) {
+        return Ok(false);
+    }
+
+    let ts = pack.trigram_section_cached()?;
+    Ok(trigram_section_short_circuits_all(
+        ps,
+        ts,
+        needle,
+        case_insensitive,
+    ))
+}
+
+/// Zero-I/O variant of [`pack_short_circuits_all`]: evaluates against `toc`'s already-loaded
+/// trigram section if present, returning `None` if the trigram section has not been loaded yet.
+pub(crate) fn pack_toc_short_circuits_all_if_cached(
+    toc: &PackToc,
+    needle: &[u8],
+    case_insensitive: bool,
+) -> Option<bool> {
+    if !postscript_can_short_circuit_needle(&toc.postscript, needle, case_insensitive) {
+        return Some(false);
+    }
+    let ts = toc.cached_trigram_section()?;
+    Some(trigram_section_short_circuits_all(
+        &toc.postscript,
+        ts,
+        needle,
+        case_insensitive,
+    ))
 }
 
 #[derive(Default)]

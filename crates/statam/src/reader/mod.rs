@@ -42,8 +42,10 @@ use crate::parallel::{
     MAX_PARALLEL_THREADS, TaskExecutor, enter_executor_scope, in_parallel_scope,
     parallel_map_in_order_static,
 };
-use crate::payload::pack::ChunkPackReader;
-use crate::payload::search::{RetainedPackChunks, pack_short_circuits_all};
+use crate::payload::pack::{ChunkPackReader, PackToc};
+use crate::payload::search::{
+    RetainedPackChunks, pack_short_circuits_all, pack_toc_short_circuits_all_if_cached,
+};
 use crate::payload::{
     FlatPayloadRefs, PayloadRefRow, decode_payload_refs_flat, decode_payload_refs_selected,
 };
@@ -99,6 +101,12 @@ pub(super) fn effective_read_threads(work_bytes: usize, max_threads: usize) -> u
 pub trait PackResolver: Send + Sync {
     /// Returns the opened [`ChunkPackReader`] for `pack_id`, or `StatamError::MissingPack`.
     fn resolve(&self, pack_id: [u8; 16]) -> Result<Arc<ChunkPackReader>, StatamError>;
+
+    /// Returns a previously cached [`PackToc`] in memory without performing any I/O.
+    /// Default returns `None`.
+    fn cached_toc(&self, _pack_id: [u8; 16]) -> Option<Arc<PackToc>> {
+        None
+    }
 }
 
 /// Simple in-memory [`PackResolver`] backed by a map of `pack_id -> Arc<ChunkPackReader>`.
@@ -585,6 +593,7 @@ impl StatamReader {
         }
 
         let mut resolved_packs: Option<Vec<Arc<ChunkPackReader>>> = None;
+        let mut cached_tocs: Option<Option<Vec<Arc<PackToc>>>> = None;
 
         'clause: for clause in subs {
             if clause.is_empty() {
@@ -617,11 +626,11 @@ impl StatamReader {
                 return Ok(true);
             }
 
-            let packs: &[Arc<ChunkPackReader>] = match resolved_packs {
-                Some(ref p) => p.as_slice(),
-                None => {
-                    let mut loaded = Vec::with_capacity(self.meta.schema_meta.pack_ids.len());
-                    if allow_open_packs {
+            let clause_pruned = if allow_open_packs {
+                let packs: &[Arc<ChunkPackReader>] = match resolved_packs {
+                    Some(ref p) => p.as_slice(),
+                    None => {
+                        let mut loaded = Vec::with_capacity(self.meta.schema_meta.pack_ids.len());
                         for &pack_id in &self.meta.schema_meta.pack_ids {
                             match self.resolve_pack(pack_id) {
                                 Ok(pack) => loaded.push(pack),
@@ -629,31 +638,82 @@ impl StatamReader {
                                 Err(e) => return Err(e),
                             }
                         }
-                    } else {
-                        let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
-                        for &pack_id in &self.meta.schema_meta.pack_ids {
-                            let Some(pack) = guard.packs.get(&pack_id) else {
-                                return Ok(false);
-                            };
-                            loaded.push(Arc::clone(pack));
+                        resolved_packs.insert(loaded).as_slice()
+                    }
+                };
+                let mut ok = true;
+                for sq in active_disjuncts {
+                    for pack in packs {
+                        if !pack_short_circuits_all(pack, &sq.needle, sq.case_insensitive)? {
+                            ok = false;
+                            break;
                         }
                     }
-                    resolved_packs.insert(loaded).as_slice()
-                }
-            };
-
-            let mut clause_pruned = true;
-            for sq in active_disjuncts {
-                for pack in packs {
-                    if !pack_short_circuits_all(pack, &sq.needle, sq.case_insensitive)? {
-                        clause_pruned = false;
+                    if !ok {
                         break;
                     }
                 }
-                if !clause_pruned {
-                    break;
+                ok
+            } else {
+                let tocs: Option<&[Arc<PackToc>]> = match cached_tocs {
+                    Some(ref opt) => opt.as_deref(),
+                    None => {
+                        let mut toc_slots: Vec<Option<Arc<PackToc>>> = {
+                            let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
+                            self.meta
+                                .schema_meta
+                                .pack_ids
+                                .iter()
+                                .map(|pack_id| {
+                                    guard.packs.get(pack_id).map(|p| Arc::clone(p.toc_arc()))
+                                })
+                                .collect()
+                        };
+                        let mut loaded = Vec::with_capacity(toc_slots.len());
+                        let mut missing = false;
+                        for (&pack_id, slot) in self
+                            .meta
+                            .schema_meta
+                            .pack_ids
+                            .iter()
+                            .zip(toc_slots.drain(..))
+                        {
+                            let toc = slot.or_else(|| {
+                                self.packs.as_ref().and_then(|r| r.cached_toc(pack_id))
+                            });
+                            if let Some(t) = toc {
+                                loaded.push(t);
+                            } else {
+                                missing = true;
+                                break;
+                            }
+                        }
+                        cached_tocs.insert((!missing).then_some(loaded)).as_deref()
+                    }
+                };
+                if let Some(tocs) = tocs {
+                    let mut ok = true;
+                    for sq in active_disjuncts {
+                        for toc in tocs {
+                            if pack_toc_short_circuits_all_if_cached(
+                                toc,
+                                &sq.needle,
+                                sq.case_insensitive,
+                            ) != Some(true)
+                            {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if !ok {
+                            break;
+                        }
+                    }
+                    ok
+                } else {
+                    false
                 }
-            }
+            };
             if clause_pruned {
                 return Ok(true);
             }
@@ -3704,4 +3764,313 @@ fn coalesce_take_batches(
     }
     flush_take_run(proj_schema, &mut cur_run, cur_rows, &mut out)?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod p2_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use bytes::Bytes;
+    use cetra_column::{
+        BinaryData, Bitmap, DataType, Field, FlatColumn, FlatData, Schema, Utf8Data,
+    };
+
+    use super::*;
+    use crate::WriteProfile;
+    use crate::codec::ZoneValue;
+    use crate::format::{Codec, TableKind};
+    use crate::io::{SimulatedS3Config, SimulatedS3Reader, SliceReader};
+    use crate::payload::pack::{ChunkPackBuilder, PackToc, PackWriteOptions};
+    use crate::writer::{StatamWriter, WriteOptions};
+
+    struct SharedTocPackResolver {
+        pack_id: [u8; 16],
+        pack_bytes: Bytes,
+        cached: Mutex<Option<Arc<PackToc>>>,
+        resolve_calls: AtomicUsize,
+        fail_missing: bool,
+    }
+
+    impl SharedTocPackResolver {
+        fn new(pack_id: [u8; 16], pack_bytes: Bytes, fail_missing: bool) -> Self {
+            Self {
+                pack_id,
+                pack_bytes,
+                cached: Mutex::new(None),
+                resolve_calls: AtomicUsize::new(0),
+                fail_missing,
+            }
+        }
+    }
+
+    impl PackResolver for SharedTocPackResolver {
+        fn resolve(&self, pack_id: [u8; 16]) -> Result<Arc<ChunkPackReader>, StatamError> {
+            self.resolve_calls.fetch_add(1, Ordering::Relaxed);
+            if self.fail_missing || pack_id != self.pack_id {
+                return Err(StatamError::MissingPack { pack_id });
+            }
+            let rr = Arc::new(SliceReader::new(self.pack_bytes.clone()));
+            let toc = {
+                let mut guard = self.cached.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(ref existing) = *guard {
+                    Arc::clone(existing)
+                } else {
+                    let (toc, _) = PackToc::read_from_with_hint(rr.as_ref(), None)?;
+                    *guard = Some(Arc::clone(&toc));
+                    toc
+                }
+            };
+            Ok(Arc::new(ChunkPackReader::open_with_toc(rr, toc)?))
+        }
+
+        fn cached_toc(&self, pack_id: [u8; 16]) -> Option<Arc<PackToc>> {
+            if pack_id != self.pack_id {
+                return None;
+            }
+            self.cached
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        }
+    }
+
+    fn build_l1_ext_fixture(pack_id: [u8; 16]) -> (Vec<u8>, Bytes) {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("input", DataType::Utf8, true),
+            Field::new("pad", DataType::Binary, false),
+        ])
+        .unwrap();
+
+        let n_rows = 400usize;
+        let mut pb = ChunkPackBuilder::new(
+            pack_id,
+            PackWriteOptions {
+                codec: Codec::Lz4,
+                zstd_level: 1,
+                target_frame_raw_bytes: 64 * 1024,
+                enable_trigram_skip: true,
+                compress_toc_lz4: true,
+                write_threads: 1,
+                emit_hash_table: false,
+            },
+        );
+
+        let mut rng = 0x7777_2026_1234_5678u64;
+        let pads: Vec<Vec<u8>> = (0..n_rows)
+            .map(|_| {
+                let mut b = vec![0u8; 600];
+                for chunk in b.chunks_mut(8) {
+                    rng = rng
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    let bytes = rng.to_le_bytes();
+                    chunk.copy_from_slice(&bytes[..chunk.len()]);
+                }
+                b
+            })
+            .collect();
+
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts.row_group_size = n_rows;
+        opts.mini_block_size = 200;
+        opts.pack_id = Some(pack_id);
+
+        let mut file_bytes = Vec::new();
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut file_bytes),
+            Arc::clone(&schema),
+            opts,
+            Some(&mut pb),
+        )
+        .unwrap();
+
+        let words = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+        ];
+        for range in [0..200usize, 200..n_rows] {
+            let ids: Vec<i64> = range.clone().map(|i| (i * 2) as i64).collect();
+            let mut inputs = Vec::with_capacity(range.len());
+            let mut valid = vec![true; range.len()];
+            for (pos, row) in range.clone().enumerate() {
+                if row % 25 == 0 {
+                    valid[pos] = false;
+                    inputs.push(String::new());
+                } else {
+                    let mut s = format!("external_payload_row_{row:04}_");
+                    for j in 0..80usize {
+                        s.push_str(words[(row * 7 + j * 3) % words.len()]);
+                        s.push('_');
+                        s.push_str(&format!("{:02x}_", (row.wrapping_mul(31) + j * 13) & 0xFF));
+                    }
+                    inputs.push(s);
+                }
+            }
+            let batch = Batch::try_new_all(
+                Arc::clone(&schema),
+                vec![
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Utf8(
+                                Utf8Data::try_from_slices(inputs.iter().map(String::as_str))
+                                    .unwrap(),
+                            ),
+                            Some(Bitmap::from_bools(&valid)),
+                        )
+                        .unwrap(),
+                    ),
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Binary(
+                                BinaryData::try_from_slices(
+                                    pads[range.clone()].iter().map(Vec::as_slice),
+                                )
+                                .unwrap(),
+                            ),
+                            None,
+                        )
+                        .unwrap(),
+                    ),
+                ],
+                range.len(),
+            )
+            .unwrap();
+            w.write_batch(&batch).unwrap();
+        }
+        w.finish().unwrap();
+
+        let mut pack_bytes = Vec::new();
+        pb.finish(&mut pack_bytes).unwrap();
+        (file_bytes, Bytes::from(pack_bytes))
+    }
+
+    #[test]
+    fn cached_toc_prunes_warm_search_with_preds_and_filter_exprs_zero_data_gets() {
+        let pack_id = [0xAAu8; 16];
+        let (l1_ext_bytes, pack_bytes) = build_l1_ext_fixture(pack_id);
+        let resolver = Arc::new(SharedTocPackResolver::new(pack_id, pack_bytes, false));
+
+        // 1. Warm the shared Arc<PackToc> trigram cache with one scan.
+        let cold_reader = StatamReader::open(
+            Arc::new(SliceReader::new(l1_ext_bytes.clone())),
+            Some(Arc::clone(&resolver) as Arc<dyn PackResolver>),
+        )
+        .unwrap();
+        let warm_res = cold_reader
+            .scan(&ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![vec![SubstringQuery::like(
+                    "input",
+                    "ABSENT_WARM_SEED_NEEDLE",
+                )]],
+                ..ScanRequest::default()
+            })
+            .unwrap();
+        assert!(warm_res.is_empty());
+        assert!(resolver.resolve_calls.load(Ordering::Relaxed) >= 1);
+        let shared_toc = resolver.cached_toc(pack_id).expect("shared PackToc");
+        assert!(shared_toc.cached_trigram_section().is_some());
+        let dbg = format!("{shared_toc:?}");
+        assert!(dbg.contains("trigrams_loaded: true"));
+        assert!(!dbg.contains("external_payload"));
+
+        // 2. Open a brand-new StatamReader with a counting RangeReader and run a miss query
+        //    WITH non-empty predicates AND filter_exprs (which match all rows so zone maps don't prune).
+        for remote_hint in [false, true] {
+            resolver.resolve_calls.store(0, Ordering::Relaxed);
+            let no_cache_cfg = SimulatedS3Config {
+                cache_capacity_blocks: 0,
+                ..SimulatedS3Config::default()
+            };
+            let counting_statam = Arc::new(
+                SimulatedS3Reader::from_bytes(l1_ext_bytes.clone(), no_cache_cfg)
+                    .with_remote_hint(remote_hint),
+            );
+            let fresh_reader = Arc::new(
+                StatamReader::open(
+                    counting_statam.clone(),
+                    Some(Arc::clone(&resolver) as Arc<dyn PackResolver>),
+                )
+                .unwrap(),
+            );
+            counting_statam.reset_counters();
+
+            let req = ScanRequest {
+                projection: Some(vec![0]),
+                predicates: vec![Predicate::new("id", ZonePred::Ge(ZoneValue::I64(0)))],
+                filter_exprs: vec![FilterExpr::Pred(Predicate::new(
+                    "id",
+                    ZonePred::Le(ZoneValue::I64(10_000)),
+                ))],
+                substrings: vec![vec![SubstringQuery::like(
+                    "input",
+                    "ABSENT_ZERO_IO_WARM_NEEDLE",
+                )]],
+                ..ScanRequest::default()
+            };
+            let out_scan = fresh_reader.scan(&req).unwrap();
+            assert!(out_scan.is_empty());
+            assert_eq!(
+                counting_statam.counters().gets,
+                0,
+                "warm PackToc pruning with preds+filter_exprs must issue 0 .statam data GETs (scan, remote={remote_hint})"
+            );
+            assert_eq!(
+                resolver.resolve_calls.load(Ordering::Relaxed),
+                0,
+                "warm PackToc pruning must issue 0 PackResolver::resolve calls (scan, remote={remote_hint})"
+            );
+
+            let mut iter = fresh_reader.scan_iter(req).unwrap();
+            assert!(iter.next_batch(None, None).unwrap().is_none());
+            assert_eq!(
+                counting_statam.counters().gets,
+                0,
+                "warm PackToc pruning with preds+filter_exprs must issue 0 .statam data GETs (scan_iter, remote={remote_hint})"
+            );
+            assert_eq!(
+                resolver.resolve_calls.load(Ordering::Relaxed),
+                0,
+                "warm PackToc pruning must issue 0 PackResolver::resolve calls (scan_iter, remote={remote_hint})"
+            );
+        }
+    }
+
+    #[test]
+    fn cached_toc_without_loaded_trigrams_does_not_open_pack_when_preds_present() {
+        let pack_id = [0xABu8; 16];
+        let (l1_ext_bytes, pack_bytes) = build_l1_ext_fixture(pack_id);
+
+        // Pre-populate PackToc in cached_toc WITHOUT loading its trigram section.
+        let (toc, _) =
+            PackToc::read_from_with_hint(&SliceReader::new(pack_bytes.clone()), None).unwrap();
+        assert!(toc.cached_trigram_section().is_none());
+
+        let resolver = Arc::new(SharedTocPackResolver::new(pack_id, pack_bytes, true));
+        *resolver.cached.lock().unwrap() = Some(toc);
+
+        let reader = StatamReader::open(
+            Arc::new(SliceReader::new(l1_ext_bytes)),
+            Some(Arc::clone(&resolver) as Arc<dyn PackResolver>),
+        )
+        .unwrap();
+
+        let out = reader
+            .scan(&ScanRequest {
+                projection: Some(vec![0]),
+                predicates: vec![Predicate::new("id", ZonePred::Eq(ZoneValue::I64(3)))],
+                substrings: vec![vec![SubstringQuery::like("input", "ABSENT_NEEDLE_XYZ")]],
+                ..ScanRequest::default()
+            })
+            .unwrap();
+        assert!(out.is_empty());
+        assert_eq!(
+            resolver.resolve_calls.load(Ordering::Relaxed),
+            0,
+            "uncached trigram PackToc with preds must not call PackResolver::resolve"
+        );
+    }
 }

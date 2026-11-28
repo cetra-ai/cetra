@@ -730,6 +730,9 @@ fn prepare_widget_streams(
             .widget
             .as_ref()
             .is_some_and(|f| !f.scores.is_empty());
+    let pushed_group_not_null = plan.group.as_ref().is_some_and(|g| {
+        !g.list && !(plan.source == WidgetSource::Traces && g.field == DURATION_NS)
+    });
 
     let (base_streams, base_schema, is_raw) = match plan.source {
         WidgetSource::Traces => {
@@ -744,6 +747,7 @@ fn prepare_widget_streams(
             )?;
             spec.time_range.around_ns = None;
             let raw_schema = traces_raw_schema()?;
+            push_group_not_null_filter(&mut spec, &raw_schema, plan, pushed_group_not_null)?;
 
             if uses_score_joins {
                 let raw_streams = ctx
@@ -827,6 +831,7 @@ fn prepare_widget_streams(
                 sort_hints: Vec::new(),
                 limit: None,
             };
+            push_group_not_null_filter(&mut spec, &raw_schema, plan, pushed_group_not_null)?;
 
             if uses_score_joins {
                 let raw_streams = ctx
@@ -958,6 +963,7 @@ fn prepare_widget_streams(
                 sort_hints: Vec::new(),
                 limit: None,
             };
+            push_group_not_null_filter(&mut spec, &raw_schema, plan, pushed_group_not_null)?;
             if let Some(wf) = &filters.widget {
                 let rewritten = rewrite_view_expr_for_raw(
                     &wf.expr,
@@ -1040,17 +1046,25 @@ fn prepare_widget_streams(
                     exec_ctx.clone(),
                 )));
             }
-            let group_col = Expr::Column {
-                index: col_index(&proj_schema, GROUP_INPUT)?,
-                name: GROUP_INPUT.to_owned(),
-                data_type: DataType::Utf8,
-            };
-            let not_null = Expr::Unary {
-                op: UnaryOp::IsNotNull,
-                expr: Box::new(group_col),
-                data_type: DataType::Bool,
-            };
-            ops.push(Box::new(FilterOp::new(not_null, exec_ctx.clone())));
+            if !pushed_group_not_null {
+                let g_idx = col_index(&proj_schema, GROUP_INPUT)?;
+                let g_dt = if group.list {
+                    DataType::Utf8
+                } else {
+                    proj_schema.fields()[g_idx].data_type.clone()
+                };
+                let group_col = Expr::Column {
+                    index: g_idx,
+                    name: GROUP_INPUT.to_owned(),
+                    data_type: g_dt,
+                };
+                let not_null = Expr::Unary {
+                    op: UnaryOp::IsNotNull,
+                    expr: Box::new(group_col),
+                    data_type: DataType::Bool,
+                };
+                ops.push(Box::new(FilterOp::new(not_null, exec_ctx.clone())));
+            }
         }
 
         out_streams
@@ -1062,6 +1076,23 @@ fn prepare_widget_streams(
         streams: out_streams,
         schema: final_schema,
     })
+}
+
+fn push_group_not_null_filter(
+    spec: &mut ScanSpec,
+    raw_schema: &Schema,
+    plan: &WidgetPlan,
+    pushed_group_not_null: bool,
+) -> Result<(), RunError> {
+    if pushed_group_not_null && let Some(group) = &plan.group {
+        let group_expr = widget_field_expr(raw_schema, &group.field, false)?;
+        spec.filters.push(Expr::Unary {
+            op: UnaryOp::IsNotNull,
+            expr: Box::new(group_expr),
+            data_type: DataType::Bool,
+        });
+    }
+    Ok(())
 }
 
 fn post_unnest_schema(
@@ -2527,6 +2558,490 @@ mod tests {
             err,
             WidgetError::Run(RunError::InvalidRequest(ref m)) if m == "from is out of range"
         ));
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn breakdown_is_not_null_pushdown_parity_across_sources_and_partials() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+
+        // Flushed disk batch (becomes L0 Statam files for spans, traces partials, and scores).
+        let mut t1_disk = span_row(1, 0, T0 + 5 * MIN, T0 + 5 * MIN);
+        t1_disk.span_kind = SpanKind::Llm;
+        t1_disk.response_model = Some("m1".to_owned());
+        t1_disk.user_id = Some("u1".to_owned());
+        t1_disk.metadata.insert("k".to_owned(), "alpha".to_owned());
+        t1_disk.tags = vec!["t1".to_owned(), "t2".to_owned()];
+
+        let mut t2_disk = span_row(2, 0, T0 + 10 * MIN, T0 + 10 * MIN);
+        t2_disk.span_kind = SpanKind::Llm;
+        t2_disk.response_model = Some("m1".to_owned());
+        t2_disk.user_id = Some("u2".to_owned());
+        t2_disk.tags = vec!["t1".to_owned()];
+
+        let mut t3_disk = span_row(3, 0, T0 + 15 * MIN, T0 + 15 * MIN);
+        t3_disk
+            .metadata
+            .insert("other".to_owned(), "ignored".to_owned());
+
+        let mut sc1 = score_row(11, 1, T0 + 5 * MIN, T0 + 5 * MIN, T0 + 5 * MIN, false, "q");
+        sc1.value = ScoreValue::Numeric(0.9);
+        sc1.metadata.insert("k".to_owned(), "s_alpha".to_owned());
+
+        let mut sc2 = score_row(
+            12,
+            2,
+            T0 + 10 * MIN,
+            T0 + 10 * MIN,
+            T0 + 10 * MIN,
+            false,
+            "q",
+        );
+        sc2.value = ScoreValue::Numeric(0.8);
+
+        storage
+            .append_spans(project, span_rows(&[t1_disk, t2_disk, t3_disk]))
+            .await
+            .expect("append disk spans");
+        storage
+            .append_scores(project, score_rows(&[sc1, sc2]))
+            .await
+            .expect("append disk scores");
+        storage
+            .flush_now(Duration::from_secs(10))
+            .await
+            .expect("flush_now");
+
+        // Memtable batch (adds second partials for traces 1 & 2 plus trace 4 and scores 3 & 4).
+        let mut t1_mem = span_row(1, 1, T0 + 6 * MIN, T0 + 6 * MIN);
+        t1_mem.parent_span_id = Some(span_row(1, 0, 0, 0).span_id);
+        t1_mem.end_time = t1_mem.start_time + 500;
+
+        let mut t2_mem = span_row(2, 1, T0 + 11 * MIN, T0 + 11 * MIN);
+        t2_mem.parent_span_id = Some(span_row(2, 0, 0, 0).span_id);
+        t2_mem.span_kind = SpanKind::Llm;
+        t2_mem.response_model = Some("m2".to_owned());
+        t2_mem.metadata.insert("k".to_owned(), "beta".to_owned());
+        t2_mem.tags = vec!["t3".to_owned()];
+
+        let mut t4_mem = span_row(4, 0, T0 + 20 * MIN, T0 + 20 * MIN);
+        t4_mem.span_kind = SpanKind::Llm;
+        t4_mem.response_model = Some("m3".to_owned());
+        t4_mem.user_id = Some("u1".to_owned());
+        t4_mem.metadata.insert("k".to_owned(), "alpha".to_owned());
+
+        let mut sc3 = score_row(
+            13,
+            3,
+            T0 + 15 * MIN,
+            T0 + 15 * MIN,
+            T0 + 15 * MIN,
+            false,
+            "q",
+        );
+        sc3.value = ScoreValue::Numeric(0.2);
+        sc3.metadata.insert("k".to_owned(), "s_beta".to_owned());
+
+        let mut sc4 = score_row(
+            14,
+            4,
+            T0 + 20 * MIN,
+            T0 + 20 * MIN,
+            T0 + 20 * MIN,
+            false,
+            "r",
+        );
+        sc4.value = ScoreValue::Categorical {
+            label: "good".to_owned(),
+            value: None,
+        };
+        sc4.metadata.insert("k".to_owned(), "s_alpha".to_owned());
+
+        storage
+            .append_spans(project, span_rows(&[t1_mem, t2_mem, t4_mem]))
+            .await
+            .expect("append mem spans");
+        storage
+            .append_scores(project, score_rows(&[sc3, sc4]))
+            .await
+            .expect("append mem scores");
+
+        let opts = QueryOptions::new(None, None);
+        let ctx = QueryContext::new(storage.query(project, opts).await.expect("query"), None)
+            .expect("ctx");
+        let base_req = WidgetRequest {
+            window: window(),
+            bucket: Bucket::Fixed(BucketWidth::M15),
+            dashboard_filter: None,
+            group_by: None,
+            include_eval: false,
+            include_experiments: false,
+            query: &WidgetQuery {
+                source: WidgetSource::Spans,
+                filter: None,
+                measures: vec![measure(Agg::Count, None, None)],
+                breakdown: None,
+            },
+            shape: Shape::Total,
+            compare: false,
+            timeout: Duration::from_secs(10),
+        };
+
+        // 1. Spans `model` breakdown without and with `uses_score_joins` (`score('q') > 0.5`).
+        let q_spans_model = WidgetQuery {
+            source: WidgetSource::Spans,
+            filter: None,
+            measures: vec![measure(Agg::Count, None, None)],
+            breakdown: Some(Breakdown {
+                field: "model".to_owned(),
+                limit: 1,
+                other: true,
+            }),
+        };
+        let WidgetData::Total { rows } = widget_query(
+            &ctx,
+            WidgetRequest {
+                query: &q_spans_model,
+                ..base_req
+            },
+        )
+        .await
+        .expect("spans model") else {
+            panic!("expected Total");
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].group.as_deref(), Some("m1"));
+        assert_eq!(rows[0].values, vec![Some(2.0)]);
+        assert!(rows[1].other);
+        assert_eq!(rows[1].values, vec![Some(2.0)]);
+
+        let WidgetData::Total { rows } = widget_query(
+            &ctx,
+            WidgetRequest {
+                query: &q_spans_model,
+                dashboard_filter: Some("score('q') > 0.5"),
+                ..base_req
+            },
+        )
+        .await
+        .expect("spans model score join") else {
+            panic!("expected Total");
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].group.as_deref(), Some("m1"));
+        assert_eq!(rows[0].values, vec![Some(2.0)]);
+        assert!(rows[1].other);
+        assert_eq!(rows[1].values, vec![Some(1.0)]);
+
+        // 2. Spans `metadata['k']` breakdown (verifies map projection with pushed IS NOT NULL)
+        //    both without and with `uses_score_joins`.
+        let q_spans_meta = WidgetQuery {
+            breakdown: Some(Breakdown {
+                field: "metadata['k']".to_owned(),
+                limit: 1,
+                other: true,
+            }),
+            ..q_spans_model.clone()
+        };
+        let WidgetData::Total { rows } = widget_query(
+            &ctx,
+            WidgetRequest {
+                query: &q_spans_meta,
+                ..base_req
+            },
+        )
+        .await
+        .expect("spans metadata") else {
+            panic!("expected Total");
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].group.as_deref(), Some("alpha"));
+        assert_eq!(rows[0].values, vec![Some(2.0)]);
+        assert!(rows[1].other);
+        assert_eq!(rows[1].values, vec![Some(1.0)]);
+
+        let WidgetData::Total { rows } = widget_query(
+            &ctx,
+            WidgetRequest {
+                query: &q_spans_meta,
+                dashboard_filter: Some("score('q') > 0.5"),
+                ..base_req
+            },
+        )
+        .await
+        .expect("spans metadata score join") else {
+            panic!("expected Total");
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].values, vec![Some(1.0)]);
+        assert!(rows[1].other);
+        assert_eq!(rows[1].values, vec![Some(1.0)]);
+
+        // 3. Traces `user_id` and `metadata['k']` across disk + memtable + multi-partial traces,
+        //    without and with `uses_score_joins`.
+        let q_traces_user = WidgetQuery {
+            source: WidgetSource::Traces,
+            filter: None,
+            measures: vec![measure(Agg::Count, None, None)],
+            breakdown: Some(Breakdown {
+                field: "user_id".to_owned(),
+                limit: 5,
+                other: true,
+            }),
+        };
+        let WidgetData::Total { rows } = widget_query(
+            &ctx,
+            WidgetRequest {
+                query: &q_traces_user,
+                ..base_req
+            },
+        )
+        .await
+        .expect("traces user_id") else {
+            panic!("expected Total");
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].group.as_deref(), Some("u1"));
+        assert_eq!(rows[0].values, vec![Some(2.0)]);
+        assert_eq!(rows[1].group.as_deref(), Some("u2"));
+        assert_eq!(rows[1].values, vec![Some(1.0)]);
+
+        let q_traces_meta = WidgetQuery {
+            breakdown: Some(Breakdown {
+                field: "metadata['k']".to_owned(),
+                limit: 1,
+                other: true,
+            }),
+            ..q_traces_user.clone()
+        };
+        let WidgetData::Total { rows } = widget_query(
+            &ctx,
+            WidgetRequest {
+                query: &q_traces_meta,
+                ..base_req
+            },
+        )
+        .await
+        .expect("traces metadata") else {
+            panic!("expected Total");
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].group.as_deref(), Some("alpha"));
+        assert_eq!(rows[0].values, vec![Some(2.0)]);
+        assert!(rows[1].other);
+        assert_eq!(rows[1].values, vec![Some(1.0)]);
+
+        let WidgetData::Total { rows } = widget_query(
+            &ctx,
+            WidgetRequest {
+                query: &q_traces_meta,
+                dashboard_filter: Some("score('q') > 0.5"),
+                ..base_req
+            },
+        )
+        .await
+        .expect("traces metadata score join") else {
+            panic!("expected Total");
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].values, vec![Some(1.0)]);
+        assert!(rows[1].other);
+        assert_eq!(rows[1].values, vec![Some(1.0)]);
+
+        // 4. Scores `value_str` and `metadata['k']` breakdowns (NULLs excluded, with/without score join).
+        let q_scores_val = WidgetQuery {
+            source: WidgetSource::Scores,
+            filter: None,
+            measures: vec![measure(Agg::Count, None, None)],
+            breakdown: Some(Breakdown {
+                field: "value_str".to_owned(),
+                limit: 5,
+                other: true,
+            }),
+        };
+        let WidgetData::Total { rows } = widget_query(
+            &ctx,
+            WidgetRequest {
+                query: &q_scores_val,
+                ..base_req
+            },
+        )
+        .await
+        .expect("scores value_str") else {
+            panic!("expected Total");
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].group.as_deref(), Some("good"));
+        assert_eq!(rows[0].values, vec![Some(1.0)]);
+
+        let q_scores_meta = WidgetQuery {
+            breakdown: Some(Breakdown {
+                field: "metadata['k']".to_owned(),
+                limit: 1,
+                other: true,
+            }),
+            ..q_scores_val.clone()
+        };
+        let WidgetData::Total { rows } = widget_query(
+            &ctx,
+            WidgetRequest {
+                query: &q_scores_meta,
+                ..base_req
+            },
+        )
+        .await
+        .expect("scores metadata") else {
+            panic!("expected Total");
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].group.as_deref(), Some("s_alpha"));
+        assert_eq!(rows[0].values, vec![Some(2.0)]);
+        assert!(rows[1].other);
+        assert_eq!(rows[1].values, vec![Some(1.0)]);
+
+        let WidgetData::Total { rows } = widget_query(
+            &ctx,
+            WidgetRequest {
+                query: &q_scores_meta,
+                dashboard_filter: Some("score('q') > 0.5"),
+                ..base_req
+            },
+        )
+        .await
+        .expect("scores metadata score join") else {
+            panic!("expected Total");
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].group.as_deref(), Some("s_alpha"));
+        assert_eq!(rows[0].values, vec![Some(1.0)]);
+
+        // 5. List breakdowns (`tags` on Spans & Traces, `GroupBy::Model` on Traces).
+        let q_spans_tags = WidgetQuery {
+            source: WidgetSource::Spans,
+            filter: None,
+            measures: vec![measure(Agg::Count, None, None)],
+            breakdown: Some(Breakdown {
+                field: "tags".to_owned(),
+                limit: 1,
+                other: true,
+            }),
+        };
+        let WidgetData::Total { rows } = widget_query(
+            &ctx,
+            WidgetRequest {
+                query: &q_spans_tags,
+                ..base_req
+            },
+        )
+        .await
+        .expect("spans tags") else {
+            panic!("expected Total");
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].group.as_deref(), Some("t1"));
+        assert_eq!(rows[0].values, vec![Some(2.0)]);
+        assert!(rows[1].other);
+        assert_eq!(rows[1].values, vec![Some(2.0)]);
+
+        let q_traces_tags = WidgetQuery {
+            source: WidgetSource::Traces,
+            ..q_spans_tags.clone()
+        };
+        let WidgetData::Total { rows } = widget_query(
+            &ctx,
+            WidgetRequest {
+                query: &q_traces_tags,
+                ..base_req
+            },
+        )
+        .await
+        .expect("traces tags") else {
+            panic!("expected Total");
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].group.as_deref(), Some("t1"));
+        assert_eq!(rows[0].values, vec![Some(2.0)]);
+        assert!(rows[1].other);
+        assert_eq!(rows[1].values, vec![Some(2.0)]);
+
+        let q_traces_models = WidgetQuery {
+            source: WidgetSource::Traces,
+            filter: None,
+            measures: vec![measure(Agg::Count, None, None)],
+            breakdown: None,
+        };
+        let WidgetData::Total { rows } = widget_query(
+            &ctx,
+            WidgetRequest {
+                query: &q_traces_models,
+                group_by: Some(GroupBy::Model),
+                ..base_req
+            },
+        )
+        .await
+        .expect("traces group_by model") else {
+            panic!("expected Total");
+        };
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].group.as_deref(), Some("m1"));
+        assert_eq!(rows[0].values, vec![Some(2.0)]);
+
+        // 6. Defensive `DURATION_NS` guard on `WidgetSource::Traces`: `prepare_widget_streams`
+        //    must NOT push `duration_ns IS NOT NULL` into `traces_raw_schema()` (which lacks
+        //    `duration_ns` and derives it from `end_time - start_time`).
+        let engine_ctx = ctx.engine();
+        let engine_ctx_c = engine_ctx.clone();
+        let dur_rows = engine_ctx
+            .run_with_ctx(Duration::from_secs(10), move |exec_ctx| {
+                let filters = CompiledWidgetFilters {
+                    dashboard: None,
+                    widget: None,
+                    conditions: vec![None],
+                    references_environment: false,
+                };
+                let plan = WidgetPlan {
+                    source: WidgetSource::Traces,
+                    measures: vec![MeasurePlan {
+                        agg: Agg::Count,
+                        field: None,
+                        has_where: false,
+                        is_cost: false,
+                        col_name: "m0".to_owned(),
+                    }],
+                    group: Some(GroupSpec {
+                        field: DURATION_NS.to_owned(),
+                        list: false,
+                        limit: 5,
+                        other: false,
+                    }),
+                };
+                let cfg = WidgetScopeCfg {
+                    include_eval: false,
+                    include_experiments: false,
+                    dashboard_text: None,
+                    filters: &filters,
+                    plan: &plan,
+                };
+                let prepared =
+                    prepare_widget_streams(&engine_ctx_c, exec_ctx, window(), None, &cfg)
+                        .map_err(run_err_to_query)?;
+                let mut total = 0usize;
+                for mut stream in prepared.streams {
+                    while let Some(batch) = stream.next_batch(&exec_ctx.eval.cancel, None)? {
+                        total += batch.num_rows();
+                    }
+                }
+                Ok(total)
+            })
+            .await
+            .expect("traces duration_ns prepare_widget_streams")
+            .0;
+        assert_eq!(dur_rows, 4);
 
         let _ = storage.shutdown().await;
     }

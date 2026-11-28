@@ -13,11 +13,15 @@ use crate::codec::dict::FileDict;
 use crate::codec::nested::ShreddedSubCol;
 use crate::codec::{ZonePred, ZoneValue, zone_map_always_matches, zone_map_may_match};
 use crate::format::{
-    BLOCK_FLAG_HAS_NAN, BLOCK_FLAG_MIN_MAX_VALID, BLOCK_FRAME_HEADER_LEN, BlockEntry, Codec,
-    Encoding, LocalityGroup, MAX_BLOCK_RAW_BYTES, read_framed_block_checked_cow,
+    BLOCK_FLAG_HAS_NAN, BLOCK_FLAG_MIN_MAX_VALID, BLOCK_FRAME_HEADER_LEN, BlockEntry,
+    COL_FLAG_HAS_TRIGRAM_INDEX, Codec, Encoding, LocalityGroup, MAX_BLOCK_RAW_BYTES,
+    read_framed_block_checked_cow,
 };
 use crate::io::RangeReader;
-use crate::payload::search::extract_ilike_trigram_hashes;
+use crate::payload::pack::{ChunkPackReader, PackToc};
+use crate::payload::search::{
+    extract_ilike_trigram_hashes, pack_short_circuits_all, pack_toc_short_circuits_all_if_cached,
+};
 use crate::payload::{FlatPayloadRefs, PayloadRefRow};
 use crate::simd::trigram::extract_trigram_hashes;
 
@@ -486,8 +490,13 @@ impl StatamReader {
         dict_sub_bitmaps: &[Vec<Option<Bitmap>>],
     ) -> Result<Vec<usize>, StatamError> {
         let fields = self.meta.schema_meta.schema.fields();
+        let rg_has_no_l0_payload = self.meta.rg_dir[rg_idx].l0_payload_len == 0;
+        let pack_ids = &self.meta.schema_meta.pack_ids;
+
+        // Stage 1 (under `self.caches.lock()`): narrow pruning (`time_range`, `lookups`, `preds`,
+        // `filter_exprs`) so zone-map-pruned RGs never touch `.stpk` packs.
         let caches = self.caches.lock().unwrap_or_else(|p| p.into_inner());
-        let mut surviving = Vec::with_capacity(mb_count);
+        let mut candidates = Vec::with_capacity(mb_count);
 
         for mb_idx in 0..mb_count {
             let mut keep = true;
@@ -557,51 +566,233 @@ impl StatamReader {
             }
 
             if keep {
-                for (cl_idx, clause) in subs.iter().enumerate() {
-                    // Sound CNF OR pruning: a mini-block may ONLY be pruned if EVERY disjunct
-                    // in this clause is pruned or provably empty/ConstNull.
-                    let mut any_disjunct_may_match = false;
-                    for (d_idx, (cidx, sq)) in clause.iter().enumerate() {
-                        let cidx = *cidx;
-                        let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
-                        if blk.null_count == blk.row_count {
-                            continue;
-                        }
-                        let mut disjunct_ok = true;
-                        if !sq.needle.is_empty() {
-                            let dict_bm = dict_sub_bitmaps
-                                .get(cl_idx)
-                                .and_then(|v| v.get(d_idx))
-                                .and_then(Option::as_ref);
-                            if blk.encoding == Encoding::Dict
-                                && let Some(code_bm) = dict_bm
-                            {
-                                if code_bm.all_zeros() {
-                                    disjunct_ok = false;
-                                } else if (blk.block_flags & BLOCK_FLAG_MIN_MAX_VALID) != 0
-                                    && blk.min_inline_len >= 4
-                                    && blk.max_inline_len >= 4
-                                {
-                                    let min_code = u32::from_le_bytes([
-                                        blk.min_inline[0],
-                                        blk.min_inline[1],
-                                        blk.min_inline[2],
-                                        blk.min_inline[3],
-                                    ]) as usize;
-                                    let max_code = u32::from_le_bytes([
-                                        blk.max_inline[0],
-                                        blk.max_inline[1],
-                                        blk.max_inline[2],
-                                        blk.max_inline[3],
-                                    ]) as usize;
-                                    let hi = max_code.min(code_bm.len().saturating_sub(1));
-                                    let any_in_range =
-                                        min_code <= hi && (min_code..=hi).any(|c| code_bm.get(c));
-                                    if !any_in_range {
-                                        disjunct_ok = false;
+                candidates.push(mb_idx);
+            }
+        }
+
+        if candidates.is_empty() || subs.is_empty() {
+            return Ok(candidates);
+        }
+
+        let needs_pack_short_circuit = rg_has_no_l0_payload
+            && !pack_ids.is_empty()
+            && self.packs.is_some()
+            && subs.iter().any(|clause| {
+                clause.iter().any(|&(cidx, ref sq)| {
+                    if sq.needle.len() < 3 {
+                        return false;
+                    }
+                    let cd = &self.meta.col_dir[cidx];
+                    if cd.locality_group != LocalityGroup::ExternalPayload
+                        || (cd.col_flags & COL_FLAG_HAS_TRIGRAM_INDEX) == 0
+                    {
+                        return false;
+                    }
+                    let blks = self.meta.rg_blocks(cidx, rg_idx);
+                    candidates.iter().any(|&mb_idx| {
+                        let blk = &blks[mb_idx];
+                        blk.encoding == Encoding::PayloadRefs && blk.null_count < blk.row_count
+                    })
+                })
+            });
+
+        if !needs_pack_short_circuit {
+            let empty_map: HashMap<(&[u8], bool), bool> = HashMap::new();
+            return Ok(self.prune_candidates_by_subs(
+                rg_idx,
+                &candidates,
+                subs,
+                dict_sub_bitmaps,
+                &empty_map,
+                &caches,
+            ));
+        }
+
+        drop(caches);
+
+        // Stage 2 (only when needed): only open uncached `.stpk` packs eagerly before Wave 1 on
+        // local readers when no narrow predicates/lookups/filter_exprs could eliminate all rows in
+        // Phase 1 without opening packs (preserving remote `.stpk` prefetch overlap and
+        // narrow-filter MissingPack isolation). Already-cached packs are always consulted with zero
+        // extra I/O.
+        enum CachedOrOpenPacks {
+            Open(Vec<Arc<ChunkPackReader>>),
+            Toc(Vec<Arc<PackToc>>),
+        }
+
+        let allow_open_uncached_packs = !self.reader.is_remote()
+            && lookups.is_empty()
+            && preds.is_empty()
+            && filter_exprs.is_empty();
+        let mut pack_short_circuit_by_query: HashMap<(&[u8], bool), bool> = HashMap::new();
+        let mut resolved_packs: Option<Option<CachedOrOpenPacks>> = None;
+        for clause in subs {
+            for &(cidx, ref sq) in clause {
+                if sq.needle.len() < 3 {
+                    continue;
+                }
+                let cd = &self.meta.col_dir[cidx];
+                if cd.locality_group != LocalityGroup::ExternalPayload
+                    || (cd.col_flags & COL_FLAG_HAS_TRIGRAM_INDEX) == 0
+                {
+                    continue;
+                }
+                let blks = self.meta.rg_blocks(cidx, rg_idx);
+                if !candidates.iter().any(|&mb_idx| {
+                    let blk = &blks[mb_idx];
+                    blk.encoding == Encoding::PayloadRefs && blk.null_count < blk.row_count
+                }) {
+                    continue;
+                }
+                let key = (sq.needle.as_slice(), sq.case_insensitive);
+                if pack_short_circuit_by_query.contains_key(&key) {
+                    continue;
+                }
+                let packs_opt = match resolved_packs {
+                    Some(ref opt) => opt.as_ref(),
+                    None => {
+                        let loaded_opt = if allow_open_uncached_packs {
+                            let mut loaded = Vec::with_capacity(pack_ids.len());
+                            let mut missing = false;
+                            for &pack_id in pack_ids {
+                                match self.resolve_pack(pack_id) {
+                                    Ok(pack) => loaded.push(pack),
+                                    Err(StatamError::MissingPack { .. }) => {
+                                        missing = true;
+                                        break;
                                     }
+                                    Err(e) => return Err(e),
                                 }
-                            } else if let Some(tri_vec) = caches.narrow_trigrams.get(&cidx) {
+                            }
+                            (!missing).then_some(CachedOrOpenPacks::Open(loaded))
+                        } else {
+                            let mut toc_slots: Vec<Option<Arc<PackToc>>> = {
+                                let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
+                                pack_ids
+                                    .iter()
+                                    .map(|pack_id| {
+                                        guard.packs.get(pack_id).map(|p| Arc::clone(p.toc_arc()))
+                                    })
+                                    .collect()
+                            };
+                            let mut loaded = Vec::with_capacity(pack_ids.len());
+                            let mut all_cached = true;
+                            for (&pack_id, slot) in pack_ids.iter().zip(toc_slots.drain(..)) {
+                                let toc = slot.or_else(|| {
+                                    self.packs.as_ref().and_then(|r| r.cached_toc(pack_id))
+                                });
+                                if let Some(t) = toc {
+                                    loaded.push(t);
+                                } else {
+                                    all_cached = false;
+                                    break;
+                                }
+                            }
+                            all_cached.then_some(CachedOrOpenPacks::Toc(loaded))
+                        };
+                        resolved_packs.insert(loaded_opt).as_ref()
+                    }
+                };
+                let all_short_circuit = match packs_opt {
+                    Some(CachedOrOpenPacks::Open(packs)) => {
+                        let mut ok = true;
+                        for pack in packs {
+                            if !pack_short_circuits_all(pack, &sq.needle, sq.case_insensitive)? {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        ok
+                    }
+                    Some(CachedOrOpenPacks::Toc(tocs)) => tocs.iter().all(|toc| {
+                        pack_toc_short_circuits_all_if_cached(toc, &sq.needle, sq.case_insensitive)
+                            == Some(true)
+                    }),
+                    None => false,
+                };
+                pack_short_circuit_by_query.insert(key, all_short_circuit);
+            }
+        }
+
+        let caches = self.caches.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(self.prune_candidates_by_subs(
+            rg_idx,
+            &candidates,
+            subs,
+            dict_sub_bitmaps,
+            &pack_short_circuit_by_query,
+            &caches,
+        ))
+    }
+
+    fn prune_candidates_by_subs(
+        &self,
+        rg_idx: usize,
+        candidates: &[usize],
+        subs: &[Vec<(usize, SubstringQuery)>],
+        dict_sub_bitmaps: &[Vec<Option<Bitmap>>],
+        pack_short_circuit_by_query: &HashMap<(&[u8], bool), bool>,
+        caches: &super::ReaderCaches,
+    ) -> Vec<usize> {
+        let rg_has_no_l0_payload = self.meta.rg_dir[rg_idx].l0_payload_len == 0;
+        let pack_ids = &self.meta.schema_meta.pack_ids;
+        let mut surviving = Vec::with_capacity(candidates.len());
+
+        for &mb_idx in candidates {
+            let mut keep = true;
+            for (cl_idx, clause) in subs.iter().enumerate() {
+                // Sound CNF OR pruning: a mini-block may ONLY be pruned if EVERY disjunct
+                // in this clause is pruned or provably empty/ConstNull.
+                let mut any_disjunct_may_match = false;
+                for (d_idx, (cidx, sq)) in clause.iter().enumerate() {
+                    let cidx = *cidx;
+                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    if blk.null_count == blk.row_count {
+                        continue;
+                    }
+                    let mut disjunct_ok = true;
+                    if !sq.needle.is_empty() {
+                        let dict_bm = dict_sub_bitmaps
+                            .get(cl_idx)
+                            .and_then(|v| v.get(d_idx))
+                            .and_then(Option::as_ref);
+                        if blk.encoding == Encoding::Dict
+                            && let Some(code_bm) = dict_bm
+                        {
+                            if code_bm.all_zeros() {
+                                disjunct_ok = false;
+                            } else if (blk.block_flags & BLOCK_FLAG_MIN_MAX_VALID) != 0
+                                && blk.min_inline_len >= 4
+                                && blk.max_inline_len >= 4
+                            {
+                                let min_code = u32::from_le_bytes([
+                                    blk.min_inline[0],
+                                    blk.min_inline[1],
+                                    blk.min_inline[2],
+                                    blk.min_inline[3],
+                                ]) as usize;
+                                let max_code = u32::from_le_bytes([
+                                    blk.max_inline[0],
+                                    blk.max_inline[1],
+                                    blk.max_inline[2],
+                                    blk.max_inline[3],
+                                ]) as usize;
+                                let hi = max_code.min(code_bm.len().saturating_sub(1));
+                                let any_in_range =
+                                    min_code <= hi && (min_code..=hi).any(|c| code_bm.get(c));
+                                if !any_in_range {
+                                    disjunct_ok = false;
+                                }
+                            }
+                        } else if let Some(tri_vec) = caches.narrow_trigrams.get(&cidx) {
+                            let allow_trigram_prune = blk.encoding != Encoding::PayloadRefs
+                                || (rg_has_no_l0_payload
+                                    && !pack_ids.is_empty()
+                                    && pack_short_circuit_by_query
+                                        .get(&(sq.needle.as_slice(), sq.case_insensitive))
+                                        .copied()
+                                        .unwrap_or(false));
+                            if allow_trigram_prune {
                                 let global_mb_idx = self.global_mb_idx(cidx, rg_idx, mb_idx);
                                 if let Some(Some(bloom)) = tri_vec.get(global_mb_idx) {
                                     let hashes = if sq.case_insensitive {
@@ -617,23 +808,22 @@ impl StatamReader {
                                 }
                             }
                         }
-                        if disjunct_ok {
-                            any_disjunct_may_match = true;
-                            break;
-                        }
                     }
-                    if !any_disjunct_may_match {
-                        keep = false;
+                    if disjunct_ok {
+                        any_disjunct_may_match = true;
                         break;
                     }
                 }
+                if !any_disjunct_may_match {
+                    keep = false;
+                    break;
+                }
             }
-
             if keep {
                 surviving.push(mb_idx);
             }
         }
-        Ok(surviving)
+        surviving
     }
 
     pub(super) fn global_mb_idx(&self, pidx: usize, rg_idx: usize, mb_in_rg: usize) -> usize {

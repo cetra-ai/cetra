@@ -1,7 +1,7 @@
 //! Trace partials and the merge specification (spec 01 § Trace, D152).
 //!
 //! [`partials_from_spans_batch`] builds one partial per trace of a spans batch.
-//! [`MergeColumns`] defines the closed column set that `NativeTraceMerger`
+//! [`MergeColumns`] defines the closed column set that `SortedTraceMerger`
 //! accumulates; there is no SQL `GROUP BY trace_id` in storage code.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1192,7 +1192,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::{Column, MergeColumns, partials_from_spans_batch};
-    use crate::engine::traces_source::NativeTraceMerger;
+    use crate::engine::traces_source::SortedTraceMerger;
     use crate::error::PartialsError;
     use crate::test_support::{dataset_spans, trace_batch};
 
@@ -1558,9 +1558,12 @@ mod tests {
 
     fn merge_all(batches: &[Batch]) -> Batch {
         let schema = traces_schema();
-        let mut merger = NativeTraceMerger::new(&MergeColumns::all(), &schema).unwrap();
-        for batch in batches {
-            merger.push_range(batch, 0, batch.raw_len()).unwrap();
+        let mut merger = SortedTraceMerger::new(&MergeColumns::all(), &schema).unwrap();
+        if !batches.is_empty() {
+            let refs: Vec<&Batch> = batches.iter().collect();
+            let combined = Batch::concat(Arc::clone(&schema), &refs, None).unwrap();
+            let sorted = sort_by_trace_id(&combined);
+            merger.push_range(&sorted, 0, sorted.raw_len()).unwrap();
         }
         merger.finish().unwrap()
     }
@@ -1609,13 +1612,14 @@ mod tests {
     #[test]
     fn size_accounts_for_every_accumulator_slot() {
         let schema = traces_schema();
-        let mut merger = NativeTraceMerger::new(&MergeColumns::all(), &schema).unwrap();
+        let mut merger = SortedTraceMerger::new(&MergeColumns::all(), &schema).unwrap();
         let partials = partials_from_spans_batch(&spans_batch(&[
             base_span(trace_id(1), span_id(1), 10),
             base_span(trace_id(2), span_id(2), 20),
         ]))
         .unwrap();
-        merger.push_range(&partials, 0, partials.raw_len()).unwrap();
+        let sorted = sort_by_trace_id(&partials);
+        merger.push_range(&sorted, 0, sorted.raw_len()).unwrap();
         assert!(merger.size() > 2 * size_of::<usize>() * Column::ALL.len());
     }
 
@@ -1664,9 +1668,9 @@ mod tests {
             base_span(trace_id(2), span_id(2), 20),
         ]))
         .unwrap();
-        let projected = project_columns(&partials, &columns.input());
+        let projected = sort_by_trace_id(&project_columns(&partials, &columns.input()));
         let schema = traces_schema();
-        let mut merger = NativeTraceMerger::new(&columns, &schema).unwrap();
+        let mut merger = SortedTraceMerger::new(&columns, &schema).unwrap();
         assert_eq!(merger.len(), 0);
         merger
             .push_range(&projected, 0, projected.raw_len())
@@ -1690,7 +1694,7 @@ mod tests {
     #[test]
     fn a_merge_of_zero_batches_gives_zero_rows() {
         let schema = traces_schema();
-        let result = NativeTraceMerger::new(&MergeColumns::all(), &schema)
+        let result = SortedTraceMerger::new(&MergeColumns::all(), &schema)
             .unwrap()
             .finish()
             .unwrap();
@@ -1858,7 +1862,7 @@ mod tests {
             .filter(|name| *name != traces::HAS_ROOT)
             .collect();
         let projected = project_columns(&partials, &missing);
-        let mut merger = NativeTraceMerger::new(&MergeColumns::all(), &schema).unwrap();
+        let mut merger = SortedTraceMerger::new(&MergeColumns::all(), &schema).unwrap();
         assert!(
             merger
                 .push_range(&projected, 0, projected.raw_len())
@@ -1893,7 +1897,7 @@ mod tests {
             Selection::All,
         )
         .unwrap();
-        let mut merger = NativeTraceMerger::new(&MergeColumns::all(), &schema).unwrap();
+        let mut merger = SortedTraceMerger::new(&MergeColumns::all(), &schema).unwrap();
         assert!(merger.push_range(&wrong, 0, wrong.raw_len()).is_err());
     }
 
@@ -1982,9 +1986,13 @@ mod tests {
                 .map(|batch| project_columns(batch, &subset.input()))
                 .collect();
             let schema = traces_schema();
-            let mut merger = NativeTraceMerger::new(&subset, &schema).unwrap();
-            for batch in &projected {
-                merger.push_range(batch, 0, batch.raw_len()).unwrap();
+            let mut merger = SortedTraceMerger::new(&subset, &schema).unwrap();
+            if !projected.is_empty() {
+                let refs: Vec<&Batch> = projected.iter().collect();
+                let proj_schema = Arc::clone(projected[0].schema());
+                let combined = Batch::concat(proj_schema, &refs, None).unwrap();
+                let sorted = sort_by_trace_id(&combined);
+                merger.push_range(&sorted, 0, sorted.raw_len()).unwrap();
             }
             let small = sort_by_trace_id(&merger.finish().unwrap());
             let full = sort_by_trace_id(&merge_all(&partials));

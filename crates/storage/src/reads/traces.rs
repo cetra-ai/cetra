@@ -38,7 +38,8 @@ use crate::reads::context::{
 };
 use crate::reads::cursor::{self, Cursor, CursorValue, Page};
 use crate::reads::scope::{
-    SearchPredicate, scoped_spans_spec, scoped_traces_spec, search_predicate,
+    SearchPredicate, StrictExclusionsFilter, apply_strict_exclusions_spans,
+    prepare_strict_exclusions_spans, scoped_spans_spec, scoped_traces_spec, search_predicate,
     strict_exclusions_spans,
 };
 use crate::reads::scores_join::{apply_compiled_filter, compile_optional_filter};
@@ -1038,12 +1039,15 @@ async fn run_span_list_attempt(
 
                 let raw_proj = span_list_raw_indices(&spans_raw, true).map_err(run_err_to_query)?;
 
-                // M3.5.5: Two-phase late-materialization Top-K via `StatamSource::take_rows`
-                // for non-time sorts (`duration_ns`, `cost_total`, `total_tokens`).
+                // M3.5.5 / Opt 5: Two-phase late-materialization Top-K via `StatamSource::take_rows`
+                // for all span list sorts (`StartTime` uses wave-ordered early-stop across files;
+                // non-time sorts scan all pruned files in Phase 1).
                 if !ctx_c.force_range_mode
-                    && sort != SpanSort::StartTime
                     && let Some(spans_statam) = &ctx_c.spans_statam
                 {
+                    if fetch == 0 {
+                        return Ok(Vec::new());
+                    }
                     if let Some(vf) = ctx_c.visible_from {
                         spec = apply_visible_from(&spec, &spans_raw, spans::START_TIME, vf)?;
                     }
@@ -1064,132 +1068,119 @@ async fn run_span_list_attempt(
                     }
                     let mut p1_spec = spec.clone();
                     p1_spec.projection = Some(narrow_set.into_iter().collect());
-                    let (mut disk_streams, p1_coord_schema) =
-                        spans_statam.open_with_row_coords(&p1_spec, exec_ctx)?;
-                    let mut disk_coords: Vec<(u32, u64)> = Vec::new();
-                    if !disk_streams.is_empty() {
-                        if strict {
-                            disk_streams = strict_exclusions_spans(
-                                &ctx_c,
-                                exec_ctx,
-                                disk_streams,
-                                Arc::clone(&p1_coord_schema),
-                                None,
-                            )?;
-                        }
-                        let mut p1_sort_keys =
-                            cursor::order_by(&p1_coord_schema, sort_col, SPAN_TIES, order)
-                                .map_err(run_err_to_query)?;
-                        p1_sort_keys.push(SortKey {
-                            expr: col_expr_q(&p1_coord_schema, spans::INGEST_TIME)?,
-                            descending: true,
-                            nulls_first: false,
-                        });
-                        let sink_schema = Arc::clone(&p1_coord_schema);
-                        let sink_keys = p1_sort_keys.clone();
-                        let sink_ctx = exec_ctx.clone();
-                        let p1_sinks = exec_run_pipeline(
-                            exec_ctx,
-                            disk_streams,
-                            |_| Ok(Vec::new()),
-                            move |_| {
-                                Ok(TopKSink::new(
-                                    Arc::clone(&sink_schema),
-                                    sink_keys.clone(),
-                                    fetch,
-                                    0,
-                                    sink_ctx.clone(),
-                                ))
-                            },
-                        )?;
-                        let p1_merged = TopKSink::merge(
-                            p1_sinks,
-                            p1_coord_schema,
-                            &p1_sort_keys,
-                            0,
-                            fetch,
-                            exec_ctx,
-                        )?;
-                        for batch in p1_merged {
-                            if batch.is_empty() {
-                                continue;
-                            }
-                            let file_col =
-                                batch.column_by_name(ROW_COORD_FILE_COL).ok_or_else(|| {
-                                    QueryError::internal("missing row coord file_ordinal")
-                                })?;
-                            let row_col = batch
-                                .column_by_name(ROW_COORD_ROW_COL)
-                                .ok_or_else(|| QueryError::internal("missing row coord row_idx"))?;
-                            for phys_row in active_rows(&batch) {
-                                let f_i64 =
-                                    raw_i64_at(file_col, phys_row).map_err(run_err_to_query)?;
-                                let r_i64 =
-                                    raw_i64_at(row_col, phys_row).map_err(run_err_to_query)?;
-                                let file_ord = u32::try_from(f_i64).map_err(|_| {
-                                    QueryError::internal("invalid row coord file_ordinal")
-                                })?;
-                                let row_idx = u64::try_from(r_i64).map_err(|_| {
-                                    QueryError::internal("invalid row coord row_idx")
-                                })?;
-                                disk_coords.push((file_ord, row_idx));
-                            }
-                        }
-                    }
 
-                    // Phase 1 (memtable): regular Top-K(`fetch`) over live memtable rows.
-                    let mut mem_winners: Vec<Batch> = Vec::new();
-                    if let Some(spans_mem) = &ctx_c.spans_mem {
-                        let mut mem_spec = spec;
-                        mem_spec.projection = Some(raw_proj.clone());
-                        let mem_scan_schema = spans_mem.projected_schema(&mem_spec)?;
-                        let mut mem_streams = spans_mem.open_partitions(&mem_spec, exec_ctx)?;
-                        if !mem_streams.is_empty() {
-                            if strict {
-                                mem_streams = strict_exclusions_spans(
+                    let mem_target = SpanListTopKTarget {
+                        schema: &list_with_ingest_schema,
+                        names: &list_with_ingest_names,
+                        sort_col,
+                        order,
+                        fetch,
+                    };
+
+                    let (disk_coords, mem_winners) = if sort == SpanSort::StartTime {
+                        // Prune disk files first so an empty disk+mem query skips scanning `traces`.
+                        let mut kept_files = spans_statam.prune_files_for_spec(&p1_spec)?;
+                        if kept_files.is_empty() && ctx_c.spans_mem.is_none() {
+                            return Ok(Vec::new());
+                        }
+
+                        // Step 1: Pre-build strict exclusions filter once (reused across memtable + waves).
+                        let strict_filter = if strict {
+                            Some(prepare_strict_exclusions_spans(&ctx_c, exec_ctx)?)
+                        } else {
+                            None
+                        };
+
+                        // Step 2: Scan memtable first so its winners can bound/stop disk waves early.
+                        let mem_winners = match &ctx_c.spans_mem {
+                            Some(spans_mem) => {
+                                let mut mem_spec = spec.clone();
+                                mem_spec.projection = Some(raw_proj.clone());
+                                let strict_mode = match &strict_filter {
+                                    Some(sf) => SpanStrictMode::Prepared(sf),
+                                    None => SpanStrictMode::Off,
+                                };
+                                scan_mem_span_winners(
                                     &ctx_c,
                                     exec_ctx,
-                                    mem_streams,
-                                    Arc::clone(&mem_scan_schema),
-                                    None,
-                                )?;
+                                    spans_mem.as_ref(),
+                                    &mem_spec,
+                                    &mem_target,
+                                    strict_mode,
+                                )?
                             }
-                            let mem_view_streams: Vec<Box<dyn PartitionStream>> = mem_streams
-                                .into_iter()
-                                .map(|s| {
-                                    let proj = project_view_columns(
-                                        &mem_scan_schema,
-                                        Arc::clone(&list_with_ingest_schema),
-                                        &list_with_ingest_names,
-                                        false,
-                                        exec_ctx.clone(),
-                                    )?;
-                                    Ok(Box::new(OperatorStream::new(
-                                        s,
-                                        vec![Box::new(proj)],
-                                        exec_ctx,
-                                    ))
-                                        as Box<dyn PartitionStream>)
-                                })
-                                .collect::<Result<Vec<_>, QueryError>>()?;
-                            let mut mem_sort_keys = cursor::order_by(
-                                &list_with_ingest_schema,
-                                sort_col,
-                                SPAN_TIES,
-                                order,
-                            )
-                            .map_err(run_err_to_query)?;
-                            mem_sort_keys.push(SortKey {
-                                expr: col_expr_q(&list_with_ingest_schema, spans::INGEST_TIME)?,
-                                descending: true,
-                                nulls_first: false,
-                            });
-                            let sink_schema = Arc::clone(&list_with_ingest_schema);
-                            let sink_keys = mem_sort_keys.clone();
+                            None => Vec::new(),
+                        };
+                        let mem_times = extract_start_times(&mem_winners)?;
+                        let mut combined_times =
+                            rebuild_combined_times(&mem_times, &[], order, fetch);
+
+                        // Step 3: Wave-ordered scan across pruned disk files.
+                        match order {
+                            SortOrder::Desc => kept_files.sort_by(|a, b| {
+                                b.1.max_time
+                                    .cmp(&a.1.max_time)
+                                    .then_with(|| b.1.min_time.cmp(&a.1.min_time))
+                                    .then_with(|| a.1.path.cmp(&b.1.path))
+                            }),
+                            SortOrder::Asc => kept_files.sort_by(|a, b| {
+                                a.1.min_time
+                                    .cmp(&b.1.min_time)
+                                    .then_with(|| a.1.max_time.cmp(&b.1.max_time))
+                                    .then_with(|| a.1.path.cmp(&b.1.path))
+                            }),
+                        }
+
+                        let mut disk_winners: Vec<Batch> = Vec::new();
+                        let mut idx = 0usize;
+                        let mut wave_size = 1usize;
+                        while idx < kept_files.len() {
+                            if exec_ctx.eval.cancel.is_cancelled() {
+                                return Err(QueryError::Cancelled);
+                            }
+                            if combined_times.len() >= fetch {
+                                let kth_time = combined_times[fetch - 1];
+                                let can_stop = match order {
+                                    SortOrder::Desc => kth_time > kept_files[idx].1.max_time,
+                                    SortOrder::Asc => kth_time < kept_files[idx].1.min_time,
+                                };
+                                if can_stop {
+                                    break;
+                                }
+                            }
+
+                            let end = (idx + wave_size).min(kept_files.len());
+                            let wave_files = kept_files[idx..end].to_vec();
+                            idx = end;
+                            let remaining = kept_files.len() - idx;
+                            wave_size = wave_size.saturating_mul(2).min(remaining);
+
+                            let (mut wave_streams, p1_coord_schema) = spans_statam
+                                .open_with_row_coords_for_files(&p1_spec, wave_files, exec_ctx)?;
+                            if wave_streams.is_empty() {
+                                continue;
+                            }
+                            if let Some(sf) = &strict_filter {
+                                wave_streams = apply_strict_exclusions_spans(
+                                    sf,
+                                    &ctx_c,
+                                    exec_ctx,
+                                    wave_streams,
+                                    Arc::clone(&p1_coord_schema),
+                                )?;
+                                if wave_streams.is_empty() {
+                                    continue;
+                                }
+                            }
+
+                            let p1_sort_keys =
+                                span_p1_sort_keys(&p1_coord_schema, sort_col, order)?;
+                            let sink_schema = Arc::clone(&p1_coord_schema);
+                            let sink_keys = p1_sort_keys.clone();
                             let sink_ctx = exec_ctx.clone();
-                            let mem_sinks = exec_run_pipeline(
+                            let mut wave_sinks = exec_run_pipeline(
                                 exec_ctx,
-                                mem_view_streams,
+                                wave_streams,
                                 |_| Ok(Vec::new()),
                                 move |_| {
                                     Ok(TopKSink::new(
@@ -1201,16 +1192,115 @@ async fn run_span_list_attempt(
                                     ))
                                 },
                             )?;
-                            mem_winners = TopKSink::merge(
-                                mem_sinks,
-                                Arc::clone(&list_with_ingest_schema),
-                                &mem_sort_keys,
+                            if wave_sinks.iter().all(|s| s.reserved_bytes() == 0) {
+                                drop(wave_sinks);
+                                continue;
+                            }
+                            if !disk_winners.is_empty() {
+                                let mut prev_sink = TopKSink::new(
+                                    Arc::clone(&p1_coord_schema),
+                                    p1_sort_keys.clone(),
+                                    fetch,
+                                    0,
+                                    exec_ctx.clone(),
+                                );
+                                let mut prev_res =
+                                    exec_ctx.pool.register("span_list_wave_prev", false);
+                                for batch in disk_winners.drain(..) {
+                                    if batch.is_empty() {
+                                        continue;
+                                    }
+                                    let bytes = batch.memory_bytes();
+                                    prev_res.try_grow(bytes)?;
+                                    prev_sink.consume(batch, &mut prev_res)?;
+                                    prev_res.free();
+                                }
+                                wave_sinks.push(prev_sink);
+                            }
+                            disk_winners = TopKSink::merge(
+                                wave_sinks,
+                                p1_coord_schema,
+                                &p1_sort_keys,
                                 0,
                                 fetch,
                                 exec_ctx,
                             )?;
+                            let disk_times = extract_start_times(&disk_winners)?;
+                            combined_times =
+                                rebuild_combined_times(&mem_times, &disk_times, order, fetch);
                         }
-                    }
+
+                        // Step 4: Drop strict filter reservation before Phase-2 `take_rows`.
+                        drop(strict_filter);
+                        let coords = extract_row_coords(&disk_winners)?;
+                        drop(disk_winners);
+                        (coords, mem_winners)
+                    } else {
+                        let (mut disk_streams, p1_coord_schema) =
+                            spans_statam.open_with_row_coords(&p1_spec, exec_ctx)?;
+                        let mut disk_coords: Vec<(u32, u64)> = Vec::new();
+                        if !disk_streams.is_empty() {
+                            if strict {
+                                disk_streams = strict_exclusions_spans(
+                                    &ctx_c,
+                                    exec_ctx,
+                                    disk_streams,
+                                    Arc::clone(&p1_coord_schema),
+                                    None,
+                                )?;
+                            }
+                            let p1_sort_keys =
+                                span_p1_sort_keys(&p1_coord_schema, sort_col, order)?;
+                            let sink_schema = Arc::clone(&p1_coord_schema);
+                            let sink_keys = p1_sort_keys.clone();
+                            let sink_ctx = exec_ctx.clone();
+                            let p1_sinks = exec_run_pipeline(
+                                exec_ctx,
+                                disk_streams,
+                                |_| Ok(Vec::new()),
+                                move |_| {
+                                    Ok(TopKSink::new(
+                                        Arc::clone(&sink_schema),
+                                        sink_keys.clone(),
+                                        fetch,
+                                        0,
+                                        sink_ctx.clone(),
+                                    ))
+                                },
+                            )?;
+                            let p1_merged = TopKSink::merge(
+                                p1_sinks,
+                                p1_coord_schema,
+                                &p1_sort_keys,
+                                0,
+                                fetch,
+                                exec_ctx,
+                            )?;
+                            disk_coords = extract_row_coords(&p1_merged)?;
+                        }
+
+                        let mem_winners = match &ctx_c.spans_mem {
+                            Some(spans_mem) => {
+                                let mut mem_spec = spec;
+                                mem_spec.projection = Some(raw_proj.clone());
+                                let strict_mode = if strict {
+                                    SpanStrictMode::PerStream
+                                } else {
+                                    SpanStrictMode::Off
+                                };
+                                scan_mem_span_winners(
+                                    &ctx_c,
+                                    exec_ctx,
+                                    spans_mem.as_ref(),
+                                    &mem_spec,
+                                    &mem_target,
+                                    strict_mode,
+                                )?
+                            }
+                            None => Vec::new(),
+                        };
+                        (disk_coords, mem_winners)
+                    };
 
                     // Phase 2: random-access fetch winning disk rows via `take_rows`, combine
                     // with memtable winners, and re-sort into exact `(sort_col, span_id,
@@ -1384,6 +1474,176 @@ async fn run_span_list_attempt(
     Ok(batches)
 }
 
+struct SpanListTopKTarget<'a> {
+    schema: &'a Arc<Schema>,
+    names: &'a [&'a str],
+    sort_col: &'a str,
+    order: SortOrder,
+    fetch: usize,
+}
+
+#[derive(Clone, Copy)]
+enum SpanStrictMode<'a> {
+    Off,
+    PerStream,
+    Prepared(&'a StrictExclusionsFilter),
+}
+
+fn span_p1_sort_keys(
+    schema: &Arc<Schema>,
+    sort_col: &str,
+    order: SortOrder,
+) -> Result<Vec<SortKey>, QueryError> {
+    let mut sort_keys =
+        cursor::order_by(schema, sort_col, SPAN_TIES, order).map_err(run_err_to_query)?;
+    sort_keys.push(SortKey {
+        expr: col_expr_q(schema, spans::INGEST_TIME)?,
+        descending: true,
+        nulls_first: false,
+    });
+    Ok(sort_keys)
+}
+
+fn extract_row_coords(batches: &[Batch]) -> Result<Vec<(u32, u64)>, QueryError> {
+    let mut coords = Vec::new();
+    for batch in batches {
+        if batch.is_empty() {
+            continue;
+        }
+        let file_col = batch
+            .column_by_name(ROW_COORD_FILE_COL)
+            .ok_or_else(|| QueryError::internal("missing row coord file_ordinal"))?;
+        let row_col = batch
+            .column_by_name(ROW_COORD_ROW_COL)
+            .ok_or_else(|| QueryError::internal("missing row coord row_idx"))?;
+        for phys_row in active_rows(batch) {
+            let f_i64 = raw_i64_at(file_col, phys_row).map_err(run_err_to_query)?;
+            let r_i64 = raw_i64_at(row_col, phys_row).map_err(run_err_to_query)?;
+            let file_ord = u32::try_from(f_i64)
+                .map_err(|_| QueryError::internal("invalid row coord file_ordinal"))?;
+            let row_idx = u64::try_from(r_i64)
+                .map_err(|_| QueryError::internal("invalid row coord row_idx"))?;
+            coords.push((file_ord, row_idx));
+        }
+    }
+    Ok(coords)
+}
+
+fn extract_start_times(batches: &[Batch]) -> Result<Vec<i64>, QueryError> {
+    let mut times = Vec::new();
+    for batch in batches {
+        if batch.is_empty() {
+            continue;
+        }
+        let start_col = require_col(batch, spans::START_TIME).map_err(run_err_to_query)?;
+        for phys_row in active_rows(batch) {
+            if !start_col.is_null(phys_row) {
+                times.push(raw_time_at(start_col, phys_row).map_err(run_err_to_query)?);
+            }
+        }
+    }
+    Ok(times)
+}
+
+fn rebuild_combined_times(
+    mem_times: &[i64],
+    disk_times: &[i64],
+    order: SortOrder,
+    fetch: usize,
+) -> Vec<i64> {
+    let mut combined = Vec::with_capacity(mem_times.len() + disk_times.len());
+    combined.extend_from_slice(mem_times);
+    combined.extend_from_slice(disk_times);
+    match order {
+        SortOrder::Desc => combined.sort_unstable_by(|a, b| b.cmp(a)),
+        SortOrder::Asc => combined.sort_unstable(),
+    }
+    combined.truncate(fetch);
+    combined
+}
+
+fn scan_mem_span_winners(
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
+    spans_mem: &dyn ScanSource,
+    mem_spec: &ScanSpec,
+    target: &SpanListTopKTarget<'_>,
+    strict_mode: SpanStrictMode<'_>,
+) -> Result<Vec<Batch>, QueryError> {
+    let mem_scan_schema = spans_mem.projected_schema(mem_spec)?;
+    let mut mem_streams = spans_mem.open_partitions(mem_spec, exec_ctx)?;
+    if mem_streams.is_empty() {
+        return Ok(Vec::new());
+    }
+    match strict_mode {
+        SpanStrictMode::Off => {}
+        SpanStrictMode::PerStream => {
+            mem_streams = strict_exclusions_spans(
+                ctx,
+                exec_ctx,
+                mem_streams,
+                Arc::clone(&mem_scan_schema),
+                None,
+            )?;
+        }
+        SpanStrictMode::Prepared(sf) => {
+            mem_streams = apply_strict_exclusions_spans(
+                sf,
+                ctx,
+                exec_ctx,
+                mem_streams,
+                Arc::clone(&mem_scan_schema),
+            )?;
+        }
+    }
+    if mem_streams.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mem_view_streams: Vec<Box<dyn PartitionStream>> = mem_streams
+        .into_iter()
+        .map(|s| {
+            let proj = project_view_columns(
+                &mem_scan_schema,
+                Arc::clone(target.schema),
+                target.names,
+                false,
+                exec_ctx.clone(),
+            )?;
+            Ok(
+                Box::new(OperatorStream::new(s, vec![Box::new(proj)], exec_ctx))
+                    as Box<dyn PartitionStream>,
+            )
+        })
+        .collect::<Result<Vec<_>, QueryError>>()?;
+    let mem_sort_keys = span_p1_sort_keys(target.schema, target.sort_col, target.order)?;
+    let sink_schema = Arc::clone(target.schema);
+    let sink_keys = mem_sort_keys.clone();
+    let sink_ctx = exec_ctx.clone();
+    let fetch = target.fetch;
+    let mem_sinks = exec_run_pipeline(
+        exec_ctx,
+        mem_view_streams,
+        |_| Ok(Vec::new()),
+        move |_| {
+            Ok(TopKSink::new(
+                Arc::clone(&sink_schema),
+                sink_keys.clone(),
+                fetch,
+                0,
+                sink_ctx.clone(),
+            ))
+        },
+    )?;
+    TopKSink::merge(
+        mem_sinks,
+        Arc::clone(target.schema),
+        &mem_sort_keys,
+        0,
+        fetch,
+        exec_ctx,
+    )
+}
+
 fn run_span_topk_and_strip_ingest(
     streams: Vec<Box<dyn PartitionStream>>,
     with_ingest_schema: Arc<Schema>,
@@ -1393,13 +1653,7 @@ fn run_span_topk_and_strip_ingest(
     fetch: usize,
     exec_ctx: &ExecContext,
 ) -> Result<Vec<Batch>, QueryError> {
-    let mut sort_keys = cursor::order_by(&with_ingest_schema, sort_col, SPAN_TIES, order)
-        .map_err(run_err_to_query)?;
-    sort_keys.push(SortKey {
-        expr: col_expr_q(&with_ingest_schema, spans::INGEST_TIME)?,
-        descending: true,
-        nulls_first: false,
-    });
+    let sort_keys = span_p1_sort_keys(&with_ingest_schema, sort_col, order)?;
 
     let sink_schema = Arc::clone(&with_ingest_schema);
     let sink_keys = sort_keys.clone();
@@ -4416,6 +4670,738 @@ mod tests {
                     assert!(!rows_2p.is_empty());
                 }
             }
+        }
+
+        let _ = storage.shutdown().await;
+    }
+
+    async fn collect_span_list_pages(
+        ctx: &QueryContext,
+        scope: ListScope,
+        strict_exclusions: bool,
+        search: Option<&str>,
+        order: SortOrder,
+        limit: usize,
+    ) -> Vec<Value> {
+        let mut cur: Option<String> = None;
+        let mut rows = Vec::new();
+        loop {
+            let page = span_list(
+                ctx,
+                SpanListRequest {
+                    filter: None,
+                    search,
+                    scope,
+                    strict_exclusions,
+                    sort: SpanSort::StartTime,
+                    order,
+                    limit,
+                    cursor: cur.as_deref(),
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("span_list page");
+            rows.extend(qe_rows(&page.batches));
+            match page.next_cursor {
+                Some(next) => cur = Some(next),
+                None => break,
+            }
+        }
+        rows
+    }
+
+    #[tokio::test]
+    async fn wave_ordered_span_list_stops_early_and_respects_cross_file_ties() {
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-00000000000c".parse().expect("pid");
+        let t_base = parse_rfc3339("2026-01-01T12:00:00Z").expect("ts");
+        let sec = 1_000_000_000_i64;
+        let win = TimeWindow::new(t_base, t_base + 100 * sec).expect("win");
+        let scope = ListScope {
+            window: Some(win),
+            include_eval: false,
+            include_experiments: false,
+        };
+
+        // --- A. Descending: early stop after Wave 1 + cross-file tie on kth_time == max_time ---
+        {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let storage = Storage::open(test_config(dir.path())).await.expect("open");
+
+            let mk = |trace: u16, span: u8, s: i64| {
+                let mut row = span_row(trace, span, t_base + s * sec, t_base + s * sec + 1_000);
+                row.project_id = project;
+                row.name = format!("span-{s}-{span}");
+                row
+            };
+
+            // File 0 (oldest): [10s..13s]
+            let f0 = vec![mk(1, 0, 10), mk(2, 0, 11), mk(3, 0, 12), mk(4, 0, 13)];
+            // File 1: [20s..23s]
+            let f1 = vec![mk(5, 0, 20), mk(6, 0, 21), mk(7, 0, 22), mk(8, 0, 23)];
+            // File 2: [30s..40s], including winning tie rows at 40s with small span_id (1, 2).
+            let f2 = vec![mk(9, 0, 30), mk(10, 0, 31), mk(11, 1, 40), mk(12, 2, 40)];
+            // File 3 (newest): [40s..42s], 4 rows so fetch=4 fills with kth_time = 40s == f2.max_time!
+            let f3 = vec![mk(13, 30, 40), mk(14, 31, 40), mk(15, 0, 41), mk(16, 0, 42)];
+
+            for batch in [f0, f1, f2, f3] {
+                storage
+                    .append_spans(project, span_rows(&batch))
+                    .await
+                    .expect("append");
+                storage.flush_now(TIMEOUT).await.expect("flush");
+            }
+
+            let mut files = storage.catalog_files(crate::wal::Table::Spans);
+            files.sort_by_key(|f| f.min_time);
+            assert_eq!(files.len(), 4);
+
+            let two_phase_eng =
+                EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                    .expect("2p");
+            let mut single_phase_eng = two_phase_eng.clone();
+            single_phase_eng.set_force_range_mode(true);
+            let ctx_2p = QueryContext::from_engine(two_phase_eng);
+            let ctx_1p = QueryContext::from_engine(single_phase_eng);
+
+            // limit = 1 -> fetch = 4. File 3 yields [42s, 41s, 40s(30), 40s(31)], so kth_time = 40s.
+            // Because File 2 has max_time == 40s, strict `>` MUST NOT stop before File 2; File 2's
+            // winning tie rows 40s(1) and 40s(2) are picked up, and File 0 (max_time 13s < 40s) is skipped!
+            let page_desc = span_list(
+                &ctx_2p,
+                SpanListRequest {
+                    filter: None,
+                    search: None,
+                    scope,
+                    strict_exclusions: false,
+                    sort: SpanSort::StartTime,
+                    order: SortOrder::Desc,
+                    limit: 1,
+                    cursor: None,
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("desc page");
+            assert!(
+                storage
+                    .qe_runtime
+                    .metadata_cache
+                    .get_statam(files[3].id)
+                    .is_some(),
+                "newest file must be opened"
+            );
+            assert!(
+                storage
+                    .qe_runtime
+                    .metadata_cache
+                    .get_statam(files[2].id)
+                    .is_some(),
+                "tied file with max_time == kth_time must NOT be skipped"
+            );
+            assert!(
+                storage
+                    .qe_runtime
+                    .metadata_cache
+                    .get_statam(files[0].id)
+                    .is_none(),
+                "oldest file with max_time < kth_time must be stopped before"
+            );
+            assert_eq!(qe_rows(&page_desc.batches).len(), 1);
+
+            // Verify tie-breaking order across the 40s boundary via full cursor pagination vs force_range_mode.
+            let paged_2p =
+                collect_span_list_pages(&ctx_2p, scope, false, None, SortOrder::Desc, 2).await;
+            let full_1p = span_list(
+                &ctx_1p,
+                SpanListRequest {
+                    filter: None,
+                    search: None,
+                    scope,
+                    strict_exclusions: false,
+                    sort: SpanSort::StartTime,
+                    order: SortOrder::Desc,
+                    limit: 100,
+                    cursor: None,
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("1p desc");
+            assert_eq!(paged_2p, qe_rows(&full_1p.batches));
+            assert_eq!(paged_2p.len(), 16);
+            assert_eq!(paged_2p[2]["name"], "span-40-31");
+            assert_eq!(paged_2p[3]["name"], "span-40-30");
+            assert_eq!(paged_2p[4]["name"], "span-40-2");
+            assert_eq!(paged_2p[5]["name"], "span-40-1");
+
+            let _ = storage.shutdown().await;
+        }
+
+        // --- B. Ascending: early stop + cross-file tie on kth_time == min_time ---
+        {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let storage = Storage::open(test_config(dir.path())).await.expect("open");
+
+            let mk = |trace: u16, span: u8, s: i64| {
+                let mut row = span_row(trace, span, t_base + s * sec, t_base + s * sec + 1_000);
+                row.project_id = project;
+                row.name = format!("span-{s}-{span}");
+                row
+            };
+
+            // File 0 (oldest): [10s..12s], 4 rows so fetch=4 fills with kth_time = 12s == f1.min_time!
+            let f0 = vec![mk(1, 0, 10), mk(2, 0, 11), mk(3, 30, 12), mk(4, 31, 12)];
+            // File 1: [12s..15s], including winning tie rows at 12s with small span_id (1, 2).
+            let f1 = vec![mk(5, 1, 12), mk(6, 2, 12), mk(7, 0, 14), mk(8, 0, 15)];
+            // File 2: [20s..25s]
+            let f2 = vec![mk(9, 0, 20), mk(10, 0, 25)];
+            // File 3 (newest): [30s..35s]
+            let f3 = vec![mk(11, 0, 30), mk(12, 0, 35)];
+
+            for batch in [f0, f1, f2, f3] {
+                storage
+                    .append_spans(project, span_rows(&batch))
+                    .await
+                    .expect("append");
+                storage.flush_now(TIMEOUT).await.expect("flush");
+            }
+
+            let mut files = storage.catalog_files(crate::wal::Table::Spans);
+            files.sort_by_key(|f| f.min_time);
+            assert_eq!(files.len(), 4);
+
+            let two_phase_eng =
+                EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                    .expect("2p");
+            let mut single_phase_eng = two_phase_eng.clone();
+            single_phase_eng.set_force_range_mode(true);
+            let ctx_2p = QueryContext::from_engine(two_phase_eng);
+            let ctx_1p = QueryContext::from_engine(single_phase_eng);
+
+            // limit = 1 -> fetch = 4. File 0 yields kth_time = 12s == f1.min_time, so File 1 MUST be opened,
+            // while File 3 (min_time 30s > 12s) must NOT be opened.
+            let page_asc = span_list(
+                &ctx_2p,
+                SpanListRequest {
+                    filter: None,
+                    search: None,
+                    scope,
+                    strict_exclusions: false,
+                    sort: SpanSort::StartTime,
+                    order: SortOrder::Asc,
+                    limit: 1,
+                    cursor: None,
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("asc page");
+            assert!(
+                storage
+                    .qe_runtime
+                    .metadata_cache
+                    .get_statam(files[0].id)
+                    .is_some()
+            );
+            assert!(
+                storage
+                    .qe_runtime
+                    .metadata_cache
+                    .get_statam(files[1].id)
+                    .is_some(),
+                "tied file with min_time == kth_time must NOT be skipped"
+            );
+            assert!(
+                storage
+                    .qe_runtime
+                    .metadata_cache
+                    .get_statam(files[3].id)
+                    .is_none(),
+                "newest file with min_time > kth_time must be stopped before"
+            );
+            assert_eq!(qe_rows(&page_asc.batches).len(), 1);
+
+            let paged_2p =
+                collect_span_list_pages(&ctx_2p, scope, false, None, SortOrder::Asc, 2).await;
+            let full_1p = span_list(
+                &ctx_1p,
+                SpanListRequest {
+                    filter: None,
+                    search: None,
+                    scope,
+                    strict_exclusions: false,
+                    sort: SpanSort::StartTime,
+                    order: SortOrder::Asc,
+                    limit: 100,
+                    cursor: None,
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("1p asc");
+            assert_eq!(paged_2p, qe_rows(&full_1p.batches));
+            assert_eq!(paged_2p.len(), 12);
+            assert_eq!(paged_2p[2]["name"], "span-12-1");
+            assert_eq!(paged_2p[3]["name"], "span-12-2");
+            assert_eq!(paged_2p[4]["name"], "span-12-30");
+
+            let _ = storage.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn wave_ordered_span_list_memtable_newer_and_older_stops_disk_waves_early() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::open(test_config(dir.path())).await.expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-00000000000d".parse().expect("pid");
+
+        let t_base = parse_rfc3339("2026-01-01T12:00:00Z").expect("ts");
+        let sec = 1_000_000_000_i64;
+        let mk = |trace: u16, s: i64| {
+            let mut row = span_row(trace, 0, t_base + s * sec, t_base + s * sec + 1_000);
+            row.project_id = project;
+            row.name = format!("span-{s}");
+            row
+        };
+
+        // Disk files span [20s..45s].
+        for range in [20..=25_i64, 30..=35_i64, 40..=45_i64] {
+            let batch: Vec<_> = range
+                .enumerate()
+                .map(|(i, s)| mk(u16::try_from(s).expect("tid") + i as u16 * 100, s))
+                .collect();
+            storage
+                .append_spans(project, span_rows(&batch))
+                .await
+                .expect("append disk");
+            storage.flush_now(TIMEOUT).await.expect("flush");
+        }
+        let disk_files = storage.catalog_files(crate::wal::Table::Spans);
+        assert_eq!(disk_files.len(), 3);
+
+        // Live memtable has 6 rows strictly older [1s..6s] AND 6 rows strictly newer [50s..55s].
+        let mut mem_batch = Vec::new();
+        for s in 1..=6_i64 {
+            mem_batch.push(mk(500 + s as u16, s));
+        }
+        for s in 50..=55_i64 {
+            mem_batch.push(mk(600 + s as u16, s));
+        }
+        storage
+            .append_spans(project, span_rows(&mem_batch))
+            .await
+            .expect("append mem");
+
+        let win = TimeWindow::new(t_base, t_base + 100 * sec).expect("win");
+        let scope = ListScope {
+            window: Some(win),
+            include_eval: false,
+            include_experiments: false,
+        };
+
+        let two_phase_eng =
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("2p");
+        let mut single_phase_eng = two_phase_eng.clone();
+        single_phase_eng.set_force_range_mode(true);
+        let ctx_2p = QueryContext::from_engine(two_phase_eng);
+        let ctx_1p = QueryContext::from_engine(single_phase_eng);
+
+        // Both Desc and Asc with limit=2 (fetch=6) are satisfied entirely by memtable before idx=0,
+        // so ZERO disk files are opened in metadata_cache!
+        for order in [SortOrder::Desc, SortOrder::Asc] {
+            let page_2p = span_list(
+                &ctx_2p,
+                SpanListRequest {
+                    filter: None,
+                    search: None,
+                    scope,
+                    strict_exclusions: false,
+                    sort: SpanSort::StartTime,
+                    order,
+                    limit: 2,
+                    cursor: None,
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("2p mem-only");
+            assert_eq!(qe_rows(&page_2p.batches).len(), 2);
+            for file in &disk_files {
+                assert!(
+                    storage
+                        .qe_runtime
+                        .metadata_cache
+                        .get_statam(file.id)
+                        .is_none(),
+                    "memtable should satisfy Top-K for {order:?} without opening disk file {}",
+                    file.path
+                );
+            }
+        }
+
+        // Now verify full cursor pagination parity across memtable + all disk files.
+        for order in [SortOrder::Desc, SortOrder::Asc] {
+            let paged_2p = collect_span_list_pages(&ctx_2p, scope, false, None, order, 3).await;
+            let full_1p = span_list(
+                &ctx_1p,
+                SpanListRequest {
+                    filter: None,
+                    search: None,
+                    scope,
+                    strict_exclusions: false,
+                    sort: SpanSort::StartTime,
+                    order,
+                    limit: 100,
+                    cursor: None,
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("1p ref");
+            assert_eq!(paged_2p, qe_rows(&full_1p.batches));
+            assert_eq!(paged_2p.len(), 30);
+        }
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn wave_ordered_span_list_overlapping_l0_l1_strict_visible_from_and_search() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = test_config(dir.path());
+        cfg.compaction.l0_files = 2;
+        cfg.compaction.interval = Duration::from_secs(3_600);
+        let storage = Storage::open(cfg).await.expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-00000000000e".parse().expect("pid");
+
+        let t_base = parse_rfc3339("2026-01-01T12:00:00Z").expect("ts");
+        let sec = 1_000_000_000_i64;
+        let mk_span = |trace: u16, span: u8, s: i64, ingest_off: i64, needle: bool| {
+            let start = t_base + s * sec;
+            let mut row = span_row(trace, span, start, start + ingest_off);
+            row.project_id = project;
+            row.name = format!("span-{trace}-{span}-{s}");
+            if needle {
+                row.input = Some("chloroplast photosynthesis pathway".to_owned());
+            }
+            row
+        };
+
+        // 1. Two L0 flushes -> compact into L1 (with overlapping times, eval span, experiment root+child).
+        let l1_a = vec![
+            mk_span(1, 0, 10, 1_000, true),
+            mk_span(2, 0, 15, 1_000, false),
+            mk_span(3, 0, 20, 1_000, true),
+            {
+                let mut eval_s = mk_span(4, 0, 22, 1_000, true);
+                eval_s.environment = Some(cetra_core::names::environment::EVAL.to_owned());
+                eval_s
+            },
+        ];
+        let mut exp_root = mk_span(5, 0, 12, 1_000, true);
+        exp_root
+            .metadata
+            .insert(metadata_key::EXPERIMENT_ID.to_owned(), "exp-99".to_owned());
+        let mut exp_child = mk_span(5, 1, 24, 1_000, true);
+        exp_child.parent_span_id = Some(exp_root.span_id);
+        let l1_b = vec![
+            exp_root,
+            exp_child,
+            mk_span(6, 0, 25, 1_000, false),
+            mk_span(7, 0, 30, 1_000, true),
+        ];
+
+        for batch in [l1_a, l1_b] {
+            storage
+                .append_spans(project, span_rows(&batch))
+                .await
+                .expect("append l1");
+            storage.flush_now(TIMEOUT).await.expect("flush l1");
+        }
+        let compact_report = storage
+            .compact(t_base + 2 * 3_600 * sec)
+            .await
+            .expect("compact");
+        assert_eq!(compact_report.failed, 0);
+
+        // 2. Two overlapping L0 files alongside the L1 file(s), including an updated copy of trace 3.
+        let l0_a = vec![
+            mk_span(3, 0, 20, 50_000, true),
+            mk_span(8, 0, 18, 1_000, true),
+            mk_span(9, 0, 28, 1_000, false),
+        ];
+        let mut eval_root = mk_span(10, 0, 14, 1_000, true);
+        eval_root.environment = Some(cetra_core::names::environment::EVAL.to_owned());
+        let mut eval_child = mk_span(10, 1, 32, 1_000, true);
+        eval_child.parent_span_id = Some(eval_root.span_id);
+        let l0_b = vec![eval_root, eval_child, mk_span(11, 0, 35, 1_000, true)];
+
+        for batch in [l0_a, l0_b] {
+            storage
+                .append_spans(project, span_rows(&batch))
+                .await
+                .expect("append l0");
+            storage.flush_now(TIMEOUT).await.expect("flush l0");
+        }
+
+        let catalog_files = storage.catalog_files(crate::wal::Table::Spans);
+        assert!(
+            catalog_files.iter().any(|f| f.level == 1),
+            "expected at least one L1 file"
+        );
+        assert!(
+            catalog_files.iter().any(|f| f.level == 0),
+            "expected overlapping L0 files"
+        );
+
+        // 3. Live memtable batch: newer copy of trace 7 + older and newer spans.
+        let mem_batch = vec![
+            mk_span(7, 0, 30, 90_000, true),
+            mk_span(12, 0, 8, 1_000, true),
+            mk_span(13, 0, 40, 1_000, true),
+        ];
+        storage
+            .append_spans(project, span_rows(&mem_batch))
+            .await
+            .expect("append mem");
+
+        let win = TimeWindow::new(t_base, t_base + 100 * sec).expect("win");
+        let vf = t_base + 14 * sec;
+
+        for (visible_from, strict, include_eval_exp, search) in [
+            (None, false, false, None),
+            (Some(vf), false, false, None),
+            (None, true, true, Some("photosynthesis")),
+            (Some(vf), true, true, Some("photosynthesis")),
+            (None, true, false, Some("cetra_nonexistent_needle_9x7z")),
+        ] {
+            let two_phase_eng = EngineContext::from_storage(
+                &storage,
+                project,
+                &QueryOptions::new(visible_from, None),
+            )
+            .expect("2p");
+            let mut single_phase_eng = two_phase_eng.clone();
+            single_phase_eng.set_force_range_mode(true);
+            let ctx_2p = QueryContext::from_engine(two_phase_eng);
+            let ctx_1p = QueryContext::from_engine(single_phase_eng);
+
+            let scope = ListScope {
+                window: Some(win),
+                include_eval: include_eval_exp,
+                include_experiments: include_eval_exp,
+            };
+
+            for order in [SortOrder::Desc, SortOrder::Asc] {
+                let rows_2p =
+                    collect_span_list_pages(&ctx_2p, scope, strict, search, order, 2).await;
+                let ref_page = span_list(
+                    &ctx_1p,
+                    SpanListRequest {
+                        filter: None,
+                        search,
+                        scope,
+                        strict_exclusions: strict,
+                        sort: SpanSort::StartTime,
+                        order,
+                        limit: 100,
+                        cursor: None,
+                        timeout: TIMEOUT,
+                    },
+                )
+                .await
+                .expect("1p ref");
+                let rows_1p = qe_rows(&ref_page.batches);
+
+                assert_eq!(
+                    rows_2p, rows_1p,
+                    "wave StartTime parity mismatch for order={order:?}, vf={visible_from:?}, strict={strict}, search={search:?}"
+                );
+                if search == Some("cetra_nonexistent_needle_9x7z") {
+                    assert!(rows_2p.is_empty());
+                } else {
+                    assert!(!rows_2p.is_empty());
+                }
+            }
+        }
+
+        // Also verify strict_exclusions=true on a clean project with zero bad traces (StrictExclusionsFilter::None).
+        let clean_project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-00000000000f".parse().expect("pid");
+        let clean_spans = vec![
+            mk_span(20, 0, 10, 1_000, true),
+            mk_span(21, 0, 20, 1_000, true),
+        ];
+        let mut clean_rows = clean_spans;
+        for s in &mut clean_rows {
+            s.project_id = clean_project;
+        }
+        storage
+            .append_spans(clean_project, span_rows(&clean_rows))
+            .await
+            .expect("append clean");
+        storage.flush_now(TIMEOUT).await.expect("flush clean");
+        let clean_ctx_2p =
+            build_context(&storage, clean_project, QueryOptions::new(None, None)).await;
+        let clean_scope = ListScope {
+            window: Some(win),
+            include_eval: false,
+            include_experiments: false,
+        };
+        let clean_rows_res =
+            collect_span_list_pages(&clean_ctx_2p, clean_scope, true, None, SortOrder::Desc, 1)
+                .await;
+        assert_eq!(clean_rows_res.len(), 2);
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn wave_ordered_span_list_settled_l1_search_miss_matches_force_range_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = test_config(dir.path());
+        cfg.compaction.l0_files = 2;
+        cfg.compaction.interval = Duration::from_secs(3_600);
+        let storage = Storage::open(cfg).await.expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000010".parse().expect("pid");
+
+        let day1 = parse_rfc3339("2026-01-01T12:00:00Z").expect("ts1");
+        let day2 = parse_rfc3339("2026-01-02T12:00:00Z").expect("ts2");
+        let sec = 1_000_000_000_i64;
+        let words = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+        ];
+        let mk_span = |trace: u16, base: i64, s: i64| {
+            let start = base + s * sec;
+            let mut row = span_row(trace, 0, start, start + 1_000);
+            row.project_id = project;
+            row.name = format!("span-{trace}-{s}");
+            let mut payload = format!("settled_l1_payload_{trace}_{s}_");
+            for j in 0..80usize {
+                payload.push_str(words[((trace as usize) * 7 + j * 3) % words.len()]);
+                payload.push('_');
+            }
+            row.input = Some(payload);
+            row
+        };
+
+        // Two L0 batches on day1 and two on day2 -> compact into settled L1 files with `.stpk` packs.
+        for (day_idx, base) in [day1, day2].into_iter().enumerate() {
+            for batch_idx in 0..2u16 {
+                let batch: Vec<_> = (0..12u16)
+                    .map(|k| {
+                        let trace = (day_idx as u16) * 100 + batch_idx * 20 + k + 1;
+                        mk_span(trace, base, i64::from(batch_idx * 20 + k))
+                    })
+                    .collect();
+                storage
+                    .append_spans(project, span_rows(&batch))
+                    .await
+                    .expect("append");
+                storage.flush_now(TIMEOUT).await.expect("flush");
+            }
+        }
+
+        let compact_report = storage
+            .compact(day2 + 2 * 3_600 * sec)
+            .await
+            .expect("compact");
+        assert_eq!(compact_report.failed, 0);
+
+        let files = storage.catalog_files(crate::wal::Table::Spans);
+        assert!(files.len() >= 2, "expected multiple settled L1 files");
+        assert!(
+            files.iter().all(|f| f.level == 1 && f.pack.is_some()),
+            "expected all files settled at L1 with external .stpk packs"
+        );
+
+        let win = TimeWindow::new(day1 - sec, day2 + 100 * sec).expect("win");
+        let scope = ListScope {
+            window: Some(win),
+            include_eval: false,
+            include_experiments: false,
+        };
+
+        let two_phase_eng =
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("2p");
+        let mut single_phase_eng = two_phase_eng.clone();
+        single_phase_eng.set_force_range_mode(true);
+        let ctx_2p = QueryContext::from_engine(two_phase_eng);
+        let ctx_1p = QueryContext::from_engine(single_phase_eng);
+
+        let miss_needle = Some("cetra_settled_l1_absent_needle_q9z");
+        for order in [SortOrder::Desc, SortOrder::Asc] {
+            let cold_2p = span_list(
+                &ctx_2p,
+                SpanListRequest {
+                    filter: None,
+                    search: miss_needle,
+                    scope,
+                    strict_exclusions: false,
+                    sort: SpanSort::StartTime,
+                    order,
+                    limit: 50,
+                    cursor: None,
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("2p cold miss");
+            let warm_2p = span_list(
+                &ctx_2p,
+                SpanListRequest {
+                    filter: None,
+                    search: miss_needle,
+                    scope,
+                    strict_exclusions: false,
+                    sort: SpanSort::StartTime,
+                    order,
+                    limit: 50,
+                    cursor: None,
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("2p warm miss");
+            let ref_1p = span_list(
+                &ctx_1p,
+                SpanListRequest {
+                    filter: None,
+                    search: miss_needle,
+                    scope,
+                    strict_exclusions: false,
+                    sort: SpanSort::StartTime,
+                    order,
+                    limit: 50,
+                    cursor: None,
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("1p miss");
+
+            let cold_rows = qe_rows(&cold_2p.batches);
+            let warm_rows = qe_rows(&warm_2p.batches);
+            let ref_rows = qe_rows(&ref_1p.batches);
+            assert!(cold_rows.is_empty());
+            assert_eq!(cold_rows, ref_rows);
+            assert_eq!(warm_rows, ref_rows);
+        }
+
+        for f in &files {
+            let pack = f.pack.as_ref().expect("pack");
+            assert!(
+                storage
+                    .qe_runtime
+                    .metadata_cache
+                    .get_pack(pack.id)
+                    .is_some(),
+                "expected PackToc cached in metadata_cache for {}",
+                f.path
+            );
         }
 
         let _ = storage.shutdown().await;

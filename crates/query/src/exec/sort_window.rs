@@ -17,10 +17,10 @@ use crate::eval::{
 };
 use crate::ir::{EvalContext, Expr};
 
-use super::pipeline::{ControlFlow, ExecContext, PushSink, transfer_or_grow};
+use super::pipeline::{ControlFlow, ExecContext, PushSink, run_pipeline, transfer_or_grow};
 use super::sort_key::{SortKey, compare_elem_refs, compare_rows, compare_rows_across};
 use super::source::PartitionStream;
-use super::spill::{MAX_MERGE_WAY, SpillFile, SpillReader, SpillWriter};
+use super::spill::{MAX_MERGE_WAY, SpillAppender, SpillFile, SpillReader, SpillWriter};
 
 const CANCEL_CHECK_MASK: usize = 1023;
 const MAX_STREAMING_WINDOW_LAG: usize = 4096;
@@ -117,6 +117,605 @@ fn compare_key_refs_across(
         }
     }
     Ordering::Equal
+}
+
+/// Order-preserving `u64` encoding of `f64` matching `eval::f64_cmp`:
+/// `-inf < negative < -0.0 == +0.0 < positive < +inf < NaN == NaN`.
+#[inline]
+fn f64_to_sortable_u64(v: f64) -> u64 {
+    if v.is_nan() {
+        return u64::MAX;
+    }
+    let norm = if v == 0.0 { 0.0f64 } else { v };
+    let bits = norm.to_bits();
+    if (bits >> 63) != 0 {
+        !bits
+    } else {
+        bits ^ (1u64 << 63)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FlatKeySpec {
+    Fixed16 {
+        descending: bool,
+        nulls_first: bool,
+    },
+    /// Covers `DataType::I64` and `DataType::TimestampNs { .. }`.
+    I64 {
+        descending: bool,
+        nulls_first: bool,
+    },
+    F64 {
+        descending: bool,
+        nulls_first: bool,
+    },
+    Utf8 {
+        descending: bool,
+        nulls_first: bool,
+    },
+}
+
+impl FlatKeySpec {
+    #[inline]
+    fn flags(self) -> (bool, bool) {
+        match self {
+            Self::Fixed16 {
+                descending,
+                nulls_first,
+            }
+            | Self::I64 {
+                descending,
+                nulls_first,
+            }
+            | Self::F64 {
+                descending,
+                nulls_first,
+            }
+            | Self::Utf8 {
+                descending,
+                nulls_first,
+            } => (descending, nulls_first),
+        }
+    }
+}
+
+fn classify_flat_key(key: &SortKey, dt: &DataType) -> Option<FlatKeySpec> {
+    match dt {
+        DataType::FixedBytes16 => Some(FlatKeySpec::Fixed16 {
+            descending: key.descending,
+            nulls_first: key.nulls_first,
+        }),
+        DataType::I64 | DataType::TimestampNs { .. } => Some(FlatKeySpec::I64 {
+            descending: key.descending,
+            nulls_first: key.nulls_first,
+        }),
+        DataType::F64 => Some(FlatKeySpec::F64 {
+            descending: key.descending,
+            nulls_first: key.nulls_first,
+        }),
+        DataType::Utf8 => Some(FlatKeySpec::Utf8 {
+            descending: key.descending,
+            nulls_first: key.nulls_first,
+        }),
+        _ => None,
+    }
+}
+
+#[inline]
+fn cmp_opt_val<T: Ord>(
+    a: Option<T>,
+    b: Option<T>,
+    descending: bool,
+    nulls_first: bool,
+) -> Ordering {
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => {
+            if nulls_first {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        }
+        (Some(_), None) => {
+            if nulls_first {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
+        }
+        (Some(va), Some(vb)) => {
+            if descending {
+                vb.cmp(&va)
+            } else {
+                va.cmp(&vb)
+            }
+        }
+    }
+}
+
+#[inline]
+fn extract_fixed16(col: &Column, r: usize) -> Option<[u8; 16]> {
+    if let Column::Flat(fc) = col {
+        if fc.nulls().is_some_and(|bm| !bm.get(r)) {
+            return None;
+        }
+        return match fc.data() {
+            FlatData::FixedBytes16(v) => v.get(r).copied(),
+            _ => None,
+        };
+    }
+    eval::read_bytes(col, r).and_then(|b| <[u8; 16]>::try_from(b).ok())
+}
+
+#[inline]
+fn extract_fixed16_non_null(col: &Column, r: usize) -> Option<[u8; 16]> {
+    if let Column::Flat(fc) = col {
+        return match fc.data() {
+            FlatData::FixedBytes16(v) => v.get(r).copied(),
+            _ => None,
+        };
+    }
+    eval::read_bytes(col, r).and_then(|b| <[u8; 16]>::try_from(b).ok())
+}
+
+#[inline]
+fn extract_i64(col: &Column, r: usize) -> Option<i64> {
+    if let Column::Flat(fc) = col {
+        if fc.nulls().is_some_and(|bm| !bm.get(r)) {
+            return None;
+        }
+        return match fc.data() {
+            FlatData::I64(v) | FlatData::TimestampNs { values: v, .. } => v.get(r).copied(),
+            _ => None,
+        };
+    }
+    match col.data_type() {
+        DataType::TimestampNs { .. } => eval::read_timestamp(col, r),
+        _ => eval::read_i64(col, r),
+    }
+}
+
+#[inline]
+fn extract_i64_non_null(col: &Column, r: usize) -> Option<i64> {
+    if let Column::Flat(fc) = col {
+        return match fc.data() {
+            FlatData::I64(v) | FlatData::TimestampNs { values: v, .. } => v.get(r).copied(),
+            _ => None,
+        };
+    }
+    match col.data_type() {
+        DataType::TimestampNs { .. } => eval::read_timestamp(col, r),
+        _ => eval::read_i64(col, r),
+    }
+}
+
+#[inline]
+fn extract_f64_key(col: &Column, r: usize) -> Option<u64> {
+    let v = if let Column::Flat(fc) = col {
+        if fc.nulls().is_some_and(|bm| !bm.get(r)) {
+            return None;
+        }
+        match fc.data() {
+            FlatData::F64(vals) => vals.get(r).copied(),
+            _ => None,
+        }
+    } else {
+        eval::read_f64(col, r)
+    }?;
+    Some(f64_to_sortable_u64(v))
+}
+
+#[inline]
+fn extract_f64_key_non_null(col: &Column, r: usize) -> Option<u64> {
+    let v = if let Column::Flat(fc) = col {
+        match fc.data() {
+            FlatData::F64(vals) => vals.get(r).copied(),
+            _ => None,
+        }
+    } else {
+        eval::read_f64(col, r)
+    }?;
+    Some(f64_to_sortable_u64(v))
+}
+
+#[inline]
+fn extract_utf8(col: &Column, r: usize) -> Option<&[u8]> {
+    if let Column::Flat(fc) = col {
+        if fc.nulls().is_some_and(|bm| !bm.get(r)) {
+            return None;
+        }
+        return match fc.data() {
+            FlatData::Utf8(u) => u.get_bytes(r),
+            _ => None,
+        };
+    }
+    eval::read_str_bytes(col, r)
+}
+
+#[inline]
+fn extract_utf8_non_null(col: &Column, r: usize) -> Option<&[u8]> {
+    if let Column::Flat(fc) = col {
+        return match fc.data() {
+            FlatData::Utf8(u) => u.get_bytes(r),
+            _ => None,
+        };
+    }
+    eval::read_str_bytes(col, r)
+}
+
+#[inline]
+fn permute_refs_from_positions<I: Iterator<Item = u32>>(refs: &mut Vec<(u32, u32)>, positions: I) {
+    let orig = std::mem::take(refs);
+    refs.reserve(orig.len());
+    for pos in positions {
+        refs.push(orig[pos as usize]);
+    }
+}
+
+fn collect_1key_non_null<'a, K: 'a, F>(
+    key_refs: &[Vec<&'a Column>],
+    refs: &[(u32, u32)],
+    extract: F,
+) -> Option<Vec<(K, u32)>>
+where
+    F: Fn(&'a Column, usize) -> Option<K>,
+{
+    let mut entries = Vec::with_capacity(refs.len());
+    for (pos, &(ba, ra)) in refs.iter().enumerate() {
+        let col = key_refs.get(ba as usize)?.first().copied()?;
+        entries.push((extract(col, ra as usize)?, pos as u32));
+    }
+    Some(entries)
+}
+
+fn collect_1key_nullable<'a, K: 'a, F>(
+    key_refs: &[Vec<&'a Column>],
+    refs: &[(u32, u32)],
+    extract: F,
+) -> Option<Vec<(Option<K>, u32)>>
+where
+    F: Fn(&'a Column, usize) -> Option<K>,
+{
+    let mut entries = Vec::with_capacity(refs.len());
+    for (pos, &(ba, ra)) in refs.iter().enumerate() {
+        let col = key_refs.get(ba as usize)?.first().copied()?;
+        entries.push((extract(col, ra as usize), pos as u32));
+    }
+    Some(entries)
+}
+
+fn sort_1key_non_null<K: Ord>(
+    mut entries: Vec<(K, u32)>,
+    descending: bool,
+    refs: &mut Vec<(u32, u32)>,
+) {
+    if descending {
+        entries.sort_unstable_by(|(ka, pa), (kb, pb)| kb.cmp(ka).then_with(|| pa.cmp(pb)));
+    } else {
+        entries.sort_unstable_by(|(ka, pa), (kb, pb)| ka.cmp(kb).then_with(|| pa.cmp(pb)));
+    }
+    permute_refs_from_positions(refs, entries.into_iter().map(|(_, pos)| pos));
+}
+
+fn sort_1key_nullable<K: Ord>(
+    mut entries: Vec<(Option<K>, u32)>,
+    descending: bool,
+    nulls_first: bool,
+    refs: &mut Vec<(u32, u32)>,
+) {
+    entries.sort_unstable_by(|(ka, pa), (kb, pb)| {
+        cmp_opt_val(ka.as_ref(), kb.as_ref(), descending, nulls_first).then_with(|| pa.cmp(pb))
+    });
+    permute_refs_from_positions(refs, entries.into_iter().map(|(_, pos)| pos));
+}
+
+fn collect_2key_non_null<'a, K1: 'a, K2: 'a, F1, F2>(
+    key_refs: &[Vec<&'a Column>],
+    refs: &[(u32, u32)],
+    extract1: F1,
+    extract2: F2,
+) -> Option<Vec<(K1, K2, u32)>>
+where
+    F1: Fn(&'a Column, usize) -> Option<K1>,
+    F2: Fn(&'a Column, usize) -> Option<K2>,
+{
+    let mut entries = Vec::with_capacity(refs.len());
+    for (pos, &(ba, ra)) in refs.iter().enumerate() {
+        let cols = key_refs.get(ba as usize)?;
+        let c1 = cols.first().copied()?;
+        let c2 = cols.get(1).copied()?;
+        let r = ra as usize;
+        entries.push((extract1(c1, r)?, extract2(c2, r)?, pos as u32));
+    }
+    Some(entries)
+}
+
+type Nullable2KeyVec<K1, K2> = Vec<(Option<K1>, Option<K2>, u32)>;
+
+fn collect_2key_nullable<'a, K1: 'a, K2: 'a, F1, F2>(
+    key_refs: &[Vec<&'a Column>],
+    refs: &[(u32, u32)],
+    extract1: F1,
+    extract2: F2,
+) -> Option<Nullable2KeyVec<K1, K2>>
+where
+    F1: Fn(&'a Column, usize) -> Option<K1>,
+    F2: Fn(&'a Column, usize) -> Option<K2>,
+{
+    let mut entries = Vec::with_capacity(refs.len());
+    for (pos, &(ba, ra)) in refs.iter().enumerate() {
+        let cols = key_refs.get(ba as usize)?;
+        let c1 = cols.first().copied()?;
+        let c2 = cols.get(1).copied()?;
+        let r = ra as usize;
+        entries.push((extract1(c1, r), extract2(c2, r), pos as u32));
+    }
+    Some(entries)
+}
+
+fn sort_2key_non_null<K1: Ord, K2: Ord>(
+    mut entries: Vec<(K1, K2, u32)>,
+    desc1: bool,
+    desc2: bool,
+    refs: &mut Vec<(u32, u32)>,
+) {
+    entries.sort_unstable_by(|(a1, a2, pa), (b1, b2, pb)| {
+        let o1 = if desc1 { b1.cmp(a1) } else { a1.cmp(b1) };
+        if o1 != Ordering::Equal {
+            return o1;
+        }
+        let o2 = if desc2 { b2.cmp(a2) } else { a2.cmp(b2) };
+        o2.then_with(|| pa.cmp(pb))
+    });
+    permute_refs_from_positions(refs, entries.into_iter().map(|(_, _, pos)| pos));
+}
+
+fn sort_2key_nullable<K1: Ord, K2: Ord>(
+    mut entries: Nullable2KeyVec<K1, K2>,
+    k1: (bool, bool),
+    k2: (bool, bool),
+    refs: &mut Vec<(u32, u32)>,
+) {
+    let (desc1, nf1) = k1;
+    let (desc2, nf2) = k2;
+    entries.sort_unstable_by(|(a1, a2, pa), (b1, b2, pb)| {
+        let o1 = cmp_opt_val(a1.as_ref(), b1.as_ref(), desc1, nf1);
+        if o1 != Ordering::Equal {
+            return o1;
+        }
+        cmp_opt_val(a2.as_ref(), b2.as_ref(), desc2, nf2).then_with(|| pa.cmp(pb))
+    });
+    permute_refs_from_positions(refs, entries.into_iter().map(|(_, _, pos)| pos));
+}
+
+fn try_sort_1key(key_refs: &[Vec<&Column>], key: &SortKey, refs: &mut Vec<(u32, u32)>) -> bool {
+    let Some(dt) = key_refs
+        .first()
+        .and_then(|cols| cols.first())
+        .map(|c| c.data_type())
+    else {
+        return false;
+    };
+    if !key_refs
+        .iter()
+        .all(|cols| !cols.is_empty() && cols[0].data_type() == dt)
+    {
+        return false;
+    }
+    let Some(spec) = classify_flat_key(key, &dt) else {
+        return false;
+    };
+    let any_nulls = key_refs.iter().any(|cols| cols[0].has_nulls());
+    match (spec, any_nulls) {
+        (FlatKeySpec::Fixed16 { descending, .. }, false) => {
+            if let Some(entries) = collect_1key_non_null(key_refs, refs, extract_fixed16_non_null) {
+                sort_1key_non_null(entries, descending, refs);
+                return true;
+            }
+        }
+        (
+            FlatKeySpec::Fixed16 {
+                descending,
+                nulls_first,
+            },
+            true,
+        ) => {
+            if let Some(entries) = collect_1key_nullable(key_refs, refs, extract_fixed16) {
+                sort_1key_nullable(entries, descending, nulls_first, refs);
+                return true;
+            }
+        }
+        (FlatKeySpec::I64 { descending, .. }, false) => {
+            if let Some(entries) = collect_1key_non_null(key_refs, refs, extract_i64_non_null) {
+                sort_1key_non_null(entries, descending, refs);
+                return true;
+            }
+        }
+        (
+            FlatKeySpec::I64 {
+                descending,
+                nulls_first,
+            },
+            true,
+        ) => {
+            if let Some(entries) = collect_1key_nullable(key_refs, refs, extract_i64) {
+                sort_1key_nullable(entries, descending, nulls_first, refs);
+                return true;
+            }
+        }
+        (FlatKeySpec::F64 { descending, .. }, false) => {
+            if let Some(entries) = collect_1key_non_null(key_refs, refs, extract_f64_key_non_null) {
+                sort_1key_non_null(entries, descending, refs);
+                return true;
+            }
+        }
+        (
+            FlatKeySpec::F64 {
+                descending,
+                nulls_first,
+            },
+            true,
+        ) => {
+            if let Some(entries) = collect_1key_nullable(key_refs, refs, extract_f64_key) {
+                sort_1key_nullable(entries, descending, nulls_first, refs);
+                return true;
+            }
+        }
+        (FlatKeySpec::Utf8 { descending, .. }, false) => {
+            if let Some(entries) = collect_1key_non_null(key_refs, refs, extract_utf8_non_null) {
+                sort_1key_non_null(entries, descending, refs);
+                return true;
+            }
+        }
+        (
+            FlatKeySpec::Utf8 {
+                descending,
+                nulls_first,
+            },
+            true,
+        ) => {
+            if let Some(entries) = collect_1key_nullable(key_refs, refs, extract_utf8) {
+                sort_1key_nullable(entries, descending, nulls_first, refs);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn try_sort_2key_typed<'a, K1, K2, F1N, F1C, F2N, F2C>(
+    key_refs: &[Vec<&'a Column>],
+    refs: &mut Vec<(u32, u32)>,
+    both_non_null: bool,
+    flags: ((bool, bool), (bool, bool)),
+    ext1: (F1N, F1C),
+    ext2: (F2N, F2C),
+) -> bool
+where
+    K1: Ord + 'a,
+    K2: Ord + 'a,
+    F1N: Fn(&'a Column, usize) -> Option<K1>,
+    F1C: Fn(&'a Column, usize) -> Option<K1>,
+    F2N: Fn(&'a Column, usize) -> Option<K2>,
+    F2C: Fn(&'a Column, usize) -> Option<K2>,
+{
+    let ((d1, nf1), (d2, nf2)) = flags;
+    if both_non_null {
+        if let Some(entries) = collect_2key_non_null(key_refs, refs, ext1.0, ext2.0) {
+            sort_2key_non_null(entries, d1, d2, refs);
+            return true;
+        }
+        return false;
+    }
+    if let Some(entries) = collect_2key_nullable(key_refs, refs, ext1.1, ext2.1) {
+        sort_2key_nullable(entries, (d1, nf1), (d2, nf2), refs);
+        return true;
+    }
+    false
+}
+
+fn try_sort_2key(key_refs: &[Vec<&Column>], keys: &[SortKey], refs: &mut Vec<(u32, u32)>) -> bool {
+    let Some(first) = key_refs.first() else {
+        return false;
+    };
+    if first.len() < 2 {
+        return false;
+    }
+    let dt0 = first[0].data_type();
+    let dt1 = first[1].data_type();
+    if !key_refs
+        .iter()
+        .all(|cols| cols.len() >= 2 && cols[0].data_type() == dt0 && cols[1].data_type() == dt1)
+    {
+        return false;
+    }
+    let (Some(spec0), Some(spec1)) = (
+        classify_flat_key(&keys[0], &dt0),
+        classify_flat_key(&keys[1], &dt1),
+    ) else {
+        return false;
+    };
+    let both_non_null = !key_refs
+        .iter()
+        .any(|cols| cols[0].has_nulls() || cols[1].has_nulls());
+    let flags = (spec0.flags(), spec1.flags());
+    match (spec0, spec1) {
+        (FlatKeySpec::Utf8 { .. }, FlatKeySpec::I64 { .. }) => try_sort_2key_typed(
+            key_refs,
+            refs,
+            both_non_null,
+            flags,
+            (extract_utf8_non_null, extract_utf8),
+            (extract_i64_non_null, extract_i64),
+        ),
+        (FlatKeySpec::I64 { .. }, FlatKeySpec::Fixed16 { .. }) => try_sort_2key_typed(
+            key_refs,
+            refs,
+            both_non_null,
+            flags,
+            (extract_i64_non_null, extract_i64),
+            (extract_fixed16_non_null, extract_fixed16),
+        ),
+        (FlatKeySpec::Fixed16 { .. }, FlatKeySpec::I64 { .. }) => try_sort_2key_typed(
+            key_refs,
+            refs,
+            both_non_null,
+            flags,
+            (extract_fixed16_non_null, extract_fixed16),
+            (extract_i64_non_null, extract_i64),
+        ),
+        (FlatKeySpec::I64 { .. }, FlatKeySpec::I64 { .. }) => try_sort_2key_typed(
+            key_refs,
+            refs,
+            both_non_null,
+            flags,
+            (extract_i64_non_null, extract_i64),
+            (extract_i64_non_null, extract_i64),
+        ),
+        (FlatKeySpec::Utf8 { .. }, FlatKeySpec::Utf8 { .. }) => try_sort_2key_typed(
+            key_refs,
+            refs,
+            both_non_null,
+            flags,
+            (extract_utf8_non_null, extract_utf8),
+            (extract_utf8_non_null, extract_utf8),
+        ),
+        _ => false,
+    }
+}
+
+/// Sorts `(batch_idx, row_idx)` references using typed key materialization for common
+/// 1-key and 2-key sorts while preserving exact stability across all `Selection` variants
+/// and falling back to generic dynamic comparison for other key counts/types.
+fn sort_row_refs_specialized(
+    key_refs: &[Vec<&Column>],
+    keys: &[SortKey],
+    refs: &mut Vec<(u32, u32)>,
+) {
+    if refs.len() <= 1 || keys.is_empty() {
+        return;
+    }
+    if refs.len() <= u32::MAX as usize {
+        let handled = match keys.len() {
+            1 => try_sort_1key(key_refs, &keys[0], refs),
+            2 => try_sort_2key(key_refs, keys, refs),
+            _ => false,
+        };
+        if handled {
+            return;
+        }
+    }
+    refs.sort_by(|&(ba, ra), &(bb, rb)| {
+        compare_key_refs_across(
+            &key_refs[ba as usize],
+            ra as usize,
+            &key_refs[bb as usize],
+            rb as usize,
+            keys,
+        )
+    });
 }
 
 /// Gathers `(cursor_or_batch_idx, row_idx)` rows from `batches` into a compacted `Batch`.
@@ -384,15 +983,7 @@ impl ExternalSort {
             .map(|bb| resolve_key_col_refs(&self.keys, &bb.batch, &bb.extra_keys))
             .collect::<Result<Vec<_>, _>>()?;
 
-        refs.sort_by(|&(ba, ra), &(bb, rb)| {
-            compare_key_refs_across(
-                &key_refs[ba as usize],
-                ra as usize,
-                &key_refs[bb as usize],
-                rb as usize,
-                &self.keys,
-            )
-        });
+        sort_row_refs_specialized(&key_refs, &self.keys, &mut refs);
 
         if let Some(limit) = self.limit {
             refs.truncate(limit);
@@ -490,9 +1081,7 @@ impl ExternalSort {
 
         {
             let key_refs = resolve_key_col_refs(&self.keys, batch, &extra_keys)?;
-            refs.sort_by(|&(_, ra), &(_, rb)| {
-                compare_key_refs_across(&key_refs, ra as usize, &key_refs, rb as usize, &self.keys)
-            });
+            sort_row_refs_specialized(std::slice::from_ref(&key_refs), &self.keys, &mut refs);
         }
         if let Some(limit) = self.limit {
             refs.truncate(limit);
@@ -1758,19 +2347,18 @@ fn validate_window_spec(spec: &WindowSpec) -> Result<Field, QueryError> {
     Ok(Field::new(spec.output_name.clone(), dt, nullable))
 }
 
-/// Evaluates a group of [`WindowSpec`]s sharing `(partition_by, order_by)` over `input`,
-/// appending one output column per spec to `input_schema`.
-pub fn eval_window_group(
-    input: Box<dyn PartitionStream>,
-    input_schema: Arc<Schema>,
-    partition_by: Vec<Expr>,
-    order_by: Vec<SortKey>,
-    specs: Vec<WindowSpec>,
-    ctx: &ExecContext,
-) -> Result<Box<dyn PartitionStream>, QueryError> {
+const PARALLEL_WINDOW_MIN_SHARE_PER_PART: usize = 256 * 1024;
+const WINDOW_PARTITION_HASH_SEED: u64 = 0x736f_7274_5f77_696e;
+
+fn validate_window_group(
+    input_schema: &Arc<Schema>,
+    partition_by: &[Expr],
+    order_by: &[SortKey],
+    specs: &[WindowSpec],
+) -> Result<(Arc<Schema>, Vec<DataType>), QueryError> {
     let mut fields = input_schema.fields().to_vec();
     let mut out_types = Vec::with_capacity(specs.len());
-    for spec in &specs {
+    for spec in specs {
         if spec.partition_by != partition_by || spec.order_by != order_by {
             return Err(QueryError::Invalid(InvalidQuery::new(
                 "window spec partition_by/order_by must match window group",
@@ -1782,6 +2370,41 @@ pub fn eval_window_group(
         fields.push(field);
     }
     let output_schema = Schema::try_new_arc(fields)?;
+    Ok((output_schema, out_types))
+}
+
+/// Evaluates a group of [`WindowSpec`]s sharing `(partition_by, order_by)` over `input`,
+/// appending one output column per spec to `input_schema`.
+pub fn eval_window_group(
+    input: Box<dyn PartitionStream>,
+    input_schema: Arc<Schema>,
+    partition_by: Vec<Expr>,
+    order_by: Vec<SortKey>,
+    specs: Vec<WindowSpec>,
+    ctx: &ExecContext,
+) -> Result<Box<dyn PartitionStream>, QueryError> {
+    eval_window_group_with_merge_way(
+        input,
+        input_schema,
+        partition_by,
+        order_by,
+        specs,
+        MAX_MERGE_WAY,
+        ctx,
+    )
+}
+
+fn eval_window_group_with_merge_way(
+    input: Box<dyn PartitionStream>,
+    input_schema: Arc<Schema>,
+    partition_by: Vec<Expr>,
+    order_by: Vec<SortKey>,
+    specs: Vec<WindowSpec>,
+    max_merge_way: usize,
+    ctx: &ExecContext,
+) -> Result<Box<dyn PartitionStream>, QueryError> {
+    let (output_schema, out_types) =
+        validate_window_group(&input_schema, &partition_by, &order_by, &specs)?;
 
     if specs.is_empty() {
         return Ok(input);
@@ -1813,12 +2436,638 @@ pub fn eval_window_group(
         sort_keys,
         specs,
         out_types,
+        max_merge_way: max_merge_way.max(2),
         ctx: ctx.clone(),
         lookahead: None,
         queued_out: VecDeque::new(),
         streaming,
         res,
     }))
+}
+
+/// Evaluates a window group over multiple input partition streams.
+///
+/// When `specs` is empty, returns `inputs` unchanged (after spec validation).
+/// When `partition_by` is non-empty, `inputs.len() > 1`, `ctx.workers.num_workers() > 1`,
+/// `ctx.target_partitions > 1`, and `ctx.pool.spill_share()` is sufficient for parallel
+/// hash partitioning, shuffles `inputs` in parallel by canonical `partition_by` hash into
+/// `P = ctx.target_partitions.min(ctx.workers.num_workers()).max(1)` independent buckets
+/// (spilling any bucket cleanly if memory pressure occurs) and returns one `WindowStream`
+/// per non-empty bucket so sorting and window evaluation run in parallel across workers.
+///
+/// Otherwise chains `inputs` and delegates to [`eval_window_group`].
+pub fn eval_window_group_parallel(
+    mut inputs: Vec<Box<dyn PartitionStream>>,
+    input_schema: Arc<Schema>,
+    partition_by: Vec<Expr>,
+    order_by: Vec<SortKey>,
+    specs: Vec<WindowSpec>,
+    ctx: &ExecContext,
+) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+    let _ = validate_window_group(&input_schema, &partition_by, &order_by, &specs)?;
+    if ctx.eval.cancel.is_cancelled() {
+        return Err(QueryError::Cancelled);
+    }
+    if specs.is_empty() {
+        return Ok(inputs);
+    }
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let p = ctx.target_partitions.min(ctx.workers.num_workers()).max(1);
+    if partition_by.is_empty()
+        || inputs.len() <= 1
+        || p <= 1
+        || ctx.pool.spill_share() < (p + 1).saturating_mul(PARALLEL_WINDOW_MIN_SHARE_PER_PART)
+    {
+        let chained: Box<dyn PartitionStream> = if inputs.len() == 1 {
+            inputs.remove(0)
+        } else {
+            Box::new(ChainedWindowInputStream::new(inputs))
+        };
+        return Ok(vec![eval_window_group(
+            chained,
+            input_schema,
+            partition_by,
+            order_by,
+            specs,
+            ctx,
+        )?]);
+    }
+
+    let sink_schema = Arc::clone(&input_schema);
+    let sink_part = partition_by.clone();
+    let sink_ctx = ctx.clone();
+    let sinks = run_pipeline(
+        ctx,
+        inputs,
+        |_| Ok(Vec::new()),
+        move |_| {
+            Ok(WindowHashPartitionSink::new(
+                Arc::clone(&sink_schema),
+                sink_part.clone(),
+                p,
+                sink_ctx.clone(),
+            ))
+        },
+    )?;
+
+    combine_window_partition_sinks(sinks, &input_schema, &partition_by, &order_by, &specs, ctx)
+}
+
+struct ChainedWindowInputStream {
+    streams: VecDeque<Box<dyn PartitionStream>>,
+}
+
+impl ChainedWindowInputStream {
+    fn new(streams: Vec<Box<dyn PartitionStream>>) -> Self {
+        Self {
+            streams: streams.into(),
+        }
+    }
+}
+
+impl PartitionStream for ChainedWindowInputStream {
+    fn next_batch(
+        &mut self,
+        cancel: &CancelToken,
+        mut res: Option<&mut Reservation>,
+    ) -> Result<Option<Batch>, QueryError> {
+        let before = pool_size(&res);
+        while let Some(front) = self.streams.front_mut() {
+            if cancel.is_cancelled() {
+                rollback_to(&mut res, before);
+                return Err(QueryError::Cancelled);
+            }
+            match front.next_batch(cancel, res.as_deref_mut()) {
+                Ok(Some(batch)) => {
+                    if batch.is_empty() {
+                        rollback_to(&mut res, before);
+                        continue;
+                    }
+                    return Ok(Some(batch));
+                }
+                Ok(None) => {
+                    self.streams.pop_front();
+                }
+                Err(err) => {
+                    rollback_to(&mut res, before);
+                    return Err(err);
+                }
+            }
+        }
+        rollback_to(&mut res, before);
+        Ok(None)
+    }
+}
+
+struct WindowPartitionBucket {
+    batches: Vec<Batch>,
+    mem_bytes: usize,
+    appender: SpillAppender,
+}
+
+struct WindowHashPartitionSink {
+    schema: Arc<Schema>,
+    part_exprs: Vec<Expr>,
+    buckets: Vec<WindowPartitionBucket>,
+    res: Reservation,         // can_spill = true
+    scratch_res: Reservation, // can_spill = false
+    max_batch_bytes: usize,
+    ctx: ExecContext,
+}
+
+impl WindowHashPartitionSink {
+    fn new(
+        schema: Arc<Schema>,
+        part_exprs: Vec<Expr>,
+        num_partitions: usize,
+        ctx: ExecContext,
+    ) -> Self {
+        let p = num_partitions.max(1);
+        let buckets = (0..p)
+            .map(|_| WindowPartitionBucket {
+                batches: Vec::new(),
+                mem_bytes: 0,
+                appender: ctx.spill.create_appender(),
+            })
+            .collect();
+        let res = ctx.pool.register("window_hash_part_sink", true);
+        let scratch_res = ctx.pool.register("window_hash_part_scratch", false);
+        Self {
+            schema,
+            part_exprs,
+            buckets,
+            res,
+            scratch_res,
+            max_batch_bytes: 0,
+            ctx,
+        }
+    }
+
+    fn total_mem_bytes(&self) -> usize {
+        self.buckets.iter().map(|b| b.mem_bytes).sum()
+    }
+
+    fn spill_largest_bucket(&mut self) -> Result<bool, QueryError> {
+        let Some((idx, _)) = self
+            .buckets
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| !b.batches.is_empty())
+            .max_by_key(|(_, b)| b.mem_bytes)
+        else {
+            return Ok(false);
+        };
+        let bucket = &mut self.buckets[idx];
+        let drained: Vec<Batch> = std::mem::take(&mut bucket.batches);
+        let freed_bytes = bucket.mem_bytes;
+        bucket.mem_bytes = 0;
+        for batch in drained {
+            if self.ctx.eval.cancel.is_cancelled() {
+                self.res.shrink(self.res.size().min(freed_bytes));
+                return Err(QueryError::Cancelled);
+            }
+            if let Err(err) = bucket.appender.append_batch(&batch, None) {
+                self.res.shrink(self.res.size().min(freed_bytes));
+                return Err(err);
+            }
+        }
+        self.res.shrink(self.res.size().min(freed_bytes));
+        Ok(true)
+    }
+
+    fn eval_part_exprs(&mut self, batch: &Batch) -> Result<Vec<Option<Arc<Column>>>, QueryError> {
+        loop {
+            self.scratch_res.free();
+            let mut owned = Vec::with_capacity(self.part_exprs.len());
+            let mut too_large = false;
+            for expr in &self.part_exprs {
+                match expr {
+                    Expr::Column {
+                        index, data_type, ..
+                    } => {
+                        let col = batch.column(*index).ok_or(ColumnError::InvalidBatch {
+                            reason: "partition key column index out of bounds",
+                        })?;
+                        if col.data_type() != *data_type {
+                            self.scratch_res.free();
+                            return Err(ColumnError::InvalidBatch {
+                                reason: "partition key column data type mismatch",
+                            }
+                            .into());
+                        }
+                        owned.push(None);
+                    }
+                    other => {
+                        match eval_expr(other, batch, &self.ctx.eval, Some(&mut self.scratch_res)) {
+                            Ok(col) => owned.push(Some(col)),
+                            Err(QueryError::TooLarge) if self.total_mem_bytes() > 0 => {
+                                too_large = true;
+                                break;
+                            }
+                            Err(err) => {
+                                self.scratch_res.free();
+                                return Err(err);
+                            }
+                        }
+                    }
+                }
+            }
+            if too_large {
+                drop(owned);
+                self.scratch_res.free();
+                if !self.spill_largest_bucket()? {
+                    return Err(QueryError::TooLarge);
+                }
+                continue;
+            }
+            return Ok(owned);
+        }
+    }
+
+    fn push_bucket_batch(
+        &mut self,
+        bucket_idx: usize,
+        batch: Batch,
+        batch_res: &mut Reservation,
+    ) -> Result<(), QueryError> {
+        let bytes = batch.memory_bytes();
+        loop {
+            match transfer_or_grow(batch_res, &mut self.res, bytes) {
+                Ok(()) => {
+                    self.buckets[bucket_idx].batches.push(batch);
+                    self.buckets[bucket_idx].mem_bytes =
+                        self.buckets[bucket_idx].mem_bytes.saturating_add(bytes);
+                    break;
+                }
+                Err(ColumnError::MemoryLimit { .. }) if self.total_mem_bytes() > 0 => {
+                    self.spill_largest_bucket()?;
+                }
+                Err(ColumnError::MemoryLimit { .. }) => {
+                    // Single sub-batch exceeds SpillShare with 0 buffered bytes: spill directly.
+                    self.buckets[bucket_idx]
+                        .appender
+                        .append_batch(&batch, None)?;
+                    return Ok(());
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+
+        let cap = self.ctx.pool.cap();
+        while self.total_mem_bytes() > 0
+            && (self
+                .res
+                .size()
+                .saturating_add(self.max_batch_bytes.saturating_mul(2))
+                > cap
+                || self
+                    .ctx
+                    .pool
+                    .reserved()
+                    .saturating_add(self.max_batch_bytes.saturating_mul(2))
+                    > cap)
+        {
+            if !self.spill_largest_bucket()? {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl PushSink for WindowHashPartitionSink {
+    fn consume(
+        &mut self,
+        batch: Batch,
+        batch_res: &mut Reservation,
+    ) -> Result<ControlFlow, QueryError> {
+        if self.ctx.eval.cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        if batch.is_empty() {
+            return Ok(ControlFlow::Continue);
+        }
+        if batch.schema().as_ref() != self.schema.as_ref() {
+            return Err(ColumnError::InvalidBatch {
+                reason: "batch schema does not match WindowHashPartitionSink schema",
+            }
+            .into());
+        }
+
+        let raw_len = batch.raw_len();
+        batch.selection().validate(raw_len)?;
+        self.max_batch_bytes = self.max_batch_bytes.max(batch.memory_bytes());
+
+        let is_all = batch.selection().is_all(raw_len);
+        let p = self.buckets.len().max(1);
+        let owned_part_cols = self.eval_part_exprs(&batch)?;
+
+        if p == 1 {
+            drop(owned_part_cols);
+            self.scratch_res.free();
+            let compact = if is_all { batch } else { batch.compact(None)? };
+            return self
+                .push_bucket_batch(0, compact, batch_res)
+                .map(|()| ControlFlow::Continue);
+        }
+
+        let mut per_bucket_rows: Vec<Vec<u32>> = vec![Vec::new(); p];
+        {
+            let mut part_cols: Vec<&Column> = Vec::with_capacity(self.part_exprs.len());
+            for (idx, expr) in self.part_exprs.iter().enumerate() {
+                if let Some(Some(col)) = owned_part_cols.get(idx) {
+                    part_cols.push(col.as_ref());
+                } else if let Expr::Column { index, .. } = expr {
+                    let col = batch.column(*index).ok_or(ColumnError::InvalidBatch {
+                        reason: "partition key column index out of bounds",
+                    })?;
+                    part_cols.push(col);
+                } else {
+                    drop(part_cols);
+                    drop(owned_part_cols);
+                    self.scratch_res.free();
+                    return Err(QueryError::internal(
+                        "missing evaluated partition key column",
+                    ));
+                }
+            }
+
+            let mut hash_push = |phys_row: usize| -> Result<(), ColumnError> {
+                let row_u32 = u32::try_from(phys_row).map_err(|_| ColumnError::Overflow {
+                    reason: "batch row index exceeds u32::MAX",
+                })?;
+                let h = crate::exec::hash_join::hash_key_row(
+                    &part_cols,
+                    phys_row,
+                    WINDOW_PARTITION_HASH_SEED,
+                );
+                per_bucket_rows[(h as usize) % p].push(row_u32);
+                Ok(())
+            };
+
+            if is_all {
+                for phys_row in 0..raw_len {
+                    hash_push(phys_row)?;
+                }
+            } else {
+                match batch.selection() {
+                    Selection::Mask(mask) => {
+                        for phys_row in mask.iter_ones() {
+                            hash_push(phys_row)?;
+                        }
+                    }
+                    Selection::Indices(indices) => {
+                        for &phys_row in indices {
+                            let h = crate::exec::hash_join::hash_key_row(
+                                &part_cols,
+                                phys_row as usize,
+                                WINDOW_PARTITION_HASH_SEED,
+                            );
+                            per_bucket_rows[(h as usize) % p].push(phys_row);
+                        }
+                    }
+                    Selection::All => {
+                        for phys_row in 0..raw_len {
+                            hash_push(phys_row)?;
+                        }
+                    }
+                }
+            }
+        }
+        drop(owned_part_cols);
+        self.scratch_res.free();
+
+        let non_empty_buckets = per_bucket_rows.iter().filter(|r| !r.is_empty()).count();
+        if non_empty_buckets == 0 {
+            return Ok(ControlFlow::Continue);
+        }
+
+        if non_empty_buckets == 1
+            && let Some(bucket_idx) = per_bucket_rows.iter().position(|r| !r.is_empty())
+        {
+            let compact = if is_all { batch } else { batch.compact(None)? };
+            return self
+                .push_bucket_batch(bucket_idx, compact, batch_res)
+                .map(|()| ControlFlow::Continue);
+        }
+
+        for (b_idx, rows) in per_bucket_rows.into_iter().enumerate() {
+            if rows.is_empty() {
+                continue;
+            }
+            let mut cols = Vec::with_capacity(batch.columns().len());
+            for col in batch.columns() {
+                cols.push(Column::Flat(col.take(&rows, None)?));
+            }
+            let sub_batch = Batch::try_new_all(Arc::clone(&self.schema), cols, rows.len())?;
+            self.push_bucket_batch(b_idx, sub_batch, batch_res)?;
+        }
+        Ok(ControlFlow::Continue)
+    }
+
+    fn finish(&mut self) -> Result<(), QueryError> {
+        self.scratch_res.free();
+        Ok(())
+    }
+}
+
+struct CombinedWindowBucket {
+    in_mem: VecDeque<Batch>,
+    in_mem_bytes: usize,
+    spills: VecDeque<SpillFile>,
+}
+
+fn combine_window_partition_sinks(
+    mut sinks: Vec<WindowHashPartitionSink>,
+    input_schema: &Arc<Schema>,
+    partition_by: &[Expr],
+    order_by: &[SortKey],
+    specs: &[WindowSpec],
+    ctx: &ExecContext,
+) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+    if sinks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let p = sinks[0].buckets.len().max(1);
+    let mut combined: Vec<CombinedWindowBucket> = (0..p)
+        .map(|_| CombinedWindowBucket {
+            in_mem: VecDeque::new(),
+            in_mem_bytes: 0,
+            spills: VecDeque::new(),
+        })
+        .collect();
+
+    let per_part_in_mem_cap = (ctx.pool.cap() / (2 * p)).max(1);
+    let mut part_res: Vec<Reservation> = (0..p)
+        .map(|_| ctx.pool.register("window_hash_part_buf", false))
+        .collect();
+
+    for sink in &mut sinks {
+        for (p_idx, bucket) in sink.buckets.iter_mut().enumerate() {
+            if ctx.eval.cancel.is_cancelled() {
+                sink.res.free();
+                return Err(QueryError::Cancelled);
+            }
+            if let Some(sf) =
+                std::mem::replace(&mut bucket.appender, ctx.spill.create_appender()).finish()
+            {
+                combined[p_idx].spills.push_back(sf);
+            }
+            if bucket.batches.is_empty() {
+                continue;
+            }
+            let b_bytes = bucket.mem_bytes;
+            let mut drained = std::mem::take(&mut bucket.batches);
+            bucket.mem_bytes = 0;
+
+            let must_spill = !combined[p_idx].spills.is_empty()
+                || combined[p_idx].in_mem_bytes.saturating_add(b_bytes) > per_part_in_mem_cap;
+            if must_spill {
+                let mut app = ctx.spill.create_appender();
+                for prev in combined[p_idx].in_mem.drain(..) {
+                    app.append_batch(&prev, None)?;
+                }
+                combined[p_idx].in_mem_bytes = 0;
+                part_res[p_idx].free();
+                for b in drained.drain(..) {
+                    app.append_batch(&b, None)?;
+                }
+                sink.res.shrink(sink.res.size().min(b_bytes));
+                if let Some(sf) = app.finish() {
+                    combined[p_idx].spills.push_back(sf);
+                }
+            } else {
+                let move_bytes = sink.res.size().min(b_bytes);
+                if move_bytes > 0 {
+                    sink.res.transfer_to(&mut part_res[p_idx], move_bytes)?;
+                }
+                combined[p_idx].in_mem.extend(drained);
+                combined[p_idx].in_mem_bytes = combined[p_idx].in_mem_bytes.saturating_add(b_bytes);
+            }
+        }
+        sink.res.free();
+    }
+    drop(sinks);
+
+    let max_merge_way = (MAX_MERGE_WAY / p).max(2);
+    let mut out_streams = Vec::with_capacity(p);
+    for (bucket, mut res) in combined.into_iter().zip(part_res) {
+        if bucket.in_mem.is_empty() && bucket.spills.is_empty() {
+            res.free();
+            continue;
+        }
+        let bucket_stream: Box<dyn PartitionStream> = Box::new(WindowBucketStream {
+            schema: Arc::clone(input_schema),
+            in_mem: bucket.in_mem,
+            in_mem_res: res,
+            spills: bucket.spills,
+            active_reader: None,
+            ctx: ctx.clone(),
+        });
+        out_streams.push(eval_window_group_with_merge_way(
+            bucket_stream,
+            Arc::clone(input_schema),
+            partition_by.to_vec(),
+            order_by.to_vec(),
+            specs.to_vec(),
+            max_merge_way,
+            ctx,
+        )?);
+    }
+    Ok(out_streams)
+}
+
+/// Streams one hash-partitioned bucket's in-memory batches followed lazily by its spilled
+/// files (holding at most 1 open `SpillReader` FD at a time) with exact `Reservation` transfer.
+struct WindowBucketStream {
+    schema: Arc<Schema>,
+    in_mem: VecDeque<Batch>,
+    in_mem_res: Reservation, // can_spill = false
+    spills: VecDeque<SpillFile>,
+    active_reader: Option<SpillReader>,
+    ctx: ExecContext,
+}
+
+impl PartitionStream for WindowBucketStream {
+    fn next_batch(
+        &mut self,
+        cancel: &CancelToken,
+        mut res: Option<&mut Reservation>,
+    ) -> Result<Option<Batch>, QueryError> {
+        let before = pool_size(&res);
+        if cancel.is_cancelled() || self.ctx.eval.cancel.is_cancelled() {
+            rollback_to(&mut res, before);
+            return Err(QueryError::Cancelled);
+        }
+
+        while let Some(batch) = self.in_mem.pop_front() {
+            if batch.is_empty() {
+                if self.in_mem.is_empty() {
+                    self.in_mem_res.free();
+                }
+                continue;
+            }
+            let bytes = batch.memory_bytes();
+            if let Some(cr) = res.as_deref_mut() {
+                if let Err(err) = transfer_or_grow(&mut self.in_mem_res, cr, bytes) {
+                    if self.in_mem.is_empty() {
+                        self.in_mem_res.free();
+                    }
+                    rollback_to(&mut res, before);
+                    return Err(err.into());
+                }
+            } else {
+                self.in_mem_res.shrink(bytes.min(self.in_mem_res.size()));
+            }
+            if self.in_mem.is_empty() {
+                self.in_mem_res.free();
+            }
+            return Ok(Some(batch));
+        }
+
+        loop {
+            if cancel.is_cancelled() || self.ctx.eval.cancel.is_cancelled() {
+                self.active_reader = None;
+                rollback_to(&mut res, before);
+                return Err(QueryError::Cancelled);
+            }
+            if self.active_reader.is_none() {
+                let Some(sf) = self.spills.pop_front() else {
+                    rollback_to(&mut res, before);
+                    return Ok(None);
+                };
+                match sf.open_reader(Arc::clone(&self.schema)) {
+                    Ok(reader) => self.active_reader = Some(reader),
+                    Err(err) => {
+                        rollback_to(&mut res, before);
+                        return Err(err);
+                    }
+                }
+            }
+            if let Some(reader) = self.active_reader.as_mut() {
+                match reader.next_batch(res.as_deref_mut()) {
+                    Ok(Some(batch)) => {
+                        if batch.is_empty() {
+                            rollback_to(&mut res, before);
+                            continue;
+                        }
+                        return Ok(Some(batch));
+                    }
+                    Ok(None) => {
+                        self.active_reader = None;
+                    }
+                    Err(err) => {
+                        self.active_reader = None;
+                        rollback_to(&mut res, before);
+                        return Err(err);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn frame_is_zero_lookahead(frame: Option<(FrameBound, FrameBound)>) -> bool {
@@ -2399,6 +3648,7 @@ struct WindowStream {
     sort_keys: Vec<SortKey>,
     specs: Vec<WindowSpec>,
     out_types: Vec<DataType>,
+    max_merge_way: usize,
     ctx: ExecContext,
     lookahead: Option<Batch>,
     queued_out: VecDeque<Batch>,
@@ -2419,7 +3669,8 @@ impl WindowStream {
             self.sort_keys.clone(),
             None,
             self.ctx.clone(),
-        );
+        )
+        .with_max_merge_way(self.max_merge_way);
         let mut scan_res = self.ctx.pool.register("window_scan", false);
         loop {
             if cancel.is_cancelled() {
@@ -6295,5 +7546,1110 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, QueryError::Cancelled));
         assert_eq!(res.size(), 0);
+    }
+
+    #[test]
+    fn f64_to_sortable_u64_matches_f64_cmp_all_edge_cases() {
+        let vals = [
+            f64::NEG_INFINITY,
+            -1e300,
+            -1.0,
+            -0.0,
+            0.0,
+            1e-300,
+            1.0,
+            f64::INFINITY,
+            f64::NAN,
+            -f64::NAN,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+        ];
+        assert_eq!(f64_to_sortable_u64(-0.0), f64_to_sortable_u64(0.0));
+        assert_eq!(f64_to_sortable_u64(f64::NAN), u64::MAX);
+        assert_eq!(f64_to_sortable_u64(-f64::NAN), u64::MAX);
+        assert_eq!(
+            f64_to_sortable_u64(f64::from_bits(0x7ff8_0000_0000_0001)),
+            u64::MAX
+        );
+
+        for (i, &a) in vals.iter().enumerate() {
+            for (j, &b) in vals.iter().enumerate() {
+                let got = f64_to_sortable_u64(a).cmp(&f64_to_sortable_u64(b));
+                let expected = eval::f64_cmp(a, b);
+                assert_eq!(
+                    got, expected,
+                    "mismatch for pair ({i}: {a:?}, {j}: {b:?}): got {got:?}, expected {expected:?}"
+                );
+            }
+        }
+    }
+
+    fn assert_specialized_matches_generic(
+        key_refs: &[Vec<&Column>],
+        keys: &[SortKey],
+        refs: &[(u32, u32)],
+    ) {
+        let mut expected = refs.to_vec();
+        expected.sort_by(|&(ba, ra), &(bb, rb)| {
+            compare_key_refs_across(
+                &key_refs[ba as usize],
+                ra as usize,
+                &key_refs[bb as usize],
+                rb as usize,
+                keys,
+            )
+        });
+        let mut actual = refs.to_vec();
+        sort_row_refs_specialized(key_refs, keys, &mut actual);
+        assert_eq!(actual, expected);
+    }
+
+    fn all_refs_for(batches: &[Vec<&Column>]) -> Vec<(u32, u32)> {
+        let mut refs = Vec::new();
+        for (b_idx, cols) in batches.iter().enumerate() {
+            let n = cols[0].len();
+            for r_idx in 0..n {
+                refs.push((b_idx as u32, r_idx as u32));
+            }
+        }
+        refs
+    }
+
+    #[test]
+    fn specialized_sort_matches_generic_across_1key_and_2key_types_nulls_and_ties() {
+        use cetra_column::{DictColumn, RleColumn};
+
+        let flag_combos = [(false, false), (false, true), (true, false), (true, true)];
+
+        // --- 1-key: FixedBytes16 (non-null Flat, nullable Flat with non-zero payload under NULLs, mixed encodings) ---
+        let id_a = [0x01u8; 16];
+        let id_b = [0x02u8; 16];
+        let id_c = [0xffu8; 16];
+        let id_zero = [0x00u8; 16];
+        let f16_flat_nn = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::FixedBytes16(vec![id_c, id_a, id_b, id_a, id_zero]),
+                None,
+            )
+            .unwrap(),
+        );
+        // Underlying buffer at null rows (1, 3) is non-zero (`id_zero`, `id_c`) to catch missing null checks.
+        let f16_flat_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::FixedBytes16(vec![id_b, id_zero, id_a, id_c, id_b]),
+                Some(Bitmap::from_bools(&[true, false, true, false, true])),
+            )
+            .unwrap(),
+        );
+        let f16_dict = Column::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(FlatData::FixedBytes16(vec![id_c, id_a]), None).unwrap(),
+                vec![0, 1, 0],
+                Some(Bitmap::from_bools(&[true, false, true])),
+            )
+            .unwrap(),
+        );
+        let f16_const_null =
+            Column::try_new_const(ScalarValue::Null(DataType::FixedBytes16), 2).unwrap();
+
+        // --- 1-key: I64 ---
+        let i64_flat_nn = Column::Flat(
+            FlatColumn::try_new(FlatData::I64(vec![42, -5, 0, 42, i64::MIN, i64::MAX]), None)
+                .unwrap(),
+        );
+        // Underlying values at null rows (0, 2) are `0` and `-100`.
+        let i64_flat_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64(vec![0, 10, -100, 10, 5]),
+                Some(Bitmap::from_bools(&[false, true, false, true, true])),
+            )
+            .unwrap(),
+        );
+        let i64_rle = Column::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::I64(vec![0, 10]),
+                    Some(Bitmap::from_bools(&[false, true])),
+                )
+                .unwrap(),
+                vec![2, 4],
+            )
+            .unwrap(),
+        );
+        let i64_const = Column::try_new_const(ScalarValue::I64(10), 3).unwrap();
+
+        // --- 1-key: TimestampNs ---
+        let ts_flat_nn = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![300, 100, 200, 100],
+                    utc: true,
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let ts_flat_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![0, 200, 999, 100],
+                    utc: true,
+                },
+                Some(Bitmap::from_bools(&[false, true, false, true])),
+            )
+            .unwrap(),
+        );
+        let ts_const = Column::try_new_const(
+            ScalarValue::TimestampNs {
+                value: 200,
+                utc: true,
+            },
+            2,
+        )
+        .unwrap();
+
+        // --- 1-key: F64 ---
+        let f64_flat_nn = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::F64(vec![f64::NAN, 1.0, -0.0, 0.0, f64::NEG_INFINITY, -f64::NAN]),
+                None,
+            )
+            .unwrap(),
+        );
+        let f64_flat_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::F64(vec![0.0, 2.5, -1.0, f64::NAN, 0.0]),
+                Some(Bitmap::from_bools(&[false, true, true, false, true])),
+            )
+            .unwrap(),
+        );
+        let f64_dict = Column::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(FlatData::F64(vec![-0.0, f64::INFINITY]), None).unwrap(),
+                vec![1, 0, 1],
+                Some(Bitmap::from_bools(&[true, true, false])),
+            )
+            .unwrap(),
+        );
+
+        // --- 1-key: Utf8 ---
+        // Include empty string `""` vs NULL (`""` stored in buffer under null bitmap!).
+        let utf8_flat_nn = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(["banana", "", "apple", "banana", "🦀"]).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+        );
+        let utf8_flat_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(["", "banana", "aaa", "", "apple"]).unwrap(),
+                ),
+                Some(Bitmap::from_bools(&[false, true, false, true, true])),
+            )
+            .unwrap(),
+        );
+        let utf8_dict = Column::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(["apple", "cherry"]).unwrap()),
+                    None,
+                )
+                .unwrap(),
+                vec![1, 0, 1],
+                Some(Bitmap::from_bools(&[true, false, true])),
+            )
+            .unwrap(),
+        );
+        let utf8_rle = Column::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(["", "banana"]).unwrap()),
+                    Some(Bitmap::from_bools(&[false, true])),
+                )
+                .unwrap(),
+                vec![1, 3],
+            )
+            .unwrap(),
+        );
+        let utf8_const = Column::try_new_const(ScalarValue::Utf8("apple".to_owned()), 2).unwrap();
+
+        let one_key_cases: Vec<(DataType, Vec<Vec<&Column>>)> = vec![
+            (DataType::FixedBytes16, vec![vec![&f16_flat_nn]]),
+            (
+                DataType::FixedBytes16,
+                vec![vec![&f16_flat_null], vec![&f16_dict], vec![&f16_const_null]],
+            ),
+            (DataType::I64, vec![vec![&i64_flat_nn]]),
+            (
+                DataType::I64,
+                vec![vec![&i64_flat_null], vec![&i64_rle], vec![&i64_const]],
+            ),
+            (DataType::TimestampNs { utc: true }, vec![vec![&ts_flat_nn]]),
+            (
+                DataType::TimestampNs { utc: true },
+                vec![vec![&ts_flat_null], vec![&ts_const]],
+            ),
+            (DataType::F64, vec![vec![&f64_flat_nn]]),
+            (DataType::F64, vec![vec![&f64_flat_null], vec![&f64_dict]]),
+            (DataType::Utf8, vec![vec![&utf8_flat_nn]]),
+            (
+                DataType::Utf8,
+                vec![
+                    vec![&utf8_flat_null],
+                    vec![&utf8_dict],
+                    vec![&utf8_rle],
+                    vec![&utf8_const],
+                ],
+            ),
+        ];
+
+        for (dt, batches) in &one_key_cases {
+            let refs = all_refs_for(batches);
+            for &(descending, nulls_first) in &flag_combos {
+                let keys = vec![SortKey {
+                    expr: col_expr(0, "k0", dt.clone()),
+                    descending,
+                    nulls_first,
+                }];
+                assert_specialized_matches_generic(batches, &keys, &refs);
+            }
+        }
+
+        // --- 2-key pairs: (Utf8, I64), (I64, FixedBytes16), (FixedBytes16, I64), (I64, I64), (Utf8, Utf8) ---
+        // Each batch has length 5 (non-null and nullable variants + mixed encodings).
+        let u5_nn = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(["gpt-4", "claude", "gpt-4", "", "claude"]).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+        );
+        let u5_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(["", "gpt-4", "aaa", "gpt-4", ""]).unwrap(),
+                ),
+                Some(Bitmap::from_bools(&[false, true, false, true, true])),
+            )
+            .unwrap(),
+        );
+        let u5_dict = Column::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(["gpt-4", "claude"]).unwrap()),
+                    None,
+                )
+                .unwrap(),
+                vec![0, 1, 0, 1, 0],
+                Some(Bitmap::from_bools(&[true, false, true, true, true])),
+            )
+            .unwrap(),
+        );
+
+        let i5_nn = Column::Flat(
+            FlatColumn::try_new(FlatData::I64(vec![10, 20, 10, 30, 20]), None).unwrap(),
+        );
+        let i5_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64(vec![0, 20, -1, 20, 10]),
+                Some(Bitmap::from_bools(&[false, true, false, true, true])),
+            )
+            .unwrap(),
+        );
+        let ts5_nn = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![100, 100, 200, 100, 200],
+                    utc: true,
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let ts5_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![999, 100, 0, 100, 200],
+                    utc: true,
+                },
+                Some(Bitmap::from_bools(&[false, true, false, true, true])),
+            )
+            .unwrap(),
+        );
+        let f5_nn = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::FixedBytes16(vec![id_a, id_b, id_a, id_c, id_b]),
+                None,
+            )
+            .unwrap(),
+        );
+        let f5_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::FixedBytes16(vec![id_zero, id_a, id_c, id_a, id_b]),
+                Some(Bitmap::from_bools(&[false, true, false, true, true])),
+            )
+            .unwrap(),
+        );
+
+        let two_key_cases: Vec<(DataType, DataType, Vec<Vec<&Column>>)> = vec![
+            // (Utf8, I64) non-null and nullable + mixed
+            (DataType::Utf8, DataType::I64, vec![vec![&u5_nn, &i5_nn]]),
+            (
+                DataType::Utf8,
+                DataType::I64,
+                vec![vec![&u5_null, &i5_null], vec![&u5_dict, &i5_nn]],
+            ),
+            // (Utf8, TimestampNs)
+            (
+                DataType::Utf8,
+                DataType::TimestampNs { utc: true },
+                vec![vec![&u5_null, &ts5_null], vec![&u5_nn, &ts5_nn]],
+            ),
+            // (I64, FixedBytes16) non-null and nullable
+            (
+                DataType::I64,
+                DataType::FixedBytes16,
+                vec![vec![&i5_nn, &f5_nn]],
+            ),
+            (
+                DataType::I64,
+                DataType::FixedBytes16,
+                vec![vec![&i5_null, &f5_null], vec![&i5_nn, &f5_null]],
+            ),
+            // (FixedBytes16, TimestampNs)
+            (
+                DataType::FixedBytes16,
+                DataType::TimestampNs { utc: true },
+                vec![vec![&f5_nn, &ts5_nn]],
+            ),
+            (
+                DataType::FixedBytes16,
+                DataType::TimestampNs { utc: true },
+                vec![vec![&f5_null, &ts5_null], vec![&f5_nn, &ts5_null]],
+            ),
+            // (I64, I64)
+            (DataType::I64, DataType::I64, vec![vec![&i5_nn, &i5_nn]]),
+            (
+                DataType::I64,
+                DataType::I64,
+                vec![vec![&i5_null, &i5_nn], vec![&i5_nn, &i5_null]],
+            ),
+            // (Utf8, Utf8)
+            (DataType::Utf8, DataType::Utf8, vec![vec![&u5_nn, &u5_nn]]),
+            (
+                DataType::Utf8,
+                DataType::Utf8,
+                vec![vec![&u5_null, &u5_dict], vec![&u5_nn, &u5_null]],
+            ),
+        ];
+
+        for (dt0, dt1, batches) in &two_key_cases {
+            let refs = all_refs_for(batches);
+            for &(d0, nf0) in &flag_combos {
+                for &(d1, nf1) in &flag_combos {
+                    let keys = vec![
+                        SortKey {
+                            expr: col_expr(0, "k0", dt0.clone()),
+                            descending: d0,
+                            nulls_first: nf0,
+                        },
+                        SortKey {
+                            expr: col_expr(1, "k1", dt1.clone()),
+                            descending: d1,
+                            nulls_first: nf1,
+                        },
+                    ];
+                    assert_specialized_matches_generic(batches, &keys, &refs);
+                }
+            }
+        }
+
+        // Empty / single-element / empty-keys / 3-key fallback / unsupported type fallback.
+        let single_ref = vec![(0u32, 0u32)];
+        let one_key = vec![SortKey {
+            expr: col_expr(0, "k0", DataType::I64),
+            descending: false,
+            nulls_first: false,
+        }];
+        assert_specialized_matches_generic(&[vec![&i5_nn]], &one_key, &single_ref);
+        assert_specialized_matches_generic(&[vec![&i5_nn]], &[], &all_refs_for(&[vec![&i5_nn]]));
+
+        let three_keys = vec![
+            SortKey {
+                expr: col_expr(0, "k0", DataType::Utf8),
+                descending: false,
+                nulls_first: false,
+            },
+            SortKey {
+                expr: col_expr(1, "k1", DataType::I64),
+                descending: true,
+                nulls_first: true,
+            },
+            SortKey {
+                expr: col_expr(2, "k2", DataType::FixedBytes16),
+                descending: false,
+                nulls_first: false,
+            },
+        ];
+        assert_specialized_matches_generic(
+            &[vec![&u5_null, &i5_null, &f5_null]],
+            &three_keys,
+            &all_refs_for(&[vec![&u5_null, &i5_null, &f5_null]]),
+        );
+    }
+
+    #[test]
+    fn specialized_sort_preserves_stability_on_unsorted_selection_indices() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path(), 64 * 1024 * 1024, 64 * 1024 * 1024);
+        let schema = Schema::try_new_arc(vec![
+            Field::new("k", DataType::I64, true),
+            Field::new("row_id", DataType::I64, false),
+        ])
+        .unwrap();
+
+        // Physical rows 0..10; Selection::Indices visits [5, 2, 8, 1, 4].
+        // Rows 5, 2, 8 share k = 10; rows 1, 4 share k = 20.
+        // Physical row_id equals physical index * 10 so any physical-order leak is visible.
+        let k_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64(vec![99, 20, 10, 99, 20, 10, 99, 99, 10, 99]),
+                None,
+            )
+            .unwrap(),
+        );
+        let id_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64(vec![0, 10, 20, 30, 40, 50, 60, 70, 80, 90]),
+                None,
+            )
+            .unwrap(),
+        );
+        let sel = Selection::Indices(vec![5, 2, 8, 1, 4]);
+        let batch = Batch::try_new(Arc::clone(&schema), vec![k_col, id_col], 10, sel).unwrap();
+
+        let keys = vec![SortKey {
+            expr: col_expr(0, "k", DataType::I64),
+            descending: false,
+            nulls_first: false,
+        }];
+
+        // 1. Direct sort_row_refs_specialized check with unsorted refs.
+        let key_refs = resolve_key_col_refs(&keys, &batch, &[None]).unwrap();
+        let mut refs = vec![(0, 5), (0, 2), (0, 8), (0, 1), (0, 4)];
+        sort_row_refs_specialized(std::slice::from_ref(&key_refs), &keys, &mut refs);
+        assert_eq!(refs, vec![(0, 5), (0, 2), (0, 8), (0, 1), (0, 4)]);
+
+        // 2. spill_single_batch end-to-end check on unsorted Selection::Indices.
+        let mut sort = ExternalSort::new(Arc::clone(&schema), keys.clone(), None, ctx.clone());
+        let mut dummy_res = ctx.pool.register("spill_sel_in", false);
+        sort.spill_single_batch(&batch, &mut dummy_res).unwrap();
+        assert_eq!(sort.spilled_run_count(), 1);
+        let mut stream = sort.into_stream().unwrap();
+        let out = drain_stream(stream.as_mut(), &ctx).unwrap();
+        drop(stream);
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        let mut got_ids = Vec::new();
+        for b in &out {
+            let col = b.column(1).unwrap();
+            for r in 0..b.num_rows() {
+                got_ids.push(eval::read_i64(col, r).unwrap());
+            }
+        }
+        // Must preserve Selection::Indices order [5, 2, 8] for k=10, then [1, 4] for k=20.
+        assert_eq!(got_ids, vec![50, 20, 80, 10, 40]);
+
+        // 3. Also verify nullable DESC NULLS FIRST on spill_single_batch with unsorted Selection::Indices.
+        let k_null_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64(vec![0, 20, 0, 0, 20, 0, 0, 0, 10, 0]),
+                Some(Bitmap::from_bools(&[
+                    true, true, false, true, true, false, true, true, true, true,
+                ])),
+            )
+            .unwrap(),
+        );
+        let id_col2 = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64(vec![0, 10, 20, 30, 40, 50, 60, 70, 80, 90]),
+                None,
+            )
+            .unwrap(),
+        );
+        let batch2 = Batch::try_new(
+            Arc::clone(&schema),
+            vec![k_null_col, id_col2],
+            10,
+            Selection::Indices(vec![5, 2, 8, 1, 4]),
+        )
+        .unwrap();
+        let keys_desc_nf = vec![SortKey {
+            expr: col_expr(0, "k", DataType::I64),
+            descending: true,
+            nulls_first: true,
+        }];
+        let mut sort2 = ExternalSort::new(Arc::clone(&schema), keys_desc_nf, None, ctx.clone());
+        sort2.spill_single_batch(&batch2, &mut dummy_res).unwrap();
+        let mut stream2 = sort2.into_stream().unwrap();
+        let out2 = drain_stream(stream2.as_mut(), &ctx).unwrap();
+        drop(stream2);
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        let mut got_ids2 = Vec::new();
+        for b in &out2 {
+            let col = b.column(1).unwrap();
+            for r in 0..b.num_rows() {
+                got_ids2.push(eval::read_i64(col, r).unwrap());
+            }
+        }
+        // NULLs first in original Selection order [50, 20], then k=20 [10, 40], then k=10 [80].
+        assert_eq!(got_ids2, vec![50, 20, 10, 40, 80]);
+    }
+
+    #[test]
+    fn parallel_window_partition_by_matches_single_stream_row_number_rank_sum_lag() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path(), 8 * 1024 * 1024, 8 * 1024 * 1024);
+        let schema = Schema::try_new_arc(vec![
+            Field::new("p_str", DataType::Utf8, true),
+            Field::new("p_f64", DataType::F64, false),
+            Field::new(
+                "p_dec",
+                DataType::Decimal128 {
+                    precision: 18,
+                    scale: 4,
+                },
+                false,
+            ),
+            Field::new("ord", DataType::I64, false),
+            Field::new("val", DataType::I64, true),
+            Field::new("row_id", DataType::I64, false),
+        ])
+        .unwrap();
+
+        #[allow(clippy::too_many_arguments)]
+        let mk_batch = |p_str: &[Option<&str>],
+                        p_f64: &[f64],
+                        p_dec: &[i128],
+                        ord: &[i64],
+                        val: &[Option<i64>],
+                        row_id: &[i64],
+                        sel: Selection|
+         -> Batch {
+            let n = p_str.len();
+            let mut str_vals = Vec::with_capacity(n);
+            let mut str_valid = Bitmap::new_ones(n);
+            for (i, s) in p_str.iter().enumerate() {
+                match s {
+                    Some(v) => str_vals.push(*v),
+                    None => {
+                        str_vals.push("");
+                        str_valid.set(i, false).unwrap();
+                    }
+                }
+            }
+            let str_nulls = if str_valid.all_ones() {
+                None
+            } else {
+                Some(str_valid)
+            };
+
+            let mut val_nums = Vec::with_capacity(n);
+            let mut val_valid = Bitmap::new_ones(n);
+            for (i, v) in val.iter().enumerate() {
+                match v {
+                    Some(x) => val_nums.push(*x),
+                    None => {
+                        val_nums.push(0);
+                        val_valid.set(i, false).unwrap();
+                    }
+                }
+            }
+            let val_nulls = if val_valid.all_ones() {
+                None
+            } else {
+                Some(val_valid)
+            };
+
+            Batch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Utf8(Utf8Data::try_from_slices(str_vals).unwrap()),
+                            str_nulls,
+                        )
+                        .unwrap(),
+                    ),
+                    Column::Flat(FlatColumn::try_new(FlatData::F64(p_f64.to_vec()), None).unwrap()),
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Decimal128 {
+                                values: p_dec.to_vec(),
+                                precision: 18,
+                                scale: 4,
+                            },
+                            None,
+                        )
+                        .unwrap(),
+                    ),
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(ord.to_vec()), None).unwrap()),
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(val_nums), val_nulls).unwrap()),
+                    Column::Flat(
+                        FlatColumn::try_new(FlatData::I64(row_id.to_vec()), None).unwrap(),
+                    ),
+                ],
+                n,
+                sel,
+            )
+            .unwrap()
+        };
+
+        let batches = vec![
+            mk_batch(
+                &[Some("alpha"), None, Some("beta"), Some("alpha")],
+                &[-0.0, f64::NAN, 1.5, 0.0],
+                &[10_000, 20_000, 30_000, 10_000],
+                &[20, 10, 5, 10],
+                &[Some(100), Some(5), None, Some(25)],
+                &[1, 2, 3, 4],
+                Selection::All,
+            ),
+            // Filtered with Selection::Mask (rows 0, 2, 3 active; row 1 dropped)
+            mk_batch(
+                &[None, Some("drop"), Some("gamma"), Some("alpha")],
+                &[-f64::NAN, 99.0, 2.5, 0.0],
+                &[20_000, 99_999, 40_000, 10_000],
+                &[10, 999, 1, 20],
+                &[Some(15), Some(999), Some(7), None],
+                &[5, 999, 6, 7],
+                Selection::Mask(Bitmap::from_bools(&[true, false, true, true])),
+            ),
+            // Filtered with unsorted Selection::Indices (rows [3, 0, 2] active; row 1 dropped)
+            mk_batch(
+                &[Some("beta"), Some("drop"), Some("delta"), Some("alpha")],
+                &[1.5, 88.0, -3.5, -0.0],
+                &[30_000, 88_888, 50_000, 10_000],
+                &[5, 888, 30, 30],
+                &[Some(40), Some(888), Some(9), Some(50)],
+                &[8, 888, 9, 10],
+                Selection::Indices(vec![3, 0, 2]),
+            ),
+            mk_batch(
+                &[None, Some("gamma"), Some("delta")],
+                &[f64::NAN, 2.5, -3.5],
+                &[20_000, 40_000, 50_000],
+                &[20, 2, 10],
+                &[None, Some(13), Some(3)],
+                &[11, 12, 13],
+                Selection::All,
+            ),
+        ];
+
+        let partition_by = vec![
+            col_expr(0, "p_str", DataType::Utf8),
+            col_expr(1, "p_f64", DataType::F64),
+            col_expr(
+                2,
+                "p_dec",
+                DataType::Decimal128 {
+                    precision: 18,
+                    scale: 4,
+                },
+            ),
+        ];
+        let order_by = vec![SortKey {
+            expr: col_expr(3, "ord", DataType::I64),
+            descending: false,
+            nulls_first: false,
+        }];
+        let specs = vec![
+            WindowSpec {
+                partition_by: partition_by.clone(),
+                order_by: order_by.clone(),
+                frame: None,
+                func: WindowFunc::RowNumber,
+                output_name: "rn".to_owned(),
+            },
+            WindowSpec {
+                partition_by: partition_by.clone(),
+                order_by: order_by.clone(),
+                frame: None,
+                func: WindowFunc::Rank,
+                output_name: "rk".to_owned(),
+            },
+            WindowSpec {
+                partition_by: partition_by.clone(),
+                order_by: order_by.clone(),
+                frame: Some((FrameBound::UnboundedPreceding, FrameBound::CurrentRow)),
+                func: WindowFunc::Sum(col_expr(4, "val", DataType::I64)),
+                output_name: "run_sum".to_owned(),
+            },
+            WindowSpec {
+                partition_by: partition_by.clone(),
+                order_by: order_by.clone(),
+                frame: None,
+                func: WindowFunc::Lag {
+                    expr: col_expr(4, "val", DataType::I64),
+                    offset: 1,
+                    default: Some(Expr::Literal(ScalarValue::I64(-999))),
+                },
+                output_name: "lag1".to_owned(),
+            },
+        ];
+
+        type WinRow = (i64, i64, i64, Option<i64>, Option<i64>);
+        let collect_rows = |batches_out: &[Batch]| -> Vec<WinRow> {
+            let mut rows = Vec::new();
+            for b in batches_out {
+                for r in 0..b.num_rows() {
+                    let row_id = eval::read_i64(b.column(5).unwrap(), r).unwrap();
+                    let rn = eval::read_i64(b.column(6).unwrap(), r).unwrap();
+                    let rk = eval::read_i64(b.column(7).unwrap(), r).unwrap();
+                    let run_sum = eval::read_i64(b.column(8).unwrap(), r);
+                    let lag1 = eval::read_i64(b.column(9).unwrap(), r);
+                    rows.push((row_id, rn, rk, run_sum, lag1));
+                }
+            }
+            rows.sort_unstable_by_key(|t| t.0);
+            rows
+        };
+
+        // Parallel path
+        let src_par = BatchSource::new(Arc::clone(&schema), batches.clone()).unwrap();
+        let inputs_par = src_par.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+        assert_eq!(inputs_par.len(), 4);
+        let par_streams = eval_window_group_parallel(
+            inputs_par,
+            Arc::clone(&schema),
+            partition_by.clone(),
+            order_by.clone(),
+            specs.clone(),
+            &ctx,
+        )
+        .unwrap();
+        assert!(
+            par_streams.len() > 1,
+            "expected > 1 parallel window streams, got {}",
+            par_streams.len()
+        );
+        let mut par_batches = Vec::new();
+        for mut s in par_streams {
+            par_batches.extend(drain_stream(s.as_mut(), &ctx).unwrap());
+        }
+        assert_eq!(ctx.spill.spilled_bytes(), 0);
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        // Single-stream baseline
+        let src_seq = BatchSource::new(Arc::clone(&schema), batches).unwrap();
+        let inputs_seq = src_seq.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+        let chained_seq = Box::new(ChainedWindowInputStream::new(inputs_seq));
+        let mut seq_stream = eval_window_group(
+            chained_seq,
+            Arc::clone(&schema),
+            partition_by,
+            order_by,
+            specs,
+            &ctx,
+        )
+        .unwrap();
+        let seq_batches = drain_stream(seq_stream.as_mut(), &ctx).unwrap();
+        drop(seq_stream);
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        let par_rows = collect_rows(&par_batches);
+        let seq_rows = collect_rows(&seq_batches);
+        assert_eq!(par_rows.len(), 13);
+        assert_eq!(par_rows, seq_rows);
+    }
+
+    #[test]
+    fn parallel_window_empty_partition_by_and_empty_specs() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path(), 8 * 1024 * 1024, 8 * 1024 * 1024);
+        let schema = Schema::try_new_arc(vec![
+            Field::new("grp", DataType::Utf8, false),
+            Field::new("ord", DataType::I64, false),
+        ])
+        .unwrap();
+
+        let mk_batch = |grps: &[&str], ords: &[i64]| -> Batch {
+            Batch::try_new_all(
+                Arc::clone(&schema),
+                vec![
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Utf8(
+                                Utf8Data::try_from_slices(grps.iter().copied()).unwrap(),
+                            ),
+                            None,
+                        )
+                        .unwrap(),
+                    ),
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(ords.to_vec()), None).unwrap()),
+                ],
+                grps.len(),
+            )
+            .unwrap()
+        };
+
+        let batches = vec![
+            mk_batch(&["a", "b"], &[30, 10]),
+            mk_batch(&["a", "c"], &[20, 40]),
+            mk_batch(&["b", "c"], &[50, 5]),
+        ];
+        let order_by = vec![SortKey {
+            expr: col_expr(1, "ord", DataType::I64),
+            descending: false,
+            nulls_first: false,
+        }];
+
+        // 1. Empty partition_by falls back to 1 stream with global window semantics.
+        let src1 = BatchSource::new(Arc::clone(&schema), batches.clone()).unwrap();
+        let inputs1 = src1.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+        let streams1 = eval_window_group_parallel(
+            inputs1,
+            Arc::clone(&schema),
+            Vec::new(),
+            order_by.clone(),
+            vec![WindowSpec {
+                partition_by: Vec::new(),
+                order_by: order_by.clone(),
+                frame: None,
+                func: WindowFunc::RowNumber,
+                output_name: "rn".to_owned(),
+            }],
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(streams1.len(), 1);
+        let mut s1 = streams1.into_iter().next().unwrap();
+        let out1 = drain_stream(s1.as_mut(), &ctx).unwrap();
+        drop(s1);
+        assert_eq!(ctx.pool.reserved(), 0);
+        let got_ord_rn: Vec<(i64, i64)> = out1
+            .iter()
+            .flat_map(|b| {
+                (0..b.num_rows()).map(|r| {
+                    (
+                        eval::read_i64(b.column(1).unwrap(), r).unwrap(),
+                        eval::read_i64(b.column(2).unwrap(), r).unwrap(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            got_ord_rn,
+            vec![(5, 1), (10, 2), (20, 3), (30, 4), (40, 5), (50, 6)]
+        );
+
+        // 2. Empty specs short-circuits returning original input streams without shuffling.
+        let src2 = BatchSource::new(Arc::clone(&schema), batches).unwrap();
+        let inputs2 = src2.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+        let input_count = inputs2.len();
+        let streams2 = eval_window_group_parallel(
+            inputs2,
+            Arc::clone(&schema),
+            vec![col_expr(0, "grp", DataType::Utf8)],
+            order_by,
+            Vec::new(),
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(streams2.len(), input_count);
+        let mut got_per_stream = Vec::new();
+        for mut s in streams2 {
+            let drained = drain_stream(s.as_mut(), &ctx).unwrap();
+            let vals: Vec<i64> = drained
+                .iter()
+                .flat_map(|b| {
+                    (0..b.num_rows()).map(|r| eval::read_i64(b.column(1).unwrap(), r).unwrap())
+                })
+                .collect();
+            got_per_stream.push(vals);
+        }
+        assert_eq!(
+            got_per_stream,
+            vec![vec![30, 10], vec![20, 40], vec![50, 5]]
+        );
+        assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn parallel_window_spills_cleanly_under_tight_memory_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        // p = 2, cap = 1 MiB (>= 3 * 256 KiB = 768 KiB so parallel shuffle engages).
+        let mut ctx = test_ctx(dir.path(), 1024 * 1024, 32 * 1024 * 1024);
+        ctx.target_partitions = 2;
+        ctx.batch_size = 512;
+
+        let schema = Schema::try_new_arc(vec![
+            Field::new("grp", DataType::Utf8, false),
+            Field::new("ord", DataType::I64, false),
+            Field::new("payload", DataType::Utf8, false),
+            Field::new("row_id", DataType::I64, false),
+        ])
+        .unwrap();
+
+        let keys_pool = ["k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7"];
+        let pad = "x".repeat(200);
+        let mut all_batches = Vec::new();
+        let mut next_id = 0i64;
+        // 48 batches * 200 rows * ~220 B > 2.1 MiB (> 2x the 1 MiB pool cap).
+        for b_idx in 0..48usize {
+            let rows_per_batch = 200usize;
+            let mut grp_vals = Vec::with_capacity(rows_per_batch);
+            let mut ord_vals = Vec::with_capacity(rows_per_batch);
+            let mut pay_vals = Vec::with_capacity(rows_per_batch);
+            let mut id_vals = Vec::with_capacity(rows_per_batch);
+            for r in 0..rows_per_batch {
+                grp_vals.push(keys_pool[(b_idx + r) % keys_pool.len()]);
+                ord_vals.push(((b_idx * 97 + r * 13) % 10_000) as i64);
+                pay_vals.push(pad.as_str());
+                id_vals.push(next_id);
+                next_id += 1;
+            }
+            all_batches.push(
+                Batch::try_new_all(
+                    Arc::clone(&schema),
+                    vec![
+                        Column::Flat(
+                            FlatColumn::try_new(
+                                FlatData::Utf8(Utf8Data::try_from_slices(grp_vals).unwrap()),
+                                None,
+                            )
+                            .unwrap(),
+                        ),
+                        Column::Flat(FlatColumn::try_new(FlatData::I64(ord_vals), None).unwrap()),
+                        Column::Flat(
+                            FlatColumn::try_new(
+                                FlatData::Utf8(Utf8Data::try_from_slices(pay_vals).unwrap()),
+                                None,
+                            )
+                            .unwrap(),
+                        ),
+                        Column::Flat(FlatColumn::try_new(FlatData::I64(id_vals), None).unwrap()),
+                    ],
+                    rows_per_batch,
+                )
+                .unwrap(),
+            );
+        }
+
+        let partition_by = vec![col_expr(0, "grp", DataType::Utf8)];
+        let order_by = vec![
+            SortKey {
+                expr: col_expr(1, "ord", DataType::I64),
+                descending: false,
+                nulls_first: false,
+            },
+            SortKey {
+                expr: col_expr(3, "row_id", DataType::I64),
+                descending: false,
+                nulls_first: false,
+            },
+        ];
+        let specs = vec![
+            WindowSpec {
+                partition_by: partition_by.clone(),
+                order_by: order_by.clone(),
+                frame: None,
+                func: WindowFunc::RowNumber,
+                output_name: "rn".to_owned(),
+            },
+            WindowSpec {
+                partition_by: partition_by.clone(),
+                order_by: order_by.clone(),
+                frame: Some((FrameBound::UnboundedPreceding, FrameBound::CurrentRow)),
+                func: WindowFunc::Sum(col_expr(1, "ord", DataType::I64)),
+                output_name: "run_sum".to_owned(),
+            },
+        ];
+
+        // Multi-partition inputs (4 streams, each 12 batches)
+        let per_part = all_batches.len() / 4;
+        let par_inputs: Vec<Box<dyn PartitionStream>> = (0..4)
+            .map(|i| {
+                let slice = all_batches[i * per_part..(i + 1) * per_part].to_vec();
+                let src = BatchSource::new(Arc::clone(&schema), slice).unwrap();
+                let mut parts = src.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+                Box::new(ChainedWindowInputStream::new(std::mem::take(&mut parts)))
+                    as Box<dyn PartitionStream>
+            })
+            .collect();
+
+        let par_streams = eval_window_group_parallel(
+            par_inputs,
+            Arc::clone(&schema),
+            partition_by.clone(),
+            order_by.clone(),
+            specs.clone(),
+            &ctx,
+        )
+        .unwrap();
+        assert!(
+            par_streams.len() > 1,
+            "expected > 1 parallel streams, got {}",
+            par_streams.len()
+        );
+        assert!(
+            ctx.spill.spilled_bytes() > 0,
+            "expected spill during tight-pool parallel window shuffle"
+        );
+
+        let mut par_rows = Vec::new();
+        for mut s in par_streams {
+            let batches_out = drain_stream(s.as_mut(), &ctx).unwrap();
+            for b in batches_out {
+                for r in 0..b.num_rows() {
+                    let row_id = eval::read_i64(b.column(3).unwrap(), r).unwrap();
+                    let rn = eval::read_i64(b.column(4).unwrap(), r).unwrap();
+                    let run_sum = eval::read_i64(b.column(5).unwrap(), r).unwrap();
+                    par_rows.push((row_id, rn, run_sum));
+                }
+            }
+        }
+        assert_eq!(ctx.spill.spilled_bytes(), 0);
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        // Generous single-stream baseline
+        let base_dir = tempfile::tempdir().unwrap();
+        let base_ctx = test_ctx(base_dir.path(), 32 * 1024 * 1024, 32 * 1024 * 1024);
+        let base_src = BatchSource::new(Arc::clone(&schema), all_batches).unwrap();
+        let base_inputs = base_src
+            .open_partitions(&ScanSpec::default(), &base_ctx)
+            .unwrap();
+        let mut base_win = eval_window_group(
+            Box::new(ChainedWindowInputStream::new(base_inputs)),
+            Arc::clone(&schema),
+            partition_by,
+            order_by,
+            specs,
+            &base_ctx,
+        )
+        .unwrap();
+        let base_out = drain_stream(base_win.as_mut(), &base_ctx).unwrap();
+        drop(base_win);
+
+        let mut base_rows = Vec::new();
+        for b in base_out {
+            for r in 0..b.num_rows() {
+                let row_id = eval::read_i64(b.column(3).unwrap(), r).unwrap();
+                let rn = eval::read_i64(b.column(4).unwrap(), r).unwrap();
+                let run_sum = eval::read_i64(b.column(5).unwrap(), r).unwrap();
+                base_rows.push((row_id, rn, run_sum));
+            }
+        }
+
+        par_rows.sort_unstable_by_key(|t| t.0);
+        base_rows.sort_unstable_by_key(|t| t.0);
+        assert_eq!(par_rows.len(), next_id as usize);
+        assert_eq!(par_rows, base_rows);
     }
 }

@@ -267,6 +267,10 @@ impl TimeBounds {
         matches!((self.min, self.max), (Some(lo), Some(hi)) if lo > hi)
     }
 
+    pub(super) fn contains(&self, ts: i64) -> bool {
+        self.min.is_none_or(|lo| ts >= lo) && self.max.is_none_or(|hi| ts <= hi)
+    }
+
     fn raise_min(&mut self, value: i64) {
         self.min = Some(self.min.map_or(value, |cur| cur.max(value)));
     }
@@ -1071,12 +1075,45 @@ impl HashPartitionedSortSink {
     }
 }
 
+fn fill_buckets_with(
+    selection: &cetra_column::Selection,
+    raw_len: usize,
+    is_all: bool,
+    per_bucket_rows: &mut [Vec<u32>],
+    mut bucket_of: impl FnMut(usize) -> usize,
+) -> Result<(), ColumnError> {
+    use cetra_column::Selection;
+    selection.validate(raw_len)?;
+    if is_all {
+        for phys_row in 0..raw_len {
+            per_bucket_rows[bucket_of(phys_row)].push(phys_row as u32);
+        }
+        return Ok(());
+    }
+    match selection {
+        Selection::Mask(mask) => {
+            for phys_row in mask.iter_ones() {
+                per_bucket_rows[bucket_of(phys_row)].push(phys_row as u32);
+            }
+        }
+        Selection::Indices(indices) => {
+            for &phys_row in indices {
+                per_bucket_rows[bucket_of(phys_row as usize)].push(phys_row);
+            }
+        }
+        Selection::All => unreachable!("is_all already returned above"),
+    }
+    Ok(())
+}
+
 impl PushSink for HashPartitionedSortSink {
     fn consume(
         &mut self,
         batch: Batch,
         batch_res: &mut Reservation,
     ) -> Result<ControlFlow, QueryError> {
+        use cetra_column::FlatData;
+
         if self.ctx.eval.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
         }
@@ -1091,18 +1128,61 @@ impl PushSink for HashPartitionedSortSink {
         }
 
         self.max_batch_bytes = self.max_batch_bytes.max(batch.memory_bytes());
-        let p = self.buckets.len().max(1);
+        let raw_len = batch.raw_len();
+        let is_all = batch.selection().is_all(raw_len);
         let key_col = batch
             .column(self.key_col_idx)
             .ok_or(ColumnError::InvalidBatch {
                 reason: "partition key column index out of bounds",
             })?;
+        let p = self.buckets.len().max(1);
+        if p == 1 {
+            batch.selection().validate(raw_len)?;
+            let compact = if is_all { batch } else { batch.compact(None)? };
+            return self
+                .push_bucket_batch(0, compact, batch_res)
+                .map(|()| ControlFlow::Continue);
+        }
 
         let mut per_bucket_rows: Vec<Vec<u32>> = vec![Vec::new(); p];
-        let indices = batch.selection().to_indices(batch.raw_len())?;
-        for phys_row in indices {
-            let b = partition_for_row(key_col, phys_row as usize, p);
-            per_bucket_rows[b].push(phys_row);
+        if let Column::Flat(f) = key_col
+            && let FlatData::FixedBytes16(ids) = f.data()
+        {
+            if let Some(nulls) = f.nulls() {
+                fill_buckets_with(
+                    batch.selection(),
+                    raw_len,
+                    is_all,
+                    &mut per_bucket_rows,
+                    |row| {
+                        if !nulls.get(row) {
+                            0
+                        } else {
+                            ids.get(row)
+                                .map_or(0, |id| (hash_bytes_fnv1a(id) as usize) % p)
+                        }
+                    },
+                )?;
+            } else {
+                fill_buckets_with(
+                    batch.selection(),
+                    raw_len,
+                    is_all,
+                    &mut per_bucket_rows,
+                    |row| {
+                        ids.get(row)
+                            .map_or(0, |id| (hash_bytes_fnv1a(id) as usize) % p)
+                    },
+                )?;
+            }
+        } else {
+            fill_buckets_with(
+                batch.selection(),
+                raw_len,
+                is_all,
+                &mut per_bucket_rows,
+                |row| partition_for_row(key_col, row, p),
+            )?;
         }
 
         let non_empty_buckets = per_bucket_rows.iter().filter(|r| !r.is_empty()).count();
@@ -1113,11 +1193,7 @@ impl PushSink for HashPartitionedSortSink {
         if non_empty_buckets == 1
             && let Some(bucket_idx) = per_bucket_rows.iter().position(|r| !r.is_empty())
         {
-            let compact = if batch.selection().is_all(batch.raw_len()) {
-                batch
-            } else {
-                batch.compact(None)?
-            };
+            let compact = if is_all { batch } else { batch.compact(None)? };
             return self
                 .push_bucket_batch(bucket_idx, compact, batch_res)
                 .map(|()| ControlFlow::Continue);
@@ -1316,6 +1392,195 @@ mod tests {
                 .is_none()
         );
         assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn hash_partitioned_sort_sink_selection_and_encoding_parity() {
+        use std::collections::BTreeMap;
+
+        use cetra_column::{Bitmap, DictColumn, RleColumn};
+        use cetra_query::exec::{ExecMetrics, SpillManager};
+
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Schema::try_new_arc(vec![
+            Field::new("k", DataType::FixedBytes16, true),
+            Field::new("row_tag", DataType::I64, false),
+        ])
+        .unwrap();
+        let sort_keys = vec![SortKey {
+            expr: Expr::Column {
+                index: 1,
+                name: "row_tag".to_owned(),
+                data_type: DataType::I64,
+            },
+            descending: false,
+            nulls_first: false,
+        }];
+
+        let k = |b: u8| -> [u8; 16] {
+            let mut arr = [0u8; 16];
+            arr[0] = b;
+            arr[15] = b.wrapping_mul(17);
+            arr
+        };
+
+        let flat_no_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::FixedBytes16(vec![k(1), k(2), k(3), k(4), k(5), k(6)]),
+                None,
+            )
+            .unwrap(),
+        );
+        let flat_with_nulls = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::FixedBytes16(vec![k(1), k(2), k(3), k(4), k(5), k(6)]),
+                Some(Bitmap::from_bools(&[true, false, true, true, false, true])),
+            )
+            .unwrap(),
+        );
+        let dict_with_nulls = Column::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::FixedBytes16(vec![k(10), k(20), k(30)]),
+                    Some(Bitmap::from_bools(&[true, false, true])),
+                )
+                .unwrap(),
+                vec![0, 1, 2, 0, 2, 1],
+                Some(Bitmap::from_bools(&[true, true, false, true, true, true])),
+            )
+            .unwrap(),
+        );
+        let const_val = Column::try_new_const(ScalarValue::FixedBytes16(k(42)), 6).unwrap();
+        let const_null =
+            Column::try_new_const(ScalarValue::Null(DataType::FixedBytes16), 6).unwrap();
+        let rle_col = Column::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::FixedBytes16(vec![k(7), k(8)]),
+                    Some(Bitmap::from_bools(&[true, false])),
+                )
+                .unwrap(),
+                vec![3, 6],
+            )
+            .unwrap(),
+        );
+
+        let key_variants = [
+            flat_no_null,
+            flat_with_nulls,
+            dict_with_nulls,
+            const_val,
+            const_null,
+            rle_col,
+        ];
+        let selections = [
+            Selection::All,
+            Selection::Mask(Bitmap::from_bools(&[true, false, true, false, true, true])),
+            Selection::Indices(vec![5, 1, 3, 1, 0]),
+            // Mask/Indices that happen to be `is_all == true`.
+            Selection::Mask(Bitmap::new_ones(6)),
+            Selection::Indices(vec![0, 1, 2, 3, 4, 5]),
+        ];
+
+        for p in [1usize, 4] {
+            for (v_idx, key_col) in key_variants.iter().enumerate() {
+                for (s_idx, sel) in selections.iter().enumerate() {
+                    let tags: Vec<i64> = (0..6)
+                        .map(|r| (v_idx * 100 + s_idx * 10 + r) as i64)
+                        .collect();
+                    let tag_col =
+                        Column::Flat(FlatColumn::try_new(FlatData::I64(tags), None).unwrap());
+                    let batch = Batch::try_new(
+                        Arc::clone(&schema),
+                        vec![key_col.clone(), tag_col],
+                        6,
+                        sel.clone(),
+                    )
+                    .unwrap();
+
+                    let mut expected_by_bucket: Vec<Vec<(Option<[u8; 16]>, i64)>> =
+                        vec![Vec::new(); p];
+                    let active_indices = sel.to_indices(6).unwrap();
+                    for phys_row in active_indices {
+                        let b = partition_for_row(key_col, phys_row as usize, p);
+                        let key_val = read_fixed16_at(key_col, phys_row as usize);
+                        let tag_val = (v_idx * 100 + s_idx * 10 + phys_row as usize) as i64;
+                        expected_by_bucket[b].push((key_val, tag_val));
+                    }
+
+                    let ctx = ExecContext {
+                        pool: GlobalPool::standalone(4 * 1024 * 1024),
+                        eval: EvalContext::new(0, CancelToken::new()),
+                        spill: Arc::new(SpillManager::with_fixed_cap(dir.path().to_path_buf(), 0)),
+                        workers: Arc::new(WorkerPool::new(1).unwrap()),
+                        batch_size: 128,
+                        target_partitions: p,
+                        metrics: ExecMetrics::default(),
+                    };
+                    let mut batch_res = ctx.pool.register("in", false);
+                    batch_res.try_grow(batch.memory_bytes()).unwrap();
+                    let mut sink =
+                        HashPartitionedSortSink::new(Arc::clone(&schema), 0, p, ctx.clone());
+                    sink.consume(batch, &mut batch_res).unwrap();
+                    batch_res.free();
+
+                    type BucketRows = BTreeMap<usize, Vec<(Option<[u8; 16]>, i64)>>;
+                    let mut actual_by_bucket: BucketRows = BTreeMap::new();
+                    for (b_idx, bucket) in sink.buckets.iter().enumerate() {
+                        let mut rows = Vec::new();
+                        for b in &bucket.batches {
+                            let kc = b.column(0).unwrap();
+                            let tc = b.column(1).unwrap();
+                            for r in 0..b.num_rows() {
+                                let ScalarValue::I64(tv) = tc.get_scalar(r).unwrap() else {
+                                    panic!("expected i64 tag");
+                                };
+                                rows.push((read_fixed16_at(kc, r), tv));
+                            }
+                        }
+                        actual_by_bucket.insert(b_idx, rows);
+                    }
+                    for (b_idx, expected) in expected_by_bucket.iter().enumerate() {
+                        assert_eq!(
+                            actual_by_bucket.get(&b_idx).unwrap(),
+                            expected,
+                            "bucket mismatch for p={p}, variant={v_idx}, sel={s_idx}, bucket={b_idx}"
+                        );
+                    }
+
+                    let streams = HashPartitionedSortSink::into_partition_streams(
+                        vec![sink],
+                        &schema,
+                        &sort_keys,
+                        &ctx,
+                    )
+                    .unwrap();
+                    let cancel = CancelToken::new();
+                    let mut out_res = ctx.pool.register("out", false);
+                    let mut all_tags = Vec::new();
+                    for mut st in streams {
+                        while let Some(out) = st.next_batch(&cancel, Some(&mut out_res)).unwrap() {
+                            let tc = out.column(1).unwrap();
+                            for r in 0..out.num_rows() {
+                                let ScalarValue::I64(tv) = tc.get_scalar(r).unwrap() else {
+                                    panic!("expected i64 tag");
+                                };
+                                all_tags.push(tv);
+                            }
+                            out_res.free();
+                        }
+                    }
+                    all_tags.sort_unstable();
+                    let mut expected_tags: Vec<i64> = expected_by_bucket
+                        .iter()
+                        .flat_map(|v| v.iter().map(|(_, t)| *t))
+                        .collect();
+                    expected_tags.sort_unstable();
+                    assert_eq!(all_tags, expected_tags);
+                    assert_eq!(ctx.pool.reserved(), 0);
+                }
+            }
+        }
     }
 
     mod integration_tests {
