@@ -39,7 +39,17 @@ pub const MAX_JOIN_SPILL_DEPTH: usize = 4;
 
 const CANCEL_CHECK_MASK: usize = 1023;
 const SPILL_FRAME_MIN_BYTES: usize = 4096;
+/// Upper bound on the frame-budget component of in-memory join headroom (4 MiB).
+/// Prevents a large query memory cap (e.g. 2 GiB) from inflating `pull_headroom` to
+/// hundreds of MiB when sibling spillable consumers (e.g. `PartitionSortStream`)
+/// register lazily after RHS draining begins.
+const MAX_JOIN_HEADROOM_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const PARALLEL_RIGHT_DRAIN_PER_TASK_MIN_BYTES: usize = 256 * 1024;
+
+#[inline]
+fn live_join_frame_budget(pool: &cetra_column::ScopedPool) -> usize {
+    (pool.spill_share() / 8).clamp(SPILL_FRAME_MIN_BYTES, MAX_JOIN_HEADROOM_FRAME_BYTES)
+}
 
 /// Physical join type executed by [`execute_hash_join`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -652,7 +662,6 @@ struct RightDrainResult {
     build_res: Reservation,
     total_rows: usize,
     max_batch_bytes: usize,
-    frame_budget: usize,
     hit_mem_limit: bool,
     rhs_saw_null: bool,
 }
@@ -675,7 +684,6 @@ struct RightDrainCtx<'a> {
     shared_build: &'a Mutex<SharedBuildState>,
     hit_mem_limit: &'a AtomicBool,
     rhs_saw_null: &'a AtomicBool,
-    frame_budget: usize,
     num_tasks: usize,
 }
 
@@ -691,7 +699,6 @@ fn drain_one_right_stream(
     let shared_build = dctx.shared_build;
     let hit_mem_limit = dctx.hit_mem_limit;
     let rhs_saw_null = dctx.rhs_saw_null;
-    let frame_budget = dctx.frame_budget;
     let num_tasks = dctx.num_tasks;
     let mut pull_res = ctx.pool.register("hash_join_right_pull", false);
     let mut scratch_res = ctx.pool.register("hash_join_right_scratch", false);
@@ -921,8 +928,9 @@ fn drain_one_right_stream(
             return Ok(RightDrainChunk::empty());
         }
         let next_max = guard.max_batch_bytes.max(batch_bytes);
+        let live_frame = live_join_frame_budget(&ctx.pool);
         let headroom = if guard.total_rows > 0 || num_tasks > 1 {
-            HashJoinStream::pull_headroom(next_max, frame_budget)
+            HashJoinStream::pull_headroom(next_max, live_frame)
         } else {
             0
         };
@@ -974,7 +982,6 @@ fn drain_right_streams_parallel(
     ctx: &ExecContext,
 ) -> Result<RightDrainResult, QueryError> {
     let build_res = ctx.pool.register("hash_join_build", true);
-    let frame_budget = (ctx.pool.spill_share() / 8).max(SPILL_FRAME_MIN_BYTES);
     if right.is_empty() {
         if ctx.eval.cancel.is_cancelled() {
             return Err(QueryError::Cancelled);
@@ -984,7 +991,6 @@ fn drain_right_streams_parallel(
             build_res,
             total_rows: 0,
             max_batch_bytes: 0,
-            frame_budget,
             hit_mem_limit: false,
             rhs_saw_null: false,
         });
@@ -1017,7 +1023,6 @@ fn drain_right_streams_parallel(
             shared_build: &shared_build,
             hit_mem_limit: &hit_mem_limit,
             rhs_saw_null: &rhs_saw_null,
-            frame_budget,
             num_tasks: 1,
         };
         let mut chunks = Vec::with_capacity(num_tasks);
@@ -1053,7 +1058,6 @@ fn drain_right_streams_parallel(
                         shared_build: &build_c,
                         hit_mem_limit: &mem_c,
                         rhs_saw_null: &null_c,
-                        frame_budget,
                         num_tasks,
                     };
                     drain_one_right_stream(stream, &dctx)
@@ -1099,7 +1103,6 @@ fn drain_right_streams_parallel(
         build_res: state.res,
         total_rows: state.total_rows,
         max_batch_bytes: state.max_batch_bytes,
-        frame_budget,
         hit_mem_limit: hit_mem_limit.load(AtomicOrdering::Acquire),
         rhs_saw_null: saw_null,
     })
@@ -1365,17 +1368,18 @@ struct ProbeTableBuildInput {
     null_equals_null: bool,
     total_rows: usize,
     max_batch_bytes: usize,
-    frame_budget: usize,
     use_fixed16: bool,
 }
 
 fn try_build_probe_table_inner(
     input: ProbeTableBuildInput,
     build_res: &mut Reservation,
+    pool: &cetra_column::ScopedPool,
     cancel: &CancelToken,
 ) -> Result<ProbeTableInner, QueryError> {
     let table_seed = table_hash_seed(0);
-    let headroom = HashJoinStream::pull_headroom(input.max_batch_bytes, input.frame_budget);
+    let headroom =
+        HashJoinStream::pull_headroom(input.max_batch_bytes, live_join_frame_budget(pool));
     if input.use_fixed16 {
         let (max_bytes, num_buckets) = Fixed16HashSet::max_index_bytes(input.total_rows);
         build_res.try_grow(max_bytes.saturating_add(headroom))?;
@@ -1508,10 +1512,10 @@ pub fn try_build_semi_anti_probe_table(
             null_equals_null,
             total_rows: drain.total_rows,
             max_batch_bytes: drain.max_batch_bytes,
-            frame_budget: drain.frame_budget,
             use_fixed16,
         },
         &mut drain.build_res,
+        &ctx.pool,
         &ctx.eval.cancel,
     ) {
         Ok(inner) => Ok(ProbeTableBuildOutcome::Ready(Arc::new(SharedProbeTable {
@@ -1669,7 +1673,10 @@ pub fn execute_hash_join_parallel(
 
         if use_fixed16 {
             let (max_bytes, num_buckets) = Fixed16HashSet::max_index_bytes(drain.total_rows);
-            let headroom = HashJoinStream::pull_headroom(drain.max_batch_bytes, drain.frame_budget);
+            let headroom = HashJoinStream::pull_headroom(
+                drain.max_batch_bytes,
+                live_join_frame_budget(&ctx.pool),
+            );
             match drain.build_res.try_grow(max_bytes.saturating_add(headroom)) {
                 Ok(()) => {
                     if headroom > 0 {
@@ -1721,7 +1728,10 @@ pub fn execute_hash_join_parallel(
             }
         } else {
             let table_seed = table_hash_seed(0);
-            let headroom = HashJoinStream::pull_headroom(drain.max_batch_bytes, drain.frame_budget);
+            let headroom = HashJoinStream::pull_headroom(
+                drain.max_batch_bytes,
+                live_join_frame_budget(&ctx.pool),
+            );
             let (_, num_buckets) = BuildTable::index_bytes(drain.total_rows, false);
             match BuildTable::try_reserve_index(
                 drain.total_rows,
@@ -2215,7 +2225,10 @@ fn hash_elem_ref(mut state: u64, elem: ElemRef<'_>) -> u64 {
     }
 }
 
-fn hash_key_row(cols: &[&Column], row: usize, seed: u64) -> u64 {
+/// Computes a canonical 64-bit hash for `row` across `cols` (handling `NULL`,
+/// canonical `F64` `-0.0`/`NaN`, `Decimal128` scale normalization, `Interval`,
+/// and nested `List`/`MapUtf8`/`Events`/`Links`).
+pub(crate) fn hash_key_row(cols: &[&Column], row: usize, seed: u64) -> u64 {
     let mut state = seed;
     for col in cols {
         let elem = if col.is_null(row) {
@@ -3028,7 +3041,7 @@ impl HashJoinStream {
     }
 
     fn frame_budget(&self) -> usize {
-        (self.ctx.pool.spill_share() / 8).max(SPILL_FRAME_MIN_BYTES)
+        live_join_frame_budget(&self.ctx.pool)
     }
 
     fn pull_headroom(max_batch_bytes: usize, frame_budget: usize) -> usize {
@@ -7341,6 +7354,309 @@ mod tests {
             assert_eq!(
                 actual, expected,
                 "64 KiB tight pool parity mismatch for {jt:?}"
+            );
+            assert_eq!(tight_ctx.pool.reserved(), 0);
+            assert_eq!(tight_ctx.spill.spilled_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn parallel_semi_join_does_not_spill_when_lazy_rhs_registers_spillable_consumers() {
+        struct LazySpillableStream {
+            pool: Arc<cetra_column::ScopedPool>,
+            lazy_res: Option<Reservation>,
+            batches: VecDeque<Batch>,
+        }
+
+        impl PartitionStream for LazySpillableStream {
+            fn next_batch(
+                &mut self,
+                cancel: &CancelToken,
+                res: Option<&mut Reservation>,
+            ) -> Result<Option<Batch>, QueryError> {
+                if cancel.is_cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
+                if self.lazy_res.is_none() {
+                    self.lazy_res = Some(self.pool.register("lazy_partition_sort", true));
+                }
+                let Some(batch) = self.batches.pop_front() else {
+                    return Ok(None);
+                };
+                if let Some(r) = res {
+                    r.try_grow(batch.memory_bytes())?;
+                }
+                Ok(Some(batch))
+            }
+        }
+
+        let f16_u64 = |v: u64| -> [u8; 16] {
+            let mut b = [0u8; 16];
+            b[..8].copy_from_slice(&v.to_le_bytes());
+            b
+        };
+
+        let left_schema = Schema::try_new_arc(vec![
+            Field::new("tid", DataType::FixedBytes16, true),
+            Field::new("v", DataType::I64, false),
+        ])
+        .unwrap();
+        let right_schema =
+            Schema::try_new_arc(vec![Field::new("tid", DataType::FixedBytes16, true)]).unwrap();
+
+        // 20 RHS batches of 1,000 FixedBytes16 rows (~320 KiB total) across 8 RHS streams.
+        let mut rhs_all_batches: Vec<Batch> = Vec::with_capacity(20);
+        for b_idx in 0..20_u64 {
+            let start = b_idx * 1_000;
+            let tids: Vec<[u8; 16]> = (start..start + 1_000).map(f16_u64).collect();
+            rhs_all_batches.push(
+                Batch::try_new_all(
+                    Arc::clone(&right_schema),
+                    vec![Column::Flat(
+                        FlatColumn::try_new(FlatData::FixedBytes16(tids), None).unwrap(),
+                    )],
+                    1_000,
+                )
+                .unwrap(),
+            );
+        }
+
+        // 8 left partitions with matching and non-matching keys.
+        let mut left_batches = Vec::with_capacity(8);
+        let mut expected_rows = Vec::new();
+        for p in 0..8_u64 {
+            let k_match_a = p * 2_000 + 42;
+            let k_match_b = 19_000 + p * 100;
+            let k_miss = 100_000 + p;
+            let v_a = (p as i64) * 10 + 1;
+            let v_b = (p as i64) * 10 + 2;
+            let v_m = (p as i64) * 10 + 3;
+            expected_rows.push((Some(f16_u64(k_match_a)), v_a));
+            expected_rows.push((Some(f16_u64(k_match_b)), v_b));
+            left_batches.push(
+                Batch::try_new_all(
+                    Arc::clone(&left_schema),
+                    vec![
+                        Column::Flat(
+                            FlatColumn::try_new(
+                                FlatData::FixedBytes16(vec![
+                                    f16_u64(k_match_a),
+                                    f16_u64(k_miss),
+                                    f16_u64(k_match_b),
+                                ]),
+                                None,
+                            )
+                            .unwrap(),
+                        ),
+                        Column::Flat(
+                            FlatColumn::try_new(FlatData::I64(vec![v_a, v_m, v_b]), None).unwrap(),
+                        ),
+                    ],
+                    3,
+                )
+                .unwrap(),
+            );
+        }
+        expected_rows.sort();
+
+        let (ctx, dir) = make_ctx(64 * 1024 * 1024, 64 * 1024 * 1024);
+        let ctx = ExecContext {
+            workers: Arc::new(WorkerPool::new(8).unwrap()),
+            target_partitions: 8,
+            ..ctx
+        };
+
+        let l_src = BatchSource::new(Arc::clone(&left_schema), left_batches).unwrap();
+        let l_streams = l_src.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+        let left_len = l_streams.len();
+        assert_eq!(left_len, 8);
+
+        let mut rhs_iter = rhs_all_batches.into_iter();
+        let mut r_streams: Vec<Box<dyn PartitionStream>> = Vec::with_capacity(8);
+        for idx in 0..8 {
+            let count = if idx < 4 { 3 } else { 2 };
+            let batches: VecDeque<Batch> = rhs_iter.by_ref().take(count).collect();
+            r_streams.push(Box::new(LazySpillableStream {
+                pool: Arc::clone(&ctx.pool),
+                lazy_res: None,
+                batches,
+            }));
+        }
+        assert!(rhs_iter.next().is_none());
+
+        let par_streams = execute_hash_join_parallel(
+            l_streams,
+            Arc::clone(&left_schema),
+            r_streams,
+            Arc::clone(&right_schema),
+            HashJoinSpec {
+                join_type: JoinType::LeftSemi,
+                left_keys: vec![col_expr(0, "tid", DataType::FixedBytes16)],
+                right_keys: vec![col_expr(0, "tid", DataType::FixedBytes16)],
+                null_equals_null: false,
+                residual_filter: None,
+            },
+            &ctx,
+        )
+        .unwrap();
+
+        assert_eq!(
+            par_streams.len(),
+            left_len,
+            "lazy spillable consumers on 64 MiB pool must NOT cause spurious spill fallback"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_eq!(ctx.spill.spilled_bytes(), 0);
+
+        let actual = extract_fixed16_rows(&drain_parallel(par_streams, &ctx.eval.cancel).unwrap());
+        assert_eq!(actual, expected_rows);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_eq!(ctx.spill.spilled_bytes(), 0);
+        assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn parallel_semi_join_still_spills_under_genuinely_tight_pool() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("tid", DataType::FixedBytes16, true),
+            Field::new("pad", DataType::Utf8, false),
+        ])
+        .unwrap();
+
+        let make_batches = |num_batches: usize,
+                            rows_per_batch: usize,
+                            offset: usize|
+         -> Vec<Batch> {
+            let mut out = Vec::with_capacity(num_batches);
+            for b in 0..num_batches {
+                let mut tids = Vec::with_capacity(rows_per_batch);
+                let mut pads = Vec::with_capacity(rows_per_batch);
+                for r in 0..rows_per_batch {
+                    let g = offset + b * rows_per_batch + r;
+                    let mut bytes = [0u8; 16];
+                    bytes[..8].copy_from_slice(&(g as u64).to_le_bytes());
+                    tids.push(bytes);
+                    pads.push(format!(
+                        "pad-{g:05}-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                    ));
+                }
+                out.push(
+                    Batch::try_new_all(
+                        Arc::clone(&schema),
+                        vec![
+                            Column::Flat(
+                                FlatColumn::try_new(FlatData::FixedBytes16(tids), None).unwrap(),
+                            ),
+                            Column::Flat(
+                                FlatColumn::try_new(
+                                    FlatData::Utf8(
+                                        Utf8Data::try_from_slices(pads.iter().map(String::as_str))
+                                            .unwrap(),
+                                    ),
+                                    None,
+                                )
+                                .unwrap(),
+                            ),
+                        ],
+                        rows_per_batch,
+                    )
+                    .unwrap(),
+                );
+            }
+            out
+        };
+
+        // 1 MiB tight pool with 2 partitions: live_share / 4 = 256 KiB.
+        // Each RHS batch of 4,000 rows is ~320 KiB (> live_share / 4), so 4 RHS batches
+        // (~1.28 MiB) must trigger spill cleanly without returning QueryError::TooLarge.
+        let pool_cap = 1024 * 1024;
+        let r_batches = make_batches(4, 4_000, 200);
+        assert!(
+            r_batches[0].memory_bytes() > pool_cap / 4,
+            "test precondition: batch_bytes ({}) must exceed live_share / 4 ({})",
+            r_batches[0].memory_bytes(),
+            pool_cap / 4
+        );
+        let l_src = BatchSource::new(Arc::clone(&schema), make_batches(4, 200, 0)).unwrap();
+        let r_src = BatchSource::new(Arc::clone(&schema), r_batches).unwrap();
+
+        let (big_ctx, _big_dir) = make_ctx(16 * 1024 * 1024, 32 * 1024 * 1024);
+        let big_ctx = ExecContext {
+            workers: Arc::new(WorkerPool::new(2).unwrap()),
+            target_partitions: 2,
+            ..big_ctx
+        };
+        let (tight_ctx, _tight_dir) = make_ctx(pool_cap, 32 * 1024 * 1024);
+        let tight_ctx = ExecContext {
+            workers: Arc::new(WorkerPool::new(2).unwrap()),
+            target_partitions: 2,
+            ..tight_ctx
+        };
+
+        for jt in [
+            JoinType::LeftSemi,
+            JoinType::LeftAnti,
+            JoinType::LeftAntiNullAware,
+        ] {
+            let spec = HashJoinSpec {
+                join_type: jt,
+                left_keys: vec![col_expr(0, "tid", DataType::FixedBytes16)],
+                right_keys: vec![col_expr(0, "tid", DataType::FixedBytes16)],
+                null_equals_null: false,
+                residual_filter: None,
+            };
+            let expected = {
+                let s = execute_hash_join(
+                    l_src
+                        .open_partitions(&ScanSpec::default(), &big_ctx)
+                        .unwrap(),
+                    Arc::clone(&schema),
+                    r_src
+                        .open_partitions(&ScanSpec::default(), &big_ctx)
+                        .unwrap(),
+                    Arc::clone(&schema),
+                    spec.clone(),
+                    &big_ctx,
+                )
+                .unwrap();
+                let mut rows = Vec::new();
+                for b in drain_stream(s, &big_ctx.eval.cancel).unwrap() {
+                    for r in 0..b.num_rows() {
+                        rows.push(read_str(b.column(1).unwrap(), r).unwrap().to_owned());
+                    }
+                }
+                rows.sort();
+                rows
+            };
+
+            let r_streams = r_src
+                .open_partitions(&ScanSpec::default(), &tight_ctx)
+                .unwrap();
+            assert_eq!(r_streams.len(), 2);
+            let par_streams = execute_hash_join_parallel(
+                l_src
+                    .open_partitions(&ScanSpec::default(), &tight_ctx)
+                    .unwrap(),
+                Arc::clone(&schema),
+                r_streams,
+                Arc::clone(&schema),
+                spec,
+                &tight_ctx,
+            )
+            .unwrap();
+            assert_eq!(par_streams.len(), 1);
+            assert!(!tight_ctx.eval.cancel.is_cancelled());
+
+            let mut actual = Vec::new();
+            for b in drain_parallel(par_streams, &tight_ctx.eval.cancel).unwrap() {
+                for r in 0..b.num_rows() {
+                    actual.push(read_str(b.column(1).unwrap(), r).unwrap().to_owned());
+                }
+            }
+            actual.sort();
+            assert_eq!(
+                actual, expected,
+                "large-batch tight pool spill parity mismatch for {jt:?}"
             );
             assert_eq!(tight_ctx.pool.reserved(), 0);
             assert_eq!(tight_ctx.spill.spilled_bytes(), 0);
