@@ -140,7 +140,7 @@ export function SettingsSidebar({
   const backTo = project ?? remembered;
 
   return (
-    <SidebarProvider className="h-[calc(100dvh-40px)] overflow-hidden">
+    <SidebarProvider className="min-h-0 flex-1 overflow-hidden">
       <Sidebar collapsible="none" aria-label="Settings">
         <SidebarHeader>
           <SidebarMenu>

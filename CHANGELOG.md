@@ -37,6 +37,8 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Changed
 
+- The web demo shows a bar above the top bar, "You're exploring a demo with sample data.", with a Start free button, in place of the small floating notice that covered the table's last row.
+
 - Tool calls in the Chat tab and the trace Transcript are one line each, `name(arguments) → result · duration`, with the tool's response folded into its call and a failed call's error shown on the line; select a line to open the arguments and result. The Transcript has a **Full width** toggle that hides the panel beside it.
 - Alerts show times to the minute in the charts' formats (`11-19 11:51`), the rule preview's time axis drops the seconds and the date within a day, and its "Threshold" label sits at the left end of the line, on the side away from the data of a rule that is not firing. An issue whose occurrences have no user shows "—" for the busiest day's users instead of 0.
 - The install command is `curl -fsSL https://cetra.sh/install.sh | sh`: `cetra.sh/install.sh` redirects to the release's install script. The GitHub release URL keeps working.
