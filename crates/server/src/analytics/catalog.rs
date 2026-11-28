@@ -25,16 +25,15 @@ pub(crate) enum Source {
     Server,
 }
 
-/// One catalog entry: what the golden file fixes.
+/// One golden-list entry: what the golden file fixes.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EventSpec {
     /// The dotted name.
     pub(crate) name: &'static str,
-    /// Where it is recorded. Read by the golden test.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Where it is recorded.
     pub(crate) source: Source,
-    /// Its property keys, sorted. Read by the golden test.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Its property keys, sorted.
     pub(crate) properties: &'static [&'static str],
 }
 
@@ -43,7 +42,9 @@ pub(crate) struct EventSpec {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const CONTEXT_PROPERTIES: [&str; 2] = ["project_id", "via"];
 
-/// Every event, sorted by name. Append-only.
+/// The golden list of every event, sorted by name, append-only. Tests and the Telemetry docs
+/// check read it; the typed [`Event`] enum is the source of truth.
+#[cfg(test)]
 pub(crate) const CATALOG: &[EventSpec] = &[
     spec("alert_rule.created", Source::Server, &[]),
     spec("annotation_queue.created", Source::Server, &["target"]),
@@ -87,6 +88,7 @@ pub(crate) const CATALOG: &[EventSpec] = &[
     spec("user.signed_in", Source::Server, &["method"]),
 ];
 
+#[cfg(test)]
 const fn spec(
     name: &'static str,
     source: Source,
@@ -494,14 +496,6 @@ fn enum_value(value: impl Serialize) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
 }
 
-/// The catalog's `&'static` spelling of `name`, if it is a catalog name.
-pub(crate) fn static_name(name: &str) -> Option<&'static str> {
-    CATALOG
-        .iter()
-        .find(|spec| spec.name == name)
-        .map(|spec| spec.name)
-}
-
 /// A web event from `POST /api/v1/analytics/events`: `None` for a server event's name, an
 /// unknown name, a missing or mistyped property, or a route that is not in [`PAGE_ROUTES`].
 /// Unknown properties are ignored. A stored route is the catalog's constant, never the input.
@@ -873,12 +867,6 @@ mod tests {
             }
             other => panic!("expected a page view, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn static_name_finds_catalog_names() {
-        assert_eq!(static_name("trace.viewed"), Some("trace.viewed"));
-        assert_eq!(static_name("trace.view"), None);
     }
 
     #[test]
