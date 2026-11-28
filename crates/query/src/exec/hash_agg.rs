@@ -1,7 +1,6 @@
 //! Spillable partitioned `HashAgg`, bounded-memory `DdSketch`, and `sessions` aggregates.
 
 use std::cmp::Ordering;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -43,6 +42,7 @@ const DDSKETCH_MAGIC_VERSION: u8 = 1;
 const DDSKETCH_HEADER_BYTES: usize = 33;
 const EMPTY_SLOT: u32 = u32::MAX;
 const CANCEL_CHECK_MASK: usize = 1023;
+const HEADROOM_CHECK_STRIDE_MASK: usize = 63;
 const MIN_SPILL_FRAME_BYTES: usize = 4096;
 
 fn gamma() -> f64 {
@@ -823,6 +823,133 @@ fn hash_col_row<H: Hasher>(col: &Column, row: usize, state: &mut H) {
     }
 }
 
+const FAST_HASH_K: u64 = 0x517c_c1b7_2722_0a95;
+
+/// Fast non-cryptographic `Hasher` for internal query-execution hash tables and
+/// `COUNT(DISTINCT)` / `ARRAY_AGG(DISTINCT)` sets. Implements `std::hash::Hasher`
+/// so `hash_cols_row` and `hash_atoms` preserve bit-for-bit parity across all `DataType`s.
+#[derive(Clone)]
+struct FastHasher {
+    state: u64,
+}
+
+impl FastHasher {
+    #[inline]
+    fn with_seed(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    #[inline]
+    fn mix_word(&mut self, word: u64) {
+        self.state = (self.state.rotate_left(5) ^ word).wrapping_mul(FAST_HASH_K);
+    }
+}
+
+impl Hasher for FastHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        mix64(self.state)
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        // Length-mix prevents prefix collisions on variable-length slices.
+        self.mix_word(bytes.len() as u64);
+        let (chunks, rem) = bytes.as_chunks::<8>();
+        for chunk in chunks {
+            self.mix_word(u64::from_le_bytes(*chunk));
+        }
+        if !rem.is_empty() {
+            let mut tail = [0u8; 8];
+            tail[..rem.len()].copy_from_slice(rem);
+            self.mix_word(u64::from_le_bytes(tail));
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.mix_word(u64::from(i));
+    }
+
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.mix_word(u64::from(i));
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.mix_word(u64::from(i));
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.mix_word(i);
+    }
+
+    #[inline]
+    fn write_u128(&mut self, i: u128) {
+        self.mix_word(i as u64);
+        self.mix_word((i >> 64) as u64);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.mix_word(i as u64);
+    }
+
+    #[inline]
+    fn write_i8(&mut self, i: i8) {
+        self.mix_word(u64::from(i as u8));
+    }
+
+    #[inline]
+    fn write_i16(&mut self, i: i16) {
+        self.mix_word(u64::from(i as u16));
+    }
+
+    #[inline]
+    fn write_i32(&mut self, i: i32) {
+        self.mix_word(u64::from(i as u32));
+    }
+
+    #[inline]
+    fn write_i64(&mut self, i: i64) {
+        self.mix_word(i as u64);
+    }
+
+    #[inline]
+    fn write_i128(&mut self, i: i128) {
+        self.mix_word(i as u64);
+        self.mix_word((i as u128 >> 64) as u64);
+    }
+
+    #[inline]
+    fn write_isize(&mut self, i: isize) {
+        self.mix_word(i as u64);
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct FastBuildHasher;
+
+static FAST_SET_SEED: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+    use std::hash::BuildHasher;
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(0x9E37_79B9_7F4A_7C15);
+    h.finish()
+});
+
+impl std::hash::BuildHasher for FastBuildHasher {
+    type Hasher = FastHasher;
+
+    #[inline]
+    fn build_hasher(&self) -> Self::Hasher {
+        FastHasher::with_seed(*FAST_SET_SEED)
+    }
+}
+
+type FastHashSet<T> = HashSet<T, FastBuildHasher>;
+
 fn mix64(mut x: u64) -> u64 {
     x ^= x >> 30;
     x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -833,7 +960,7 @@ fn mix64(mut x: u64) -> u64 {
 }
 
 fn hash_cols_row(cols: &[&Column], row: usize, mix_round: u64) -> u64 {
-    let mut h = DefaultHasher::new();
+    let mut h = FastHasher::with_seed(mix64(mix_round ^ 0x9E37_79B9_7F4A_7C15));
     mix_round.hash(&mut h);
     for col in cols {
         hash_col_row(col, row, &mut h);
@@ -842,7 +969,7 @@ fn hash_cols_row(cols: &[&Column], row: usize, mix_round: u64) -> u64 {
 }
 
 fn hash_atoms(atoms: &[KeyAtom], mix_round: u64) -> u64 {
-    let mut h = DefaultHasher::new();
+    let mut h = FastHasher::with_seed(mix64(mix_round ^ 0x9E37_79B9_7F4A_7C15));
     mix_round.hash(&mut h);
     for atom in atoms {
         if atom.is_null() {
@@ -1339,7 +1466,7 @@ impl AccKind {
         match self {
             Self::CountStar | Self::Count => AccState::Count(0),
             Self::CountDistinct(_) => AccState::CountDistinct {
-                set: HashSet::new(),
+                set: FastHashSet::default(),
                 heap_bytes: 0,
             },
             Self::SumI64 => AccState::SumI64(None),
@@ -1357,7 +1484,7 @@ impl AccKind {
             Self::ArrayAgg { distinct, .. } => AccState::ArrayAgg {
                 seen_any: false,
                 values: Vec::new(),
-                set: distinct.then(HashSet::new),
+                set: distinct.then(FastHashSet::default),
                 heap_bytes: 0,
             },
             Self::FirstNonNullByOrder { .. } => AccState::FirstNonNullByOrder {
@@ -1380,7 +1507,7 @@ impl AccKind {
 enum AccState {
     Count(i64),
     CountDistinct {
-        set: HashSet<KeyAtom>,
+        set: FastHashSet<KeyAtom>,
         heap_bytes: usize,
     },
     CountDistinctFinal(i64),
@@ -1405,7 +1532,7 @@ enum AccState {
     ArrayAgg {
         seen_any: bool,
         values: Vec<KeyAtom>,
-        set: Option<HashSet<KeyAtom>>,
+        set: Option<FastHashSet<KeyAtom>>,
         heap_bytes: usize,
     },
     FirstNonNullByOrder {
@@ -4459,6 +4586,12 @@ impl PushSink for HashAgg {
         let filter_masks = &evaled.filter_masks;
 
         if let Some(states) = self.global_states.as_mut() {
+            let workers = self
+                .ctx
+                .workers
+                .num_workers()
+                .min(self.ctx.target_partitions.max(1))
+                .max(1);
             for (idx, &row) in active_rows.iter().enumerate() {
                 if (idx & CANCEL_CHECK_MASK) == 0 && self.ctx.eval.cancel.is_cancelled() {
                     eval_res.free();
@@ -4481,33 +4614,31 @@ impl PushSink for HashAgg {
                 let cur_sp: usize = states.iter().map(AccState::spillable_heap_bytes).sum();
                 let cur_unsp: usize = states.iter().map(AccState::unspillable_heap_bytes).sum();
                 let target_sp = cur_sp.saturating_add(need_sp);
-                let workers = self
-                    .ctx
-                    .workers
-                    .num_workers()
-                    .min(self.ctx.target_partitions.max(1))
-                    .max(1);
-                let other_workers_headroom = if workers > 1 && self.res.size() >= 4096 {
-                    self.max_batch_bytes
-                        .saturating_mul(workers - 1)
-                        .saturating_add(4096)
-                        .min(self.ctx.pool.cap() / 2)
-                } else {
-                    0
-                };
                 let grow_res = if target_sp > self.res.size() {
                     self.res.try_grow(target_sp - self.res.size())
                 } else {
                     Ok(())
                 };
-                let headroom_exceeded = grow_res.is_ok()
-                    && other_workers_headroom > 0
-                    && self
-                        .ctx
-                        .pool
-                        .reserved()
-                        .saturating_add(other_workers_headroom)
-                        > self.ctx.pool.cap();
+                let check_headroom = need_sp > 0 || (idx & HEADROOM_CHECK_STRIDE_MASK) == 0;
+                let headroom_exceeded = if check_headroom && grow_res.is_ok() && workers > 1 {
+                    let other_workers_headroom = if self.res.size() >= 4096 {
+                        self.max_batch_bytes
+                            .saturating_mul(workers - 1)
+                            .saturating_add(4096)
+                            .min(self.ctx.pool.cap() / 2)
+                    } else {
+                        0
+                    };
+                    other_workers_headroom > 0
+                        && self
+                            .ctx
+                            .pool
+                            .reserved()
+                            .saturating_add(other_workers_headroom)
+                            > self.ctx.pool.cap()
+                } else {
+                    false
+                };
                 if grow_res.is_err() || headroom_exceeded {
                     let soft_only = grow_res.is_ok();
                     let err = grow_res.err();
@@ -4641,6 +4772,12 @@ impl PushSink for HashAgg {
             agg_inputs: &agg_inputs,
             filter_masks,
         };
+        let workers = self
+            .ctx
+            .workers
+            .num_workers()
+            .min(self.ctx.target_partitions.max(1))
+            .max(1);
         for (idx, &row) in active_rows.iter().enumerate() {
             if (idx & CANCEL_CHECK_MASK) == 0 && self.ctx.eval.cancel.is_cancelled() {
                 eval_res.free();
@@ -4662,7 +4799,11 @@ impl PushSink for HashAgg {
                 &layout,
                 &mut group_state,
                 &mut spill_sink,
-                self.max_batch_bytes,
+                FoldHeadroom {
+                    max_batch_bytes: self.max_batch_bytes,
+                    workers,
+                    check_soft_headroom: (idx & HEADROOM_CHECK_STRIDE_MASK) == 0,
+                },
                 &self.ctx,
             );
             if let Err(err) = res {
@@ -4956,13 +5097,20 @@ struct SpillPartitionSink<'a> {
     distinct_spills: &'a mut Vec<Option<DistinctSlotSpill>>,
 }
 
+#[derive(Clone, Copy)]
+struct FoldHeadroom {
+    max_batch_bytes: usize,
+    workers: usize,
+    check_soft_headroom: bool,
+}
+
 fn fold_grouped_row_with_spill(
     row: usize,
     inputs: &GroupedBatchInputs<'_>,
     layout: &AggLayout<'_>,
     state: &mut GroupTableState<'_>,
     spill_sink: &mut SpillPartitionSink<'_>,
-    max_batch_bytes: usize,
+    headroom: FoldHeadroom,
     ctx: &ExecContext,
 ) -> Result<(), QueryError> {
     let hash = hash_cols_row(inputs.group_cols, row, 0);
@@ -5007,22 +5155,23 @@ fn fold_grouped_row_with_spill(
 
         // Leave spill-share and pool-wide headroom when multiple workers share a tight pool so
         // sibling workers' unspillable `scan_res` / fresh `GroupTable` allocations cannot starve.
-        let workers = ctx
-            .workers
-            .num_workers()
-            .min(ctx.target_partitions.max(1))
-            .max(1);
-        let spill_headroom = if workers > 1 && state.table.num_groups() >= 16 && !table_drained {
-            (ctx.pool.spill_share() / 8).min(4096)
-        } else {
-            0
-        };
-        let other_workers_headroom = if workers > 1
+        let actual_growth = sp_needed_total > state.res.size() || existing_gi.is_none();
+        let check_soft = actual_growth || headroom.check_soft_headroom;
+        let workers = headroom.workers;
+        let spill_headroom =
+            if check_soft && workers > 1 && state.table.num_groups() >= 16 && !table_drained {
+                (ctx.pool.spill_share() / 8).min(4096)
+            } else {
+                0
+            };
+        let other_workers_headroom = if check_soft
+            && workers > 1
             && state.res.size() >= 4096
             && state.table.num_groups() > 0
             && !table_drained
         {
-            max_batch_bytes
+            headroom
+                .max_batch_bytes
                 .saturating_mul(workers - 1)
                 .saturating_add(4096)
                 .min(ctx.pool.cap() / 2)
@@ -5196,12 +5345,16 @@ fn fold_partial_batch_into_table(
 
         let sp_needed = state.table.spillable_bytes.saturating_add(need_sp);
         let unsp_needed = state.table.unspillable_bytes.saturating_add(need_unsp);
-        let eff_headroom = if state.table.num_groups() > 0 {
+        let before_sp = state.res.size();
+        let check_headroom = sp_needed > before_sp
+            || existing_gi.is_none()
+            || row == start_row
+            || (row & HEADROOM_CHECK_STRIDE_MASK) == 0;
+        let eff_headroom = if check_headroom && state.table.num_groups() > 0 {
             headroom
         } else {
             0
         };
-        let before_sp = state.res.size();
         let sp_with_headroom = sp_needed.saturating_add(eff_headroom);
         let sp_ok = if sp_with_headroom > before_sp {
             match state.res.try_grow(sp_with_headroom - before_sp) {
@@ -6668,7 +6821,7 @@ fn flush_distinct_slot_grouped(
     res: &mut Reservation,
     ctx: &ExecContext,
 ) -> Result<bool, QueryError> {
-    let mut drained_groups: Vec<(usize, HashSet<KeyAtom>)> = Vec::new();
+    let mut drained_groups: Vec<(usize, FastHashSet<KeyAtom>)> = Vec::new();
     let mut freed = 0usize;
     for (gi, row_states) in table.states.iter_mut().enumerate() {
         let row_bytes = row_states[slot.agg_idx].spillable_heap_bytes();
@@ -8309,6 +8462,57 @@ mod tests {
     }
 
     #[test]
+    fn fast_hasher_distributes_top_and_bottom_bits_across_repartition_depths() {
+        const N: usize = 10_000;
+        let i64_vals: Vec<i64> = (0..N as i64).collect();
+        let fixed16_vals: Vec<[u8; 16]> = (0..N as u64)
+            .map(|i| {
+                let mut bytes = [0u8; 16];
+                bytes[8..].copy_from_slice(&i.to_be_bytes());
+                bytes
+            })
+            .collect();
+
+        let i64_col = Column::Flat(FlatColumn::try_new(FlatData::I64(i64_vals), None).unwrap());
+        let fixed16_col =
+            Column::Flat(FlatColumn::try_new(FlatData::FixedBytes16(fixed16_vals), None).unwrap());
+
+        for (label, col) in [("I64", &i64_col), ("FixedBytes16", &fixed16_col)] {
+            let mut per_key_seen = vec![HashSet::with_capacity(8); N];
+            for domain_bit in [0u64, TABLE_HASH_DOMAIN_BIT] {
+                for depth in 0..4u64 {
+                    let mix_round = depth | domain_bit;
+                    let mut top_buckets = [0usize; NUM_SPILL_PARTITIONS];
+                    let mut bot_buckets = [0usize; NUM_SPILL_PARTITIONS];
+                    for (row, seen) in per_key_seen.iter_mut().enumerate() {
+                        let h = hash_cols_row(&[col], row, mix_round);
+                        let atom = read_key_atom(col, row);
+                        assert_eq!(h, hash_atoms(&[atom], mix_round));
+                        top_buckets[spill_partition(h)] += 1;
+                        bot_buckets[(h as usize) & (NUM_SPILL_PARTITIONS - 1)] += 1;
+                        seen.insert(h);
+                    }
+                    assert!(
+                        top_buckets.iter().all(|&c| c > 0),
+                        "{label} depth={depth} domain={domain_bit:#x} empty top bucket: {top_buckets:?}"
+                    );
+                    assert!(
+                        bot_buckets.iter().all(|&c| c > 0),
+                        "{label} depth={depth} domain={domain_bit:#x} empty bottom bucket: {bot_buckets:?}"
+                    );
+                }
+            }
+            for (row, seen) in per_key_seen.iter().enumerate() {
+                assert_eq!(
+                    seen.len(),
+                    8,
+                    "{label} row {row} collided across mix_round/domain depths"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn group_by_fixed_bytes16_trace_id_spill_exact() {
         let schema = Schema::try_new_arc(vec![
             Field::new("trace_id", DataType::FixedBytes16, false),
@@ -9501,7 +9705,7 @@ mod tests {
         let mut arr_st = AccState::ArrayAgg {
             seen_any: true,
             values: Vec::with_capacity(8),
-            set: Some(HashSet::with_capacity(8)),
+            set: Some(FastHashSet::with_capacity_and_hasher(8, FastBuildHasher)),
             heap_bytes: 0,
         };
         let payload = "x".repeat(200);
