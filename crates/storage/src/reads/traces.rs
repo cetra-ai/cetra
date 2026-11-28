@@ -1133,7 +1133,14 @@ async fn run_span_list_attempt(
 
                         let mut disk_winners: Vec<Batch> = Vec::new();
                         let mut idx = 0usize;
-                        let mut wave_size = 1usize;
+                        let mut wave_size = if p1_spec.substrings.is_empty() {
+                            1usize
+                        } else {
+                            exec_ctx
+                                .target_partitions
+                                .max(1)
+                                .min(kept_files.len().max(1))
+                        };
                         while idx < kept_files.len() {
                             if exec_ctx.eval.cancel.is_cancelled() {
                                 return Err(QueryError::Cancelled);
@@ -5253,6 +5260,156 @@ mod tests {
             collect_span_list_pages(&clean_ctx_2p, clean_scope, true, None, SortOrder::Desc, 1)
                 .await;
         assert_eq!(clean_rows_res.len(), 2);
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn wave_ordered_span_list_settled_l1_search_miss_matches_force_range_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = test_config(dir.path());
+        cfg.compaction.l0_files = 2;
+        cfg.compaction.interval = Duration::from_secs(3_600);
+        let storage = Storage::open(cfg).await.expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000010".parse().expect("pid");
+
+        let day1 = parse_rfc3339("2026-01-01T12:00:00Z").expect("ts1");
+        let day2 = parse_rfc3339("2026-01-02T12:00:00Z").expect("ts2");
+        let sec = 1_000_000_000_i64;
+        let words = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+        ];
+        let mk_span = |trace: u16, base: i64, s: i64| {
+            let start = base + s * sec;
+            let mut row = span_row(trace, 0, start, start + 1_000);
+            row.project_id = project;
+            row.name = format!("span-{trace}-{s}");
+            let mut payload = format!("settled_l1_payload_{trace}_{s}_");
+            for j in 0..80usize {
+                payload.push_str(words[((trace as usize) * 7 + j * 3) % words.len()]);
+                payload.push('_');
+            }
+            row.input = Some(payload);
+            row
+        };
+
+        // Two L0 batches on day1 and two on day2 -> compact into settled L1 files with `.stpk` packs.
+        for (day_idx, base) in [day1, day2].into_iter().enumerate() {
+            for batch_idx in 0..2u16 {
+                let batch: Vec<_> = (0..12u16)
+                    .map(|k| {
+                        let trace = (day_idx as u16) * 100 + batch_idx * 20 + k + 1;
+                        mk_span(trace, base, i64::from(batch_idx * 20 + k))
+                    })
+                    .collect();
+                storage
+                    .append_spans(project, span_rows(&batch))
+                    .await
+                    .expect("append");
+                storage.flush_now(TIMEOUT).await.expect("flush");
+            }
+        }
+
+        let compact_report = storage
+            .compact(day2 + 2 * 3_600 * sec)
+            .await
+            .expect("compact");
+        assert_eq!(compact_report.failed, 0);
+
+        let files = storage.catalog_files(crate::wal::Table::Spans);
+        assert!(files.len() >= 2, "expected multiple settled L1 files");
+        assert!(
+            files.iter().all(|f| f.level == 1 && f.pack.is_some()),
+            "expected all files settled at L1 with external .stpk packs"
+        );
+
+        let win = TimeWindow::new(day1 - sec, day2 + 100 * sec).expect("win");
+        let scope = ListScope {
+            window: Some(win),
+            include_eval: false,
+            include_experiments: false,
+        };
+
+        let two_phase_eng =
+            EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+                .expect("2p");
+        let mut single_phase_eng = two_phase_eng.clone();
+        single_phase_eng.set_force_range_mode(true);
+        let ctx_2p = QueryContext::from_engine(two_phase_eng);
+        let ctx_1p = QueryContext::from_engine(single_phase_eng);
+
+        let miss_needle = Some("cetra_settled_l1_absent_needle_q9z");
+        for order in [SortOrder::Desc, SortOrder::Asc] {
+            let cold_2p = span_list(
+                &ctx_2p,
+                SpanListRequest {
+                    filter: None,
+                    search: miss_needle,
+                    scope,
+                    strict_exclusions: false,
+                    sort: SpanSort::StartTime,
+                    order,
+                    limit: 50,
+                    cursor: None,
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("2p cold miss");
+            let warm_2p = span_list(
+                &ctx_2p,
+                SpanListRequest {
+                    filter: None,
+                    search: miss_needle,
+                    scope,
+                    strict_exclusions: false,
+                    sort: SpanSort::StartTime,
+                    order,
+                    limit: 50,
+                    cursor: None,
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("2p warm miss");
+            let ref_1p = span_list(
+                &ctx_1p,
+                SpanListRequest {
+                    filter: None,
+                    search: miss_needle,
+                    scope,
+                    strict_exclusions: false,
+                    sort: SpanSort::StartTime,
+                    order,
+                    limit: 50,
+                    cursor: None,
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("1p miss");
+
+            let cold_rows = qe_rows(&cold_2p.batches);
+            let warm_rows = qe_rows(&warm_2p.batches);
+            let ref_rows = qe_rows(&ref_1p.batches);
+            assert!(cold_rows.is_empty());
+            assert_eq!(cold_rows, ref_rows);
+            assert_eq!(warm_rows, ref_rows);
+        }
+
+        for f in &files {
+            let pack = f.pack.as_ref().expect("pack");
+            assert!(
+                storage
+                    .qe_runtime
+                    .metadata_cache
+                    .get_pack(pack.id)
+                    .is_some(),
+                "expected PackToc cached in metadata_cache for {}",
+                f.path
+            );
+        }
 
         let _ = storage.shutdown().await;
     }

@@ -2238,6 +2238,13 @@ impl PackResolver for SingleFilePackResolver {
         let reader = ChunkPackReader::open_with_toc(rr, toc)?;
         Ok(Arc::new(reader))
     }
+
+    fn cached_toc(&self, pack_id: [u8; 16]) -> Option<Arc<PackToc>> {
+        if pack_id != self.pack.id {
+            return None;
+        }
+        self.metadata_cache.get_pack(pack_id)
+    }
 }
 
 enum FileScanCursor {

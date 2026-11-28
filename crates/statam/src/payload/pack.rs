@@ -2138,7 +2138,6 @@ fn default_edge_codec() -> Codec {
 }
 
 /// Decoded read-path Table of Contents for a `.stpk` chunk pack.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackToc {
     /// Decoded 112-byte PackPostscript.
     pub postscript: PackPostscript,
@@ -2149,9 +2148,56 @@ pub struct PackToc {
     /// True iff `frames` partition `0..chunks.len()` contiguously and every `chunks[cid].frame_id`
     /// matches its owning frame index.
     pub(crate) frames_contiguous: bool,
+    /// Shared lazily-loaded trigram section across all `ChunkPackReader`s built from this `Arc<PackToc>`.
+    pub(crate) trigram_cache: OnceLock<TrigramSectionData>,
+    pub(crate) trigram_init: Mutex<()>,
 }
 
+impl fmt::Debug for PackToc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PackToc")
+            .field("postscript", &self.postscript)
+            .field("frame_count", &self.frames.len())
+            .field("chunk_count", &self.chunks.len())
+            .field("frames_contiguous", &self.frames_contiguous)
+            .field("trigrams_loaded", &self.trigram_cache.get().is_some())
+            .finish()
+    }
+}
+
+impl Clone for PackToc {
+    fn clone(&self) -> Self {
+        let trigram_cache = OnceLock::new();
+        if let Some(ts) = self.trigram_cache.get() {
+            let _ = trigram_cache.set(ts.clone());
+        }
+        Self {
+            postscript: self.postscript,
+            frames: self.frames.clone(),
+            chunks: self.chunks.clone(),
+            frames_contiguous: self.frames_contiguous,
+            trigram_cache,
+            trigram_init: Mutex::new(()),
+        }
+    }
+}
+
+impl PartialEq for PackToc {
+    fn eq(&self, other: &Self) -> bool {
+        self.postscript == other.postscript
+            && self.frames == other.frames
+            && self.chunks == other.chunks
+            && self.frames_contiguous == other.frames_contiguous
+    }
+}
+
+impl Eq for PackToc {}
+
 impl PackToc {
+    /// Returns the already-loaded trigram section without performing any I/O.
+    pub(crate) fn cached_trigram_section(&self) -> Option<&TrigramSectionData> {
+        self.trigram_cache.get()
+    }
     /// Reads and validates a `.stpk` [`PackToc`] using an optional catalog-stored TOC size hint.
     ///
     /// On remote readers, expands the tail fetch ONLY upward from the default pack tail hint
@@ -2394,6 +2440,8 @@ fn read_toc_and_tail(
         frames,
         chunks,
         frames_contiguous,
+        trigram_cache: OnceLock::new(),
+        trigram_init: Mutex::new(()),
     });
     Ok((toc, tail_start, tail, data_end))
 }
@@ -2454,8 +2502,6 @@ pub struct ChunkPackReader {
     inline_edge_table: Option<Bytes>,
     dict_cache: OnceLock<Option<Arc<PackDecoderDict>>>,
     dict_init: Mutex<()>,
-    trigram_cache: OnceLock<TrigramSectionData>,
-    trigram_init: Mutex<()>,
     edge_table_cache: OnceLock<Arc<FlatEdgeTable>>,
     edge_table_init: Mutex<()>,
 }
@@ -2536,8 +2582,6 @@ impl ChunkPackReader {
             inline_edge_table,
             dict_cache: OnceLock::new(),
             dict_init: Mutex::new(()),
-            trigram_cache: OnceLock::new(),
-            trigram_init: Mutex::new(()),
             edge_table_cache: OnceLock::new(),
             edge_table_init: Mutex::new(()),
         })
@@ -2575,8 +2619,6 @@ impl ChunkPackReader {
             inline_edge_table: None,
             dict_cache: OnceLock::new(),
             dict_init: Mutex::new(()),
-            trigram_cache: OnceLock::new(),
-            trigram_init: Mutex::new(()),
             edge_table_cache: OnceLock::new(),
             edge_table_init: Mutex::new(()),
         })
@@ -3714,16 +3756,20 @@ impl ChunkPackReader {
     }
 
     pub(crate) fn trigram_section_cached(&self) -> Result<&TrigramSectionData, StatamError> {
-        if let Some(cached) = self.trigram_cache.get() {
+        if let Some(cached) = self.toc.trigram_cache.get() {
             return Ok(cached);
         }
-        let _guard = self.trigram_init.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(cached) = self.trigram_cache.get() {
+        let _guard = self
+            .toc
+            .trigram_init
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(cached) = self.toc.trigram_cache.get() {
             return Ok(cached);
         }
         let data = self.read_trigram_section_uncached(false)?;
-        let _ = self.trigram_cache.set(data);
-        self.trigram_cache.get().ok_or(StatamError::Corrupt {
+        let _ = self.toc.trigram_cache.set(data);
+        self.toc.trigram_cache.get().ok_or(StatamError::Corrupt {
             reason: "trigram cache uninitialized",
         })
     }

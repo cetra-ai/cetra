@@ -18,8 +18,10 @@ use crate::format::{
     read_framed_block_checked_cow,
 };
 use crate::io::RangeReader;
-use crate::payload::pack::ChunkPackReader;
-use crate::payload::search::{extract_ilike_trigram_hashes, pack_short_circuits_all};
+use crate::payload::pack::{ChunkPackReader, PackToc};
+use crate::payload::search::{
+    extract_ilike_trigram_hashes, pack_short_circuits_all, pack_toc_short_circuits_all_if_cached,
+};
 use crate::payload::{FlatPayloadRefs, PayloadRefRow};
 use crate::simd::trigram::extract_trigram_hashes;
 
@@ -613,12 +615,17 @@ impl StatamReader {
         // Phase 1 without opening packs (preserving remote `.stpk` prefetch overlap and
         // narrow-filter MissingPack isolation). Already-cached packs are always consulted with zero
         // extra I/O.
+        enum CachedOrOpenPacks {
+            Open(Vec<Arc<ChunkPackReader>>),
+            Toc(Vec<Arc<PackToc>>),
+        }
+
         let allow_open_uncached_packs = !self.reader.is_remote()
             && lookups.is_empty()
             && preds.is_empty()
             && filter_exprs.is_empty();
         let mut pack_short_circuit_by_query: HashMap<(&[u8], bool), bool> = HashMap::new();
-        let mut resolved_packs: Option<Option<Vec<Arc<ChunkPackReader>>>> = None;
+        let mut resolved_packs: Option<Option<CachedOrOpenPacks>> = None;
         for clause in subs {
             for &(cidx, ref sq) in clause {
                 if sq.needle.len() < 3 {
@@ -641,8 +648,8 @@ impl StatamReader {
                 if pack_short_circuit_by_query.contains_key(&key) {
                     continue;
                 }
-                let packs = match resolved_packs {
-                    Some(ref opt) => opt.as_deref(),
+                let packs_opt = match resolved_packs {
+                    Some(ref opt) => opt.as_ref(),
                     None => {
                         let loaded_opt = if allow_open_uncached_packs {
                             let mut loaded = Vec::with_capacity(pack_ids.len());
@@ -657,35 +664,51 @@ impl StatamReader {
                                     Err(e) => return Err(e),
                                 }
                             }
-                            (!missing).then_some(loaded)
+                            (!missing).then_some(CachedOrOpenPacks::Open(loaded))
                         } else {
-                            let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
+                            let mut toc_slots: Vec<Option<Arc<PackToc>>> = {
+                                let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
+                                pack_ids
+                                    .iter()
+                                    .map(|pack_id| {
+                                        guard.packs.get(pack_id).map(|p| Arc::clone(p.toc_arc()))
+                                    })
+                                    .collect()
+                            };
                             let mut loaded = Vec::with_capacity(pack_ids.len());
                             let mut all_cached = true;
-                            for &pack_id in pack_ids {
-                                if let Some(pack) = guard.packs.get(&pack_id) {
-                                    loaded.push(Arc::clone(pack));
+                            for (&pack_id, slot) in pack_ids.iter().zip(toc_slots.drain(..)) {
+                                let toc = slot.or_else(|| {
+                                    self.packs.as_ref().and_then(|r| r.cached_toc(pack_id))
+                                });
+                                if let Some(t) = toc {
+                                    loaded.push(t);
                                 } else {
                                     all_cached = false;
                                     break;
                                 }
                             }
-                            all_cached.then_some(loaded)
+                            all_cached.then_some(CachedOrOpenPacks::Toc(loaded))
                         };
-                        resolved_packs.insert(loaded_opt).as_deref()
+                        resolved_packs.insert(loaded_opt).as_ref()
                     }
                 };
-                let all_short_circuit = if let Some(packs) = packs {
-                    let mut ok = true;
-                    for pack in packs {
-                        if !pack_short_circuits_all(pack, &sq.needle, sq.case_insensitive)? {
-                            ok = false;
-                            break;
+                let all_short_circuit = match packs_opt {
+                    Some(CachedOrOpenPacks::Open(packs)) => {
+                        let mut ok = true;
+                        for pack in packs {
+                            if !pack_short_circuits_all(pack, &sq.needle, sq.case_insensitive)? {
+                                ok = false;
+                                break;
+                            }
                         }
+                        ok
                     }
-                    ok
-                } else {
-                    false
+                    Some(CachedOrOpenPacks::Toc(tocs)) => tocs.iter().all(|toc| {
+                        pack_toc_short_circuits_all_if_cached(toc, &sq.needle, sq.case_insensitive)
+                            == Some(true)
+                    }),
+                    None => false,
                 };
                 pack_short_circuit_by_query.insert(key, all_short_circuit);
             }
