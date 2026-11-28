@@ -5526,34 +5526,43 @@ mod tests {
         }
 
         // 6. Corrupt PlainSubchunkedView bounds / DoS checks.
+        //    Wire layout: `chunk_count(u32: 0..4) || rows_per_chunk(u16: 4..6) ||
+        //    per-chunk dir[codec(u8: +0), raw_len(u32: +1..+5), stored_len(u32: +5..+9)]`.
         let sub_slice = &enc.raw_body[null_prefix..];
-        // 6a. rows_per_chunk == 0.
+        // 6a. rows_per_chunk == 0 (bytes 4..6).
         let mut bad_rpc = sub_slice.to_vec();
-        bad_rpc[0..2].copy_from_slice(&0u16.to_le_bytes());
+        bad_rpc[4..6].copy_from_slice(&0u16.to_le_bytes());
         assert!(matches!(
             PlainSubchunkedView::parse(&bad_rpc, n),
-            Err(StatamError::Corrupt { .. })
+            Err(StatamError::Corrupt {
+                reason: "invalid plain subchunked rows_per_chunk",
+            })
         ));
-        // 6b. Wrong chunk_count.
+        // 6b. Wrong chunk_count (bytes 0..4).
         let mut bad_cc = sub_slice.to_vec();
-        bad_cc[2..4].copy_from_slice(&99u16.to_le_bytes());
+        bad_cc[0..4].copy_from_slice(&99u32.to_le_bytes());
         assert!(matches!(
             PlainSubchunkedView::parse(&bad_cc, n),
-            Err(StatamError::Corrupt { .. })
+            Err(StatamError::Corrupt {
+                reason: "plain subchunked chunk_count mismatch",
+            })
         ));
         // 6c. Trailing garbage byte.
         let mut trailing = sub_slice.to_vec();
         trailing.push(0xAA);
         assert!(matches!(
             PlainSubchunkedView::parse(&trailing, n),
-            Err(StatamError::Corrupt { .. })
+            Err(StatamError::Corrupt {
+                reason: "trailing bytes in plain subchunked payload",
+            })
         ));
-        // 6d. Zip-bomb raw_len > MAX_BLOCK_RAW_BYTES rejected by parse.
+        // 6d. Zip-bomb raw_len > MAX_BLOCK_RAW_BYTES (entry 0 codec at byte 6, raw_len at bytes 7..11).
         let mut bomb = sub_slice.to_vec();
-        bomb[8..12].copy_from_slice(&((MAX_BLOCK_RAW_BYTES as u32) + 1).to_le_bytes());
+        bomb[6] = Codec::Zstd as u8;
+        bomb[7..11].copy_from_slice(&((MAX_BLOCK_RAW_BYTES as u32) + 1).to_le_bytes());
         assert!(matches!(
             PlainSubchunkedView::parse(&bomb, n),
-            Err(StatamError::BoundsExceeded { .. } | StatamError::Corrupt { .. })
+            Err(StatamError::BoundsExceeded { .. })
         ));
     }
 }

@@ -2310,17 +2310,18 @@ fn encode_scalar_or_nested_col_into(
                 used_dict_encoding = true;
             }
             null_count_total = null_count_total.saturating_add(u32::from(enc.null_count));
+            let (lz4_pct_cap, min_savings_pct) = if profile == WriteProfile::L1Compact {
+                (112, 15)
+            } else {
+                (0, 0)
+            };
             let entry = enc.write_framed_entry_adaptive(
                 mb_first_row,
                 mb_len as u16,
                 base_offset,
                 zstd_level,
-                if profile == WriteProfile::L1Compact {
-                    112
-                } else {
-                    0
-                },
-                15,
+                lz4_pct_cap,
+                min_savings_pct,
                 out_buf,
             )?;
             out_blocks.push(entry);

@@ -1598,6 +1598,11 @@ pub fn decode_shredded_residual_block_keys_only(
     entry: &BlockEntry,
     mask: &Bitmap,
 ) -> Result<FlatColumn, StatamError> {
+    if (entry.block_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0 {
+        return Err(StatamError::Corrupt {
+            reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED forbidden on MapUtf8 residual",
+        });
+    }
     if mask.len() != entry.row_count as usize {
         return Err(StatamError::Corrupt {
             reason: "selection mask length mismatch",
@@ -1990,6 +1995,11 @@ pub fn decode_shredded_residual_block(
     raw_body: &[u8],
     entry: &BlockEntry,
 ) -> Result<FlatColumn, StatamError> {
+    if (entry.block_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0 {
+        return Err(StatamError::Corrupt {
+            reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED forbidden on MapUtf8 residual",
+        });
+    }
     if entry.encoding == Encoding::ConstNull || entry.encoding == Encoding::Const {
         return Ok(decode_const_block(entry, &DataType::MapUtf8)?.materialize(None)?);
     }
@@ -2029,6 +2039,11 @@ pub fn decode_shredded_residual_block_selected(
     entry: &BlockEntry,
     mask: &Bitmap,
 ) -> Result<FlatColumn, StatamError> {
+    if (entry.block_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0 {
+        return Err(StatamError::Corrupt {
+            reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED forbidden on MapUtf8 residual",
+        });
+    }
     if mask.len() != entry.row_count as usize {
         return Err(StatamError::Corrupt {
             reason: "selection mask length mismatch",
@@ -3410,10 +3425,11 @@ struct ParsedListChildHeader<'a> {
     child_body: &'a [u8],
 }
 
-fn parse_list_child_header(
-    rest: &[u8],
+fn parse_list_child_header<'a>(
+    rest: &'a [u8],
     total_child: usize,
-) -> Result<ParsedListChildHeader<'_>, StatamError> {
+    child_dt: &DataType,
+) -> Result<ParsedListChildHeader<'a>, StatamError> {
     if rest.len() < 28 {
         return Err(StatamError::Corrupt {
             reason: "truncated ListEncoded child header",
@@ -3426,9 +3442,11 @@ fn parse_list_child_header(
             reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst ListEncoded child",
         });
     }
-    if (child_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0 && child_enc != Encoding::Plain {
+    if (child_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0
+        && (child_enc != Encoding::Plain || !matches!(child_dt, DataType::Utf8 | DataType::Binary))
+    {
         return Err(StatamError::Corrupt {
-            reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED set on non-Plain ListEncoded child",
+            reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED only valid for Plain Utf8/Binary ListEncoded child",
         });
     }
     if (child_flags & BLOCK_FLAG_NO_INLINE_PAYLOADS) != 0 {
@@ -3653,7 +3671,7 @@ fn decode_list_body_selected(
     let (counts, rest) = read_packed_counts(rest, row_count)?;
     let (offsets, total_child) = counts_to_offsets(&counts)?;
 
-    let hdr = parse_list_child_header(rest, total_child)?;
+    let hdr = parse_list_child_header(rest, total_child, inner)?;
     let child_enc = hdr.child_enc;
     let child_flags = hdr.child_flags;
     let child_len = hdr.child_len;
@@ -4476,7 +4494,7 @@ fn decode_list_body(
     let (counts, rest) = read_packed_counts(rest, row_count)?;
     let (offsets, total_child) = counts_to_offsets(&counts)?;
 
-    let hdr = parse_list_child_header(rest, total_child)?;
+    let hdr = parse_list_child_header(rest, total_child, inner)?;
     let child_col = decode_child_column(
         hdr.child_body,
         hdr.child_enc,
@@ -4516,6 +4534,13 @@ fn decode_child_column(
     remaining_depth: usize,
     budget: &mut usize,
 ) -> Result<Column, StatamError> {
+    if (flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0
+        && !(enc == Encoding::Plain && matches!(dt, DataType::Utf8 | DataType::Binary))
+    {
+        return Err(StatamError::Corrupt {
+            reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED only valid for Plain Utf8/Binary child",
+        });
+    }
     if len == 0 {
         if !body.is_empty() {
             return Err(StatamError::Corrupt {

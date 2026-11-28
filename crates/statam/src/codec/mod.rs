@@ -518,18 +518,23 @@ pub(crate) fn encode_dict_codes_precomputed(
 }
 
 #[inline]
-fn validate_block_entry_flags(entry: &BlockEntry) -> Result<(), StatamError> {
+fn validate_block_entry_flags(entry: &BlockEntry, dt: &DataType) -> Result<(), StatamError> {
     if (entry.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0 && entry.encoding != Encoding::Fsst {
         return Err(StatamError::Corrupt {
             reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst encoding",
         });
     }
-    if (entry.block_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0
-        && (entry.encoding != Encoding::Plain || entry.codec != Codec::None)
-    {
-        return Err(StatamError::Corrupt {
-            reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED requires Plain encoding with Codec::None",
-        });
+    if (entry.block_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0 {
+        if entry.encoding != Encoding::Plain || entry.codec != Codec::None {
+            return Err(StatamError::Corrupt {
+                reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED requires Plain encoding with Codec::None",
+            });
+        }
+        if !matches!(dt, DataType::Utf8 | DataType::Binary) {
+            return Err(StatamError::Corrupt {
+                reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED only valid for Utf8/Binary",
+            });
+        }
     }
     if (entry.block_flags & BLOCK_FLAG_NO_INLINE_PAYLOADS) != 0
         && entry.encoding != Encoding::PayloadRefs
@@ -551,7 +556,7 @@ pub fn decode_mini_block(
     dt: &DataType,
     file_dict: Option<&FileDict>,
 ) -> Result<Column, StatamError> {
-    validate_block_entry_flags(entry)?;
+    validate_block_entry_flags(entry, dt)?;
     dt.validate(MAX_NESTING_DEPTH)?;
 
     if entry.encoding == Encoding::ConstNull || entry.encoding == Encoding::Const {
@@ -605,7 +610,7 @@ pub fn decode_mini_block_selected(
     file_dict: Option<&FileDict>,
     mask: &Bitmap,
 ) -> Result<Column, StatamError> {
-    validate_block_entry_flags(entry)?;
+    validate_block_entry_flags(entry, dt)?;
     let row_count = entry.row_count as usize;
     if mask.len() != row_count {
         return Err(StatamError::Corrupt {
@@ -681,7 +686,7 @@ pub(crate) fn decode_mini_block_selected_parallel_bytes(
     mask: &Bitmap,
     threads: usize,
 ) -> Result<Column, StatamError> {
-    validate_block_entry_flags(entry)?;
+    validate_block_entry_flags(entry, dt)?;
     dt.validate(MAX_NESTING_DEPTH)?;
     let row_count = entry.row_count as usize;
     if mask.len() != row_count {
@@ -796,7 +801,7 @@ pub(crate) fn decode_mini_block_take(
     file_dict: Option<&FileDict>,
     indices: &[usize],
 ) -> Result<Column, StatamError> {
-    validate_block_entry_flags(entry)?;
+    validate_block_entry_flags(entry, dt)?;
     dt.validate(MAX_NESTING_DEPTH)?;
     let row_count = entry.row_count as usize;
     if indices
@@ -5503,5 +5508,135 @@ mod tests {
             WriteProfile::L1Compact,
             Encoding::Fsst,
         );
+    }
+
+    #[test]
+    fn pass26_plain_subchunked_rejected_on_map_list_map_and_empty_non_varlen() {
+        let make_plain_sub_entry = |row_count: u16, encoding: Encoding| BlockEntry {
+            first_row: 0,
+            row_count,
+            null_count: 0,
+            offset: 0,
+            stored_len: 0,
+            raw_len: 0,
+            encoding,
+            codec: Codec::None,
+            block_flags: BLOCK_FLAG_PLAIN_SUBCHUNKED,
+            min_inline_len: 0,
+            max_inline_len: 0,
+            reserved: [0; 3],
+            min_inline: [0; 16],
+            max_inline: [0; 16],
+        };
+
+        // 1. `row_count == 0` non-Utf8/Binary blocks rejected across ALL 4 mini-block decoders!
+        let empty_mask = Bitmap::new_zeroed(0);
+        for dt in [DataType::I64, DataType::MapUtf8, DataType::Bool] {
+            let entry0 = make_plain_sub_entry(0, Encoding::Plain);
+            assert!(matches!(
+                decode_mini_block(&[], &entry0, &dt, None),
+                Err(StatamError::Corrupt {
+                    reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED only valid for Utf8/Binary",
+                })
+            ));
+            assert!(matches!(
+                decode_mini_block_selected(&[], &entry0, &dt, None, &empty_mask),
+                Err(StatamError::Corrupt {
+                    reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED only valid for Utf8/Binary",
+                })
+            ));
+            assert!(matches!(
+                decode_mini_block_selected_parallel_bytes(
+                    Bytes::new(),
+                    &entry0,
+                    &dt,
+                    None,
+                    &empty_mask,
+                    2,
+                ),
+                Err(StatamError::Corrupt {
+                    reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED only valid for Utf8/Binary",
+                })
+            ));
+            assert!(matches!(
+                decode_mini_block_take(&[], &entry0, &dt, None, &[]),
+                Err(StatamError::Corrupt {
+                    reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED only valid for Utf8/Binary",
+                })
+            ));
+        }
+
+        // 2. Shredded residual decoders reject `BLOCK_FLAG_PLAIN_SUBCHUNKED` (both row_count == 0
+        //    and row_count > 0, both Plain and ShreddedMap encodings).
+        for row_count in [0u16, 2u16] {
+            let mask = Bitmap::new_ones(row_count as usize);
+            for enc in [Encoding::Plain, Encoding::ShreddedMap] {
+                let entry = make_plain_sub_entry(row_count, enc);
+                assert!(matches!(
+                    nested::decode_shredded_residual_block(&[], &entry),
+                    Err(StatamError::Corrupt {
+                        reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED forbidden on MapUtf8 residual",
+                    })
+                ));
+                assert!(matches!(
+                    decode_shredded_residual_block_selected(&[], &entry, &mask),
+                    Err(StatamError::Corrupt {
+                        reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED forbidden on MapUtf8 residual",
+                    })
+                ));
+                assert!(matches!(
+                    decode_shredded_residual_block_keys_only(&[], &entry, &mask),
+                    Err(StatamError::Corrupt {
+                        reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED forbidden on MapUtf8 residual",
+                    })
+                ));
+            }
+        }
+
+        // 3. `List<MapUtf8>` with `BLOCK_FLAG_PLAIN_SUBCHUNKED` on child rejected consistently by
+        //    BOTH full `decode_mini_block` AND sparse `decode_mini_block_selected` (even when child len == 0!).
+        let list_map_dt = DataType::List(Box::new(DataType::MapUtf8));
+        // Build a minimal valid ListEncoded payload with 32 rows (all empty lists so total_elems == 0)
+        // so sparse mask (1/32 < 1/16) takes the sparse nested decode path while full mask takes full decode.
+        let rows = 32usize;
+        let mut list_body = Vec::new();
+        // offsets: len_bw = 0 (all zero lengths -> 32 empty lists, total_elems = 0)
+        list_body.push(0u8);
+        // child header (32 bytes): enc=Plain, flags=BLOCK_FLAG_PLAIN_SUBCHUNKED, child_len=0 (u32),
+        // child_null_count=0 (u32), min_inline_len=0, min_inline=[0;16], has_dict=0, body_len=0 (u32).
+        list_body.push(Encoding::Plain as u8);
+        list_body.push(BLOCK_FLAG_PLAIN_SUBCHUNKED);
+        list_body.extend_from_slice(&0u32.to_le_bytes());
+        list_body.extend_from_slice(&0u32.to_le_bytes());
+        list_body.push(0u8);
+        list_body.extend_from_slice(&[0u8; 16]);
+        list_body.push(0u8);
+        list_body.extend_from_slice(&0u32.to_le_bytes());
+        let list_entry = BlockEntry {
+            first_row: 0,
+            row_count: rows as u16,
+            null_count: 0,
+            offset: 0,
+            stored_len: list_body.len() as u32,
+            raw_len: list_body.len() as u32,
+            encoding: Encoding::ListEncoded,
+            codec: Codec::None,
+            block_flags: 0,
+            min_inline_len: 0,
+            max_inline_len: 0,
+            reserved: [0; 3],
+            min_inline: [0; 16],
+            max_inline: [0; 16],
+        };
+        let mut sparse_mask = Bitmap::new_zeroed(rows);
+        let _ = sparse_mask.set(0, true);
+        assert!(matches!(
+            decode_mini_block(&list_body, &list_entry, &list_map_dt, None),
+            Err(StatamError::Corrupt { .. })
+        ));
+        assert!(matches!(
+            decode_mini_block_selected(&list_body, &list_entry, &list_map_dt, None, &sparse_mask),
+            Err(StatamError::Corrupt { .. })
+        ));
     }
 }

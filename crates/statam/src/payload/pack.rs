@@ -1159,60 +1159,59 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
                 }
             }
             if raw_body.len() > MAX_BLOOM_BYTES {
-                return Err(StatamError::BoundsExceeded {
-                    reason: "TS02 uncompressed body exceeds MAX_BLOOM_BYTES",
-                });
-            }
-            let uncompressed_body_len =
-                u32::try_from(raw_body.len()).map_err(|_| StatamError::BoundsExceeded {
-                    reason: "TS02 uncompressed body length overflows u32",
+                (0u64, 0u32)
+            } else {
+                let uncompressed_body_len =
+                    u32::try_from(raw_body.len()).map_err(|_| StatamError::BoundsExceeded {
+                        reason: "TS02 uncompressed body length overflows u32",
+                    })?;
+                let group_count_u32 = u32::try_from(self.trigram_groups.len()).map_err(|_| {
+                    StatamError::BoundsExceeded {
+                        reason: "TS02 group_count overflows u32",
+                    }
                 })?;
-            let group_count_u32 = u32::try_from(self.trigram_groups.len()).map_err(|_| {
-                StatamError::BoundsExceeded {
-                    reason: "TS02 group_count overflows u32",
-                }
-            })?;
 
-            #[cfg(not(miri))]
-            let (ts_flags, stored_body) = {
-                let (c, s) = compress_guarded(&raw_body, Codec::Zstd, self.options.zstd_level)?;
-                if c == Codec::Zstd {
-                    (TS02_FLAG_ZSTD, s)
+                #[cfg(not(miri))]
+                let (ts_flags, stored_body) = {
+                    let (c, s) = compress_guarded(&raw_body, Codec::Zstd, self.options.zstd_level)?;
+                    if c == Codec::Zstd {
+                        (TS02_FLAG_ZSTD, s)
+                    } else {
+                        (0u16, raw_body)
+                    }
+                };
+                #[cfg(miri)]
+                let (ts_flags, stored_body) = (0u16, raw_body);
+
+                let total_len = TS02_HEADER_LEN
+                    .checked_add(stored_body.len())
+                    .and_then(|n| n.checked_add(4))
+                    .ok_or(StatamError::BoundsExceeded {
+                        reason: "trigram section size overflow",
+                    })?;
+                if total_len > MAX_BLOOM_BYTES {
+                    (0u64, 0u32)
                 } else {
-                    (0u16, raw_body)
+                    let len =
+                        u32::try_from(total_len).map_err(|_| StatamError::BoundsExceeded {
+                            reason: "trigram section exceeds u32",
+                        })?;
+                    trigram_section.reserve(total_len);
+                    trigram_section.extend_from_slice(&TRIGRAM_SECTION_MAGIC);
+                    trigram_section.extend_from_slice(&ts_flags.to_le_bytes());
+                    trigram_section.extend_from_slice(&0u16.to_le_bytes()); // reserved
+                    trigram_section.extend_from_slice(&group_count_u32.to_le_bytes());
+                    trigram_section.extend_from_slice(&(edge_bloom_bytes as u32).to_le_bytes());
+                    trigram_section.extend_from_slice(&uncompressed_body_len.to_le_bytes());
+                    trigram_section.extend_from_slice(&stored_body);
+                    let ts_crc = crc32c::crc32c(&trigram_section);
+                    trigram_section.extend_from_slice(&ts_crc.to_le_bytes());
+
+                    let off = cur_off;
+                    cur_off = cur_off.saturating_add(u64::from(len));
+                    (off, len)
                 }
-            };
-            #[cfg(miri)]
-            let (ts_flags, stored_body) = (0u16, raw_body);
-
-            let total_len = TS02_HEADER_LEN
-                .checked_add(stored_body.len())
-                .and_then(|n| n.checked_add(4))
-                .ok_or(StatamError::BoundsExceeded {
-                    reason: "trigram section size overflow",
-                })?;
-            if total_len > MAX_BLOOM_BYTES {
-                return Err(StatamError::BoundsExceeded {
-                    reason: "TS02 section exceeds MAX_BLOOM_BYTES",
-                });
             }
-            let len = u32::try_from(total_len).map_err(|_| StatamError::BoundsExceeded {
-                reason: "trigram section exceeds u32",
-            })?;
-            trigram_section.reserve(total_len);
-            trigram_section.extend_from_slice(&TRIGRAM_SECTION_MAGIC);
-            trigram_section.extend_from_slice(&ts_flags.to_le_bytes());
-            trigram_section.extend_from_slice(&0u16.to_le_bytes()); // reserved
-            trigram_section.extend_from_slice(&group_count_u32.to_le_bytes());
-            trigram_section.extend_from_slice(&(edge_bloom_bytes as u32).to_le_bytes());
-            trigram_section.extend_from_slice(&uncompressed_body_len.to_le_bytes());
-            trigram_section.extend_from_slice(&stored_body);
-            let ts_crc = crc32c::crc32c(&trigram_section);
-            trigram_section.extend_from_slice(&ts_crc.to_le_bytes());
-
-            let off = cur_off;
-            cur_off = cur_off.saturating_add(u64::from(len));
-            (off, len)
         } else {
             (0u64, 0u32)
         };
@@ -1881,11 +1880,15 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
     }
 
     fn push_trigram_group(&mut self, frame_span: u16, bloom_bytes: Option<Vec<u8>>) {
+        // Reserve worst-case coalesced `None`-group tail bytes across `MAX_PACK_FRAMES` so a
+        // valid large pack can never exceed `MAX_BLOOM_BYTES` once the bloom budget fills up.
+        const MAX_NONE_TAIL_BYTES: usize = MAX_PACK_FRAMES.div_ceil(u16::MAX as usize) * 6;
         if let Some(bytes) = bloom_bytes {
             let entry_bytes = 6usize.saturating_add(bytes.len());
             let projected_total = TS02_HEADER_LEN
                 .saturating_add(4)
                 .saturating_add(2 * 8_192)
+                .saturating_add(MAX_NONE_TAIL_BYTES)
                 .saturating_add(self.trigram_body_est_bytes)
                 .saturating_add(entry_bytes);
             if projected_total <= MAX_BLOOM_BYTES {
@@ -1894,6 +1897,12 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
                 self.trigram_groups.push((frame_span, Some(bytes)));
                 return;
             }
+        }
+        if let Some((prev_span, None)) = self.trigram_groups.last_mut()
+            && let Some(merged) = prev_span.checked_add(frame_span)
+        {
+            *prev_span = merged;
+            return;
         }
         self.trigram_body_est_bytes = self.trigram_body_est_bytes.saturating_add(6);
         self.trigram_groups.push((frame_span, None));
@@ -7624,5 +7633,99 @@ mod tests {
             2,
             "gap > 32 KiB with waste (64 KiB) > useful (16 KiB) must NOT coalesce"
         );
+    }
+
+    #[test]
+    fn pass26_ts02_none_group_coalescing_and_max_bloom_bytes_budget() {
+        // 1. Consecutive `None` groups coalesce with 0 extra bytes and split cleanly across u16::MAX.
+        let mut pb = ChunkPackBuilder::new(
+            [0x29u8; 16],
+            PackWriteOptions {
+                codec: Codec::None,
+                zstd_level: 0,
+                target_frame_raw_bytes: 64 * 1024,
+                enable_trigram_skip: true,
+                compress_toc_lz4: false,
+                write_threads: 1,
+                emit_hash_table: false,
+            },
+        );
+        pb.push_trigram_group(40_000, None);
+        pb.push_trigram_group(25_535, None); // 65_535 -> merges into single entry!
+        assert_eq!(pb.trigram_groups.len(), 1);
+        assert_eq!(pb.trigram_groups[0], (u16::MAX, None));
+        assert_eq!(pb.trigram_body_est_bytes, 6);
+        pb.push_trigram_group(1, None); // overflows u16::MAX -> starts second None entry!
+        assert_eq!(pb.trigram_groups.len(), 2);
+        assert_eq!(pb.trigram_groups[1], (1, None));
+        assert_eq!(pb.trigram_body_est_bytes, 12);
+
+        // 2. Pack hitting the `MAX_BLOOM_BYTES` budget via `append_raw_frame` with 16 KiB blooms
+        //    degrades tail groups to coalesced `None` entries, finishes `Ok(...)`, and opens cleanly!
+        let mut src_pb = ChunkPackBuilder::new(
+            [0x2Au8; 16],
+            PackWriteOptions {
+                codec: Codec::None,
+                zstd_level: 0,
+                target_frame_raw_bytes: 64 * 1024,
+                enable_trigram_skip: false,
+                compress_toc_lz4: false,
+                write_threads: 1,
+                emit_hash_table: false,
+            },
+        );
+        src_pb.intern_chunk(b"tiny_frame_chunk_payload").unwrap();
+        let mut src_bytes = Vec::new();
+        src_pb.finish(&mut src_bytes).unwrap();
+        let src_r = ChunkPackReader::open(Arc::new(SliceReader::new(src_bytes))).unwrap();
+        let fe0 = src_r.toc().frames[0];
+        let raw_f0 = src_r.read_frame_raw(0).unwrap().to_vec();
+        let loc0 = src_r.toc().chunks[0];
+        let chunks = [(loc0.offset_in_frame, loc0.raw_len)];
+        let edges = src_r.read_edge_table().unwrap();
+
+        let mut bloom = TrigramBloom::new(MAX_TRIGRAM_BLOOM_BYTES);
+        bloom.insert_bytes_ilike_folded(b"budget_probe_trigram_token");
+        let bloom_bytes = bloom.as_bytes();
+        // `MAX_BLOOM_BYTES` is 4 MiB (~256 × 16 KiB blooms); append 300 frames to cross the budget!
+        let n_frames = (MAX_BLOOM_BYTES / MAX_TRIGRAM_BLOOM_BYTES) + 44;
+        let mut big_pb = ChunkPackBuilder::new(
+            [0x2Bu8; 16],
+            PackWriteOptions {
+                codec: Codec::None,
+                zstd_level: 0,
+                target_frame_raw_bytes: 64 * 1024,
+                enable_trigram_skip: true,
+                compress_toc_lz4: false,
+                write_threads: 1,
+                emit_hash_table: false,
+            },
+        );
+        for _ in 0..n_frames {
+            big_pb
+                .append_raw_frame(&raw_f0, fe0, &chunks, None, bloom_bytes, &edges)
+                .unwrap();
+        }
+        // Tail frames past budget must have coalesced into a single `None` group!
+        assert!(
+            matches!(big_pb.trigram_groups.last(), Some(&(span, None)) if span > 1),
+            "expected tail groups past MAX_BLOOM_BYTES to coalesce into one None group"
+        );
+        let mut out_pack = Vec::new();
+        big_pb.finish(&mut out_pack).unwrap();
+
+        let big_r = ChunkPackReader::open(Arc::new(SliceReader::new(out_pack))).unwrap();
+        assert_eq!(big_r.toc().frames.len(), n_frames);
+        assert!(big_r.postscript().trigram_len as usize <= MAX_BLOOM_BYTES);
+        let ts = big_r.trigram_section_cached().unwrap();
+        assert_eq!(
+            ts.group_frame_spans
+                .iter()
+                .map(|&s| s as usize)
+                .sum::<usize>(),
+            n_frames
+        );
+        assert!(ts.group_blooms.first().unwrap().is_some());
+        assert!(ts.group_blooms.last().unwrap().is_none());
     }
 }
