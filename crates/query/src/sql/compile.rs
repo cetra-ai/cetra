@@ -15,7 +15,7 @@ use crate::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join_parallel}
 use crate::exec::pipeline::{
     ControlFlow, ExecContext, PushOperator, run_pipeline_with_stop, transfer_or_grow,
 };
-use crate::exec::sort_window::{ExternalSort, eval_window_group};
+use crate::exec::sort_window::{ExternalSort, eval_window_group_parallel};
 use crate::exec::source::{BatchSource, PartitionStream, ScanSource, ScanSpec};
 use crate::exec::streaming::{FilterOp, LimitOp, ProjectOp, TopKSink, UnionSource, UnnestOp};
 use crate::ir::Expr;
@@ -421,20 +421,20 @@ fn compile_stage(
         } => {
             let stage = compile_stage(input, sources, ctx)?;
             let input_schema = Arc::clone(&stage.schema);
-            let single = stage.into_single_stream(ctx);
-            let stream = eval_window_group(
-                single,
+            let streams = stage.into_streams(ctx);
+            let win_streams = eval_window_group_parallel(
+                streams,
                 input_schema,
                 partition_by.clone(),
                 order_by.clone(),
                 specs.clone(),
                 ctx,
             )?;
-            let stream = retag_stream_to_schema(stream, schema);
-            Ok(CompiledStage::from_streams(
-                vec![stream],
-                Arc::clone(schema),
-            ))
+            let streams = win_streams
+                .into_iter()
+                .map(|s| retag_stream_to_schema(s, schema))
+                .collect();
+            Ok(CompiledStage::from_streams(streams, Arc::clone(schema)))
         }
 
         LogicalPlan::Join {
@@ -1762,5 +1762,94 @@ mod tests {
             assert_eq!(rows, expected_rows, "SQL output mismatch for `{sql}`");
             assert_eq!(ctx.pool.reserved(), 0);
         }
+    }
+
+    #[test]
+    fn sql_window_partition_by_runs_parallel_and_matches_expected() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("model", DataType::Utf8, false),
+            Field::new("duration_ns", DataType::I64, false),
+            Field::new("span_id", DataType::I64, false),
+        ])
+        .unwrap();
+
+        let mk_batch = |models: &[&str], durs: &[i64], ids: &[i64]| -> Batch {
+            Batch::try_new_all(
+                Arc::clone(&schema),
+                vec![
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Utf8(
+                                Utf8Data::try_from_slices(models.iter().copied()).unwrap(),
+                            ),
+                            None,
+                        )
+                        .unwrap(),
+                    ),
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(durs.to_vec()), None).unwrap()),
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(ids.to_vec()), None).unwrap()),
+                ],
+                models.len(),
+            )
+            .unwrap()
+        };
+
+        let src = Arc::new(
+            BatchSource::new(
+                Arc::clone(&schema),
+                vec![
+                    mk_batch(&["gpt-4", "claude-3"], &[100, 300], &[1, 2]),
+                    mk_batch(&["gpt-4", "llama-3"], &[400, 150], &[3, 4]),
+                    mk_batch(&["claude-3", "mistral"], &[200, 250], &[5, 6]),
+                    mk_batch(&["llama-3", "gpt-4"], &[50, 250], &[7, 8]),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let mut catalog = SqlCatalog::new(None, None);
+        catalog.register_batch_source("spans_w", src).unwrap();
+        let mut sources = SqlSources::new();
+        sources.register_catalog_batches(&catalog);
+
+        let (ctx, _dir) = test_ctx(8 * 1024 * 1024);
+        let ctx = ExecContext {
+            target_partitions: 2,
+            batch_size: 4,
+            ..ctx
+        };
+        let params = serde_json::Map::new();
+
+        let sql_no_order = "SELECT model, duration_ns, span_id, ROW_NUMBER() OVER (PARTITION BY model ORDER BY duration_ns DESC) AS rn FROM spans_w";
+        let plan = crate::sql::prepare_sql_plan(&catalog, sql_no_order, &params).unwrap();
+        let stage = compile_stage(&plan, &sources, &ctx).unwrap();
+        assert!(
+            stage.streams.len() > 1,
+            "expected > 1 parallel window streams, got {}",
+            stage.streams.len()
+        );
+        drop(stage);
+
+        let sql = "SELECT model, duration_ns, span_id, ROW_NUMBER() OVER (PARTITION BY model ORDER BY duration_ns DESC) AS rn FROM spans_w ORDER BY model ASC, rn ASC, span_id ASC";
+        let res = crate::sql::sql_json(&catalog, &sources, &ctx, sql, &params, 100).unwrap();
+        let rows: Vec<serde_json::Value> = res
+            .rows
+            .into_iter()
+            .map(serde_json::Value::Object)
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                serde_json::json!({"model": "claude-3", "duration_ns": 300, "span_id": 2, "rn": 1}),
+                serde_json::json!({"model": "claude-3", "duration_ns": 200, "span_id": 5, "rn": 2}),
+                serde_json::json!({"model": "gpt-4", "duration_ns": 400, "span_id": 3, "rn": 1}),
+                serde_json::json!({"model": "gpt-4", "duration_ns": 250, "span_id": 8, "rn": 2}),
+                serde_json::json!({"model": "gpt-4", "duration_ns": 100, "span_id": 1, "rn": 3}),
+                serde_json::json!({"model": "llama-3", "duration_ns": 150, "span_id": 4, "rn": 1}),
+                serde_json::json!({"model": "llama-3", "duration_ns": 50, "span_id": 7, "rn": 2}),
+                serde_json::json!({"model": "mistral", "duration_ns": 250, "span_id": 6, "rn": 1}),
+            ]
+        );
+        assert_eq!(ctx.pool.reserved(), 0);
     }
 }
