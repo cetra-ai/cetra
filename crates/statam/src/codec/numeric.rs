@@ -3302,6 +3302,82 @@ fn encode_plain_subchunked(
     plain_raw_with_nulls: &[u8],
     nulls_prefix_len: usize,
 ) -> Result<Option<Vec<u8>>, StatamError> {
+    if flat.is_empty() {
+        return Ok(None);
+    }
+
+    #[cfg(not(miri))]
+    let mut zstd_comp = zstd::bulk::Compressor::new(3).map_err(|_| StatamError::Corrupt {
+        reason: "plain subchunk zstd compressor init failed",
+    })?;
+    #[cfg(not(miri))]
+    let effective_plain_zstd = {
+        let plain_len = plain_raw_with_nulls.len();
+        if plain_len == 0 {
+            0
+        } else {
+            let pz =
+                zstd_comp
+                    .compress(plain_raw_with_nulls)
+                    .map_err(|_| StatamError::Corrupt {
+                        reason: "plain subchunk guard zstd compression failed",
+                    })?;
+            let ratio_ok = (plain_len as u64)
+                <= (pz.len() as u64)
+                    .saturating_mul(MAX_DECOMPRESS_RATIO)
+                    .saturating_add(MAX_DECOMPRESS_SLACK);
+            if pz.len().saturating_add(16) < plain_len && ratio_ok {
+                pz.len()
+            } else {
+                plain_len
+            }
+        }
+    };
+
+    if let Some(body) = encode_plain_subchunked_with_rows(
+        flat,
+        plain_raw_with_nulls,
+        nulls_prefix_len,
+        PLAIN_SUBCHUNK_ROWS,
+        115,
+        true,
+        #[cfg(not(miri))]
+        &mut zstd_comp,
+        #[cfg(not(miri))]
+        effective_plain_zstd,
+    )? {
+        return Ok(Some(body));
+    }
+
+    if flat.len() >= 2048 && plain_raw_with_nulls.len() >= 512 * 1024 {
+        return encode_plain_subchunked_with_rows(
+            flat,
+            plain_raw_with_nulls,
+            nulls_prefix_len,
+            512,
+            145,
+            false,
+            #[cfg(not(miri))]
+            &mut zstd_comp,
+            #[cfg(not(miri))]
+            effective_plain_zstd,
+        );
+    }
+
+    Ok(None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_plain_subchunked_with_rows(
+    flat: &FlatColumn,
+    plain_raw_with_nulls: &[u8],
+    nulls_prefix_len: usize,
+    rows_per_chunk: u16,
+    max_pct: u64,
+    allow_small_cap: bool,
+    #[cfg(not(miri))] zstd_comp: &mut zstd::bulk::Compressor<'_>,
+    #[cfg(not(miri))] effective_plain_zstd: usize,
+) -> Result<Option<Vec<u8>>, StatamError> {
     let (offsets, bytes): (&[u32], &[u8]) = match flat.data() {
         FlatData::Utf8(u) => (u.offsets(), u.bytes()),
         FlatData::Binary(b) => (b.offsets(), b.bytes()),
@@ -3312,10 +3388,10 @@ fn encode_plain_subchunked(
         }
     };
     let row_count = flat.len();
-    if row_count == 0 {
+    if row_count == 0 || rows_per_chunk == 0 {
         return Ok(None);
     }
-    let rows_per_chunk = usize::from(PLAIN_SUBCHUNK_ROWS).min(row_count);
+    let rows_per_chunk = usize::from(rows_per_chunk).min(row_count);
     let rows_per_chunk_u16 =
         u16::try_from(rows_per_chunk).map_err(|_| StatamError::BoundsExceeded {
             reason: "plain subchunk rows_per_chunk exceeds u16::MAX",
@@ -3323,11 +3399,6 @@ fn encode_plain_subchunked(
     let chunk_count = row_count.div_ceil(rows_per_chunk);
     let chunk_count_u32 = u32::try_from(chunk_count).map_err(|_| StatamError::BoundsExceeded {
         reason: "plain subchunk count overflows u32",
-    })?;
-
-    #[cfg(not(miri))]
-    let mut zstd_comp = zstd::bulk::Compressor::new(3).map_err(|_| StatamError::Corrupt {
-        reason: "plain subchunk zstd compressor init failed",
     })?;
 
     let mut entries: Vec<(Codec, u32, u32)> = Vec::with_capacity(chunk_count);
@@ -3426,34 +3497,23 @@ fn encode_plain_subchunked(
     #[cfg(not(miri))]
     {
         let plain_len = plain_raw_with_nulls.len();
-        let effective_plain_zstd = if plain_len == 0 {
-            0
-        } else {
-            let pz =
-                zstd_comp
-                    .compress(plain_raw_with_nulls)
-                    .map_err(|_| StatamError::Corrupt {
-                        reason: "plain subchunk guard zstd compression failed",
-                    })?;
-            let ratio_ok = (plain_len as u64)
-                <= (pz.len() as u64)
-                    .saturating_mul(MAX_DECOMPRESS_RATIO)
-                    .saturating_add(MAX_DECOMPRESS_SLACK);
-            if pz.len().saturating_add(16) < plain_len && ratio_ok {
-                pz.len()
-            } else {
-                plain_len
-            }
-        };
         let subchunked_total = body_len.saturating_add(nulls_prefix_len);
-        if (subchunked_total as u64).saturating_mul(100)
-            > (effective_plain_zstd as u64).saturating_mul(115)
-        {
+        let keep_subchunked = (subchunked_total as u64).saturating_mul(100)
+            <= (effective_plain_zstd as u64).saturating_mul(max_pct)
+            || (allow_small_cap
+                && plain_len >= 256 * 1024
+                && subchunked_total <= effective_plain_zstd.saturating_add(32 * 1024));
+        if !keep_subchunked {
             return Ok(None);
         }
     }
     #[cfg(miri)]
-    let _ = (plain_raw_with_nulls, nulls_prefix_len);
+    let _ = (
+        plain_raw_with_nulls,
+        nulls_prefix_len,
+        max_pct,
+        allow_small_cap,
+    );
 
     let mut out = Vec::with_capacity(body_len);
     out.extend_from_slice(&chunk_count_u32.to_le_bytes());
@@ -5564,5 +5624,73 @@ mod tests {
             PlainSubchunkedView::parse(&bomb, n),
             Err(StatamError::BoundsExceeded { .. })
         ));
+    }
+
+    #[test]
+    fn plain_subchunked_512_row_chunks_roundtrip_and_take_parity() {
+        let n = 2_048usize;
+        let rows: Vec<String> = (0..n)
+            .map(|i| {
+                let phrase = match i % 8 {
+                    0 => "assistant_summary_report_alpha",
+                    1 => "tool_invocation_response_beta",
+                    2 => "retrieval_context_snippet_gamma",
+                    3 => "structured_telemetry_payload_delta",
+                    4 => "workflow_execution_checkpoint_epsilon",
+                    5 => "evaluation_rubric_feedback_zeta",
+                    6 => "prompt_template_variables_eta",
+                    _ => "reasoning_trace_conclusion_theta",
+                };
+                format!(
+                    "{phrase}_{i:05}_{:016x}_padding_payload_content_to_exceed_260_bytes_per_row_with_cross_row_patterns_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                )
+            })
+            .collect();
+        let flat = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_from_slices(rows.iter().map(String::as_str)).unwrap()),
+            None,
+        )
+        .unwrap();
+        let plain_raw = encode_plain_body(&flat).unwrap();
+        assert!(plain_raw.len() >= 512 * 1024);
+
+        #[cfg(not(miri))]
+        let mut zstd_comp = zstd::bulk::Compressor::new(3).unwrap();
+        let body = encode_plain_subchunked_with_rows(
+            &flat,
+            &plain_raw,
+            0,
+            512,
+            200,
+            false,
+            #[cfg(not(miri))]
+            &mut zstd_comp,
+            #[cfg(not(miri))]
+            plain_raw.len(),
+        )
+        .unwrap()
+        .expect("512-row plain subchunked encoding must succeed");
+
+        let view = PlainSubchunkedView::parse(&body, n).unwrap();
+        assert_eq!(view.rows_per_chunk, 512);
+        assert_eq!(view.chunks.len(), 4);
+
+        let (offs, data) = view.decode_all(MAX_BLOCK_RAW_BYTES).unwrap();
+        let decoded =
+            FlatColumn::try_new(FlatData::Utf8(Utf8Data::try_new(offs, data).unwrap()), None)
+                .unwrap();
+        assert!(decoded.semantic_eq(&flat));
+
+        let idxs = [0usize, 511, 512, 1_024, 1_535, 2_047];
+        let (t_offs, t_data) = view.decode_take(&idxs, NullRef::None).unwrap();
+        let taken = FlatColumn::try_new(
+            FlatData::Utf8(Utf8Data::try_new(t_offs, t_data).unwrap()),
+            None,
+        )
+        .unwrap();
+        for (pos, &r) in idxs.iter().enumerate() {
+            assert_eq!(taken.get_scalar(pos).unwrap(), flat.get_scalar(r).unwrap());
+        }
     }
 }

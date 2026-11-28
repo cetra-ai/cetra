@@ -18,7 +18,7 @@ use crate::format::{
     MAX_HOT_TAIL_BYTES, MAX_PACK_CHUNKS, MAX_PACK_DICT_BYTES, MAX_PACK_FRAMES,
     MAX_ROW_PAYLOAD_BYTES, PACK_FLAG_HAS_DICT, PACK_FLAG_HAS_TRIGRAM, PACK_FLAG_TOC_LZ4,
     PACK_FLAG_TOC_ZSTD, PACK_FRAME_FLAG_USES_DICT, PACK_FRAME_HEADER_LEN, PACK_FRAME_MAGIC,
-    PACK_HEADER_LEN, PACK_POSTSCRIPT_LEN, PackDecoderDict, PackDictCompressor,
+    PACK_HEADER_LEN, PACK_POSTSCRIPT_LEN, PackDecoderDict, PackDictCompressor, PackEncoderDict,
     PackFrameDecompressor, PackHeader, PackPostscript, compress_guarded, decompress_checked,
     pack_frame_crc, read_framed_pack_frame, read_framed_pack_frame_with_decompressor,
     read_framed_pack_frame_with_dict, write_framed_pack_frame,
@@ -92,11 +92,12 @@ pub const TRIGRAM_SECTION_MAGIC: [u8; 4] = *b"TS02";
 const TS02_HEADER_LEN: usize = 20;
 /// `TS02` flag bit: body is Zstd-compressed.
 const TS02_FLAG_ZSTD: u16 = 0x0001;
-/// Number of consecutive `32 KiB` adaptive-prose frames merged into one `256 KiB` super-frame bloom.
-const ADAPTIVE_PROSE_TRIGRAM_GROUP_FRAMES: u16 = 8;
+/// Number of consecutive `32 KiB` adaptive-prose frames merged into one trigram group
+/// (`1` = per-frame `2 KiB` blooms; `TS02` wire format still supports any `frame_span >= 1`).
+const ADAPTIVE_PROSE_TRIGRAM_GROUP_FRAMES: u16 = 1;
 
-/// Minimum compressed frame length required to emit a trigram bloom (`< 1024` omitted).
-const MIN_FRAME_FOR_TRIGRAM: usize = 1024;
+/// Minimum compressed frame length required to emit a trigram bloom (`< 1` omitted).
+const MIN_FRAME_FOR_TRIGRAM: usize = 1;
 /// Maximum trigram bloom bit density (`> 72%` saturated blooms are omitted).
 const MAX_TRIGRAM_DENSITY: f64 = 0.72;
 /// Trigram density threshold for non-max blooms indicating high-entropy prose frames.
@@ -117,8 +118,8 @@ const REMOTE_PACK_COALESCE_MAX_SPAN: u64 = 4 * 1024 * 1024;
 const BOUNDARY_GUARD_THRESHOLD: usize = 8_192;
 /// 1 MiB `ReadCache` boundary guard max frame size (`< 32 KiB`).
 const BOUNDARY_GUARD_MAX_FRAME: usize = 32_768;
-/// Default target raw bytes per `.stpk` frame (128 KiB).
-pub(crate) const DEFAULT_TARGET_FRAME_RAW_BYTES: usize = 128 * 1024;
+/// Default target raw bytes per `.stpk` frame (256 KiB).
+pub(crate) const DEFAULT_TARGET_FRAME_RAW_BYTES: usize = 256 * 1024;
 /// Minimum unique raw frame bytes buffered before triggering streaming Zstd dict training (2 MiB).
 const DICT_TRAIN_MIN_RAW: usize = 2 * 1024 * 1024;
 /// Target trained Zstd dictionary size (64 KiB).
@@ -143,7 +144,7 @@ pub struct PackWriteOptions {
     pub codec: Codec,
     /// Zstd compression level when `codec == Codec::Zstd` (default: `3`).
     pub zstd_level: i32,
-    /// Target uncompressed frame size in bytes (default: `128 KiB`).
+    /// Target uncompressed frame size in bytes (default: `256 KiB`).
     pub target_frame_raw_bytes: usize,
     /// Whether to emit adaptive per-frame trigram skip filters (default: `true`).
     pub enable_trigram_skip: bool,
@@ -330,6 +331,7 @@ pub struct ChunkPackBuilder<W: Write + Seek = Cursor<Vec<u8>>> {
     pending_frame_chunks: usize,
     pending_frame_raw_bytes: usize,
     trained_dict: Option<Vec<u8>>,
+    encoder_dict: Option<Arc<PackEncoderDict>>,
     dict_compressor: Option<PackDictCompressor>,
     used_dict_in_any_frame: bool,
     dedup_hits: u64,
@@ -455,6 +457,7 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
             pending_frame_chunks: 0,
             pending_frame_raw_bytes: 0,
             trained_dict: None,
+            encoder_dict: None,
             dict_compressor: None,
             used_dict_in_any_frame: false,
             dedup_hits: 0,
@@ -1518,7 +1521,11 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
         let raw = std::mem::take(&mut self.cur_raw);
         let chunks = std::mem::take(&mut self.cur_chunks);
         if self.options.write_threads > 1 {
-            let batch_cap = self.options.write_threads.clamp(1, MAX_PARALLEL_THREADS);
+            let batch_cap = self
+                .options
+                .write_threads
+                .clamp(1, MAX_PARALLEL_THREADS)
+                .saturating_mul(4);
             if !self.pending_frames.is_empty()
                 && (self.pending_frames.len() >= batch_cap
                     || self.pending_frame_raw_bytes.saturating_add(raw.len())
@@ -1546,8 +1553,11 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
     }
 
     /// Deterministically decides once after `DICT_TRAIN_MIN_RAW` (`2 MiB`) of non-bypass frames
-    /// whether to adapt `effective_target_frame_raw_bytes` from `128 KiB` down to `32 KiB` for
-    /// unique high-entropy prose streams (also enabling streaming Zstd dictionary training).
+    /// whether to adapt `effective_target_frame_raw_bytes` from `256 KiB` to:
+    /// - `32 KiB` (+ auto-dict) for unique high-entropy prose streams (FineWeb),
+    /// - `512 KiB` for high-dedup streams (`2 * dedup_hits >= unique_chunks`, `>= 33%` dedup ratio, e.g. `W1_agents`),
+    /// - `128 KiB` for low-dedup non-prose streams (e.g. `W2` / `JSONBench`).
+    ///
     /// Flushes `pending_frames` synchronously at this exact boundary so `1T` and `8T` inspect
     /// the identical committed frame set.
     fn maybe_decide_adaptive_frame_size(&mut self) -> Result<(), StatamError> {
@@ -1561,14 +1571,14 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
             self.flush_pending_frames()?;
         }
         self.frame_size_decided = true;
-        if self.observed_non_bypass_chunks == 0 || self.observed_trigram_frames == 0 {
+        if self.observed_non_bypass_chunks == 0 {
             return Ok(());
         }
         let low_dedup = self.dedup_hits.saturating_mul(20) < self.observed_non_bypass_chunks;
         let mean_chunk_ok =
             (self.observed_non_bypass_raw / self.observed_non_bypass_chunks) >= 1_024;
-        let high_density =
-            self.observed_high_density_frames.saturating_mul(2) >= self.observed_trigram_frames;
+        let high_density = self.observed_trigram_frames > 0
+            && self.observed_high_density_frames.saturating_mul(2) >= self.observed_trigram_frames;
         if low_dedup && mean_chunk_ok && high_density {
             self.effective_target_frame_raw_bytes = ADAPTIVE_PROSE_FRAME_RAW_BYTES;
             self.adaptive_prose_active = true;
@@ -1579,6 +1589,10 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
                 self.enable_dict = true;
                 self.dict_decided = false;
             }
+        } else if self.dedup_hits.saturating_mul(2) >= self.observed_non_bypass_chunks {
+            self.effective_target_frame_raw_bytes = 512 * 1024;
+        } else if low_dedup {
+            self.effective_target_frame_raw_bytes = 128 * 1024;
         }
         Ok(())
     }
@@ -1624,10 +1638,14 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
                     zstd::dict::from_continuous(&sample_buf, &sample_sizes, DICT_TARGET_BYTES)
                 && !dict_bytes.is_empty()
                 && dict_bytes.len() <= MAX_PACK_DICT_BYTES
-                && let Ok(comp) = PackDictCompressor::new(self.options.zstd_level, &dict_bytes)
+                && let Ok(enc_dict) = PackEncoderDict::new(self.options.zstd_level, &dict_bytes)
             {
-                self.trained_dict = Some(dict_bytes);
-                self.dict_compressor = Some(comp);
+                let enc_dict = Arc::new(enc_dict);
+                if let Ok(comp) = PackDictCompressor::from_prepared(&enc_dict) {
+                    self.trained_dict = Some(dict_bytes);
+                    self.encoder_dict = Some(enc_dict);
+                    self.dict_compressor = Some(comp);
+                }
             }
         }
         #[cfg(miri)]
@@ -1680,15 +1698,12 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
 
         let options = self.options;
         let adaptive_prose = self.adaptive_prose_active;
-        let trained_dict: Option<Arc<[u8]>> = self
-            .trained_dict
-            .as_ref()
-            .map(|d| Arc::<[u8]>::from(d.as_slice()));
+        let encoder_dict = self.encoder_dict.clone();
         let encoded = parallel_map_in_order_static_with_ctx(
-            (options, adaptive_prose, trained_dict),
+            (options, adaptive_prose, encoder_dict),
             batch,
             options.write_threads,
-            |(options, adaptive_prose, trained_dict), worker| {
+            |(options, adaptive_prose, encoder_dict), worker| {
                 worker.run_with_init(
                     || Ok(None::<PackDictCompressor>),
                     |worker_comp, (raw, chunks, is_bypass, min_savings_pct)| {
@@ -1697,10 +1712,9 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
                         }
                         if !is_bypass
                             && worker_comp.is_none()
-                            && let Some(dict_bytes) = trained_dict.as_deref()
+                            && let Some(enc_dict) = encoder_dict.as_ref()
                         {
-                            *worker_comp =
-                                Some(PackDictCompressor::new(options.zstd_level, dict_bytes)?);
+                            *worker_comp = Some(PackDictCompressor::from_prepared(enc_dict)?);
                         }
                         let mut framed = Vec::new();
                         let frame_codec = if is_bypass {
@@ -1735,7 +1749,7 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
                             && options.enable_trigram_skip
                             && (info.stored_len as usize) >= MIN_FRAME_FOR_TRIGRAM
                         {
-                            build_frame_trigram_bloom(&raw, &chunks, info.stored_len as usize)
+                            build_frame_trigram_bloom(&raw, info.stored_len as usize, &chunks)
                         } else {
                             (None, false)
                         };
@@ -1832,7 +1846,7 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
             && self.options.enable_trigram_skip
             && (info.stored_len as usize) >= MIN_FRAME_FOR_TRIGRAM
         {
-            build_frame_trigram_bloom(raw, &chunks, info.stored_len as usize)
+            build_frame_trigram_bloom(raw, info.stored_len as usize, &chunks)
         } else {
             (None, false)
         };
@@ -2011,7 +2025,7 @@ fn build_adaptive_prose_frame_bloom(
     raw: &[u8],
     chunks: &[PendingChunk],
 ) -> (Option<TrigramBloom>, bool) {
-    let mut bloom = TrigramBloom::new(MAX_TRIGRAM_BLOOM_BYTES);
+    let mut bloom = TrigramBloom::new(2048);
     let mut scanned_bytes = 0usize;
     let mut next_check_bytes = 64 * 1024;
     for c in chunks {
@@ -2038,11 +2052,10 @@ fn build_adaptive_prose_frame_bloom(
 
 fn build_frame_trigram_bloom(
     raw: &[u8],
-    chunks: &[PendingChunk],
     stored_len: usize,
+    chunks: &[PendingChunk],
 ) -> (Option<TrigramBloom>, bool) {
-    let max_bytes = (stored_len / 4)
-        .min(raw.len() / 8)
+    let max_bytes = ((stored_len / 2).min(raw.len() / 8))
         .clamp(MIN_TRIGRAM_BLOOM_BYTES, MAX_TRIGRAM_BLOOM_BYTES);
     let cap_pow2 = 1usize << (usize::BITS as usize - 1 - max_bytes.leading_zeros() as usize);
     let mut bloom = TrigramBloom::new(cap_pow2);
@@ -2073,9 +2086,8 @@ fn build_frame_trigram_bloom(
         return (None, true);
     }
 
-    // Scale `HIGH_TRIGRAM_MAX_BLOOM_DENSITY` by bloom size so a `128 KiB` prose frame whose
-    // compressed `stored_len / 4` chose a `4 KiB` bloom (density >= 0.24) triggers identically
-    // to an `8 KiB` bloom (density >= 0.12) with the same ~7,864+ set bits (~4,200+ trigrams).
+    // Scale `HIGH_TRIGRAM_MAX_BLOOM_DENSITY` by bloom size so any bloom carrying ~7,864+ set bits
+    // (~4,200+ distinct trigrams) triggers high-density prose adaptation consistently.
     let high_density = density > HIGH_TRIGRAM_DENSITY_THRESHOLD
         || (bloom.as_bytes().len() as f64) * density >= 8_192.0 * HIGH_TRIGRAM_MAX_BLOOM_DENSITY;
     (Some(bloom), high_density)
@@ -4565,7 +4577,7 @@ fn read_u32_le(buf: &[u8], off: usize) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::io::{SimulatedS3Config, SimulatedS3Reader, SliceReader};
 
@@ -4798,7 +4810,8 @@ mod tests {
         };
         let mut b = ChunkPackBuilder::new([4u8; 16], opts);
 
-        // Frame 0: tiny chunk (< 1024 B stored) -> filter_len must be 0.
+        // Frame 0: tiny non-empty chunk (>= 1 B stored) gets a minimal 256 B bloom so trailing
+        // partial frames still support trigram short-circuiting.
         let tiny = b"tiny frame payload".repeat(20);
         b.intern_chunk(&tiny).unwrap();
 
@@ -4823,7 +4836,15 @@ mod tests {
         assert_eq!(r.toc().frames[0].filter_len, 0);
         assert_eq!(r.toc().frames[1].filter_len, 0);
         let blooms = r.read_trigram_section().unwrap();
-        assert_eq!(blooms, vec![None, None]);
+        assert_eq!(blooms.len(), 2);
+        let tiny_bloom = blooms[0]
+            .as_ref()
+            .expect("tiny non-empty non-bypass frame must emit minimal trigram bloom");
+        assert_eq!(tiny_bloom.as_bytes().len(), MIN_TRIGRAM_BLOOM_BYTES);
+        let mut needle_hashes = Vec::new();
+        crate::simd::trigram::extract_trigram_hashes(b"tiny", false, &mut needle_hashes);
+        assert!(tiny_bloom.may_contain_hashes(&needle_hashes));
+        assert!(blooms[1].is_none());
     }
 
     #[test]
@@ -6192,11 +6213,11 @@ mod tests {
 
     #[test]
     fn upgrade2_adaptive_prose_frame_sizing_1t_eq_4t_and_trigram_pruning() {
-        // Generate > 4.5 MiB of unique high-entropy English-like prose (~1,200 x ~4 KiB chunks)
-        // so 512 KiB frames saturate/exceed 0.55 trigram density and trigger 64 KiB adaptation at 2 MiB.
+        // Generate > 4.5 MiB of unique English-like prose (~1,200 x ~4 KiB chunks from a
+        // 1,600-word vocabulary, matching FineWeb's ~3k-5k distinct trigrams per 32 KiB) so
+        // 256 KiB initial frames trigger 32 KiB adaptation at 2 MiB with 2 KiB per-frame blooms.
         const NUM_CHUNKS: usize = 1_200;
-        let alpha = b"abcdefghijklmnopqrstuvwxyz";
-        let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(NUM_CHUNKS);
+        let alpha = b"abcdefghijklmnoprstuvwy";
         let mut rng_state = 0x1234_5678_9abc_def0u64;
         let mut next_u64 = || {
             rng_state ^= rng_state << 13;
@@ -6204,16 +6225,21 @@ mod tests {
             rng_state ^= rng_state << 17;
             rng_state
         };
+        let vocab: Vec<Vec<u8>> = (0..1_600usize)
+            .map(|_| {
+                let wlen = 5 + (next_u64() as usize % 3);
+                (0..wlen)
+                    .map(|_| alpha[(next_u64() as usize) % alpha.len()])
+                    .collect()
+            })
+            .collect();
 
+        let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(NUM_CHUNKS);
         for idx in 0..NUM_CHUNKS {
             let mut doc = Vec::with_capacity(4_100);
             doc.extend_from_slice(format!("article_{idx:05}: ").as_bytes());
             while doc.len() < 4_000 {
-                let wlen = 4 + (next_u64() as usize % 5);
-                for _ in 0..wlen {
-                    let b = alpha[(next_u64() as usize) % alpha.len()];
-                    doc.push(b);
-                }
+                doc.extend_from_slice(&vocab[(next_u64() as usize) % vocab.len()]);
                 doc.push(b' ');
             }
             if idx == 700 || idx == 1_050 {
@@ -6252,8 +6278,8 @@ mod tests {
             "expected adapted 32 KiB frames after 2 MiB, got only {} frames",
             toc.frames.len()
         );
-        // First ~16 frames (~2 MiB) stay near 128 KiB; subsequent adapted frames are <= 32 KiB.
-        assert!(toc.frames[0].raw_len as usize >= 100 * 1024);
+        // First ~8 frames (~2 MiB) stay near 256 KiB; subsequent adapted frames are <= 32 KiB.
+        assert!(toc.frames[0].raw_len as usize >= 200 * 1024);
         let adapted_frames = &toc.frames[20..toc.frames.len() - 1];
         assert!(!adapted_frames.is_empty());
         for f in adapted_frames {
@@ -6278,7 +6304,7 @@ mod tests {
         assert!(
             ts.group_frame_spans
                 .contains(&ADAPTIVE_PROSE_TRIGRAM_GROUP_FRAMES),
-            "adapted prose frames must coalesce into frame_span=8 super-frame trigram groups"
+            "adapted prose frames must emit per-frame (frame_span=1) 2 KiB trigram blooms"
         );
         let trigrams = reader.read_trigram_section().unwrap();
         let needle = b"quantum_flux_calibration_sentinel";
@@ -6289,6 +6315,13 @@ mod tests {
             assert_eq!(f.filter_len, 0);
             if let Some(bloom) = &trigrams[fid] {
                 assert!(bloom.bit_density() <= MAX_TRIGRAM_DENSITY);
+                if fid >= 20 {
+                    assert!(
+                        bloom.as_bytes().len() <= 2048,
+                        "adapted prose per-frame bloom {} exceeded 2 KiB",
+                        bloom.as_bytes().len()
+                    );
+                }
                 if !bloom.may_contain_hashes(&needle_hashes) {
                     pruned += 1;
                 }
@@ -6327,23 +6360,44 @@ mod tests {
             ..PackWriteOptions::default()
         };
         let mut pb = ChunkPackBuilder::new([0xA3u8; 16], opts);
-        // Emit each unique chunk twice -> 50% dedup hit rate (>> 5% threshold).
+        // Emit each unique chunk 3 times -> dedup_hits == 2 * unique -> adapts to 512 KiB frames!
         for ch in &unique_chunks {
+            pb.intern_chunk(ch).unwrap();
             pb.intern_chunk(ch).unwrap();
             pb.intern_chunk(ch).unwrap();
         }
         assert_eq!(
-            pb.effective_target_frame_raw_bytes, DEFAULT_TARGET_FRAME_RAW_BYTES,
-            "high-dedup stream must stay at 128 KiB target frame size"
+            pb.effective_target_frame_raw_bytes,
+            512 * 1024,
+            "high-dedup stream (2 * dedup_hits >= unique) must adapt to 512 KiB target frame size"
         );
         let mut out = Vec::new();
         pb.finish(&mut out).unwrap();
         let reader = ChunkPackReader::open(Arc::new(SliceReader::new(out))).unwrap();
-        // ~2.8 MiB unique chunks at 128 KiB/frame -> ~23 frames (never downsized to ~88 frames).
+        // ~2.8 MiB unique chunks (~2 MiB at 256 KiB + ~0.8 MiB at 512 KiB) -> <= 12 frames.
         assert!(
-            reader.toc().frames.len() <= 28,
-            "expected <= 28 frames at 128 KiB, got {}",
+            reader.toc().frames.len() <= 14,
+            "expected <= 14 frames after adapting to 512 KiB, got {}",
             reader.toc().frames.len()
+        );
+
+        // Also verify low-dedup non-prose structured stream adapts to 128 KiB target frame size.
+        let mut pb_low = ChunkPackBuilder::new([0xA5u8; 16], opts);
+        let pad = "a".repeat(3_900);
+        for idx in 0..700usize {
+            let chunk = format!(
+                "{{\"kind\":\"event\",\"seq\":{idx:05},\"status\":\"ok\",\"payload\":\"{pad}\"}}"
+            );
+            pb_low.intern_chunk(chunk.as_bytes()).unwrap();
+        }
+        assert!(
+            !pb_low.adaptive_prose_active,
+            "low-entropy structured stream must not trigger adaptive prose mode"
+        );
+        assert_eq!(
+            pb_low.effective_target_frame_raw_bytes,
+            128 * 1024,
+            "low-dedup non-prose stream must adapt to 128 KiB target frame size"
         );
     }
 
@@ -7318,16 +7372,125 @@ mod tests {
         );
     }
 
+    /// Test helper: rewrites an existing `.stpk` pack's `TS02` trigram section so matching-size
+    /// consecutive frame blooms are merged into `group_span`-frame super-frame groups (`span > 1`),
+    /// preserving valid CRCs, offsets, and postscript metadata for variable-span `TS02` & GDPR tests.
+    pub(crate) fn rewrite_pack_ts02_with_frame_span_for_test(
+        pack_bytes: &[u8],
+        group_span: u16,
+    ) -> Vec<u8> {
+        assert!(group_span >= 2);
+        let reader =
+            ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes.to_vec()))).unwrap();
+        let mut ps = *reader.postscript();
+        assert!(ps.trigram_off > 0 && ps.trigram_len > 0);
+        let ts = reader.trigram_section_cached().unwrap();
+        let frame_blooms = reader.read_trigram_section().unwrap();
+        let span_usize = usize::from(group_span);
+
+        let mut groups: Vec<(u16, Option<Vec<u8>>)> = Vec::new();
+        let mut i = 0usize;
+        while i < frame_blooms.len() {
+            let end = (i + span_usize).min(frame_blooms.len());
+            let slice = &frame_blooms[i..end];
+            if slice.len() == span_usize
+                && let Some(first) = slice[0].as_ref()
+                && slice.iter().all(|b| {
+                    b.as_ref()
+                        .is_some_and(|x| x.as_bytes().len() == first.as_bytes().len())
+                })
+            {
+                let mut merged = first.as_bytes().to_vec();
+                for item in &slice[1..] {
+                    if let Some(b) = item.as_ref() {
+                        for (dst, &src) in merged.iter_mut().zip(b.as_bytes()) {
+                            *dst |= src;
+                        }
+                    }
+                }
+                groups.push((group_span, Some(merged)));
+                i = end;
+            } else {
+                groups.push((
+                    1u16,
+                    frame_blooms[i].as_ref().map(|b| b.as_bytes().to_vec()),
+                ));
+                i += 1;
+            }
+        }
+
+        let edge_bloom_len = ts
+            .edge_blooms
+            .as_ref()
+            .map_or(0, |(tail_b, _)| tail_b.as_bytes().len());
+        let mut raw_body = Vec::new();
+        if let Some((tail_b, head_b)) = &ts.edge_blooms {
+            raw_body.extend_from_slice(tail_b.as_bytes());
+            raw_body.extend_from_slice(head_b.as_bytes());
+        }
+        for (span, bloom_opt) in &groups {
+            raw_body.extend_from_slice(&span.to_le_bytes());
+            if let Some(bytes) = bloom_opt {
+                raw_body.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                raw_body.extend_from_slice(bytes);
+            } else {
+                raw_body.extend_from_slice(&0u32.to_le_bytes());
+            }
+        }
+
+        #[cfg(not(miri))]
+        let (ts_flags, stored_body) = {
+            let (c, s) = compress_guarded(&raw_body, Codec::Zstd, 1).unwrap();
+            if c == Codec::Zstd {
+                (TS02_FLAG_ZSTD, s)
+            } else {
+                (0u16, raw_body.clone())
+            }
+        };
+        #[cfg(miri)]
+        let (ts_flags, stored_body) = (0u16, raw_body.clone());
+
+        let mut sec = Vec::with_capacity(TS02_HEADER_LEN + stored_body.len() + 4);
+        sec.extend_from_slice(&TRIGRAM_SECTION_MAGIC);
+        sec.extend_from_slice(&ts_flags.to_le_bytes());
+        sec.extend_from_slice(&0u16.to_le_bytes());
+        sec.extend_from_slice(&(groups.len() as u32).to_le_bytes());
+        sec.extend_from_slice(&(edge_bloom_len as u32).to_le_bytes());
+        sec.extend_from_slice(&(raw_body.len() as u32).to_le_bytes());
+        sec.extend_from_slice(&stored_body);
+        let crc = crc32c::crc32c(&sec);
+        sec.extend_from_slice(&crc.to_le_bytes());
+
+        let old_off = ps.trigram_off as usize;
+        let old_end = old_off + ps.trigram_len as usize;
+        let toc_body_end = pack_bytes.len() - PACK_POSTSCRIPT_LEN;
+        let mut patched = pack_bytes[..old_off].to_vec();
+        let new_off = patched.len() as u64;
+        patched.extend_from_slice(&sec);
+        let delta = (sec.len() as i64) - (ps.trigram_len as i64);
+        patched.extend_from_slice(&pack_bytes[old_end..toc_body_end]);
+        ps.trigram_off = new_off;
+        ps.trigram_len = sec.len() as u32;
+        if ps.edge_table_len > 0 {
+            ps.edge_table_off = (ps.edge_table_off as i64 + delta) as u64;
+        }
+        if ps.dict_len > 0 {
+            ps.dict_off = (ps.dict_off as i64 + delta) as u64;
+        }
+        patched.extend_from_slice(&ps.encode());
+        patched
+    }
+
     #[test]
     fn pass26_ts02_superframes_auto_dict_validation_coalescing_and_small_pack_tail() {
-        // 1. Default PackWriteOptions has emit_hash_table == false and 128 KiB target frame.
+        // 1. Default PackWriteOptions has emit_hash_table == false and 256 KiB target frame.
         let def_opts = PackWriteOptions::default();
         assert!(!def_opts.emit_hash_table);
-        assert_eq!(def_opts.target_frame_raw_bytes, 128 * 1024);
+        assert_eq!(def_opts.target_frame_raw_bytes, 256 * 1024);
 
         // 2. Adaptive prose (>= 2 MiB of diverse English-like prose with ~6,000+ distinct trigrams
-        //    per 128 KiB frame, matching FineWeb) triggers 32 KiB prose frames, frame_span == 8
-        //    super-frame TS02 groups, auto-dict activation (non-Miri), and zero-false-negative pruning.
+        //    per 256 KiB frame, matching FineWeb) triggers 32 KiB prose frames, per-frame 2 KiB
+        //    TS02 blooms (`frame_span == 1`), auto-dict activation (non-Miri), and zero-FN pruning.
         let mut rng = 0x2626_cafe_babe_1234u64;
         let alpha = b"abcdefghijklmnoprstuvwy"; // 23 letters (excludes q, x, z so test needles are disjoint)
         let vocab: Vec<String> = (0..2_500)
@@ -7399,8 +7562,10 @@ mod tests {
 
         let ts = reader.trigram_section_cached().unwrap();
         assert!(
-            ts.group_frame_spans.contains(&1) && ts.group_frame_spans.iter().any(|&s| s > 1),
-            "expected initial 128 KiB single frames (span=1) followed by adaptive prose super-frames (span>1), got {:?}",
+            ts.group_frame_spans
+                .iter()
+                .all(|&s| s == ADAPTIVE_PROSE_TRIGRAM_GROUP_FRAMES),
+            "expected per-frame TS02 groups (frame_span=1), got {:?}",
             ts.group_frame_spans
         );
         assert_eq!(
@@ -7409,6 +7574,16 @@ mod tests {
                 .map(|&s| s as usize)
                 .sum::<usize>(),
             reader.toc().frames.len()
+        );
+        // Adapted 32 KiB prose frames emit <= 2 KiB per-frame blooms.
+        let frame_blooms = reader.read_trigram_section().unwrap();
+        assert!(
+            frame_blooms
+                .iter()
+                .skip(12)
+                .filter_map(Option::as_ref)
+                .any(|b| b.as_bytes().len() <= 2048),
+            "expected adapted 32 KiB prose frames to use 2 KiB per-frame blooms"
         );
         assert!(
             crate::payload::search::pack_short_circuits_all(
@@ -7430,6 +7605,48 @@ mod tests {
         assert_eq!(got[&0], expected_chunks[0]);
         assert_eq!(got[&needle_cid], expected_chunks[needle_cid as usize]);
         assert_eq!(got[&899], expected_chunks[899]);
+
+        // 2b. Explicitly verify variable-group TS02 (`frame_span = 4`) decode, pruning, and search!
+        let span4_pack_bytes = rewrite_pack_ts02_with_frame_span_for_test(&pack_bytes, 4);
+        let span4_reader =
+            ChunkPackReader::open(Arc::new(SliceReader::new(span4_pack_bytes))).unwrap();
+        let span4_ts = span4_reader.trigram_section_cached().unwrap();
+        assert!(
+            span4_ts.group_frame_spans.contains(&4),
+            "expected explicit frame_span=4 TS02 groups, got {:?}",
+            span4_ts.group_frame_spans
+        );
+        assert_eq!(
+            span4_ts
+                .group_frame_spans
+                .iter()
+                .map(|&s| s as usize)
+                .sum::<usize>(),
+            span4_reader.toc().frames.len()
+        );
+        assert!(
+            crate::payload::search::pack_short_circuits_all(
+                &span4_reader,
+                b"PASS26_ABSENT_QQQ_ZZZ_999",
+                false
+            )
+            .unwrap()
+        );
+        assert!(
+            !crate::payload::search::pack_short_circuits_all(
+                &span4_reader,
+                b"PASS26_SUPERFRAME_NEEDLE_ZXQ",
+                false
+            )
+            .unwrap()
+        );
+        let span4_hits = crate::payload::search::search_pack_chunks(
+            &span4_reader,
+            b"PASS26_SUPERFRAME_NEEDLE_ZXQ",
+            false,
+        )
+        .unwrap();
+        assert_eq!(span4_hits, vec![needle_cid]);
 
         // 3. Strict untrusted TS02 validation: bad CRC, unknown flags, non-zero reserved,
         //    OOM group_count, frame_span == 0, trailing bytes, non-zero FrameEntry.filter_len.

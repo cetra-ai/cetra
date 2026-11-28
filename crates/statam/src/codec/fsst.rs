@@ -31,8 +31,12 @@ pub const FSST_MAX_SYMBOLS: usize = 255;
 pub const FSST_MAX_SYM_LEN: usize = 8;
 
 /// Target row count per adaptive `LZ4`/`Zstd`/`None` sub-chunk inside `Encoding::Fsst`
-/// when `BLOCK_FLAG_FSST_SUBCHUNKED` is set.
-pub const FSST_SUBCHUNK_ROWS: u16 = 256;
+/// when `BLOCK_FLAG_FSST_SUBCHUNKED` is set on narrow columns.
+pub const FSST_SUBCHUNK_ROWS: u16 = 512;
+
+/// Target row count per adaptive `LZ4`/`Zstd`/`None` sub-chunk inside `Encoding::Fsst`
+/// when `BLOCK_FLAG_FSST_SUBCHUNKED` is set on `WideRow` columns.
+pub(crate) const FSST_WIDE_SUBCHUNK_ROWS: u16 = 256;
 
 /// Minimum row count (`> 512`) required to trigger sub-chunked FSST encoding.
 pub(crate) const FSST_SUBCHUNK_MIN_ROWS: usize = 512;
@@ -839,8 +843,7 @@ fn encode_fsst_body_impl(
 ///
 /// Returns `Ok(None)` if `values.len() <= FSST_SUBCHUNK_MIN_ROWS`, FSST achieves `< 1.15x`
 /// gain, `coded_bytes.len() < FSST_SUBCHUNK_MIN_CODED_BYTES`, or (outside Miri) the
-/// sub-chunked output plus `nulls_prefix_len` exceeds `115%` of `plain_with_nulls_for_guard`
-/// compressed with Zstd(3).
+/// sub-chunked output plus `nulls_prefix_len` exceeds the bounded Zstd(3) overhead cap.
 pub(crate) fn encode_fsst_subchunked_only(
     values: &[&[u8]],
     profile: WriteProfile,
@@ -856,7 +859,7 @@ pub(crate) fn encode_fsst_subchunked_only(
     if enc.coded_bytes.len() < FSST_SUBCHUNK_MIN_CODED_BYTES {
         return Ok(None);
     }
-    let subchunk_rows_usize = usize::from(FSST_SUBCHUNK_ROWS);
+    let subchunk_rows_usize = usize::from(FSST_WIDE_SUBCHUNK_ROWS);
     let num_chunks = values.len().div_ceil(subchunk_rows_usize);
     let Ok(num_chunks_u16) = u16::try_from(num_chunks) else {
         return Ok(None);
@@ -877,7 +880,7 @@ pub(crate) fn encode_fsst_subchunked_only(
         &enc.table,
         &enc.row_lens,
         &enc.coded_bytes,
-        FSST_SUBCHUNK_ROWS,
+        FSST_WIDE_SUBCHUNK_ROWS,
         num_chunks_u16,
         profile,
         #[cfg(not(miri))]
@@ -909,9 +912,12 @@ pub(crate) fn encode_fsst_subchunked_only(
         let subchunked_total_with_nulls = sub.total_out.saturating_add(nulls_prefix_len);
         let within_pct = (subchunked_total_with_nulls as u64).saturating_mul(100)
             <= (effective_plain_zstd_len as u64).saturating_mul(122);
-        let within_small_cap = (subchunked_total_with_nulls as u64).saturating_mul(100)
+        let within_small_cap = ((subchunked_total_with_nulls as u64).saturating_mul(100)
             <= (effective_plain_zstd_len as u64).saturating_mul(130)
-            && subchunked_total_with_nulls <= effective_plain_zstd_len.saturating_add(4 * 1024);
+            && subchunked_total_with_nulls <= effective_plain_zstd_len.saturating_add(4 * 1024))
+            || (plain_len >= 256 * 1024
+                && subchunked_total_with_nulls
+                    <= effective_plain_zstd_len.saturating_add(32 * 1024));
         if !within_pct && !within_small_cap {
             return Ok(None);
         }
@@ -921,7 +927,7 @@ pub(crate) fn encode_fsst_subchunked_only(
 
     Ok(Some(assemble_fsst_subchunked(
         &enc.table,
-        FSST_SUBCHUNK_ROWS,
+        FSST_WIDE_SUBCHUNK_ROWS,
         num_chunks_u16,
         sub,
     )))
@@ -1006,11 +1012,7 @@ fn compress_fsst_subchunks(
 
         let lz4_buf = lz4_flex::block::compress(&sub_raw);
         let lz4_len = lz4_buf.len();
-        let lz4_max_pct: u64 = if profile == WriteProfile::L1Compact {
-            94
-        } else {
-            88
-        };
+        let lz4_max_pct: u64 = 88;
         let lz4_ok = ratio_ok(lz4_len)
             && (lz4_len as u64).saturating_mul(100) <= (raw_len as u64).saturating_mul(lz4_max_pct);
 
@@ -1036,7 +1038,7 @@ fn compress_fsst_subchunks(
                 || cfg!(miri)
                 || !zstd_ok
                 || zstd_buf.as_ref().is_none_or(|zb| {
-                    (lz4_len as u64).saturating_mul(100) <= (zb.len() as u64).saturating_mul(118)
+                    (lz4_len as u64).saturating_mul(100) <= (zb.len() as u64).saturating_mul(110)
                 }));
 
         let chosen_codec = if use_lz4 {
@@ -1138,7 +1140,7 @@ fn encode_fsst_subchunked(
             })?
             .len();
         let within_pct = (sub.total_out as u64).saturating_mul(100)
-            <= (whole_zstd_len as u64).saturating_mul(122);
+            <= (whole_zstd_len as u64).saturating_mul(115);
         let within_small_cap = (sub.total_out as u64).saturating_mul(100)
             <= (whole_zstd_len as u64).saturating_mul(130)
             && sub.total_out <= whole_zstd_len.saturating_add(8 * 1024);
@@ -3677,7 +3679,7 @@ mod tests {
             .unwrap();
         assert!(!small_sub, "row_count <= 512 must not sub-chunk");
 
-        // > 512 rows AND >= 16 KiB coded bytes -> triggers 256-row sub-chunks in both profiles.
+        // > 512 rows AND >= 16 KiB coded bytes -> triggers 512-row sub-chunks in both profiles.
         let row_count = 1_030usize;
         let mut owned = Vec::with_capacity(row_count);
         let mut valid_bits = Vec::with_capacity(row_count);
@@ -4503,7 +4505,7 @@ mod tests {
 
     #[test]
     fn pass25_subchunked_fsst_parallel_decode_parity_all_selected_and_errors() {
-        // 3,072 rows (12 sub-chunks of 256 rows), structured JSON with varied words (~320 B/row)
+        // 3,072 rows (6 sub-chunks of 512 rows), structured JSON with varied words (~320 B/row)
         // so FSST compresses well while `sum_raw >= 128 KiB`, genuinely exercising WorkerPool fan-out.
         let row_count = 3_072usize;
         let words = [

@@ -152,10 +152,10 @@ pub const BLOCK_FLAG_MIN_MAX_VALID: u8 = 0x04;
 pub const BLOCK_FLAG_HAS_NAN: u8 = 0x08;
 /// Constant empty `List`/`MapUtf8`/`Events`/`Links` collection.
 pub const BLOCK_FLAG_CONST_EMPTY_COLLECTION: u8 = 0x10;
-/// `Encoding::Fsst` mini-block uses 256-row adaptive `LZ4`/`Zstd`/`None` sub-chunks
+/// `Encoding::Fsst` mini-block uses adaptive `LZ4`/`Zstd`/`None` sub-chunks
 /// (`outer codec = Codec::None`, `raw_len == stored_len`).
 pub const BLOCK_FLAG_FSST_SUBCHUNKED: u8 = 0x20;
-/// `Encoding::Plain` (`Utf8` / `Binary`) mini-block uses 256-row adaptive `LZ4`/`Zstd`/`None`
+/// `Encoding::Plain` (`Utf8` / `Binary`) mini-block uses adaptive `LZ4`/`Zstd`/`None`
 /// sub-chunks (`outer codec = Codec::None`, `raw_len == stored_len`).
 pub const BLOCK_FLAG_PLAIN_SUBCHUNKED: u8 = 0x40;
 /// `Encoding::PayloadRefs` mini-block contains zero `Inline` rows and zero `L0_LOCAL_PACK_IDX`
@@ -2363,10 +2363,64 @@ fn decompress_zstd(_stored: &[u8], _raw_len: usize) -> Result<Vec<u8>, StatamErr
     Err(StatamError::UnsupportedFeature { mask: 0x02 })
 }
 
+/// Prepared Zstd encoder dictionary for `.stpk` pack frames.
+///
+/// Digests trained dictionary bytes once into a reusable `ZSTD_CDict` that can be shared
+/// across worker threads via `Arc<PackEncoderDict>` and bound to per-worker
+/// [`PackDictCompressor`] instances in O(1) without re-digesting the dictionary.
+pub struct PackEncoderDict {
+    #[cfg(not(miri))]
+    inner: zstd::dict::EncoderDictionary<'static>,
+    dict_len: usize,
+}
+
+impl fmt::Debug for PackEncoderDict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PackEncoderDict")
+            .field("dict_len", &self.dict_len)
+            .finish()
+    }
+}
+
+impl PackEncoderDict {
+    /// Prepares a Zstd encoder dictionary from raw trained dictionary bytes at `zstd_level`.
+    #[cfg(not(miri))]
+    pub fn new(zstd_level: i32, dict_bytes: &[u8]) -> Result<Self, StatamError> {
+        if dict_bytes.is_empty() {
+            return Err(StatamError::Corrupt {
+                reason: "empty pack dictionary",
+            });
+        }
+        if dict_bytes.len() > MAX_PACK_DICT_BYTES {
+            return Err(StatamError::BoundsExceeded {
+                reason: "pack dictionary exceeds MAX_PACK_DICT_BYTES",
+            });
+        }
+        let inner =
+            zstd::dict::EncoderDictionary::try_copy(dict_bytes, zstd_level).map_err(|_| {
+                StatamError::Corrupt {
+                    reason: "invalid zstd pack encoder dictionary",
+                }
+            })?;
+        Ok(Self {
+            inner,
+            dict_len: dict_bytes.len(),
+        })
+    }
+
+    /// Returns `StatamError::UnsupportedFeature` under Miri where Zstd C FFI is disabled.
+    #[cfg(miri)]
+    pub fn new(_zstd_level: i32, _dict_bytes: &[u8]) -> Result<Self, StatamError> {
+        Err(StatamError::UnsupportedFeature { mask: 0x02 })
+    }
+}
+
 /// Prepared Zstd bulk compressor bound to a trained `.stpk` dictionary.
 pub struct PackDictCompressor {
     #[cfg(not(miri))]
     inner: zstd::bulk::Compressor<'static>,
+    #[cfg(not(miri))]
+    prepared: Arc<PackEncoderDict>,
     dict_len: usize,
 }
 
@@ -2382,31 +2436,45 @@ impl PackDictCompressor {
     /// Creates a Zstd bulk compressor initialized with a trained `.stpk` dictionary.
     #[cfg(not(miri))]
     pub fn new(zstd_level: i32, dict_bytes: &[u8]) -> Result<Self, StatamError> {
-        if dict_bytes.is_empty() {
-            return Err(StatamError::Corrupt {
-                reason: "empty pack dictionary",
-            });
-        }
-        if dict_bytes.len() > MAX_PACK_DICT_BYTES {
-            return Err(StatamError::BoundsExceeded {
-                reason: "pack dictionary exceeds MAX_PACK_DICT_BYTES",
-            });
-        }
-        let inner =
-            zstd::bulk::Compressor::with_dictionary(zstd_level, dict_bytes).map_err(|_| {
-                StatamError::Corrupt {
-                    reason: "zstd dict compressor init failed",
-                }
-            })?;
+        let dict = Arc::new(PackEncoderDict::new(zstd_level, dict_bytes)?);
+        Self::from_prepared(&dict)
+    }
+
+    /// Creates a Zstd bulk compressor attached to a pre-digested [`PackEncoderDict`] in O(1).
+    #[cfg(not(miri))]
+    pub fn from_prepared(dict: &Arc<PackEncoderDict>) -> Result<Self, StatamError> {
+        let inner = zstd::bulk::Compressor::new(0).map_err(|_| StatamError::Corrupt {
+            reason: "zstd dict compressor init failed",
+        })?;
         Ok(Self {
             inner,
-            dict_len: dict_bytes.len(),
+            prepared: Arc::clone(dict),
+            dict_len: dict.dict_len,
         })
+    }
+
+    /// Compresses `raw` using the prepared `ZSTD_CDict` without rebuilding dictionary tables.
+    #[cfg(not(miri))]
+    fn compress(&mut self, raw: &[u8]) -> Result<Vec<u8>, StatamError> {
+        let mut buffer = Vec::with_capacity(zstd::zstd_safe::compress_bound(raw.len()));
+        self.inner
+            .context_mut()
+            .compress_using_cdict(&mut buffer, raw, self.prepared.inner.as_cdict())
+            .map_err(|_| StatamError::Corrupt {
+                reason: "zstd dict compression failed",
+            })?;
+        Ok(buffer)
     }
 
     /// Returns `StatamError::UnsupportedFeature` under Miri where Zstd C FFI is disabled.
     #[cfg(miri)]
     pub fn new(_zstd_level: i32, _dict_bytes: &[u8]) -> Result<Self, StatamError> {
+        Err(StatamError::UnsupportedFeature { mask: 0x02 })
+    }
+
+    /// Returns `StatamError::UnsupportedFeature` under Miri where Zstd C FFI is disabled.
+    #[cfg(miri)]
+    pub fn from_prepared(_dict: &Arc<PackEncoderDict>) -> Result<Self, StatamError> {
         Err(StatamError::UnsupportedFeature { mask: 0x02 })
     }
 }
@@ -2678,6 +2746,11 @@ pub fn write_framed_block_adaptive(
             if (lz4_len as u64).saturating_mul(100)
                 <= (zstd_len as u64).saturating_mul(u64::from(lz4_pct_cap))
                 || lz4_len <= zstd_len.saturating_add(64)
+                || (encoding == Encoding::ShreddedMap
+                    && (zstd_len as u64).saturating_mul(100)
+                        >= (raw.len() as u64).saturating_mul(65)
+                    && (lz4_len as u64).saturating_mul(100)
+                        <= (zstd_len as u64).saturating_mul(140))
             {
                 (Codec::Lz4, &lz4_buf)
             } else {
@@ -2903,9 +2976,7 @@ pub fn write_framed_pack_frame_with_compressor_min_savings(
         let raw_len = u32::try_from(raw.len()).map_err(|_| StatamError::BoundsExceeded {
             reason: "pack frame raw_len overflows u32",
         })?;
-        let compressed = comp.inner.compress(raw).map_err(|_| StatamError::Corrupt {
-            reason: "zstd dict compression failed",
-        })?;
+        let compressed = comp.compress(raw)?;
         let ratio_ok = (raw.len() as u64)
             <= (compressed.len() as u64)
                 .saturating_mul(MAX_DECOMPRESS_RATIO)
@@ -4521,5 +4592,59 @@ mod tests {
             decode_schema(&raw_dup_sort),
             Err(StatamError::Corrupt { .. })
         ));
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn pack_encoder_dict_bounds_and_shared_prepared_determinism() {
+        assert!(matches!(
+            PackEncoderDict::new(3, &[]),
+            Err(StatamError::Corrupt { .. })
+        ));
+        let oversized = vec![0xABu8; MAX_PACK_DICT_BYTES + 1];
+        assert!(matches!(
+            PackEncoderDict::new(3, &oversized),
+            Err(StatamError::BoundsExceeded { .. })
+        ));
+
+        let mut samples_buf = Vec::new();
+        let mut sample_sizes = Vec::new();
+        for i in 0..128u32 {
+            let s = format!(
+                "{{\"role\":\"assistant\",\"model\":\"gpt-4o\",\"trace\":\"{i:04}\",\"content\":\"shared prepared encoder dict payload alpha beta gamma\"}}"
+            );
+            sample_sizes.push(s.len());
+            samples_buf.extend_from_slice(s.as_bytes());
+        }
+        let dict_bytes =
+            zstd::dict::from_continuous(&samples_buf, &sample_sizes, 32 * 1024).unwrap();
+        let prepared = Arc::new(PackEncoderDict::new(3, &dict_bytes).unwrap());
+
+        let mut comp_a = PackDictCompressor::from_prepared(&prepared).unwrap();
+        let mut comp_b = PackDictCompressor::from_prepared(&prepared).unwrap();
+        let payload = &samples_buf[..4096];
+
+        let mut framed_a = Vec::new();
+        let mut framed_b = Vec::new();
+        let info_a = write_framed_pack_frame_with_compressor(
+            payload,
+            Codec::Zstd,
+            0,
+            3,
+            Some(&mut comp_a),
+            &mut framed_a,
+        )
+        .unwrap();
+        let info_b = write_framed_pack_frame_with_compressor(
+            payload,
+            Codec::Zstd,
+            0,
+            3,
+            Some(&mut comp_b),
+            &mut framed_b,
+        )
+        .unwrap();
+        assert_eq!(info_a, info_b);
+        assert_eq!(framed_a, framed_b);
     }
 }

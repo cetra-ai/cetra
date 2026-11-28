@@ -3471,15 +3471,21 @@ mod tests {
             w.write_batch(&sf_batch).unwrap();
             w.finish().unwrap();
         }
-        let mut sf_old_p = Vec::new();
-        sf_pb.finish(&mut sf_old_p).unwrap();
+        let mut sf_old_p_raw = Vec::new();
+        sf_pb.finish(&mut sf_old_p_raw).unwrap();
+        // Explicitly coalesce TS02 groups into `frame_span = 4` super-frames so variable-span
+        // TS02 GDPR zero-trigram-leak coverage stays exercised even with default `frame_span = 1`.
+        let sf_old_p = crate::payload::pack::tests::rewrite_pack_ts02_with_frame_span_for_test(
+            &sf_old_p_raw,
+            4,
+        );
 
         let sf_old_pr =
             ChunkPackReader::open(Arc::new(SliceReader::new(sf_old_p.clone()))).unwrap();
         let sf_old_ts = sf_old_pr.trigram_section_cached().unwrap();
         assert!(
-            sf_old_ts.group_frame_spans.contains(&8),
-            "expected adaptive prose pack to contain frame_span == 8 super-frames, got {:?}",
+            sf_old_ts.group_frame_spans.contains(&4),
+            "expected pack to contain frame_span == 4 super-frames, got {:?}",
             sf_old_ts.group_frame_spans
         );
         // Locate the actual chunk(s) containing the erased secret (rows may CDC-split into >1 chunk).

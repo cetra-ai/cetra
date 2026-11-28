@@ -2438,14 +2438,14 @@ fn streaming_pack_builder_is_bit_exact_with_in_memory_and_owned_writer() {
 }
 
 #[test]
-fn pass26_generic_schema_wide_row_promotion_tier_ordering_and_shredded_map_preserved() {
+fn pass26_generic_schema_wide_row_promotion_schema_order_and_shredded_map_preserved() {
     let schema = Schema::try_new_arc(vec![
-        Field::new("comment", DataType::Utf8, false), // col 0: high-card > 24 B, >= 64 KiB -> promoted WideRow!
-        Field::new("amount", DataType::I64, false),   // col 1: Tier 3
-        Field::new("attrs", DataType::MapUtf8, false), // col 2: Tier 4 ShreddedMap (must be preserved!)
-        Field::new("status", DataType::Utf8, false),   // col 3: low-card Dict -> Tier 2
-        Field::new("ship_date", DataType::Date, false), // col 4: Tier 1
-        Field::new("short_code", DataType::Utf8, false), // col 5: non-dict <= 24 B -> stays Core Tier 5
+        Field::new("comment", DataType::Utf8, false), // col 0: high-card > 128 B, >= 256 KiB -> promoted WideRow!
+        Field::new("amount", DataType::I64, false),   // col 1: Core (schema order)
+        Field::new("attrs", DataType::MapUtf8, false), // col 2: ShreddedMap (must be preserved!)
+        Field::new("status", DataType::Utf8, false),  // col 3: low-card Dict -> Core (schema order)
+        Field::new("ship_date", DataType::Date, false), // col 4: Core (schema order)
+        Field::new("medium_url", DataType::Utf8, false), // col 5: non-dict ~60 B (<= 128 B) -> stays Core!
     ])
     .unwrap();
 
@@ -2469,7 +2469,7 @@ fn pass26_generic_schema_wide_row_promotion_tier_ordering_and_shredded_map_prese
         let comments: Vec<String> = (0..rows_per_rg)
             .map(|i| {
                 format!(
-                    "generic_long_comment_row_{:06}_descriptive_text_padding_xyz",
+                    "generic_long_comment_row_{:06}_descriptive_text_padding_for_wide_row_promotion_threshold_over_128_bytes_per_row_and_256kib_per_row_group_payload_segment_xyz",
                     base + i
                 )
             })
@@ -2479,8 +2479,8 @@ fn pass26_generic_schema_wide_row_promotion_tier_ordering_and_shredded_map_prese
             .map(|i| ["OPEN", "CLOSED", "PENDING"][i % 3])
             .collect();
         let dates: Vec<i32> = (0..rows_per_rg).map(|i| 19_000 + (i % 30) as i32).collect();
-        let short_codes: Vec<String> = (0..rows_per_rg)
-            .map(|i| format!("c{:06}", base + i)) // 7 B unique -> non-dict, <= 24 B -> stays Core!
+        let medium_urls: Vec<String> = (0..rows_per_rg)
+            .map(|i| format!("https://example.org/items/cat_{:02}/id_{:06}_slug_segment", i % 19, base + i)) // ~58 B unique -> non-dict, <= 128 B -> stays Core!
             .collect();
 
         let mut map_offsets = Vec::with_capacity(rows_per_rg + 1);
@@ -2529,7 +2529,7 @@ fn pass26_generic_schema_wide_row_promotion_tier_ordering_and_shredded_map_prese
                 Column::Flat(
                     FlatColumn::try_new(
                         FlatData::Utf8(
-                            Utf8Data::try_from_slices(short_codes.iter().map(String::as_str))
+                            Utf8Data::try_from_slices(medium_urls.iter().map(String::as_str))
                                 .unwrap(),
                         ),
                         None,
@@ -2548,7 +2548,7 @@ fn pass26_generic_schema_wide_row_promotion_tier_ordering_and_shredded_map_prese
     reader.verify_full().unwrap();
     assert_eq!(reader.meta().rg_dir.len(), 2);
 
-    // 1. `comment` (col 0) promoted to WideRow; `short_code` (col 5) stays Core.
+    // 1. `comment` (col 0, >128 B & >=256 KiB) promoted to WideRow; `medium_url` (col 5, ~58 B) stays Core.
     assert_eq!(
         reader.meta().col_dir[0].locality_group,
         LocalityGroup::WideRow
@@ -2559,23 +2559,24 @@ fn pass26_generic_schema_wide_row_promotion_tier_ordering_and_shredded_map_prese
         !reader.meta().schema_meta.shredded_maps.is_empty(),
         "Generic schema core_column_plan must preserve ShreddedMap sub-columns"
     );
-    // 3. Physical block offset order inside BOTH RG0 and RG1 follows:
-    //    Tier 1 (`ship_date`) < Tier 2 (`status`) < Tier 3 (`amount`) < Tier 4 (shredded subcol) < Tier 5 (`short_code`) < WideRow (`comment`).
+    // 3. Physical block offset order inside BOTH RG0 and RG1 preserves natural schema order
+    //    for Core columns (`amount` < `status` < `ship_date` < `medium_url`), followed by
+    //    shredded map sub-columns, followed by WideRow (`comment`).
     let sub_pidx = reader.meta().schema_meta.shredded_maps[0].keys[0].sub_col_idx as usize;
     for rg in 0..n_rgs {
-        let off_date = reader.meta().rg_blocks(4, rg)[0].offset;
-        let off_status = reader.meta().rg_blocks(3, rg)[0].offset;
         let off_amount = reader.meta().rg_blocks(1, rg)[0].offset;
+        let off_status = reader.meta().rg_blocks(3, rg)[0].offset;
+        let off_date = reader.meta().rg_blocks(4, rg)[0].offset;
+        let off_medium = reader.meta().rg_blocks(5, rg)[0].offset;
         let off_sub = reader.meta().rg_blocks(sub_pidx, rg)[0].offset;
-        let off_short = reader.meta().rg_blocks(5, rg)[0].offset;
         let off_comment = reader.meta().rg_blocks(0, rg)[0].offset;
         assert!(
-            off_date < off_status
-                && off_status < off_amount
-                && off_amount < off_sub
-                && off_sub < off_short
-                && off_short < off_comment,
-            "RG{rg} physical layout mismatch: date={off_date}, status={off_status}, amount={off_amount}, sub={off_sub}, short={off_short}, comment={off_comment}"
+            off_amount < off_status
+                && off_status < off_date
+                && off_date < off_medium
+                && off_medium < off_sub
+                && off_sub < off_comment,
+            "RG{rg} physical layout mismatch: amount={off_amount}, status={off_status}, date={off_date}, medium={off_medium}, sub={off_sub}, comment={off_comment}"
         );
     }
 

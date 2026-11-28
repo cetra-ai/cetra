@@ -3690,16 +3690,9 @@ fn take_rows_random_access_schema_compact_selection_all_and_min_savings_parity()
             "high-entropy F64 block should fall back to Codec::None via 12% savings guard"
         );
         assert_eq!(reader.meta.rg_blocks(3, 0)[0].encoding, Encoding::Dict);
-        // Col 4 (`msg`, > 24 B mean and >= 64 KiB RG0 raw in TableKind::Generic) is promoted to
-        // WideRow where Zstd beats FSST by >22%, so it uses Plain (or Fsst under Miri).
-        assert_eq!(
-            reader.meta.col_dir[4].locality_group,
-            LocalityGroup::WideRow
-        );
-        assert!(matches!(
-            reader.meta.rg_blocks(4, 0)[0].encoding,
-            Encoding::Plain | Encoding::Fsst
-        ));
+        // Col 4 (`msg`, ~65 B mean <= 128 B in TableKind::Generic) stays Core and uses FSST.
+        assert_eq!(reader.meta.col_dir[4].locality_group, LocalityGroup::Core);
+        assert_eq!(reader.meta.rg_blocks(4, 0)[0].encoding, Encoding::Fsst);
         assert_eq!(
             reader.meta.rg_blocks(5, 0)[0].encoding,
             Encoding::BitpackBool

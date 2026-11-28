@@ -571,7 +571,7 @@ fn materialize_phase2_mb_with_meta(
                 if can_parallel_subchunked
                     && is_subchunked_varlen
                     && matches!(dt, DataType::Utf8 | DataType::Binary)
-                    && blk.raw_len >= 128 * 1024
+                    && blk.raw_len >= 32 * 1024
                 {
                     if let Some(&idx) = large_subchunked_pos.get(&cidx) {
                         large_subchunked_tasks[idx].1.push(pos);
@@ -596,6 +596,11 @@ fn materialize_phase2_mb_with_meta(
             effective_read_threads(task_work_bytes, threads)
         };
         if regular_tasks.len() >= 4 && task_workers > 1 {
+            regular_tasks.sort_unstable_by(|a, b| {
+                let len_a = meta.rg_blocks(a.1, rg_idx)[mb_idx].raw_len;
+                let len_b = meta.rg_blocks(b.1, rg_idx)[mb_idx].raw_len;
+                len_b.cmp(&len_a).then_with(|| a.0.cmp(&b.0))
+            });
             let meta_arc = Arc::clone(meta);
             let plan_arc = Arc::clone(plan);
             let map_proj_arc = Arc::clone(map_proj_by_col);
@@ -1151,6 +1156,11 @@ fn materialize_take_mb_with_meta(
             effective_read_threads(task_work_bytes, threads)
         };
         if parallel_tasks.len() >= 4 && task_workers > 1 {
+            parallel_tasks.sort_unstable_by(|a, b| {
+                let len_a = meta.rg_blocks(a.1, rg_idx)[mb_idx].raw_len;
+                let len_b = meta.rg_blocks(b.1, rg_idx)[mb_idx].raw_len;
+                len_b.cmp(&len_a).then_with(|| a.0.cmp(&b.0))
+            });
             let meta_arc = Arc::clone(meta);
             let plan_arc = Arc::clone(plan);
             let map_proj_arc = Arc::clone(empty_map_proj);

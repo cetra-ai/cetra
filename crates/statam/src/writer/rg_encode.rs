@@ -70,71 +70,25 @@ pub(super) fn payload_ref_rows_all_external_or_null(rows: &[PayloadRefRow]) -> b
     })
 }
 
-/// Returns the deterministic tiered write ordering for `Core` columns and shredded map sub-columns.
+/// Returns the deterministic write ordering for `Core` columns and shredded map sub-columns.
 ///
-/// - For `TableKind::Generic`: Tier 1 (`Date` / `TimestampNs` / `Bool`) -> Tier 2 (`Dict`-encoded)
-///   -> Tier 3 (`I64` / `F64` / `Decimal128` / `Interval` / `FixedBytes8` / `FixedBytes16`) ->
-///   Tier 4 (`MetadataShredded` + `OtherShredded`) -> Tier 5 (remaining narrow `Utf8` / `Binary` / `Null`).
+/// - For `TableKind::Generic`: preserves natural schema order for all `LocalityGroup::Core`
+///   columns, followed by `MetadataShredded` and `OtherShredded`.
 /// - For Cetra `Spans` / `Traces` / `Scores`: preserves the hardcoded Analytics-Core 6-tier layout.
 pub(super) fn core_column_plan(
     table_kind: TableKind,
     fields: &[Field],
     logical_locality: &[LocalityGroup],
-    phys_col_meta: &[PhysColWriteState],
 ) -> Vec<CoreWriteStep> {
     let mut steps = Vec::with_capacity(fields.len() + 2);
     if table_kind == TableKind::Generic {
-        let mut emitted = vec![false; fields.len()];
-        // Tier 1: Date / TimestampNs / Bool
-        for (cidx, field) in fields.iter().enumerate() {
-            if logical_locality[cidx] == LocalityGroup::Core
-                && matches!(
-                    field.data_type,
-                    DataType::Date | DataType::TimestampNs { .. } | DataType::Bool
-                )
-            {
-                steps.push(CoreWriteStep::Col(cidx));
-                emitted[cidx] = true;
-            }
-        }
-        // Tier 2: Dict-encoded columns
         for (cidx, _) in fields.iter().enumerate() {
-            if !emitted[cidx]
-                && logical_locality[cidx] == LocalityGroup::Core
-                && phys_col_meta[cidx].dict.is_some()
-            {
+            if logical_locality[cidx] == LocalityGroup::Core {
                 steps.push(CoreWriteStep::Col(cidx));
-                emitted[cidx] = true;
             }
         }
-        // Tier 3: Fixed-width numeric & ID columns
-        for (cidx, field) in fields.iter().enumerate() {
-            if !emitted[cidx]
-                && logical_locality[cidx] == LocalityGroup::Core
-                && matches!(
-                    field.data_type,
-                    DataType::I64
-                        | DataType::F64
-                        | DataType::Decimal128 { .. }
-                        | DataType::Interval
-                        | DataType::FixedBytes8
-                        | DataType::FixedBytes16
-                )
-            {
-                steps.push(CoreWriteStep::Col(cidx));
-                emitted[cidx] = true;
-            }
-        }
-        // Tier 4: ShreddedMap promoted sub-columns (never omitted)
         steps.push(CoreWriteStep::MetadataShredded);
         steps.push(CoreWriteStep::OtherShredded);
-        // Tier 5: Remaining narrow non-dict Utf8 / Binary / Null / other Core columns
-        for (cidx, _) in fields.iter().enumerate() {
-            if !emitted[cidx] && logical_locality[cidx] == LocalityGroup::Core {
-                steps.push(CoreWriteStep::Col(cidx));
-                emitted[cidx] = true;
-            }
-        }
         return steps;
     }
 
@@ -325,12 +279,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
         } else {
             let mut deferred_wide_residuals: Vec<(usize, Vec<EncodedMiniBlock>, Vec<u16>)> =
                 Vec::new();
-            for step in core_column_plan(
-                self.options.table_kind,
-                fields,
-                &self.logical_locality,
-                &self.phys_col_meta,
-            ) {
+            for step in core_column_plan(self.options.table_kind, fields, &self.logical_locality) {
                 match step {
                     CoreWriteStep::Col(cidx) => {
                         self.encode_rg_scalar_or_nested_col(
@@ -391,7 +340,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                 let mut cur_first = first_row_u32;
                 for (enc, rc) in mb_residuals.iter().zip(mb_row_counts.iter()) {
                     let lz4_cap = if enc.raw_body.len() >= 8 * 1024 {
-                        112
+                        108
                     } else {
                         0
                     };
@@ -716,12 +665,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
         let schema = Arc::clone(&self.schema);
         let fields = schema.fields();
 
-        for step in core_column_plan(
-            self.options.table_kind,
-            fields,
-            &self.logical_locality,
-            &self.phys_col_meta,
-        ) {
+        for step in core_column_plan(self.options.table_kind, fields, &self.logical_locality) {
             match step {
                 CoreWriteStep::Col(cidx) => {
                     commit_core_col(
@@ -1006,7 +950,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
     }
 
     /// Freezes RG0 `WideRow` promotions once for `TableKind::Generic`: any non-dict `Core` `Utf8`
-    /// column whose RG0 mean raw length exceeds `24 B` and whose RG0 raw bytes are `>= 64 KiB`
+    /// column whose RG0 mean raw length exceeds `128 B` and whose RG0 raw bytes are `>= 256 KiB`
     /// is promoted to `LocalityGroup::WideRow` file-wide (identical across RG0 and all `rg_idx >= 1`).
     fn promote_generic_wide_utf8_cols(
         &mut self,
@@ -1053,7 +997,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                     (raw, nn)
                 }
             };
-            if raw_bytes >= 64 * 1024 && non_null > 0 && raw_bytes > non_null.saturating_mul(24) {
+            if raw_bytes >= 256 * 1024 && non_null > 0 && raw_bytes > non_null.saturating_mul(128) {
                 self.logical_locality[cidx] = LocalityGroup::WideRow;
                 self.phys_col_meta[cidx].locality_group = LocalityGroup::WideRow;
             }
@@ -2311,7 +2255,7 @@ fn encode_scalar_or_nested_col_into(
             }
             null_count_total = null_count_total.saturating_add(u32::from(enc.null_count));
             let (lz4_pct_cap, min_savings_pct) = if profile == WriteProfile::L1Compact {
-                (112, 15)
+                (112, 12)
             } else {
                 (0, 0)
             };
@@ -2437,16 +2381,21 @@ fn encode_scalar_or_nested_col_into(
                 Encoding::ForBitpack
                 | Encoding::DeltaBitpack
                 | Encoding::BitpackBool
-                | Encoding::Dict => (112, 15),
+                | Encoding::Dict => (112, 12),
                 Encoding::ShreddedMap => (
                     if enc.raw_body.len() >= 8 * 1024 {
-                        112
+                        108
                     } else {
                         0
                     },
                     0,
                 ),
-                Encoding::ListEncoded | Encoding::EventsStruct | Encoding::LinksStruct => (114, 0),
+                Encoding::ListEncoded | Encoding::EventsStruct | Encoding::LinksStruct => (108, 0),
+                Encoding::Plain
+                    if matches!(dt, DataType::MapUtf8) && enc.raw_body.len() >= 8 * 1024 =>
+                {
+                    (108, 0)
+                }
                 Encoding::Plain
                     if matches!(
                         dt,
@@ -2605,7 +2554,7 @@ fn encode_shredded_map_to_local(
         res_null_count_total = res_null_count_total.saturating_add(u32::from(res_enc.null_count));
         let res_lz4_cap =
             if profile == WriteProfile::L1Compact && res_enc.raw_body.len() >= 8 * 1024 {
-                112
+                108
             } else {
                 0
             };
