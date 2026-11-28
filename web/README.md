@@ -27,4 +27,4 @@ MSW reads `fixtures/api/manifest.json`. An entry's path params must match. A mis
 
 ## Demo build
 
-`pnpm --dir web run build:demo` builds the UI on its mocks into `dist-demo/`, with a "Demo, sample data" notice. `just web-demo-deploy main` deploys it to the `cetra-web-demo` Worker (`wrangler.jsonc`); CI does it on every push to `main`, and deploys a Preview for each PR that touches `web/` or `fixtures/api/`.
+`pnpm --dir web run build:demo` builds the UI on its mocks into `dist-demo/`, with a "demo with sample data" bar and a Start free button above the top bar. `just web-demo-deploy main` deploys it to the `cetra-web-demo` Worker (`wrangler.jsonc`); CI does it on every push to `main`, and deploys a Preview for each PR that touches `web/` or `fixtures/api/`.

@@ -282,7 +282,7 @@ export function ProjectSidebar({ children }: { children: ReactNode }) {
           setStoredOpen(next);
           writeSidebarOpen(next);
         }}
-        className="h-[calc(100dvh-40px)] overflow-hidden"
+        className="min-h-0 flex-1 overflow-hidden"
       >
         {/* The toggle sits at the top bar's far left, in the same place open or collapsed. */}
         <TopBarStart>
