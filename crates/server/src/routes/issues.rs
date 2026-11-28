@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::common::{FieldError, PageParams, TimeParam};
 use crate::api::issues::{
     CreateIssueSourceRequest, Issue, IssueCandidateCounts, IssueDay, IssueEvent, IssueEventPage,
@@ -319,6 +322,7 @@ async fn create_issue_source(
     let org = access.project.org_id;
     let now = state.clock.now_ns();
     let requested_channels = body.channel_ids.clone();
+    let catalog_kind = body.kind;
     let errors = unused(source_kind(body.kind), &create_given(&body));
     let kind = source_kind(body.kind).as_str();
     let row = created_row(body, project, user.id, now);
@@ -348,6 +352,11 @@ async fn create_issue_source(
             reload_score_rules(&state).await;
             state.issues_wake();
             let figures = llm_figures(&state, &row, now).await?;
+            record(
+                &state,
+                &CatalogEvent::IssueSourceCreated { kind: catalog_kind },
+                &Actor::project(&principal, &access),
+            );
             Ok((
                 StatusCode::CREATED,
                 error::Json(source_json(&row, 0, channels, figures.as_ref())),

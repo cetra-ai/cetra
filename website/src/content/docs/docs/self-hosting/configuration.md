@@ -22,7 +22,7 @@ defaults is in the [configuration reference](/docs/self-hosting/configuration-re
 | `otlp_http_addr` | `CETRA_OTLP_HTTP_ADDR` | `0.0.0.0:4318` | empty disables it |
 | `trusted_proxies` | `CETRA_TRUSTED_PROXIES` | none | comma-separated CIDRs whose `X-Forwarded-For` is trusted |
 | `metrics_addr` | `CETRA_METRICS_ADDR` | unset (off) | Prometheus `/metrics` on its own listener, with no authentication: bind it privately ([Monitoring](/docs/self-hosting/monitoring/)) |
-| `restore_mode` | `CETRA_RESTORE_MODE` | `false` | no outbound calls, for restore drills ([Backup and restore](/docs/self-hosting/backup/#restore-mode-restore-drills)) |
+| `restore_mode` | `CETRA_RESTORE_MODE` | `false` | no outbound calls except the self-monitoring export, and nothing sent to us (heartbeat, crash reports), for restore drills ([Backup and restore](/docs/self-hosting/backup/#restore-mode-restore-drills)) |
 | `smtp_url`, `email_from` | `CETRA_SMTP_URL`, `CETRA_EMAIL_FROM` | unset (email off) | invites, password reset |
 | `encryption_key` | `CETRA_ENCRYPTION_KEY` | `<data_dir>/secret.key`, generated | encrypts stored secrets |
 | `license_key` | `CETRA_LICENSE_KEY` | unset | enterprise features; wins over a key installed from the admin settings |

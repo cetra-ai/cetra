@@ -34,6 +34,10 @@ pub struct AuthConfig {
     /// The login page asks for the email first: some domain signs in through an org's
     /// provider (D-P-60).
     pub sso_discovery: bool,
+    /// Product analytics are on: the UI sends its catalog events to
+    /// `POST /api/v1/analytics/events` (track TL M6, D-TL-14). True only when the PostHog sink
+    /// runs (`[analytics]` set, not restore mode); self-hosted installs send no events.
+    pub analytics: bool,
 }
 
 /// Who may register after the first user exists.
@@ -435,6 +439,7 @@ mod tests {
             org_create_allowed: true,
             org_create_url: None,
             sso_discovery: false,
+            analytics: false,
         };
         let me = Me {
             user: user(),

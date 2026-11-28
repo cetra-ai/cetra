@@ -20,7 +20,7 @@ What a backup contains:
 - the encryption key, if you set `CETRA_ENCRYPTION_KEY` instead of using `secret.key`: store it
   with the backup. A backup can only be read with the key that was current when it was taken.
 
-`tmp/` (query spill files) and `LOCK` can be left out.
+`tmp/` (query spill files), `LOCK` and `telemetry/` (unsent [crash reports](/docs/self-hosting/telemetry/#crash-reports)) can be left out.
 
 An online backup holds `meta.db`, `catalog.db`, `secret.key`, `manifest.json` and, without S3, the
 objects it lists. It has no WAL: it is taken right after a flush, so the WAL holds nothing it needs.
@@ -319,9 +319,9 @@ describes: the copy then cannot send anything.
 
 ## Restore mode (restore drills)
 
-`restore_mode = true` (or `CETRA_RESTORE_MODE=true`) starts a server that makes no outbound call. Use it
+`restore_mode = true` (or `CETRA_RESTORE_MODE=true`) starts a server that makes no outbound call, except the self-monitoring export to your own endpoint ([Monitoring](/docs/self-hosting/monitoring/#export-logs-over-otlp)). Use it
 for a copy of an installation that you start to check a restore, for example a drill that runs a copy of a
-cell.
+cell. It sends nothing to us either: the heartbeat and crash reports are off in restore mode ([Telemetry](/docs/self-hosting/telemetry/)).
 
 With restore mode on, the server:
 
@@ -330,7 +330,9 @@ With restore mode on, the server:
 - sends no email (each one is logged as `email not sent: restore mode` and dropped);
 - builds no identity provider: no SSO buttons, password login and API keys only;
 - makes no org-SSO domain check and no DNS lookup;
-- sends no usage notices.
+- sends no usage notices;
+- keeps exporting its own logs to `self_monitoring.otlp_endpoint`, when it is set: that endpoint is yours.
+- sends no heartbeat and no crash report to us (see [Telemetry](/docs/self-hosting/telemetry/)).
 
 User-triggered outbound calls answer `503` with code `restore_mode`: the channel and connection tests, evaluator
 test runs, manual evaluation runs, backfills, the org-SSO provider check and domain verification, the SMTP

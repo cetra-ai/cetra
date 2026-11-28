@@ -47,6 +47,10 @@ On the first start, cetra logs a setup link: open it to create the first admin, 
 project. It listens on port 8080 for the web UI, the API and OTLP/HTTP, and on 4317 for OTLP/gRPC.
 Its data goes to `./cetra-data`.
 
+A release build sends one anonymous heartbeat a day: the version, the platform, bucketed counts
+and which features are in use. Set `CETRA_TELEMETRY=off` to turn it off; every field is listed
+in [Telemetry](https://cetra.sh/docs/self-hosting/telemetry/).
+
 Then send traces from an application:
 
 ```python

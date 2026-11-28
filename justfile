@@ -660,6 +660,7 @@ release-notes version:
 # Cheap packaging checks: versions, chart, compose files, Biome on tools/packaging (CI's packaging job, D-N-13)
 check-packaging-lint: versions-check helm-check js-install
     pnpm exec biome check tools/packaging
+    tools/packaging/telemetry-off-check.sh
     cd deploy/compose && docker compose config --quiet
     cd deploy/compose && GARAGE_RPC_SECRET=x GARAGE_ADMIN_TOKEN=x GARAGE_ACCESS_KEY_ID=x GARAGE_SECRET_ACCESS_KEY=x docker compose -f compose.yaml -f compose.s3.yaml config --quiet
 

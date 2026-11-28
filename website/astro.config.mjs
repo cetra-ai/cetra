@@ -146,6 +146,7 @@ export default defineConfig({
                   items: [
                     { label: "FAQ", link: "/docs/help/faq/" },
                     { label: "Troubleshooting", link: "/docs/help/troubleshooting/" },
+                    { label: "Reporting a bug", link: "/docs/help/reporting-a-bug/" },
                     { label: "Changelog", link: "/docs/help/changelog/" },
                     { label: "Support and security", link: "/docs/help/support/" },
                   ],
@@ -178,6 +179,7 @@ export default defineConfig({
                     { label: "Email (SMTP)", link: "/docs/self-hosting/email/" },
                     { label: "Object storage (S3)", link: "/docs/self-hosting/s3/" },
                     { label: "Security", link: "/docs/self-hosting/security/" },
+                    { label: "Telemetry", link: "/docs/self-hosting/telemetry/" },
                     { label: "Resources", link: "/docs/self-hosting/resources/" },
                   ],
                 },

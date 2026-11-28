@@ -10,6 +10,13 @@ pub(crate) const ENCRYPTION_CHECK: &str = "encryption.check";
 /// Key of the licence key an instance admin installed (D-P-75). A signed token, stored in plain text.
 pub(crate) const LICENSE_KEY: &str = "license.key";
 
+/// Key of this instance's random id for the heartbeat and crash reports (D-TL-9). A UUIDv4.
+pub(crate) const TELEMETRY_INSTANCE_ID: &str = "telemetry.instance_id";
+
+/// Key of the time of the last heartbeat the relay accepted (D-TL-8): i64 nanoseconds since
+/// the Unix epoch, as decimal text.
+pub(crate) const TELEMETRY_LAST_HEARTBEAT_AT: &str = "telemetry.last_heartbeat_at";
+
 /// The value of `key`, or `None`.
 ///
 /// # Errors
@@ -60,6 +67,26 @@ pub(crate) async fn put_setting(
     Ok(())
 }
 
+/// Inserts `key` with `value` unless the key exists; an existing value is kept (D-TL-9).
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the write fails.
+pub(crate) async fn insert_setting_if_absent(
+    conn: &mut SqliteConnection,
+    key: &str,
+    value: &str,
+) -> Result<(), MetaError> {
+    sqlx::query(
+        "INSERT INTO instance_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+    )
+    .bind(key)
+    .bind(value)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +126,37 @@ mod tests {
         assert_eq!(
             get_setting(db.reader(), "k").await.unwrap(),
             Some("second".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_if_absent_writes_a_new_key() {
+        let (_dir, db) = crate::meta::test_db().await;
+        db.write(|conn| {
+            Box::pin(async move { insert_setting_if_absent(conn, "k", "first").await })
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            get_setting(db.reader(), "k").await.unwrap(),
+            Some("first".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_if_absent_keeps_an_existing_value() {
+        let (_dir, db) = crate::meta::test_db().await;
+        db.write(|conn| {
+            Box::pin(async move {
+                put_setting(conn, "k", "first").await?;
+                insert_setting_if_absent(conn, "k", "second").await
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            get_setting(db.reader(), "k").await.unwrap(),
+            Some("first".to_owned())
         );
     }
 }

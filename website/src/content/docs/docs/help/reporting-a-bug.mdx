@@ -1,0 +1,73 @@
+---
+title: Reporting a bug
+description: Write a debug bundle with cetra debug-bundle, check it, and attach it to a GitHub issue.
+---
+
+This page shows how to put what we need to fix a bug into one file, and how to report it.
+
+## Write a debug bundle
+
+`cetra debug-bundle` writes one JSON file with:
+
+- the cetra version and build, and the host's operating system, kernel, CPU count, memory and container memory limit;
+- your configuration as cetra reads it from the file and the `CETRA_*` variables, with the values of settings that can hold a secret or an email address replaced by `<redacted>`;
+- when the server is running: its uptime, its last 2,000 log lines, storage and `meta.db` statistics, the readiness checks, and the telemetry state with the heartbeat it would send;
+- when the server is not running: the sizes and format versions of the files in the data directory.
+
+The command reads the same configuration as `cetra serve` and asks the running server through `<data_dir>/admin.sock`. It never contacts the network. Run it as the user that runs the server (the socket answers only that user and root), with the server's configuration: the same `--config` file, and the same `CETRA_*` variables and working directory. A service manager's environment, such as a systemd unit's `Environment=` lines, is not in your shell, so pass `--config` and set `CETRA_DATA_DIR` as the unit does. Inside a container, `exec` already has the container's environment.
+
+On a host:
+
+```bash
+cetra debug-bundle
+```
+
+It prints the path of the file it wrote, `cetra-debug-<UTC time>.json` in the current directory. Add `--config <file>` if `cetra serve` uses one, and `--output <file>` to choose the path. The command never overwrites a file.
+
+With Docker Compose, write the file to your machine with `--output -`, which prints the JSON on standard output (the image has no shell to copy files with). `-T` keeps Compose from allocating a terminal, which would change the line endings:
+
+```bash
+docker compose exec -T cetra cetra debug-bundle --output - > cetra-debug.json
+```
+
+With Kubernetes:
+
+```bash
+kubectl -n cetra exec cetra-0 -- cetra debug-bundle --output - > cetra-debug.json
+```
+
+## Check it before you share it
+
+Open the file and read it before you attach it to a public issue. The bundle replaces the values of secret and email settings (`encryption_key`, `license_key`, `smtp_url`, `email_from`, the `client_secret` of each sign-in provider, the `init` passwords and keys, `self_monitoring.otlp_headers`, and `self_monitoring.otlp_endpoint`, whose path can hold a token; a running server's section gives the endpoint's host) and of any setting it does not know with `<redacted>`. It keeps host names, bucket names, paths, domains and the names of your organization and project. Remove anything you do not want to share.
+
+Log lines never contain prompts, completions, keys or email addresses. The bundle keeps the lines your `log.level` shows, without the HTTP, TLS, OpenTelemetry and `sqlx` libraries' own lines. If you raised `log.level` to `debug` or `trace` for a module, read those lines with care: library and debug output can include more detail than the default `info`. As a second check, the bundle replaces anything that looks like an email address, a cetra key (`sk-cetra-…`, `pk-cetra-…`, `pat-cetra-…`) or a password in a URL with `<redacted>`.
+
+## When the server does not start
+
+The bundle is written even when the configuration does not load: `config_error` names the setting and the kind of error, without the value. When the server is not running, attach its last log lines too:
+
+```bash
+docker compose logs --tail 500 cetra
+kubectl -n cetra logs cetra-0 --tail 500
+journalctl -u cetra -n 500
+```
+
+## Open an issue
+
+1. Open a [bug report](https://github.com/cetra-ai/cetra/issues/new?template=bug_report.yml) on GitHub.
+2. Say what happened, what you expected, and how to reproduce it.
+3. Drag the bundle into the **Debug bundle** field. If GitHub refuses the `.json` file, rename it to `.txt`.
+
+Do not report a security problem in a public issue: see [Support and security](/docs/help/support/#report-a-vulnerability).
+
+## What the bundle contains
+
+| Key | What it holds |
+|---|---|
+| `build` | `version`, `target` (the platform the binary was built for), `profile`, and whether the web UI is embedded. |
+| `host` | `os`, `os_version`, `kernel_release`, `arch`, `cpus`, `total_memory_bytes`, `container_memory_limit_bytes` and `deployment` (`binary`, `docker` or `kubernetes`). |
+| `config` | The config file's path, the names of the `CETRA_*` variables that are set (never their values), and the settings you set, redacted as above. Defaults are not listed: they are those of the [configuration reference](/docs/self-hosting/configuration-reference/) for the `build.version`. |
+| `config_error` | `null`, or the `kind` of error and the `key` it concerns. |
+| `server` | `state`: `running` with the server's `debug_info` (its log lines as JSON objects), `not_running` with the data directory's files, `unreachable` with a reason (for example a server that runs without its socket), or `refused` with the socket's error code. |
+
+`server.debug_info.telemetry` shows whether the heartbeat is on and why, the instance id, and the heartbeat the server would send now ([Telemetry](/docs/self-hosting/telemetry/)). The full command reference is [`cetra debug-bundle`](/docs/reference/cli/#cetra-debug-bundle).

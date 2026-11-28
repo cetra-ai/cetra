@@ -16,6 +16,7 @@ use futures::TryStreamExt;
 use object_store::{ObjectMeta, ObjectStore, path::Path as ObjectPath};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tracing::Instrument as _;
 
 use crate::catalog::{Committer, FileId, ObsoleteRemoval, StagedRemoval, now_ns};
 use crate::error::{GcError, OrphanError};
@@ -84,47 +85,11 @@ pub(crate) fn spawn(start: GcStart) -> GcHandle {
                     }
                 }
                 _ = interval.tick() => {
-                    if let Err(error) = collect_once(
-                        &start.committer,
-                        &start.objects,
-                        &start.hooks,
-                        now_ns(),
-                        MAX_AGE,
-                    )
-                    .await
-                    {
-                        // The label only: the error names a staged path, which
-                        // can be a media path (spec 03 §9).
-                        tracing::warn!("staged object collection failed");
-                        tracing::debug!(error = error.label(), "staged object collection error");
-                    }
-                    if let Err(error) = collect_obsolete(
-                        &start.committer,
-                        &start.objects,
-                        &start.hooks,
-                        now_ns(),
-                        start.grace,
-                    )
-                    .await
-                    {
-                        // The label only: the error names an object key.
-                        tracing::warn!("obsolete file collection failed");
-                        tracing::debug!(error = error.label(), "obsolete file collection error");
-                    }
-                    if tokio::time::Instant::now() >= next_media {
-                        if let Err(error) = start.media.collect_all(now_ns()).await {
-                            // The label only: the error names an object path,
-                            // which holds the blob's hash (spec 03 §9).
-                            tracing::warn!(
-                                error = error.label(),
-                                "media collection failed"
-                            );
-                        }
-                        next_media = tokio::time::Instant::now() + MEDIA_INTERVAL;
-                    }
-                    // Half-finished drops get their media step retried
-                    // (spec 03 §7).
-                    start.media.finish_drops().await;
+                    let span = crate::spans::storage_gc();
+                    let failed = gc_tick(&start, &mut next_media, &span)
+                        .instrument(span.clone())
+                        .await;
+                    span.record(crate::spans::OUTCOME, if failed { "error" } else { "ok" });
                 }
             }
         }
@@ -133,6 +98,64 @@ pub(crate) fn spawn(start: GcStart) -> GcHandle {
         stop: stop_tx,
         task: std::sync::Mutex::new(Some(task)),
     }
+}
+
+/// One periodic tick: staged objects, obsolete files, then (daily) media, then half-finished
+/// drops. Records the obsolete files' count and bytes on `span`; returns whether a step failed.
+async fn gc_tick(
+    start: &GcStart,
+    next_media: &mut tokio::time::Instant,
+    span: &tracing::Span,
+) -> bool {
+    let mut failed = false;
+    if let Err(error) = collect_once(
+        &start.committer,
+        &start.objects,
+        &start.hooks,
+        now_ns(),
+        MAX_AGE,
+    )
+    .await
+    {
+        // The label only: the error names a staged path, which
+        // can be a media path (spec 03 §9).
+        tracing::warn!("staged object collection failed");
+        tracing::debug!(error = error.label(), "staged object collection error");
+        failed = true;
+    }
+    match collect_obsolete(
+        &start.committer,
+        &start.objects,
+        &start.hooks,
+        now_ns(),
+        start.grace,
+    )
+    .await
+    {
+        Ok(report) => {
+            span.record(crate::spans::FILES, crate::spans::count(report.deleted));
+            span.record(crate::spans::BYTES, crate::spans::count(report.bytes));
+        }
+        Err(error) => {
+            // The label only: the error names an object key.
+            tracing::warn!("obsolete file collection failed");
+            tracing::debug!(error = error.label(), "obsolete file collection error");
+            failed = true;
+        }
+    }
+    if tokio::time::Instant::now() >= *next_media {
+        if let Err(error) = start.media.collect_all(now_ns()).await {
+            // The label only: the error names an object path,
+            // which holds the blob's hash (spec 03 §9).
+            tracing::warn!(error = error.label(), "media collection failed");
+            failed = true;
+        }
+        *next_media = tokio::time::Instant::now() + MEDIA_INTERVAL;
+    }
+    // Half-finished drops get their media step retried
+    // (spec 03 §7).
+    start.media.finish_drops().await;
+    failed
 }
 
 /// Deletes staged objects with `created_at` strictly before `now - max_age`.

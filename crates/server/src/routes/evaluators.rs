@@ -20,6 +20,9 @@ use serde_json::Value;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page, PageParams};
 use crate::api::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorScoreStats, EvaluatorStats,
@@ -511,7 +514,14 @@ async fn create_evaluator(
         })
         .await?;
     match outcome {
-        Outcome::Updated(row) => Ok((StatusCode::CREATED, error::Json(evaluator_json(&row)?))),
+        Outcome::Updated(row) => {
+            record(
+                &state,
+                &CatalogEvent::EvaluatorCreated { kind },
+                &Actor::project(&principal, &access),
+            );
+            Ok((StatusCode::CREATED, error::Json(evaluator_json(&row)?)))
+        }
         Outcome::ConnectionMissing => Err(bad_request(vec![connection_missing()])),
         Outcome::Gone => Err(ApiError::NotFound),
         // A new evaluator has no rules yet; the arm exists for the shared enum.

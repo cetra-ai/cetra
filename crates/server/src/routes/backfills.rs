@@ -13,6 +13,9 @@ use serde::Deserialize;
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use crate::api::common::{FieldError, Page};
 use crate::audit::catalog::OnlineRuleAction;
@@ -186,6 +189,11 @@ async fn create_backfill(
         }),
         Create::Created(row) => {
             state.eval.wake_backfills();
+            record(
+                &state,
+                &CatalogEvent::BackfillStarted,
+                &Actor::project(&principal, &access),
+            );
             Ok((StatusCode::ACCEPTED, error::Json(backfill_json(&row)?)))
         }
     }

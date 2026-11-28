@@ -398,6 +398,213 @@ impl Default for LogConfig {
     }
 }
 
+/// The default `telemetry.endpoint`: the relay track Q runs (D-TL-10).
+const DEFAULT_TELEMETRY_ENDPOINT: &str = "https://telemetry.cetra.sh";
+
+/// The rule a bad `CETRA_TELEMETRY` breaks (D-TL-11). Never the value.
+const TELEMETRY_VALUES: &str =
+    "accepted values are off, false and 0 (any case); unset or empty leaves the config in charge";
+
+/// `[telemetry]` controls the heartbeat and crash reports: what cetra sends to us (D-TL-1,
+/// D-TL-8). The switchboard can turn it off whatever these say (D-TL-11).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelemetryConfig {
+    /// The daily anonymous heartbeat. Default true.
+    #[serde(default = "default_heartbeat")]
+    pub heartbeat: bool,
+    /// Opt-in crash reports to `<endpoint>/v1/crash` (D-TL-5). Default false.
+    #[serde(default)]
+    pub crash_reports: bool,
+    /// Base URL of the relay; the heartbeat goes to `<endpoint>/v1/heartbeat`. `https`, or
+    /// `http` to a loopback IP. Stored without a trailing slash.
+    #[serde(default = "default_telemetry_endpoint")]
+    pub endpoint: String,
+    /// `CETRA_TELEMETRY`, `DO_NOT_TRACK` and the CI variables, captured by the loader from
+    /// the environment it reads. Not a key.
+    #[serde(skip)]
+    pub(crate) env: crate::observability::switchboard::TelemetryEnv,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat: default_heartbeat(),
+            crash_reports: false,
+            endpoint: default_telemetry_endpoint(),
+            env: crate::observability::switchboard::TelemetryEnv::default(),
+        }
+    }
+}
+
+/// The rule `[analytics]` breaks when only one of its keys is set. Static.
+const ANALYTICS_PAIR: &str = "set posthog_host and posthog_key together, or leave both unset";
+
+/// `[analytics]`: per-user product events to the operator's PostHog (track TL M6, D-TL-14).
+/// Off while unset; restore mode turns it off too.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsConfig {
+    /// PostHog ingestion host, e.g. `https://eu.i.posthog.com`; batches go to `<host>/batch/`.
+    /// `https`, or plain `http` to a private IP address. Stored without a trailing slash.
+    #[serde(default)]
+    pub posthog_host: Option<String>,
+    /// The PostHog project API key (`phc_…`).
+    #[serde(default)]
+    pub posthog_key: Option<Secret<String>>,
+}
+
+impl AnalyticsConfig {
+    /// The host and key, when both are set.
+    pub fn posthog(&self) -> Option<(&str, &Secret<String>)> {
+        match (&self.posthog_host, &self.posthog_key) {
+            (Some(host), Some(key)) => Some((host.as_str(), key)),
+            _ => None,
+        }
+    }
+}
+
+fn default_heartbeat() -> bool {
+    true
+}
+
+fn default_telemetry_endpoint() -> String {
+    DEFAULT_TELEMETRY_ENDPOINT.to_owned()
+}
+
+/// `self_monitoring.otlp_endpoint` (track TL, D-TL-1): an `http` or `https` base URL without
+/// user info, query or fragment. Its path is kept and `/v1/logs` or `/v1/traces` is appended to it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OtlpEndpoint {
+    /// The URL without a trailing `/`, for example `https://otlp.example.com/otlp`.
+    base: String,
+    /// The host as written in the URL (IPv6 in brackets), for logs.
+    host: String,
+}
+
+impl OtlpEndpoint {
+    /// The URL log records are posted to: the base followed by `/v1/logs`.
+    pub fn logs_url(&self) -> String {
+        format!("{}/v1/logs", self.base)
+    }
+
+    /// The URL spans are posted to: the base followed by `/v1/traces` (track TL M2).
+    pub fn traces_url(&self) -> String {
+        format!("{}/v1/traces", self.base)
+    }
+
+    /// The endpoint's host, the only part of it cetra logs.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+}
+
+/// Prints the host only: some vendors put a token in the path.
+impl fmt::Debug for OtlpEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OtlpEndpoint")
+            .field("host", &self.host)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `self_monitoring.trace_sample_ratio` (track TL M2): the probability that a root span is
+/// exported, from 0.0 to 1.0; children follow their root. Never NaN, so it is `Eq`.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(try_from = "f64")]
+pub struct TraceSampleRatio(f64);
+
+// `TryFrom` refuses NaN, the only `f64` that is not equal to itself, so equality is reflexive.
+impl Eq for TraceSampleRatio {}
+
+impl TraceSampleRatio {
+    /// The default share of root spans, 10 % (D-TL-3).
+    pub const DEFAULT: Self = Self(0.1);
+
+    /// The ratio as a number in `[0.0, 1.0]`.
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl TryFrom<f64> for TraceSampleRatio {
+    type Error = &'static str;
+
+    /// Accepts `[0.0, 1.0]`; refuses NaN, infinities and anything outside. The reason never
+    /// quotes the input.
+    fn try_from(value: f64) -> Result<Self, Self::Error> {
+        if (0.0..=1.0).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err("must be a number from 0.0 to 1.0")
+        }
+    }
+}
+
+/// `[self_monitoring]`: export of cetra's own logs and spans to the operator's OTLP/HTTP endpoint
+/// (track TL, D-TL-1, D-TL-3). Off while `otlp_endpoint` is unset.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelfMonitoringConfig {
+    /// Base URL of the OTLP/HTTP endpoint. Unset or blank: no export.
+    #[serde(default, deserialize_with = "deserialize_otlp_endpoint")]
+    pub otlp_endpoint: Option<OtlpEndpoint>,
+    /// Request headers, `name=value,name=value` (the `OTEL_EXPORTER_OTLP_HEADERS` syntax).
+    #[serde(default)]
+    pub otlp_headers: Option<Secret<String>>,
+    /// Whether log records are exported. Defaults to `true`.
+    #[serde(default = "default_self_monitoring_logs")]
+    pub logs: bool,
+    /// Whether spans are exported. Defaults to `true` (track TL M2).
+    #[serde(default = "default_self_monitoring_traces")]
+    pub traces: bool,
+    /// `EnvFilter` directive of the exported events. Defaults to `warn`. The subscriber
+    /// checks it and caps `rmcp` at `warn`, as for stdout. Spans record the events that pass it.
+    #[serde(default = "default_self_monitoring_level")]
+    pub level: String,
+    /// Probability that a root span is exported; its children follow it. Defaults to 0.1.
+    #[serde(default = "default_trace_sample_ratio")]
+    pub trace_sample_ratio: TraceSampleRatio,
+    /// Extra resource attributes, `key=value,key=value` (the `OTEL_RESOURCE_ATTRIBUTES` syntax).
+    #[serde(default)]
+    pub resource: String,
+}
+
+impl Default for SelfMonitoringConfig {
+    fn default() -> Self {
+        Self {
+            otlp_endpoint: None,
+            otlp_headers: None,
+            logs: default_self_monitoring_logs(),
+            traces: default_self_monitoring_traces(),
+            level: default_self_monitoring_level(),
+            trace_sample_ratio: default_trace_sample_ratio(),
+            resource: String::new(),
+        }
+    }
+}
+
+impl SelfMonitoringConfig {
+    /// The endpoint, when log records are exported: `otlp_endpoint` is set and `logs` is true.
+    pub fn logs_endpoint(&self) -> Option<&OtlpEndpoint> {
+        self.otlp_endpoint.as_ref().filter(|_| self.logs)
+    }
+
+    /// The endpoint, when spans are exported: `otlp_endpoint` is set, `traces` is true and
+    /// `trace_sample_ratio` is above 0. At 0 no span would be kept, so no span layer is built.
+    pub fn traces_endpoint(&self) -> Option<&OtlpEndpoint> {
+        self.otlp_endpoint
+            .as_ref()
+            .filter(|_| self.traces && self.trace_sample_ratio.get() > 0.0)
+    }
+
+    /// Whether anything is exported: logs, spans or both.
+    pub fn exports(&self) -> bool {
+        self.logs_endpoint().is_some() || self.traces_endpoint().is_some()
+    }
+}
+
 /// How an SMTP connection is encrypted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tls {
@@ -679,8 +886,8 @@ impl Default for DemoConfig {
 
 /// Everything `cetra serve` reads from the environment and `cetra.toml`.
 ///
-/// Keys that spec 12 lists for later work (telemetry, compaction, gc, deletion,
-/// anchor) are not fields. Setting one is an unknown-key error.
+/// Keys that spec 12 lists for later work (compaction, gc, deletion, anchor) are not
+/// fields. Setting one is an unknown-key error.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
@@ -774,6 +981,15 @@ pub struct ServerConfig {
     /// Log format and level.
     #[serde(default)]
     pub log: LogConfig,
+    /// `[self_monitoring]`: export of cetra's own logs and spans over OTLP/HTTP (track TL, D-TL-1).
+    #[serde(default)]
+    pub self_monitoring: SelfMonitoringConfig,
+    /// `[telemetry]`: the heartbeat to us (D-TL-8).
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+    /// `[analytics]`: per-user product events to PostHog (track TL M6).
+    #[serde(default)]
+    pub analytics: AnalyticsConfig,
 }
 
 impl ServerConfig {
@@ -851,7 +1067,8 @@ pub enum ConfigError {
     MissingFile(PathBuf),
 }
 
-fn default_data_dir() -> PathBuf {
+/// Also read by the debug bundle (track TL M3).
+pub(crate) fn default_data_dir() -> PathBuf {
     PathBuf::from("./cetra-data")
 }
 
@@ -891,12 +1108,54 @@ fn default_log_level() -> String {
     "info".to_owned()
 }
 
-fn load_from(toml: Option<&str>, env: &[(&str, &str)]) -> Result<ServerConfig, ConfigError> {
+fn default_self_monitoring_logs() -> bool {
+    true
+}
+
+fn default_self_monitoring_level() -> String {
+    "warn".to_owned()
+}
+
+fn default_self_monitoring_traces() -> bool {
+    true
+}
+
+fn default_trace_sample_ratio() -> TraceSampleRatio {
+    TraceSampleRatio::DEFAULT
+}
+
+/// The file, then the `CETRA_*` variables, as one figment: the sources [`load_from`]
+/// extracts and [`source_tree`] shows.
+fn sources(toml: Option<&str>, env: &[(&str, &str)]) -> Figment {
     let mut figment = Figment::new();
     if let Some(toml) = toml {
         figment = figment.merge(Toml::string(toml));
     }
-    figment = figment.merge(EnvSource { pairs: env });
+    figment.merge(EnvSource { pairs: env })
+}
+
+/// The merged sources as one dictionary, before serde defaults, validation and the
+/// `storage.data_dir` injection: what the debug bundle shows (D-TL-6). A TOML syntax
+/// error is mapped as [`load_from`] maps it, so its text names a position only.
+pub(crate) fn source_tree(toml: Option<&str>, env: &[(&str, &str)]) -> Result<Dict, ConfigError> {
+    let mut data = sources(toml, env).data().map_err(map_figment)?;
+    Ok(data.remove(&Profile::Default).unwrap_or_default())
+}
+
+/// Defaults, then `toml`, then `env`, validated. Also used by tests outside this module to
+/// build a config from TOML.
+pub(crate) fn load_from(
+    toml: Option<&str>,
+    env: &[(&str, &str)],
+) -> Result<ServerConfig, ConfigError> {
+    let telemetry_env =
+        crate::observability::switchboard::TelemetryEnv::from_pairs(env).map_err(|_| {
+            ConfigError::Provider {
+                key: "CETRA_TELEMETRY".to_owned(),
+                reason: TELEMETRY_VALUES,
+            }
+        })?;
+    let mut figment = sources(toml, env);
     if figment.find_value("storage.data_dir").is_ok() {
         return Err(ConfigError::Invalid {
             key: "storage.data_dir",
@@ -911,6 +1170,7 @@ fn load_from(toml: Option<&str>, env: &[(&str, &str)]) -> Result<ServerConfig, C
     figment = figment.merge(Serialized::default("storage.data_dir", data_dir));
     let mut config: ServerConfig = figment.extract().map_err(map_figment)?;
     apply_oidc_env(&mut config.auth, env)?;
+    config.telemetry.env = telemetry_env;
     validate(&mut config)?;
     Ok(config)
 }
@@ -951,7 +1211,8 @@ fn apply_oidc_env(auth: &mut AuthSettings, env: &[(&str, &str)]) -> Result<(), C
     Ok(())
 }
 
-fn read_toml(path: Option<&Path>) -> Result<Option<String>, ConfigError> {
+/// Also read by the debug bundle (track TL M3).
+pub(crate) fn read_toml(path: Option<&Path>) -> Result<Option<String>, ConfigError> {
     let Some(path) = configured_path(path) else {
         return Ok(None);
     };
@@ -966,7 +1227,8 @@ fn read_toml(path: Option<&Path>) -> Result<Option<String>, ConfigError> {
     }
 }
 
-fn configured_path(path: Option<&Path>) -> Option<PathBuf> {
+/// Also read by the debug bundle (track TL M3).
+pub(crate) fn configured_path(path: Option<&Path>) -> Option<PathBuf> {
     match path {
         Some(path) => Some(path.to_path_buf()),
         None => std::env::var_os("CETRA_CONFIG").map(PathBuf::from),
@@ -1036,6 +1298,12 @@ fn secret_key(path: &[String]) -> Option<&'static str> {
         {
             Some("auth.google.client_secret")
         }
+        [parent, key] if parent == "self_monitoring" && key == "otlp_headers" => {
+            Some("self_monitoring.otlp_headers")
+        }
+        [parent, key] if parent == "analytics" && key == "posthog_key" => {
+            Some("analytics.posthog_key")
+        }
         [..] if path.last().is_some_and(|key| key == "client_secret") => {
             Some("auth.oidc.client_secret")
         }
@@ -1053,6 +1321,8 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
     validate_entitlements(&mut config.entitlements)?;
     validate_orgs(&config.orgs)?;
     validate_demo(&config.demo)?;
+    validate_telemetry(&mut config.telemetry)?;
+    validate_analytics(&mut config.analytics)?;
     if config
         .license_key
         .as_ref()
@@ -1068,6 +1338,7 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
     }
     validate_auth(&mut config.auth)?;
     validate_init(&config.init)?;
+    validate_self_monitoring(&config.self_monitoring)?;
     if config
         .otlp_http_addr
         .is_some_and(|addr| same_listener(addr, config.http_addr))
@@ -1661,6 +1932,127 @@ fn validate_demo(demo: &DemoConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Which hosts `outbound_base_url` accepts over plain `http`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlainHttp {
+    /// A loopback IP literal only (`telemetry.endpoint`: our relay is reached over the internet).
+    LoopbackOnly,
+    /// A private IP literal (`analytics.posthog_host`, user 2026-11-24: a PostHog on a tailnet).
+    Private,
+}
+
+/// A loopback, RFC 1918, CGNAT (`100.64.0.0/10`, Tailscale) or IPv6 unique local (`fc00::/7`) address.
+fn is_private_ip(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Ipv4(ip) => {
+            let [a, b, _, _] = ip.octets();
+            ip.is_loopback()
+                || a == 10
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 168)
+                || (a == 100 && (64..=127).contains(&b))
+        }
+        url::Host::Ipv6(ip) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
+        url::Host::Domain(_) => false,
+    }
+}
+
+/// An outbound base URL of operator config (`telemetry.endpoint`, `analytics.posthog_host`):
+/// `https`, or plain `http` to the hosts `plain_http` allows (an IP literal only; a host name
+/// is never allowed over `http`); no user info, query or fragment. Returned without a trailing
+/// slash. Reasons are static and never quote the input.
+fn outbound_base_url(
+    raw: &str,
+    key: &'static str,
+    plain_http: PlainHttp,
+) -> Result<String, ConfigError> {
+    let invalid = |reason| ConfigError::Invalid { key, reason };
+    let url = url::Url::parse(raw.trim())
+        .map_err(|_| invalid("must be an absolute http or https URL"))?;
+    let allowed = match plain_http {
+        PlainHttp::LoopbackOnly => match url.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            _ => false,
+        },
+        PlainHttp::Private => url.host().is_some_and(|host| is_private_ip(&host)),
+    };
+    match url.scheme() {
+        "https" => {}
+        "http" if allowed => {}
+        _ => {
+            return Err(invalid(match plain_http {
+                PlainHttp::LoopbackOnly => "must be https, or http to a loopback address",
+                PlainHttp::Private => "must be https, or http to a private address",
+            }));
+        }
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid("must not contain user info, a query or a fragment"));
+    }
+    Ok(url.as_str().trim_end_matches('/').to_owned())
+}
+
+/// `telemetry.endpoint` (D-TL-10), by [`outbound_base_url`].
+fn validate_telemetry(telemetry: &mut TelemetryConfig) -> Result<(), ConfigError> {
+    telemetry.endpoint = outbound_base_url(
+        &telemetry.endpoint,
+        "telemetry.endpoint",
+        PlainHttp::LoopbackOnly,
+    )?;
+    Ok(())
+}
+
+/// `[analytics]`: blank values are unset; both keys or neither; the host by
+/// [`outbound_base_url`]; the key printable ASCII without spaces, at most 256 bytes.
+fn validate_analytics(analytics: &mut AnalyticsConfig) -> Result<(), ConfigError> {
+    if analytics
+        .posthog_host
+        .as_deref()
+        .is_some_and(|host| host.trim().is_empty())
+    {
+        analytics.posthog_host = None;
+    }
+    if analytics
+        .posthog_key
+        .as_ref()
+        .is_some_and(|key| key.expose().trim().is_empty())
+    {
+        analytics.posthog_key = None;
+    }
+    match (&analytics.posthog_host, &analytics.posthog_key) {
+        (None, None) => return Ok(()),
+        (Some(_), Some(_)) => {}
+        _ => {
+            return Err(ConfigError::Invalid {
+                key: "analytics",
+                reason: ANALYTICS_PAIR,
+            });
+        }
+    }
+    if let Some(host) = analytics.posthog_host.take() {
+        analytics.posthog_host = Some(outbound_base_url(
+            &host,
+            "analytics.posthog_host",
+            PlainHttp::Private,
+        )?);
+    }
+    if let Some(key) = &analytics.posthog_key {
+        let value = key.expose();
+        if value.len() > 256 || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return Err(ConfigError::Invalid {
+                key: "analytics.posthog_key",
+                reason: "must be printable ASCII without spaces, at most 256 bytes",
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_orgs(orgs: &OrgsConfig) -> Result<(), ConfigError> {
     let Some(url) = orgs.create_url.as_deref() else {
         return Ok(());
@@ -1774,6 +2166,142 @@ fn parse_public_url(raw: &str) -> Result<PublicUrl, &'static str> {
     })
 }
 
+/// Most entries in `self_monitoring.otlp_headers` or `self_monitoring.resource`.
+pub(crate) const MAX_PAIRS: usize = 32;
+
+/// Longest `self_monitoring.otlp_headers` or `self_monitoring.resource` value, in bytes.
+pub(crate) const MAX_PAIRS_BYTES: usize = 8192;
+
+/// Headers cetra sets itself on every export request.
+const RESERVED_HEADERS: &[&str] = &[
+    "content-type",
+    "content-encoding",
+    "content-length",
+    "host",
+    "user-agent",
+];
+
+/// Why a reserved header is refused.
+const RESERVED_HEADER_REASON: &str =
+    "content-type, content-encoding, content-length, host and user-agent are set by cetra";
+
+/// Checks `self_monitoring.otlp_endpoint`. The reasons never quote the input.
+pub(crate) fn parse_otlp_endpoint(raw: &str) -> Result<OtlpEndpoint, &'static str> {
+    let raw = raw.trim();
+    if !is_http_url(raw) {
+        return Err("must be an http or https URL");
+    }
+    let url = url::Url::parse(raw).map_err(|_| "must be an http or https URL")?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("must not contain user info");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("must not have a query or fragment");
+    }
+    let path = url.path().trim_end_matches('/');
+    if path.ends_with("/v1/logs") || path.ends_with("/v1/traces") {
+        return Err("must be the base URL, without /v1/logs or /v1/traces");
+    }
+    let Some(host) = url.host_str() else {
+        return Err("must have a host");
+    };
+    Ok(OtlpEndpoint {
+        host: host.to_owned(),
+        // No query or fragment, so the serialization ends with the path.
+        base: url.as_str().trim_end_matches('/').to_owned(),
+    })
+}
+
+/// `name=value` entries separated by `,` (the `OTEL_EXPORTER_OTLP_HEADERS` and
+/// `OTEL_RESOURCE_ATTRIBUTES` syntax). Each entry is split at its first `=`. Names and values
+/// are trimmed, and values are percent-decoded (`%20` is a space; `+` stays `+`, as in
+/// base64). Empty entries are skipped. The reasons never quote the input.
+fn parse_pairs(raw: &str) -> Result<Vec<(String, String)>, &'static str> {
+    if raw.len() > MAX_PAIRS_BYTES {
+        return Err("at most 8192 bytes");
+    }
+    let mut pairs = Vec::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = entry.split_once('=') else {
+            return Err("entries must be name=value");
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a name is empty");
+        }
+        let value =
+            percent_decode(value.trim()).map_err(|()| "a value is not valid percent-encoding")?;
+        pairs.push((name.to_owned(), value));
+    }
+    if pairs.len() > MAX_PAIRS {
+        return Err("at most 32 entries");
+    }
+    Ok(pairs)
+}
+
+/// `self_monitoring.otlp_headers` as `(lower-case name, value)` pairs, in order.
+pub(crate) fn parse_otlp_headers(raw: &str) -> Result<Vec<(String, String)>, &'static str> {
+    let mut headers = parse_pairs(raw)?;
+    let mut seen = BTreeSet::new();
+    for (name, value) in &mut headers {
+        if !name.bytes().all(is_token_byte) {
+            return Err("a header name is not a valid HTTP token");
+        }
+        name.make_ascii_lowercase();
+        if RESERVED_HEADERS.contains(&name.as_str()) {
+            return Err(RESERVED_HEADER_REASON);
+        }
+        if !seen.insert(name.clone()) {
+            return Err("a name is listed twice");
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte == b'\t' || (b' '..=b'~').contains(&byte))
+        {
+            return Err("a header value has a character HTTP does not allow");
+        }
+    }
+    Ok(headers)
+}
+
+/// RFC 9110 `tchar`.
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+/// `self_monitoring.resource` as `(key, value)` pairs, in order.
+pub(crate) fn parse_resource(raw: &str) -> Result<Vec<(String, String)>, &'static str> {
+    let pairs = parse_pairs(raw)?;
+    let mut seen = BTreeSet::new();
+    for (key, _) in &pairs {
+        if key.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err("a key has whitespace or a control character");
+        }
+        if !seen.insert(key.as_str()) {
+            return Err("a name is listed twice");
+        }
+    }
+    Ok(pairs)
+}
+
+fn validate_self_monitoring(monitoring: &SelfMonitoringConfig) -> Result<(), ConfigError> {
+    if let Some(headers) = &monitoring.otlp_headers {
+        parse_otlp_headers(headers.expose()).map_err(|reason| ConfigError::Invalid {
+            key: "self_monitoring.otlp_headers",
+            reason,
+        })?;
+    }
+    parse_resource(&monitoring.resource).map_err(|reason| ConfigError::Invalid {
+        key: "self_monitoring.resource",
+        reason,
+    })?;
+    Ok(())
+}
+
 fn deserialize_socket_addr<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<SocketAddr, D::Error> {
@@ -1795,6 +2323,21 @@ fn deserialize_optional_socket_addr<'de, D: Deserializer<'de>>(
         .parse()
         .map(Some)
         .map_err(|_error| de::Error::custom("invalid socket address"))
+}
+
+/// A blank string is `None` (no export), so `CETRA_SELF_MONITORING__OTLP_ENDPOINT=` unsets it.
+fn deserialize_otlp_endpoint<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<OtlpEndpoint>, D::Error> {
+    let Some(raw) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    parse_otlp_endpoint(&raw)
+        .map(Some)
+        .map_err(de::Error::custom)
 }
 
 fn deserialize_proxies<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<IpNet>, D::Error> {
@@ -1895,11 +2438,17 @@ fn split_key(name: &str) -> Option<String> {
     )
 }
 
-/// `CETRA_CONFIG` and the CLI's own variables (D-H-12) are not config keys.
+/// `CETRA_CONFIG`, `CETRA_TELEMETRY` (read by [`load_from`] before the sources, D-TL-11) and the CLI's own variables (D-H-12) are not config keys.
 fn is_filtered(name: &str) -> bool {
-    ["CETRA_CONFIG", "CETRA_URL", "CETRA_TOKEN", "CETRA_PROJECT"]
-        .iter()
-        .any(|filtered| name.eq_ignore_ascii_case(filtered))
+    [
+        "CETRA_CONFIG",
+        "CETRA_TELEMETRY",
+        "CETRA_URL",
+        "CETRA_TOKEN",
+        "CETRA_PROJECT",
+    ]
+    .iter()
+    .any(|filtered| name.eq_ignore_ascii_case(filtered))
         || alias_key(name).is_some()
 }
 
@@ -1929,6 +2478,8 @@ fn is_secret_path(dotted: &str) -> bool {
             | "init.admin_password"
             | "init.secret_key"
             | "init.read_key"
+            | "self_monitoring.otlp_headers"
+            | "analytics.posthog_key"
     ) || dotted.ends_with(".client_secret")
 }
 
@@ -1965,6 +2516,7 @@ fn merge_dict(into: &mut Dict, from: Dict) {
 
 #[cfg(test)]
 mod tests {
+    use super::is_private_ip;
     use std::collections::{BTreeMap, BTreeSet};
     use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
@@ -1976,11 +2528,14 @@ mod tests {
     use figment::error::{Actual, Kind};
 
     use super::{
-        ALIASES, AlertsConfig, ConfigError, DemoConfig, EmailRecipients, IngestConfig, LogFormat,
-        MediaConfig, OrgsConfig, Secret, ServerConfig, SmtpUrl, Tls, issuer_problem, load_from,
-        oidc_env_name,
+        ALIASES, ANALYTICS_PAIR, AlertsConfig, AnalyticsConfig, ConfigError, DemoConfig,
+        EmailRecipients, IngestConfig, LogFormat, MediaConfig, OrgsConfig, Secret,
+        SelfMonitoringConfig, ServerConfig, SmtpUrl, TELEMETRY_VALUES, TelemetryConfig, Tls,
+        TraceSampleRatio, issuer_problem, load_from, oidc_env_name, parse_otlp_endpoint,
+        parse_otlp_headers, parse_resource,
     };
     use crate::api::account::SignupPolicy;
+    use crate::observability::switchboard::TelemetryEnv;
 
     fn socket(raw: &str) -> SocketAddr {
         raw.parse().unwrap()
@@ -2027,6 +2582,7 @@ mod tests {
         assert!(config.init.secret_key.is_none());
         assert!(config.log.format.is_none());
         assert_eq!(config.log.level, "info");
+        assert_eq!(config.self_monitoring, SelfMonitoringConfig::default());
 
         let storage = config.storage_config();
         assert_eq!(storage.data_dir, config.data_dir);
@@ -2049,6 +2605,7 @@ mod tests {
         assert_eq!(storage.memtable.hard_limit, ByteSize::gib(1));
         assert_eq!(storage.query.metadata_cache_bytes, ByteSize::mib(512));
         assert!(storage.query.target_partitions >= 1);
+        assert_eq!(config.analytics, AnalyticsConfig::default());
     }
 
     #[test]
@@ -2086,6 +2643,735 @@ mod tests {
         assert_eq!(config.auth.signup, SignupPolicy::Disabled);
         assert_eq!(config.log.level, "debug");
         assert_eq!(config.log.format, Some(LogFormat::Json));
+    }
+
+    #[test]
+    fn telemetry_defaults() {
+        let config = load_from(None, &[]).unwrap();
+        assert!(config.telemetry.heartbeat);
+        assert!(!config.telemetry.crash_reports);
+        assert_eq!(config.telemetry.endpoint, "https://telemetry.cetra.sh");
+        assert_eq!(config.telemetry.env, TelemetryEnv::default());
+    }
+
+    #[test]
+    fn cetra_telemetry_off_loads_and_keeps_the_table() {
+        let config = load_from(None, &[("CETRA_TELEMETRY", "off")]).unwrap();
+        assert!(config.telemetry.env.forced_off);
+        assert!(config.telemetry.heartbeat);
+    }
+
+    #[test]
+    fn cetra_telemetry_is_not_mapped_to_the_table() {
+        let env = [
+            ("CETRA_TELEMETRY", "OFF"),
+            ("CETRA_TELEMETRY__HEARTBEAT", "false"),
+        ];
+        let config = load_from(None, &env).unwrap();
+        assert!(config.telemetry.env.forced_off);
+        assert!(!config.telemetry.heartbeat);
+    }
+
+    #[test]
+    fn a_bad_cetra_telemetry_is_a_load_error() {
+        for value in ["on", "1", "true"] {
+            let result = load_from(None, &[("CETRA_TELEMETRY", value)]);
+            assert!(
+                matches!(
+                    &result,
+                    Err(ConfigError::Provider { key, reason })
+                        if key == "CETRA_TELEMETRY" && *reason == TELEMETRY_VALUES
+                ),
+                "value {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cetra_telemetry_error_never_quotes_the_value() {
+        let error = load_from(None, &[("CETRA_TELEMETRY", "planted-value-7f3")])
+            .expect_err("an invalid value is an error");
+        assert!(!error.to_string().contains("planted-value-7f3"));
+    }
+
+    #[test]
+    fn an_empty_cetra_telemetry_loads() {
+        let config = load_from(None, &[("CETRA_TELEMETRY", "")]).unwrap();
+        assert!(!config.telemetry.env.forced_off);
+    }
+
+    #[test]
+    fn do_not_track_and_ci_reach_the_config() {
+        let env = [("DO_NOT_TRACK", "1"), ("GITHUB_ACTIONS", "true")];
+        let config = load_from(None, &env).unwrap();
+        assert!(config.telemetry.env.do_not_track);
+        assert!(config.telemetry.env.ci);
+    }
+
+    #[test]
+    fn telemetry_heartbeat_from_toml() {
+        let config = load_from(Some("[telemetry]\nheartbeat = false\n"), &[]).unwrap();
+        assert!(!config.telemetry.heartbeat);
+    }
+
+    #[test]
+    fn telemetry_crash_reports_from_toml() {
+        let config = load_from(Some("[telemetry]\ncrash_reports = true\n"), &[]).unwrap();
+        assert!(config.telemetry.crash_reports);
+    }
+
+    #[test]
+    fn telemetry_crash_reports_from_env() {
+        let env = [("CETRA_TELEMETRY__CRASH_REPORTS", "true")];
+        let config = load_from(None, &env).unwrap();
+        assert!(config.telemetry.crash_reports);
+    }
+
+    #[test]
+    fn telemetry_endpoint_accepts() {
+        let cases = [
+            (
+                "https://relay.example.com/cetra/",
+                "https://relay.example.com/cetra",
+            ),
+            ("http://127.0.0.1:9", "http://127.0.0.1:9"),
+            ("http://[::1]:8080/", "http://[::1]:8080"),
+        ];
+        for (raw, stored) in cases {
+            let toml = format!("[telemetry]\nendpoint = \"{raw}\"\n");
+            let config = load_from(Some(&toml), &[]).unwrap();
+            assert_eq!(config.telemetry.endpoint, stored, "{raw}");
+            let env = [("CETRA_TELEMETRY__ENDPOINT", raw)];
+            let config = load_from(None, &env).unwrap();
+            assert_eq!(config.telemetry.endpoint, stored, "{raw}");
+        }
+        let config = load_from(None, &[]).unwrap();
+        assert_eq!(config.telemetry, TelemetryConfig::default());
+    }
+
+    #[test]
+    fn telemetry_endpoint_refuses() {
+        let absolute = "must be an absolute http or https URL";
+        let scheme = "must be https, or http to a loopback address";
+        let user_info = "must not contain user info, a query or a fragment";
+        let cases = [
+            ("", absolute),
+            ("not a url", absolute),
+            ("http://localhost:8080", scheme),
+            ("http://relay.example.com", scheme),
+            ("ftp://relay.example.com", scheme),
+            ("http://10.0.0.1", scheme),
+            ("https://user:pw@relay.example.com", user_info),
+            ("https://relay.example.com/?a=1", user_info),
+            ("https://relay.example.com/#f", user_info),
+        ];
+        for (raw, reason) in cases {
+            let toml = format!("[telemetry]\nendpoint = \"{raw}\"\n");
+            let result = load_from(Some(&toml), &[]);
+            assert!(
+                matches!(
+                    &result,
+                    Err(ConfigError::Invalid { key: "telemetry.endpoint", reason: got })
+                        if *got == reason
+                ),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn analytics_defaults() {
+        let config = load_from(None, &[]).unwrap();
+        assert_eq!(config.analytics.posthog_host, None);
+        assert!(config.analytics.posthog_key.is_none());
+        assert!(config.analytics.posthog().is_none());
+    }
+
+    #[test]
+    fn analytics_loads_from_toml_and_env() {
+        let toml = "[analytics]\nposthog_host = \"https://eu.i.posthog.com/\"\n";
+        let env = [("CETRA_ANALYTICS__POSTHOG_KEY", "phc_abc123")];
+        let config = load_from(Some(toml), &env).unwrap();
+        assert_eq!(
+            config.analytics.posthog_host.as_deref(),
+            Some("https://eu.i.posthog.com")
+        );
+        let (host, key) = config.analytics.posthog().unwrap();
+        assert_eq!(host, "https://eu.i.posthog.com");
+        assert_eq!(key.expose(), "phc_abc123");
+        assert!(!format!("{config:?}").contains("phc_abc123"));
+    }
+
+    #[test]
+    fn an_all_digit_posthog_key_stays_a_string() {
+        let env = [
+            ("CETRA_ANALYTICS__POSTHOG_HOST", "https://eu.i.posthog.com"),
+            ("CETRA_ANALYTICS__POSTHOG_KEY", "12345"),
+        ];
+        let config = load_from(None, &env).unwrap();
+        let key = config.analytics.posthog_key.as_ref().unwrap();
+        assert_eq!(key.expose(), "12345");
+    }
+
+    #[test]
+    fn analytics_needs_both_keys() {
+        let host_only = [("CETRA_ANALYTICS__POSTHOG_HOST", "https://eu.i.posthog.com")];
+        let result = load_from(None, &host_only);
+        assert!(
+            matches!(
+                &result,
+                Err(ConfigError::Invalid { key: "analytics", reason }) if *reason == ANALYTICS_PAIR
+            ),
+            "{result:?}"
+        );
+        let key_only = [("CETRA_ANALYTICS__POSTHOG_KEY", "phc_abc123")];
+        let result = load_from(None, &key_only);
+        assert!(
+            matches!(
+                &result,
+                Err(ConfigError::Invalid { key: "analytics", reason }) if *reason == ANALYTICS_PAIR
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn blank_analytics_values_are_unset() {
+        let env = [
+            ("CETRA_ANALYTICS__POSTHOG_HOST", ""),
+            ("CETRA_ANALYTICS__POSTHOG_KEY", "  "),
+        ];
+        let config = load_from(None, &env).unwrap();
+        assert_eq!(config.analytics.posthog_host, None);
+        assert!(config.analytics.posthog_key.is_none());
+    }
+
+    #[test]
+    fn posthog_host_refuses() {
+        let absolute = "must be an absolute http or https URL";
+        let scheme = "must be https, or http to a private address";
+        let user_info = "must not contain user info, a query or a fragment";
+        let cases = [
+            ("not a url", absolute),
+            ("http://eu.i.posthog.com", scheme),
+            ("http://localhost:8000", scheme),
+            ("ftp://h.example", scheme),
+            ("https://u:p@h.example", user_info),
+            ("https://h.example/?a=1", user_info),
+            ("https://h.example/#f", user_info),
+        ];
+        for (raw, reason) in cases {
+            let env = [
+                ("CETRA_ANALYTICS__POSTHOG_HOST", raw),
+                ("CETRA_ANALYTICS__POSTHOG_KEY", "phc_abc123"),
+            ];
+            let result = load_from(None, &env);
+            assert!(
+                matches!(
+                    &result,
+                    Err(ConfigError::Invalid { key: "analytics.posthog_host", reason: got })
+                        if *got == reason
+                ),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn posthog_host_accepts_loopback_http() {
+        let env = [
+            ("CETRA_ANALYTICS__POSTHOG_HOST", "http://127.0.0.1:9999/"),
+            ("CETRA_ANALYTICS__POSTHOG_KEY", "phc_abc123"),
+        ];
+        let config = load_from(None, &env).unwrap();
+        assert_eq!(
+            config.analytics.posthog_host.as_deref(),
+            Some("http://127.0.0.1:9999")
+        );
+    }
+
+    #[test]
+    fn posthog_host_accepts_http_to_private_addresses() {
+        let hosts = [
+            "http://100.101.102.103:8000",
+            "http://10.0.0.5",
+            "http://192.168.1.2:8000",
+            "http://172.16.0.1",
+            "http://127.0.0.1:9",
+            "http://[fd7a:115c:a1e0::1]:8000",
+        ];
+        for raw in hosts {
+            let env = [
+                ("CETRA_ANALYTICS__POSTHOG_HOST", raw),
+                ("CETRA_ANALYTICS__POSTHOG_KEY", "phc_abc123"),
+            ];
+            let config = load_from(None, &env).unwrap_or_else(|error| panic!("{raw:?}: {error}"));
+            assert!(config.analytics.posthog_host.is_some(), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn posthog_host_refuses_http_to_public_or_named_hosts() {
+        let reason = "must be https, or http to a private address";
+        let hosts = [
+            "http://8.8.8.8",
+            "http://100.128.0.1",
+            "http://172.32.0.1",
+            "http://posthog.internal",
+            "http://169.254.1.1",
+        ];
+        for raw in hosts {
+            let env = [
+                ("CETRA_ANALYTICS__POSTHOG_HOST", raw),
+                ("CETRA_ANALYTICS__POSTHOG_KEY", "phc_abc123"),
+            ];
+            let result = load_from(None, &env);
+            assert!(
+                matches!(
+                    &result,
+                    Err(ConfigError::Invalid { key: "analytics.posthog_host", reason: got })
+                        if *got == reason
+                ),
+                "{raw:?}"
+            );
+            let text = result.err().unwrap().to_string();
+            assert!(!text.contains(raw), "{text}");
+        }
+    }
+
+    #[test]
+    fn telemetry_endpoint_still_refuses_http_to_a_private_address() {
+        let toml = "[telemetry]\nendpoint = \"http://100.101.102.103\"\n";
+        let result = load_from(Some(toml), &[]);
+        assert!(
+            matches!(
+                &result,
+                Err(ConfigError::Invalid { key: "telemetry.endpoint", reason: got })
+                    if *got == "must be https, or http to a loopback address"
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn is_private_ip_rules() {
+        let private = |raw: &str| {
+            let url = url::Url::parse(raw).unwrap();
+            is_private_ip(&url.host().unwrap())
+        };
+        assert!(!private("http://100.63.255.255"));
+        assert!(private("http://100.64.0.0"));
+        assert!(private("http://100.127.255.255"));
+        assert!(!private("http://172.15.0.1"));
+        assert!(private("http://172.31.255.255"));
+        assert!(!private("http://[fe80::1]"));
+        assert!(private("http://[fc00::1]"));
+        assert!(private("http://[fd00::1]"));
+        assert!(private("http://[::1]"));
+        assert!(!private("http://8.8.8.8"));
+        assert!(!private("http://169.254.1.1"));
+        assert!(!private("http://posthog.internal"));
+    }
+
+    #[test]
+    fn posthog_key_refuses_without_quoting_it() {
+        let long = "a".repeat(257);
+        for value in ["phc abc", long.as_str(), "phc\u{7f}x"] {
+            let env = [
+                ("CETRA_ANALYTICS__POSTHOG_HOST", "https://eu.i.posthog.com"),
+                ("CETRA_ANALYTICS__POSTHOG_KEY", value),
+            ];
+            let error = load_from(None, &env).err().unwrap();
+            assert!(
+                matches!(
+                    error,
+                    ConfigError::Invalid {
+                        key: "analytics.posthog_key",
+                        ..
+                    }
+                ),
+                "{error}"
+            );
+            let text = error.to_string();
+            assert!(!text.contains(value), "{text}");
+            assert!(!text.contains("phc"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_bad_posthog_key_type_is_reported_by_key() {
+        let toml = "[analytics]\nposthog_host = \"https://eu.i.posthog.com\"\nposthog_key = 5\n";
+        let error = load_from(Some(toml), &[]).err().unwrap();
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                key: "analytics.posthog_key",
+                reason: "expected a string",
+            }
+        ));
+    }
+
+    #[test]
+    fn unknown_analytics_key_is_refused() {
+        let result = load_from(Some("[analytics]\nposthog = 1\n"), &[]);
+        assert!(matches!(result, Err(ConfigError::Figment(_))));
+    }
+
+    #[test]
+    fn telemetry_env_is_not_a_key() {
+        let result = load_from(Some("[telemetry]\nenv = 1\n"), &[]);
+        assert!(matches!(result, Err(ConfigError::Figment(_))));
+    }
+
+    #[test]
+    fn self_monitoring_defaults() {
+        let config = load_from(None, &[]).unwrap();
+        let monitoring = &config.self_monitoring;
+        assert!(monitoring.otlp_endpoint.is_none());
+        assert!(monitoring.otlp_headers.is_none());
+        assert!(monitoring.logs);
+        assert_eq!(monitoring.level, "warn");
+        assert_eq!(monitoring.resource, "");
+        assert!(monitoring.logs_endpoint().is_none());
+        assert!(!monitoring.exports());
+        assert!(monitoring.traces);
+        assert_eq!(monitoring.trace_sample_ratio.get(), 0.1);
+        assert!(monitoring.traces_endpoint().is_none());
+    }
+
+    #[test]
+    fn self_monitoring_loads_from_toml_and_env() {
+        let toml = "[self_monitoring]\notlp_endpoint = \"https://otlp.example.com/otlp/\"\n";
+        let env = [
+            (
+                "CETRA_SELF_MONITORING__OTLP_HEADERS",
+                "authorization=Basic%20abc",
+            ),
+            ("CETRA_SELF_MONITORING__LOGS", "false"),
+            ("CETRA_SELF_MONITORING__TRACES", "false"),
+            ("CETRA_SELF_MONITORING__LEVEL", "info"),
+            (
+                "CETRA_SELF_MONITORING__RESOURCE",
+                "deployment.environment=prod,cetra.cell=eu1",
+            ),
+        ];
+        let config = load_from(Some(toml), &env).unwrap();
+        let monitoring = &config.self_monitoring;
+        let endpoint = monitoring.otlp_endpoint.as_ref().unwrap();
+        assert_eq!(endpoint.logs_url(), "https://otlp.example.com/otlp/v1/logs");
+        assert_eq!(endpoint.host(), "otlp.example.com");
+        assert!(!monitoring.logs);
+        assert!(monitoring.logs_endpoint().is_none());
+        assert!(!monitoring.traces);
+        assert!(monitoring.traces_endpoint().is_none());
+        assert!(!monitoring.exports());
+        assert_eq!(monitoring.level, "info");
+        assert_eq!(
+            monitoring.resource,
+            "deployment.environment=prod,cetra.cell=eu1"
+        );
+        assert_eq!(
+            format!("{:?}", monitoring.otlp_headers.as_ref().unwrap()),
+            "Secret(***)"
+        );
+
+        // The same file without the env overrides exports logs.
+        let config = load_from(Some(toml), &[]).unwrap();
+        assert!(config.self_monitoring.logs);
+        assert!(config.self_monitoring.exports());
+    }
+
+    #[test]
+    fn otlp_endpoint_rules() {
+        let accepted = [
+            (
+                "https://o1.ingest.de.sentry.io/api/2/integration/otlp",
+                "https://o1.ingest.de.sentry.io/api/2/integration/otlp/v1/logs",
+            ),
+            ("http://collector:4318", "http://collector:4318/v1/logs"),
+            ("http://collector:4318/", "http://collector:4318/v1/logs"),
+            (
+                "https://otlp-gateway-prod-eu-west-2.grafana.net/otlp//",
+                "https://otlp-gateway-prod-eu-west-2.grafana.net/otlp/v1/logs",
+            ),
+            ("http://[::1]:4318", "http://[::1]:4318/v1/logs"),
+        ];
+        for (raw, logs_url) in accepted {
+            let endpoint = parse_otlp_endpoint(raw).unwrap();
+            assert_eq!(endpoint.logs_url(), logs_url, "{raw}");
+        }
+        assert_eq!(
+            parse_otlp_endpoint("http://[::1]:4318").unwrap().host(),
+            "[::1]"
+        );
+        let secret = parse_otlp_endpoint("https://x/api/s3cr3t/otlp").unwrap();
+        assert_eq!(format!("{secret:?}"), "OtlpEndpoint { host: \"x\", .. }");
+
+        let refused = [
+            ("ftp://x", "must be an http or https URL"),
+            ("not a url", "must be an http or https URL"),
+            ("https:///x", "must be an http or https URL"),
+            ("https://user:pw@x", "must not contain user info"),
+            (
+                "https://x/otlp?token=1",
+                "must not have a query or fragment",
+            ),
+            ("https://x/otlp#f", "must not have a query or fragment"),
+            (
+                "https://x/otlp/v1/logs",
+                "must be the base URL, without /v1/logs or /v1/traces",
+            ),
+            (
+                "https://x/v1/traces/",
+                "must be the base URL, without /v1/logs or /v1/traces",
+            ),
+        ];
+        for (raw, reason) in refused {
+            assert_eq!(parse_otlp_endpoint(raw).unwrap_err(), reason, "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_blank_otlp_endpoint_is_unset() {
+        for blank in ["", "   "] {
+            let config =
+                load_from(None, &[("CETRA_SELF_MONITORING__OTLP_ENDPOINT", blank)]).unwrap();
+            assert!(config.self_monitoring.otlp_endpoint.is_none());
+        }
+    }
+
+    #[test]
+    fn an_invalid_otlp_endpoint_names_the_rule_not_the_value() {
+        let toml = "[self_monitoring]\notlp_endpoint = \"https://user:hunter2@x\"\n";
+        let text = load_from(Some(toml), &[]).err().unwrap().to_string();
+        assert!(text.contains("must not contain user info"), "{text}");
+        assert!(text.contains("otlp_endpoint"), "{text}");
+        assert!(!text.contains("hunter2"), "{text}");
+    }
+
+    #[test]
+    fn otlp_headers_rules() {
+        fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+            items
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect()
+        }
+        let accepted = [
+            (
+                "authorization=Basic%20abc",
+                vec![("authorization", "Basic abc")],
+            ),
+            (
+                "x-sentry-auth=sentry sentry_key=abc",
+                vec![("x-sentry-auth", "sentry sentry_key=abc")],
+            ),
+            (" A = b , ,c=d ", vec![("a", "b"), ("c", "d")]),
+            ("a=", vec![("a", "")]),
+            ("", vec![]),
+            ("k=YWJj+/9=", vec![("k", "YWJj+/9=")]),
+        ];
+        for (raw, expected) in accepted {
+            assert_eq!(parse_otlp_headers(raw).unwrap(), pairs(&expected), "{raw}");
+        }
+
+        let refused = [
+            ("novalue", "entries must be name=value"),
+            ("=v", "a name is empty"),
+            ("bad name=v", "a header name is not a valid HTTP token"),
+            ("a=%zz", "a value is not valid percent-encoding"),
+            ("a=%4", "a value is not valid percent-encoding"),
+            ("a=%FF", "a value is not valid percent-encoding"),
+            (
+                "a=%0A",
+                "a header value has a character HTTP does not allow",
+            ),
+            ("a=1,A=2", "a name is listed twice"),
+            (
+                "Content-Type=x",
+                "content-type, content-encoding, content-length, host and user-agent are set by cetra",
+            ),
+            (
+                "user-agent=x",
+                "content-type, content-encoding, content-length, host and user-agent are set by cetra",
+            ),
+        ];
+        for (raw, reason) in refused {
+            assert_eq!(parse_otlp_headers(raw).unwrap_err(), reason, "{raw}");
+        }
+
+        let many: Vec<String> = (0..33).map(|index| format!("h{index}=v")).collect();
+        assert_eq!(
+            parse_otlp_headers(&many.join(",")).unwrap_err(),
+            "at most 32 entries"
+        );
+        let long = format!("a={}", "x".repeat(8191));
+        assert_eq!(long.len(), 8193);
+        assert_eq!(parse_otlp_headers(&long).unwrap_err(), "at most 8192 bytes");
+    }
+
+    #[test]
+    fn resource_rules() {
+        assert_eq!(
+            parse_resource("deployment.environment=prod,cetra.cell=eu1").unwrap(),
+            vec![
+                ("deployment.environment".to_owned(), "prod".to_owned()),
+                ("cetra.cell".to_owned(), "eu1".to_owned()),
+            ]
+        );
+        assert_eq!(
+            parse_resource("k=v%2Cw").unwrap(),
+            vec![("k".to_owned(), "v,w".to_owned())]
+        );
+        assert_eq!(
+            parse_resource("Service.Name=x").unwrap(),
+            vec![("Service.Name".to_owned(), "x".to_owned())]
+        );
+
+        let refused = [
+            ("k v=1", "a key has whitespace or a control character"),
+            ("=1", "a name is empty"),
+            ("k=1,k=2", "a name is listed twice"),
+            ("k=%FF", "a value is not valid percent-encoding"),
+        ];
+        for (raw, reason) in refused {
+            assert_eq!(parse_resource(raw).unwrap_err(), reason, "{raw}");
+        }
+    }
+
+    #[test]
+    fn invalid_otlp_headers_never_reach_the_error() {
+        let error = load_from(None, &[("CETRA_SELF_MONITORING__OTLP_HEADERS", "12345")])
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                key: "self_monitoring.otlp_headers",
+                reason: "entries must be name=value",
+            }
+        ));
+        assert!(!error.to_string().contains("12345"));
+
+        let error = load_from(Some("[self_monitoring]\notlp_headers = 5\n"), &[])
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                key: "self_monitoring.otlp_headers",
+                reason: "expected a string",
+            }
+        ));
+    }
+
+    #[test]
+    fn invalid_resource_is_refused() {
+        let error = load_from(None, &[("CETRA_SELF_MONITORING__RESOURCE", "nokey")])
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                key: "self_monitoring.resource",
+                reason: "entries must be name=value",
+            }
+        ));
+    }
+
+    #[test]
+    fn unknown_self_monitoring_key_is_refused() {
+        // cetra exports no metrics over OTLP (D-N-28), so `metrics` is refused.
+        assert!(load_from(Some("[self_monitoring]\nmetrics = true\n"), &[]).is_err());
+    }
+
+    #[test]
+    fn trace_sample_ratio_bounds() {
+        for value in [0.0, 0.25, 1.0] {
+            assert_eq!(TraceSampleRatio::try_from(value).unwrap().get(), value);
+        }
+        for value in [-0.1, 1.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                TraceSampleRatio::try_from(value).unwrap_err(),
+                "must be a number from 0.0 to 1.0",
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn trace_settings_load_from_toml_and_env() {
+        let toml = "[self_monitoring]\notlp_endpoint = \"https://otlp.example.com/otlp\"\n\
+                    traces = false\ntrace_sample_ratio = 0.5\n";
+        let config = load_from(Some(toml), &[]).unwrap();
+        assert!(!config.self_monitoring.traces);
+        assert_eq!(config.self_monitoring.trace_sample_ratio.get(), 0.5);
+        assert!(config.self_monitoring.traces_endpoint().is_none());
+        assert!(config.self_monitoring.exports());
+
+        let env = [
+            ("CETRA_SELF_MONITORING__TRACE_SAMPLE_RATIO", "1"),
+            ("CETRA_SELF_MONITORING__LOGS", "false"),
+        ];
+        let config = load_from(
+            Some("[self_monitoring]\notlp_endpoint = \"https://otlp.example.com/otlp\"\n"),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(config.self_monitoring.trace_sample_ratio.get(), 1.0);
+        let endpoint = config.self_monitoring.traces_endpoint().unwrap();
+        assert_eq!(
+            endpoint.traces_url(),
+            "https://otlp.example.com/otlp/v1/traces"
+        );
+        assert!(config.self_monitoring.exports());
+    }
+
+    #[test]
+    fn a_trace_sample_ratio_out_of_range_is_refused() {
+        let endpoint = "[self_monitoring]\notlp_endpoint = \"https://otlp.example.com/otlp\"\n";
+        for toml in ["trace_sample_ratio = 1.5\n", "trace_sample_ratio = nan\n"] {
+            let error = load_from(Some(&format!("{endpoint}{toml}")), &[]).unwrap_err();
+            let text = error.to_string();
+            assert!(text.contains("must be a number from 0.0 to 1.0"), "{text}");
+            assert!(text.contains("trace_sample_ratio"), "{text}");
+        }
+        let error = load_from(
+            Some(endpoint),
+            &[("CETRA_SELF_MONITORING__TRACE_SAMPLE_RATIO", "-1")],
+        )
+        .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("must be a number from 0.0 to 1.0"), "{text}");
+        assert!(text.contains("trace_sample_ratio"), "{text}");
+    }
+
+    #[test]
+    fn a_zero_ratio_exports_no_span() {
+        let base = "[self_monitoring]\notlp_endpoint = \"https://otlp.example.com/otlp\"\n\
+                    logs = false\ntrace_sample_ratio = 0.0\n";
+        let config = load_from(Some(base), &[]).unwrap();
+        assert!(config.self_monitoring.traces_endpoint().is_none());
+        assert!(!config.self_monitoring.exports());
+
+        let with_logs = base.replace("logs = false", "logs = true");
+        let config = load_from(Some(&with_logs), &[]).unwrap();
+        assert!(config.self_monitoring.exports());
+    }
+
+    #[test]
+    fn traces_url_appends_v1_traces() {
+        let cases = [
+            ("http://collector:4318/", "http://collector:4318/v1/traces"),
+            (
+                "https://o1.ingest.de.sentry.io/api/2/integration/otlp",
+                "https://o1.ingest.de.sentry.io/api/2/integration/otlp/v1/traces",
+            ),
+        ];
+        for (raw, traces_url) in cases {
+            let endpoint = parse_otlp_endpoint(raw).unwrap();
+            assert_eq!(endpoint.traces_url(), traces_url, "{raw}");
+        }
     }
 
     #[test]

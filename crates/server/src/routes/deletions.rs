@@ -13,6 +13,9 @@ use cetra_storage::{FilterDeletionRequest, QueryContext, TimeWindow, filter_trac
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page, PageParams, ProblemCode};
 use crate::api::deletions::{
     CreateDeletion, Deletion, DeletionActor, DeletionActorKind, DeletionFailure, DeletionFilter,
@@ -392,6 +395,11 @@ async fn create_deletion(
         .await?;
 
     state.deletions.wake.notify_one();
+    record(
+        &state,
+        &CatalogEvent::DeletionRequested,
+        &Actor::project(&principal, &access),
+    );
     Ok((StatusCode::ACCEPTED, error::Json(deletion_json(&row))))
 }
 

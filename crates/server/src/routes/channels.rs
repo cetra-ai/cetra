@@ -11,6 +11,9 @@ use uuid::Uuid;
 use crate::alerts::channel::{ChannelConfig, open_config, seal_config};
 use crate::alerts::deliver::{Outgoing, send_to_channel};
 use crate::alerts::message::{self, MessageKind, Notice};
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::alerts::{
     AlertMetric, AlertWindow, ChannelDelivery, ChannelKind, ChannelTestResult, Comparator,
     CreateChannelRequest, DeliveryStatus, NotificationChannel, UpdateChannelRequest,
@@ -166,6 +169,11 @@ async fn create_channel(
             })
         })
         .await?;
+    record(
+        &state,
+        &CatalogEvent::ChannelCreated { kind },
+        &Actor::project(&principal, &access),
+    );
     Ok((
         StatusCode::CREATED,
         error::Json(channel_json(&state, &row, None)),

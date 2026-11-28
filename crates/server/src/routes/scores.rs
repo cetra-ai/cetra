@@ -8,6 +8,9 @@ use cetra_storage as storage;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::{Page, ProblemCode};
 use crate::api::convert;
 use crate::api::scores::{ScoreBatch, ScoreListParams, ScoreWriteResult};
@@ -158,7 +161,13 @@ async fn create_scores(
     error::Json(batch): error::Json<ScoreBatch>,
 ) -> Result<error::Json<ScoreWriteResult>, ApiError> {
     let (writer, kind) = project_writer(&principal, &access)?;
-    write_batch(&state, &access, writer, kind, batch).await
+    let value = write_batch(&state, &access, writer, kind, batch).await?;
+    record(
+        &state,
+        &Event::ScoresCreated,
+        &Actor::project(&principal, &access),
+    );
+    Ok(value)
 }
 
 /// `DELETE …/scores/{score_id}`: appends a tombstone of the live score (spec 03 §5). Another

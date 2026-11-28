@@ -95,8 +95,9 @@ pub(crate) async fn healthz(State(state): State<AppState>) -> Response {
     }
 }
 
-/// Every readiness check passes (D-N-30). Each failed check adds its name to the 503 detail.
-pub(crate) async fn readyz(State(state): State<AppState>) -> Response {
+/// The readiness checks that fail now, in `/readyz` order (D-N-30): empty when ready. The
+/// object-store probe goes through the cache. Also read by the admin socket's `debug_info`.
+pub(crate) async fn failed_checks(state: &AppState) -> Vec<&'static str> {
     let mut failed = Vec::new();
     if state.meta.ping().await.is_err() {
         failed.push("meta.db");
@@ -120,6 +121,12 @@ pub(crate) async fn readyz(State(state): State<AppState>) -> Response {
     if !reachable {
         failed.push("object store");
     }
+    failed
+}
+
+/// Every readiness check passes (D-N-30). Each failed check adds its name to the 503 detail.
+pub(crate) async fn readyz(State(state): State<AppState>) -> Response {
+    let failed = failed_checks(&state).await;
     if failed.is_empty() {
         axum::Json(Probe {
             status: "ready",
@@ -143,7 +150,7 @@ mod tests {
     use cetra_storage::StorageHealth;
     use tokio::time::Instant;
 
-    use super::{PROBE_TTL, ReadyCache, sticky_failures};
+    use super::{PROBE_TTL, ReadyCache, failed_checks, sticky_failures};
     use crate::api::common::ProblemCode;
     use crate::test_support::TestApp;
 
@@ -221,6 +228,30 @@ mod tests {
 
         let live = app.request(Method::GET, "/healthz").send().await;
         assert_eq!(live.status, 200);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_checks_is_empty_when_ready() {
+        let app = TestApp::new().await;
+        assert!(failed_checks(&app.state).await.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_checks_names_low_disk() {
+        let app = TestApp::with_config(|config| {
+            config.storage.min_free_bytes = ByteSize::b(u64::MAX);
+        })
+        .await;
+        // The monitor measures every second; wait until it reports low.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !app.state.storage.health().disk_low {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "disk never reported low"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(failed_checks(&app.state).await.contains(&"free disk"));
     }
 
     #[tokio::test(start_paused = true)]

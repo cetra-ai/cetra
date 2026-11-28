@@ -16,6 +16,7 @@ use cetra_server::api::account::{
 };
 use cetra_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAdminUser};
 use cetra_server::api::alerts::{AlertEvent, AlertRule, IssueAlertPreview, NotificationChannel};
+use cetra_server::api::analytics::AnalyticsEventsRequest;
 use cetra_server::api::annotation_queues::{
     AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem, CreateAnnotationQueue,
     NextQueueItem, QueueMatchingAdded, QueueMatchingPreview, QueueMatchingRequest, SkipQueueItem,
@@ -508,6 +509,7 @@ fn static_files_match_their_types() {
 #[test]
 fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<ScoreBatch>("requests/score-batch.json");
+    roundtrip::<AnalyticsEventsRequest>("requests/analytics-events.json");
     roundtrip::<UpdateAssistantConversationRequest>("requests/assistant-conversation-rename.json");
     roundtrip::<AssistantFeedbackRequest>("requests/assistant-feedback.json");
     roundtrip::<AssistantTurnRequest>("requests/assistant-turn.json");
@@ -605,6 +607,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         .unwrap_or_else(|error| panic!("openapi registry: {error}"));
     let requests = [
         ("create_key_scores", "requests/score-batch.json"),
+        ("post_analytics_events", "requests/analytics-events.json"),
         ("post_feedback", "requests/feedback.json"),
         ("post_llm_connection", "requests/llm-connection-create.json"),
         ("run_sql", "requests/sql-query.json"),

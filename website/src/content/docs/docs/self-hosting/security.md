@@ -23,6 +23,7 @@ This page is a checklist to go through before you expose a self-hosted cetra to 
 
 - [ ] **Leave `security.allow_private_network_egress` off** unless you need it. LLM judges and webhooks then cannot reach loopback, private, link-local or cloud-metadata addresses, which stops a user from pointing them at your internal services. Turn it on only for a local Ollama or vLLM, and then only on a network where that is acceptable. See the [configuration reference](/docs/self-hosting/configuration-reference/#security).
 - [ ] **Use `restore_mode` for restore drills**, so a restored copy sends no alerts, webhooks or emails. See [Backup and restore](/docs/self-hosting/backup/#restore-mode-restore-drills).
+- [ ] **Decide about the heartbeat.** cetra sends one anonymous heartbeat a day to `telemetry.cetra.sh`. Allow that host in your egress rules, or set `CETRA_TELEMETRY=off`. See [Telemetry](/docs/self-hosting/telemetry/).
 
 ## Running the process
 

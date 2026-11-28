@@ -3723,6 +3723,56 @@
         ]
       }
     },
+    "/api/v1/analytics/events": {
+      "post": {
+        "tags": [
+          "analytics"
+        ],
+        "summary": "Send product analytics events",
+        "description": "Session only. Web events of the catalog (`page.viewed` with a route template, `command_palette.opened`, `live_tail.toggled`, `list_layout.changed`, `theme.changed`, `assistant.panel_opened`). At most 50 events and 64 KiB are read, and 60 requests a minute per user. Unknown names and properties and invalid values are dropped; when a PostHog sink runs, events of orgs or projects the user cannot read are dropped too. The user comes from the session. `DNT: 1` or `Sec-GPC: 1` keeps the events out of PostHog. With no PostHog sink the events are dropped. Always 204 once signed in.",
+        "operationId": "post_analytics_events",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalyticsEventsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Accepted, whatever the body held."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/me": {
       "patch": {
         "tags": [
@@ -29826,6 +29876,47 @@
           "24h"
         ]
       },
+      "AnalyticsEventInput": {
+        "type": "object",
+        "description": "One web event. The server keeps it only when `name` is a web event of the catalog with\nvalid properties, and the user can read `org` and `project`.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "A web event name of the catalog, e.g. `page.viewed`."
+          },
+          "org": {
+            "type": "string",
+            "description": "The page's org, as in the URL (slug or id). Resolved by the server, never stored."
+          },
+          "project": {
+            "type": "string",
+            "description": "The page's project, as in the URL (slug or id). Resolved by the server, never stored."
+          },
+          "properties": {
+            "type": "object",
+            "description": "The event's properties; unknown keys are dropped."
+          }
+        }
+      },
+      "AnalyticsEventsRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/analytics/events`. At most 50 events are read; the rest are dropped.",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AnalyticsEventInput"
+            },
+            "description": "Catalog events of the web UI."
+          }
+        }
+      },
       "AnnotationQueue": {
         "type": "object",
         "description": "An annotation queue with its counts.",
@@ -30853,9 +30944,14 @@
           "smtp_enabled",
           "email_verification_required",
           "org_create_allowed",
-          "sso_discovery"
+          "sso_discovery",
+          "analytics"
         ],
         "properties": {
+          "analytics": {
+            "type": "boolean",
+            "description": "Product analytics are on: the UI sends its catalog events to\n`POST /api/v1/analytics/events` (track TL M6, D-TL-14). True only when the PostHog sink\nruns (`[analytics]` set, not restore mode); self-hosted installs send no events."
+          },
           "email_verification_required": {
             "type": "boolean",
             "description": "New accounts must verify their email before signing in."
@@ -44129,6 +44225,10 @@
     {
       "name": "auth",
       "description": "Login, logout, sign-up, password reset, the current user, and first-run setup."
+    },
+    {
+      "name": "analytics",
+      "description": "Product analytics events from the web UI (session only)."
     },
     {
       "name": "admin",

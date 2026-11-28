@@ -13,6 +13,9 @@ use serde_json::{Map, Value};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page};
 use cetra_storage::{
     MAX_EXPERIMENT_SCORES, MAX_EXPERIMENT_TRACES, QueryContext, RunError, experiment_scores,
@@ -392,6 +395,11 @@ async fn create_experiment(
         item_count = row.item_count,
         repetitions = row.repetitions,
         "experiment created"
+    );
+    record(
+        &state,
+        &Event::ExperimentCreated,
+        &Actor::project(&principal, &access),
     );
     Ok((
         StatusCode::CREATED,

@@ -55,6 +55,7 @@ GARAGE_SECRET_ACCESS_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(3
 EOF
 cat >"$dir/cetra.env" <<EOF
 CETRA_PUBLIC_URL=http://127.0.0.1:$http_port
+CETRA_TELEMETRY=off
 CETRA_INIT_ADMIN_EMAIL=smoke@example.com
 CETRA_INIT_ADMIN_PASSWORD=cetra-smoke-1
 CETRA_INIT_ORG=Smoke

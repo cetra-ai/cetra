@@ -996,6 +996,8 @@ CREATE TABLE usage_daily (
 CREATE TABLE instance_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 -- 'encryption.check': hex HMAC-SHA256 check value of the encryption key (D-I-2)
 -- 'license.key': the licence key an instance admin installed, plain text (D-P-75)
+-- 'telemetry.instance_id': random UUIDv4 of the instance for the heartbeat and crash reports, created on first use with an insert that keeps an existing row (D-TL-9)
+-- 'telemetry.last_heartbeat_at': i64 ns of the last heartbeat the relay accepted, as decimal text (D-TL-8)
 ```
 
 `instance_settings` is created by track I (migration `0004`, D156).

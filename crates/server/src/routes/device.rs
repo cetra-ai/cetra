@@ -8,6 +8,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::common::ProblemCode;
 use crate::api::device::{
     DeviceApproveRequest, DeviceCodeRequest, DeviceCodeResponse, DeviceGrant, DeviceGrantProject,
@@ -221,6 +224,11 @@ async fn approve(
             DeviceError::NotFound => ApiError::NotFound,
             other => internal(other),
         })?;
+    record(
+        &state,
+        &CatalogEvent::DeviceApproved,
+        &Actor::principal(&principal),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 

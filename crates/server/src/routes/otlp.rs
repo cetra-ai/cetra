@@ -16,6 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use cetra_core::ids::ProjectId;
 use cetra_otel::Rejections;
+use tracing::Instrument as _;
 
 use crate::auth::roles::KeyScope;
 use crate::entitlements::units::check_cap;
@@ -26,6 +27,7 @@ use crate::ingest::body::{BodyFormat, body_encoding, body_format, read_capped};
 use crate::ingest::otlp::export_response;
 use crate::ingest::{Accepted, CommitTarget, IngestError, check_rate, commit_in_task};
 use crate::meta::projects::ProjectRow;
+use crate::observability::spans;
 use crate::routes::agent_context::post_agent_context;
 use crate::telemetry::{IngestOutcome, Protocol, ingest_outcome};
 
@@ -176,10 +178,16 @@ async fn export(
     body: Body,
 ) -> Result<Response, ApiError> {
     let started = Instant::now();
+    let span = spans::otlp_export(spans::PROTOCOL_HTTP);
+    span.record(
+        spans::PROJECT_ID,
+        tracing::field::display(access.project.id),
+    );
     if let Err(cap) = check_cap(&state, access.project.org_id).await {
         state
             .telemetry
             .refuse_ingest(Protocol::otlp_http, IngestOutcome::quota);
+        span.record(spans::OUTCOME, tracing::field::debug(IngestOutcome::quota));
         tracing::debug!(
             target: "ingest",
             project_id = %access.project.id,
@@ -188,12 +196,18 @@ async fn export(
         );
         return Err(cap.into());
     }
-    match export_body(&state, &access.project, &headers, body, started).await {
-        Ok(response) => Ok(response),
+    match export_body(&state, &access.project, &headers, body, started)
+        .instrument(span.clone())
+        .await
+    {
+        Ok(response) => {
+            span.record(spans::OUTCOME, tracing::field::debug(IngestOutcome::ok));
+            Ok(response)
+        }
         Err(error) => {
-            state
-                .telemetry
-                .refuse_ingest(Protocol::otlp_http, ingest_outcome(&error));
+            let outcome = ingest_outcome(&error);
+            state.telemetry.refuse_ingest(Protocol::otlp_http, outcome);
+            span.record(spans::OUTCOME, tracing::field::debug(outcome));
             log_refusal(access.project.id, &error, started);
             Err(error.into())
         }
@@ -251,6 +265,10 @@ async fn export_body(
         u64::try_from(receipt.accepted).unwrap_or(u64::MAX),
         request_bytes,
     );
+    let span = tracing::Span::current();
+    span.record(spans::SPANS, spans::count(receipt.accepted));
+    span.record(spans::REJECTED, spans::count(rejections.total()));
+    span.record(spans::BYTES, spans::count(request_bytes));
     tracing::info!(
         target: "ingest",
         project_id = %project.id,
@@ -343,6 +361,8 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
+    use crate::observability::otlp::receiver::{int_attribute, string_attribute};
+    use crate::observability::subscriber::capture_spans;
     use crate::test_support::raw_query;
     use axum::http::{Method, StatusCode};
     use bytes::Bytes;
@@ -465,6 +485,61 @@ mod tests {
 
     fn json_body(response: &crate::test_support::TestResponse) -> Value {
         serde_json::from_slice(&response.body).expect("JSON body")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_export_runs_in_an_otlp_export_span_under_its_request() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let body = protobuf(&plain_export(2));
+        let (response, captured) = capture_spans(
+            post_traces(&app, &seeded.ingest_key, "application/x-protobuf", body).send(),
+        )
+        .await;
+        assert_eq!(response.status, 200);
+        let exports = captured.named("otlp.export");
+        assert_eq!(exports.len(), 1, "{exports:?}");
+        let export = &exports[0];
+        assert_eq!(
+            string_attribute(&export.attributes, "protocol").as_deref(),
+            Some("http")
+        );
+        assert_eq!(
+            string_attribute(&export.attributes, "project_id"),
+            Some(seeded.project.id.to_string())
+        );
+        assert_eq!(int_attribute(&export.attributes, "spans"), Some(2));
+        assert_eq!(int_attribute(&export.attributes, "rejected"), Some(0));
+        assert!(int_attribute(&export.attributes, "bytes").is_some_and(|bytes| bytes > 0));
+        assert_eq!(
+            string_attribute(&export.attributes, "outcome").as_deref(),
+            Some("ok")
+        );
+        let requests: Vec<_> = captured
+            .named("http.request")
+            .into_iter()
+            .filter(|span| {
+                string_attribute(&span.attributes, "http.route").as_deref() == Some("/v1/traces")
+            })
+            .collect();
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert_eq!(export.parent_span_id, requests[0].span_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_export_records_its_outcome() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let body = protobuf(&plain_export(1));
+        let (response, captured) =
+            capture_spans(post_traces(&app, &seeded.ingest_key, "text/plain", body).send()).await;
+        assert_eq!(response.status, 415);
+        let exports = captured.named("otlp.export");
+        assert_eq!(exports.len(), 1, "{exports:?}");
+        assert_eq!(
+            string_attribute(&exports[0].attributes, "outcome").as_deref(),
+            Some("invalid")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -32,6 +32,9 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::common::{FieldError, TextPosition};
 use crate::api::playground::{
     PlaygroundParams, PlaygroundRunRequest, PlaygroundSource, PlaygroundTool,
@@ -189,6 +192,11 @@ async fn run_playground(
         _permit: permit,
         _commits: commits,
     }));
+    record(
+        &state,
+        &CatalogEvent::PlaygroundRun,
+        &Actor::project(&principal, &access),
+    );
     Ok(sse_response(rx))
 }
 

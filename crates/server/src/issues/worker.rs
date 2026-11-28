@@ -21,6 +21,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 use tokio::sync::watch;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use super::errors::{self, Occurrence};
@@ -42,6 +43,7 @@ use crate::meta::issues::{
     finish_candidate, interrupt_candidates, ready_candidates,
 };
 use crate::meta::projects::{self, ProjectRow};
+use crate::observability::spans;
 
 /// How often the loop looks for ready candidates when nothing wakes it.
 const TICK: Duration = Duration::from_secs(1);
@@ -205,15 +207,21 @@ struct Loaded {
 async fn run_candidate(state: &AppState, candidate: CandidateRow, claims: u32) {
     let id = candidate.id;
     let source_id = candidate.source_id;
-    let outcome = AssertUnwindSafe(execute_candidate(state, &candidate, claims))
-        .catch_unwind()
-        .await;
+    let span = spans::issues_candidate(id, source_id);
+    let outcome =
+        AssertUnwindSafe(execute_candidate(state, &candidate, claims).instrument(span.clone()))
+            .catch_unwind()
+            .await;
     match outcome {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => {
+            span.record(spans::OUTCOME, "recorded");
+        }
         Ok(Err(error)) => {
+            span.record(spans::OUTCOME, "record_failed");
             tracing::error!(candidate_id = %id, error = %error, "issue candidate could not be recorded");
         }
         Err(_panic) => {
+            span.record(spans::OUTCOME, "panicked");
             tracing::error!(candidate_id = %id, "issue candidate panicked");
             let failed = CandidateFinish::Failed { class: "internal" };
             if let Err(error) = write_finish(state, source_id, id, claims, failed, 0.0).await {

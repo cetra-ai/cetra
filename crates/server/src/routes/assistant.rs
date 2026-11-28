@@ -17,6 +17,9 @@ use uuid::Uuid;
 
 use cetra_core::ids::{ProjectId, TraceId};
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::assistant::{
     AssistantConversation, AssistantConversationDetail, AssistantFeedback,
     AssistantFeedbackRequest, AssistantMessage, AssistantMessageStatus, AssistantPart,
@@ -602,6 +605,11 @@ async fn post_turn(
     tokio::spawn(run_turn(state.clone(), setup, turn_tx, guard));
     tokio::spawn(forward_turn(turn_rx, sse_tx, timing));
     tracing::info!(conversation_id = %id, project_id = %project_id, user_id = %user_id, turn_seq = user_seq, "assistant turn started");
+    record(
+        &state,
+        &CatalogEvent::AssistantTurnSent,
+        &Actor::project(&principal, &access),
+    );
     Ok(sse_response(sse_rx))
 }
 

@@ -294,6 +294,13 @@ pub async fn run(
 /// socket fails. Storage is shut down before a later step's error is returned,
 /// so `LOCK` is not held after `Err`.
 pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Running, ServeError> {
+    // Boxed: the startup future is larger than clippy's `large_futures` bound, and boxing it
+    // here spares every caller.
+    Box::pin(bind_inner(config, ui)).await
+}
+
+async fn bind_inner(config: ServerConfig, ui: Option<axum::Router>) -> Result<Running, ServeError> {
+    crate::observability::facts::mark_process_start();
     let data_dir = config.data_dir.clone();
     let http_addr = config.http_addr;
     let otlp_http_addr = config.otlp_http_addr;
@@ -486,6 +493,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         usize::try_from(config.issues.workers).unwrap_or(usize::MAX),
     ));
     let limits = Limits::new(&config.demo);
+    let (analytics, analytics_worker) = crate::analytics::Analytics::new(&config);
     let state = AppState::new(AppInner {
         config,
         meta,
@@ -527,6 +535,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         issue_score_rules: crate::issues::triggers::ScoreRules::default(),
         issue_workers,
         issue_wake: tokio::sync::Notify::new(),
+        analytics,
     });
     crate::ee::sso_enforcement::warn_if_unlicensed(&state);
     if let Err(error) = crate::bootstrap::prepare(&state).await {
@@ -631,6 +640,18 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         tracing::warn!(
             "restore mode: outbound work is off (alerts, webhooks, judges, email, identity providers)"
         );
+    }
+    // What may go to us (D-TL-11); the notice is logged either way.
+    let decision = crate::observability::switchboard::for_config(&state.config);
+    if let Some(task) = crate::observability::heartbeat::start(&state, decision).await {
+        tasks.push(task);
+    }
+    if let Some(task) = crate::observability::crash::start(&state, decision).await {
+        tasks.push(task);
+    }
+    // Per-user product events to the operator's PostHog, when `[analytics]` is set (D-TL-14).
+    if let Some(worker) = analytics_worker {
+        tasks.push(tokio::spawn(worker.run()));
     }
     let admin_socket = admin_socket::spawn(state.clone(), &data_dir);
     tracing::info!(%local_addr, "listening");
@@ -1275,11 +1296,25 @@ mod tests {
         ));
     }
 
+    /// With `[analytics]` unset and the heartbeat off in a test build, neither the PostHog worker
+    /// nor the counter saver starts, and `serve` starts and shuts down as before (track TL M6).
+    #[tokio::test]
+    async fn serve_starts_without_analytics() {
+        let dir = tempfile::tempdir().unwrap();
+        bind(config(dir.path()), None)
+            .await
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
+    }
+
     /// Restore mode starts seven fewer loops in `Running.tasks`: the two alert loops that send
     /// (evaluation and delivery), usage notices (email), the org-SSO recheck (DNS), the SAML
     /// metadata refresh (IdP metadata fetches), the audit purge (a restored copy keeps its
     /// records unchanged) and the audit stream (outbound records). The eval dispatcher and
     /// backfill runner live in `eval_tasks`, which is not counted here.
+
     #[tokio::test]
     async fn restore_mode_skips_the_sending_and_dns_loops() {
         let dir = tempfile::tempdir().unwrap();
@@ -1310,6 +1345,78 @@ mod tests {
         let text = String::from_utf8_lossy(&body);
         assert!(text.starts_with("HTTP/1.1 200"), "{text}");
         running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_startup_notice_says_why_the_heartbeat_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let (running, logs) =
+            crate::test_support::capture_logs(Box::pin(bind(config(dir.path()), None))).await;
+        let running = running.unwrap();
+        assert!(logs.contains("telemetry: the heartbeat is off"), "{logs}");
+        assert!(logs.contains("debug_build"), "{logs}");
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_startup_notice_says_crash_reports_are_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let (running, logs) =
+            crate::test_support::capture_logs(Box::pin(bind(config(dir.path()), None))).await;
+        let running = running.unwrap();
+        assert!(logs.contains("telemetry: crash reports are off"), "{logs}");
+        assert!(logs.contains("config"), "{logs}");
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn crash_reports_on_logs_the_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut on = config(dir.path());
+        on.telemetry.crash_reports = true;
+        let (running, logs) = crate::test_support::capture_logs(Box::pin(bind(on, None))).await;
+        let running = running.unwrap();
+        assert!(logs.contains("telemetry: crash reports are on"), "{logs}");
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_mode_clears_the_crash_spool() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("telemetry").join("spool");
+        std::fs::create_dir_all(&spool).unwrap();
+        std::fs::write(
+            spool.join("crash-00000000000000000001-0000000001.json"),
+            "{}",
+        )
+        .unwrap();
+        let mut restore = config(dir.path());
+        restore.restore_mode = true;
+        let (running, logs) =
+            crate::test_support::capture_logs(Box::pin(bind(restore, None))).await;
+        running.unwrap().shutdown().await.unwrap();
+        assert!(!spool.exists());
+        let line = logs
+            .lines()
+            .find(|line| line.contains("telemetry: crash reports are off"))
+            .unwrap_or_default();
+        assert!(line.contains("restore_mode"), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn restore_mode_is_the_telemetry_reason_in_restore_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut restore = config(dir.path());
+        restore.restore_mode = true;
+        let (running, logs) =
+            crate::test_support::capture_logs(Box::pin(bind(restore, None))).await;
+        running.unwrap().shutdown().await.unwrap();
+        let line = logs
+            .lines()
+            .find(|line| line.contains("telemetry: the heartbeat is off"))
+            .unwrap_or_default();
+        assert!(line.contains("restore_mode"), "{logs}");
+        assert!(!logs.contains("debug_build"), "{logs}");
     }
 
     #[tokio::test]

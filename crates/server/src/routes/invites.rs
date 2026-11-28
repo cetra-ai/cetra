@@ -8,6 +8,9 @@ use axum::routing::{delete, get, post};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::account::OrgMembership;
 use crate::api::common::{Page, PageParams, Problem, ProblemCode};
 use crate::api::entitlements::Feature;
@@ -250,6 +253,11 @@ async fn create_invite(
             },
         );
     }
+    record(
+        &state,
+        &CatalogEvent::InviteCreated { role },
+        &Actor::org(&principal, &access),
+    );
     Ok((
         StatusCode::CREATED,
         error::Json(CreatedInvite {

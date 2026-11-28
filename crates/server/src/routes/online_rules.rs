@@ -16,6 +16,9 @@ use serde_json::Value;
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::common::{FieldError, PageParams, TimeParam};
 use crate::api::evaluators::StatsWindow;
 use crate::api::online_rules::{
@@ -395,6 +398,7 @@ async fn create_online_rule(
     let project = access.project.id;
     let org = access.project.org_id;
     let now = state.clock.now_ns();
+    let target = body.target;
     let draft = RuleDraft {
         name: body.name.trim().to_owned(),
         target: body.target,
@@ -448,6 +452,11 @@ async fn create_online_rule(
     let outcome = outcome?;
     match outcome {
         RuleWrite::Done { row, .. } => {
+            record(
+                &state,
+                &CatalogEvent::OnlineRuleCreated { target },
+                &Actor::project(&principal, &access),
+            );
             let json = rule_json(&state, &row, &JobCounts::default(), now).await?;
             Ok((StatusCode::CREATED, error::Json(json)))
         }

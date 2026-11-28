@@ -900,6 +900,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/analytics/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send product analytics events
+         * @description Session only. Web events of the catalog (`page.viewed` with a route template, `command_palette.opened`, `live_tail.toggled`, `list_layout.changed`, `theme.changed`, `assistant.panel_opened`). At most 50 events and 64 KiB are read, and 60 requests a minute per user. Unknown names and properties and invalid values are dropped; when a PostHog sink runs, events of orgs or projects the user cannot read are dropped too. The user comes from the session. `DNT: 1` or `Sec-GPC: 1` keeps the events out of PostHog. With no PostHog sink the events are dropped. Always 204 once signed in.
+         */
+        post: operations["post_analytics_events"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me": {
         parameters: {
             query?: never;
@@ -4689,6 +4709,25 @@ export interface components {
          * @enum {string}
          */
         AlertWindow: "1m" | "5m" | "15m" | "1h" | "6h" | "24h";
+        /**
+         * @description One web event. The server keeps it only when `name` is a web event of the catalog with
+         *     valid properties, and the user can read `org` and `project`.
+         */
+        AnalyticsEventInput: {
+            /** @description A web event name of the catalog, e.g. `page.viewed`. */
+            name: string;
+            /** @description The page's org, as in the URL (slug or id). Resolved by the server, never stored. */
+            org?: string;
+            /** @description The page's project, as in the URL (slug or id). Resolved by the server, never stored. */
+            project?: string;
+            /** @description The event's properties; unknown keys are dropped. */
+            properties?: Record<string, never>;
+        };
+        /** @description `POST /api/v1/analytics/events`. At most 50 events are read; the rest are dropped. */
+        AnalyticsEventsRequest: {
+            /** @description Catalog events of the web UI. */
+            events: components["schemas"]["AnalyticsEventInput"][];
+        };
         /** @description An annotation queue with its counts. */
         AnnotationQueue: {
             /** @description Item counts by status, over the items the data window shows. */
@@ -5209,6 +5248,12 @@ export interface components {
          *     `GET /api/auth/config`. Spec 08 § Sign-up policy and spec 09 § Auth.
          */
         AuthConfig: {
+            /**
+             * @description Product analytics are on: the UI sends its catalog events to
+             *     `POST /api/v1/analytics/events` (track TL M6, D-TL-14). True only when the PostHog sink
+             *     runs (`[analytics]` set, not restore mode); self-hosted installs send no events.
+             */
+            analytics: boolean;
             /** @description New accounts must verify their email before signing in. */
             email_verification_required: boolean;
             /** @description Users may create orgs (D-P-31). */
@@ -15267,6 +15312,46 @@ export interface operations {
             };
             /** @description Too many requests. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_analytics_events: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnalyticsEventsRequest"];
+            };
+        };
+        responses: {
+            /** @description Accepted, whatever the body held. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

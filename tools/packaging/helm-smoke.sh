@@ -39,6 +39,7 @@ if ! helm install cetra deploy/helm/cetra --kube-context "$context" \
   --set image.tag="$tag" \
   --set image.pullPolicy=Never \
   --set persistence.size=1Gi \
+  --set-string secret.values.CETRA_TELEMETRY=off \
   --set-string secret.values.CETRA_INIT_ADMIN_EMAIL=smoke@example.com \
   --set-string secret.values.CETRA_INIT_ADMIN_PASSWORD=cetra-smoke-1 \
   --set-string secret.values.CETRA_INIT_ORG=Smoke \

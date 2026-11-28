@@ -47,8 +47,9 @@ use crate::auth::secret::{self, KeyKind, NewKey};
 use crate::auth::session::{SessionOrigin, start_session};
 use crate::clock::Clock;
 use crate::config::{
-    AlertsConfig, AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig, IngestConfig,
-    InitConfig, LogConfig, MediaConfig, OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
+    AlertsConfig, AnalyticsConfig, AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig,
+    IngestConfig, InitConfig, LogConfig, MediaConfig, OrgsConfig, PublicUrl, SecurityConfig,
+    SelfMonitoringConfig, ServerConfig, TelemetryConfig,
 };
 use crate::http::access::RouteDef;
 use crate::http::{AppInner, AppState, router, router_with, serve_router};
@@ -403,6 +404,11 @@ impl TestApp {
         )
         .expect("org SSO state");
         let limits = Limits::new(&config.demo);
+        let (analytics, analytics_worker) =
+            crate::analytics::Analytics::with_flush_interval(&config, Duration::from_millis(50));
+        if let Some(worker) = analytics_worker {
+            drop(tokio::spawn(worker.run()));
+        }
         let state = AppState::new(AppInner {
             config,
             meta,
@@ -446,6 +452,7 @@ impl TestApp {
             eval,
             pending: crate::eval::pending::PendingTraces::default(),
             telemetry,
+            analytics,
         });
         state
             .org_sso
@@ -1316,6 +1323,13 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         email_from: None,
         init: InitConfig::default(),
         log: LogConfig::default(),
+        self_monitoring: SelfMonitoringConfig::default(),
+        // Loopback discard port: a test build without debug_assertions can never reach the relay.
+        telemetry: TelemetryConfig {
+            endpoint: "http://127.0.0.1:9".to_owned(),
+            ..TelemetryConfig::default()
+        },
+        analytics: AnalyticsConfig::default(),
     }
 }
 
@@ -2095,6 +2109,13 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         email_from: None,
         init: InitConfig::default(),
         log: LogConfig::default(),
+        self_monitoring: SelfMonitoringConfig::default(),
+        // Loopback discard port: a test build without debug_assertions can never reach the relay.
+        telemetry: TelemetryConfig {
+            endpoint: "http://127.0.0.1:9".to_owned(),
+            ..TelemetryConfig::default()
+        },
+        analytics: AnalyticsConfig::default(),
     }
 }
 

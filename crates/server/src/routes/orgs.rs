@@ -9,6 +9,9 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::account::{CreateOrgRequest, OrgMembership, OrgRole, UpdateOrgRequest};
 use crate::api::common::{FieldError, Page, PageParams, ProblemCode};
 use crate::audit::catalog::OrgAction;
@@ -138,6 +141,11 @@ async fn create_org(
         })
         .await?;
     let demo = is_demo_org(&state.config, org.id);
+    record(
+        &state,
+        &CatalogEvent::OrgCreated,
+        &Actor::principal(&principal),
+    );
     Ok((
         StatusCode::CREATED,
         error::Json(membership(&org, OrgRole::Owner, demo)),

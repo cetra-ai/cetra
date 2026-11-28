@@ -41,6 +41,7 @@ use super::alerts::{
     IssueAlertPreview, IssueAlertPreviewParams, LatencyTarget, NotificationChannel,
     ScoreAggregation, UpdateAlertRuleRequest, UpdateChannelRequest,
 };
+use super::analytics::{AnalyticsEventInput, AnalyticsEventsRequest};
 use super::annotation_queues::{
     AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem,
     AnnotationQueueItemListParams, AnnotationQueueListParams, CreateAnnotationQueue,
@@ -240,6 +241,8 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<MetricsBucket>();
     set.insert::<MetricsGroupBy>();
     set.insert::<AuthConfig>();
+    set.insert::<AnalyticsEventsRequest>();
+    set.insert::<AnalyticsEventInput>();
     set.insert::<SetupRequest>();
     set.insert::<SetupResponse>();
     set.insert::<LoginRequest>();
@@ -702,6 +705,7 @@ pub fn openapi() -> OpenApi {
                 "auth",
                 "Login, logout, sign-up, password reset, the current user, and first-run setup.",
             ),
+            tag("analytics", "Product analytics events from the web UI (session only)."),
             tag(
                 "admin",
                 "Instance administrators: accounts and the effective settings.",
@@ -1072,6 +1076,7 @@ fn paths() -> Paths {
     let paths = PathsBuilder::new();
     let paths = auth_paths(paths);
     let paths = admin_paths(paths);
+    let paths = analytics_paths(paths);
     let paths = invite_paths(paths);
     let paths = org_sso_paths(paths);
     let paths = scim_paths(paths);
@@ -1502,6 +1507,27 @@ fn admin_paths(paths: PathsBuilder) -> PathsBuilder {
             "/api/v1/admin/settings/test-email",
             PathItem::new(HttpMethod::Post, test_email),
         )
+}
+
+fn analytics_paths(paths: PathsBuilder) -> PathsBuilder {
+    let events = operation("post_analytics_events", "analytics", "Send product analytics events")
+        .description(Some(
+            "Session only. Web events of the catalog (`page.viewed` with a route template, `command_palette.opened`, `live_tail.toggled`, `list_layout.changed`, `theme.changed`, `assistant.panel_opened`). At most 50 events and 64 KiB are read, and 60 requests a minute per user. Unknown names and properties and invalid values are dropped; when a PostHog sink runs, events of orgs or projects the user cannot read are dropped too. The user comes from the session. `DNT: 1` or `Sec-GPC: 1` keeps the events out of PostHog. With no PostHog sink the events are dropped. Always 204 once signed in.",
+        ))
+        .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+        .request_body(Some(json_body("AnalyticsEventsRequest")))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new()
+                .description("Accepted, whatever the body held.")
+                .build(),
+            &[401, 403],
+        ))
+        .build();
+    paths.path(
+        "/api/v1/analytics/events",
+        PathItem::new(HttpMethod::Post, events),
+    )
 }
 
 fn auth_paths(paths: PathsBuilder) -> PathsBuilder {

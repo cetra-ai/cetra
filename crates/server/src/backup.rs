@@ -18,9 +18,11 @@ use sha2::{Digest, Sha256};
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions as _, Connection as _};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing::Instrument as _;
 
 use crate::crypto;
 use crate::http::AppState;
+use crate::observability::spans;
 
 /// How long the flush before a backup may take (§ Consistency, step 3).
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -120,7 +122,7 @@ impl BackupError {
 ///
 /// `to` must be absolute and absent or an empty directory, outside the data
 /// directory. A backup that does not finish, by an error or because this future is
-/// dropped, removes what it wrote (see [`Partial`]).
+/// dropped, removes what it wrote (see [`Partial`]). Runs in a `backup` span.
 ///
 /// The backup runs in a task of its own, which is never aborted: dropping a future
 /// does not stop the file writes and SQLite calls it already started on other
@@ -130,6 +132,40 @@ impl BackupError {
 /// writes into it any more; then it frees the backup slot. A caller that must see
 /// the directory gone, such as shutdown, waits for the slot.
 pub(crate) async fn run(
+    state: &AppState,
+    to: &Path,
+    meta_only: bool,
+) -> Result<BackupReport, BackupError> {
+    let span = spans::backup();
+    let result = take_backup(state, to, meta_only)
+        .instrument(span.clone())
+        .await;
+    match &result {
+        Ok(report) => {
+            let mode = match report.mode {
+                BackupMode::Full => "full",
+                BackupMode::MetaOnly => "meta-only",
+            };
+            span.record(spans::MODE, mode);
+            span.record(spans::OBJECTS, spans::count(report.objects));
+            span.record(spans::BYTES, spans::count(report.object_bytes));
+            span.record(spans::OUTCOME, "ok");
+        }
+        Err(error) => {
+            span.record(spans::OUTCOME, error.code());
+        }
+    }
+    result
+}
+
+/// Takes an online backup into `to` (§ Consistency of N M2's design).
+///
+/// `to` must be absolute and absent or an empty directory, outside the data
+/// directory. A backup that does not finish, by an error or because this future is
+/// dropped, removes what it wrote (see [`Partial`]). The backup runs in a task of
+/// its own, never aborted: dropping this future sets its cancel flag, and the task
+/// stops and removes the directory once nothing writes into it any more.
+async fn take_backup(
     state: &AppState,
     to: &Path,
     meta_only: bool,
@@ -148,7 +184,7 @@ pub(crate) async fn run(
     }
 }
 
-/// Sets the backup's cancel flag when [`run`]'s future is dropped.
+/// Sets the backup's cancel flag when [`take_backup`]'s future is dropped.
 struct CancelOnDrop(CopyCancel);
 
 impl Drop for CancelOnDrop {
@@ -157,7 +193,7 @@ impl Drop for CancelOnDrop {
     }
 }
 
-/// The body of [`run`], in its own task.
+/// The body of [`take_backup`], in its own task.
 async fn take(
     state: &AppState,
     to: &Path,
@@ -633,8 +669,10 @@ mod tests {
     use super::*;
     use crate::config::Secret;
     use crate::crypto::{encode_key, random_key};
+    use crate::observability::otlp::receiver::{int_attribute, string_attribute};
+    use crate::observability::subscriber::capture_spans;
     use crate::serve::{Running, bind};
-    use crate::test_support::{config, dataset_span, raw_span_count};
+    use crate::test_support::{TestApp, config, dataset_span, raw_span_count};
 
     /// Appends `count` example spans to `project`.
     async fn append(running: &Running, project: ProjectId, count: usize) {
@@ -724,6 +762,86 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn the_crash_spool_is_not_backed_up() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let running = bind(config(&data), None).await.unwrap();
+        let spool = data.join("telemetry").join("spool");
+        std::fs::create_dir_all(&spool).unwrap();
+        std::fs::write(
+            spool.join("crash-00000000000000000001-0000000001.json"),
+            "{}",
+        )
+        .unwrap();
+        let project = ProjectId::new_v7();
+        append(&running, project, 3).await;
+        let target = root.path().join("backup");
+        run(running.state(), &target, false).await.unwrap();
+        running.shutdown().await.unwrap();
+
+        assert!(!target.join("telemetry").exists());
+        let mut names: Vec<String> = std::fs::read_dir(&target)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "catalog.db",
+                "manifest.json",
+                "meta.db",
+                "objects",
+                "secret.key"
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_backup_runs_in_its_span() {
+        let app = TestApp::new().await;
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("b");
+        let (result, captured) = capture_spans(run(&app.state, &target, false)).await;
+        let report = result.unwrap();
+        assert_eq!(report.mode, BackupMode::Full);
+
+        let found = captured.named("backup");
+        assert_eq!(found.len(), 1);
+        let attributes = &found[0].attributes;
+        assert_eq!(
+            string_attribute(attributes, "mode"),
+            Some("full".to_owned())
+        );
+        assert!(int_attribute(attributes, "objects").is_some_and(|count| count >= 0));
+        assert!(int_attribute(attributes, "bytes").is_some_and(|count| count >= 0));
+        assert_eq!(
+            string_attribute(attributes, "outcome"),
+            Some("ok".to_owned())
+        );
+
+        let text = captured.text();
+        assert!(!text.contains(&*target.to_string_lossy()), "{text}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_backup_records_its_code() {
+        let app = TestApp::new().await;
+        let (result, captured) = capture_spans(run(&app.state, Path::new("relative"), false)).await;
+        assert!(
+            matches!(result, Err(BackupError::RelativeTarget)),
+            "the relative target is refused"
+        );
+
+        let found = captured.named("backup");
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            string_attribute(&found[0].attributes, "outcome"),
+            Some("bad_request".to_owned())
+        );
     }
 
     #[tokio::test]

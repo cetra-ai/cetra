@@ -15,6 +15,7 @@ use cetra_statam::{
 };
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::catalog::{
@@ -270,7 +271,13 @@ impl Compactor {
                 let day = job.day.to_string();
                 let kind = kind_label(job.kind);
                 let inputs = job.inputs.len();
-                let outcome = compactor.run(job, policy).await;
+                let span = crate::spans::storage_compaction(table, &project, kind);
+                let outcome = compactor.run(job, policy).instrument(span.clone()).await;
+                if let Ok(report) = &outcome {
+                    span.record(crate::spans::FILES, crate::spans::count(report.input_files));
+                    span.record(crate::spans::BYTES, crate::spans::count(report.input_bytes));
+                }
+                span.record(crate::spans::OUTCOME, compaction_outcome(&outcome));
                 if let Err(error) = &outcome {
                     // A conflict's text is its static reason. Every other error
                     // is named by its label only, so covered-row predicates
@@ -1354,6 +1361,17 @@ fn kind_label(kind: JobKind) -> &'static str {
     }
 }
 
+/// The `outcome` of a compaction job's span: `ok`, `conflict` (a later pass redoes it),
+/// `deferred` (not enough free disk) or `error`.
+fn compaction_outcome(outcome: &Result<CompactionReport, CompactionError>) -> &'static str {
+    match outcome {
+        Ok(_) => "ok",
+        Err(CompactionError::Commit(CommitError::Conflict { .. })) => "conflict",
+        Err(CompactionError::DiskFull) => "deferred",
+        Err(_) => "error",
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::QueryOptions;
@@ -1578,6 +1596,18 @@ pub(crate) mod tests {
             target_file_size,
             ..Policy::from(&quiet_compaction(l0_files))
         }
+    }
+
+    #[test]
+    fn compaction_outcome_names_each_case() {
+        use super::{CompactionReport, compaction_outcome};
+        use crate::error::CompactionError;
+
+        assert_eq!(compaction_outcome(&Ok(CompactionReport::default())), "ok");
+        assert_eq!(
+            compaction_outcome(&Err(CompactionError::DiskFull)),
+            "deferred"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -61,6 +61,7 @@ mod query_error;
 pub(crate) mod read_cache;
 mod reads;
 mod snapshot;
+pub(crate) mod spans;
 mod sql;
 pub(crate) mod statam_io;
 pub(crate) mod unwind;

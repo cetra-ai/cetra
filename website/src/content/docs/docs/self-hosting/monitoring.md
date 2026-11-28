@@ -1,10 +1,11 @@
 ---
 title: "Monitoring"
-description: "Check cetra's health, scrape its Prometheus metrics and set up alerts on them."
+description: "Check cetra's health, scrape its Prometheus metrics, export its logs and traces over OTLP and set up alerts."
 ---
 
 cetra has two health endpoints on the HTTP port (8080), and an optional Prometheus endpoint on its
-own port. Both are described here.
+own port. cetra can also export its own logs and traces to an OTLP endpoint when you configure one. All three are
+described here.
 
 ## Health endpoints
 
@@ -120,6 +121,156 @@ Two things to know when reading them:
 - HTTP metrics count only the final response of a request (2xx to 5xx).
 - HTTP ingest answers 401 and 403 are counted in `cetra_http_requests_total`, not in
   `cetra_ingest_requests_total`. The `unauthorized` ingest outcome is for gRPC.
+
+## Export logs over OTLP
+
+cetra can send its own log events (warnings and errors by default) to an OTLP/HTTP endpoint you
+choose: Sentry, Grafana Cloud, an OpenTelemetry Collector, or any backend that accepts OTLP logs
+over HTTP. It is off until you set `self_monitoring.otlp_endpoint`.
+
+```toml
+[self_monitoring]
+otlp_endpoint = "https://otlp.example.com/otlp"   # cetra posts to <endpoint>/v1/logs
+otlp_headers = "authorization=Bearer <token>"     # a secret; name=value pairs, comma-separated
+level = "warn"                                    # which events are exported
+resource = "deployment.environment=prod"          # extra resource attributes
+```
+
+The environment form of each key is `CETRA_SELF_MONITORING__` followed by the key in upper case,
+for example `CETRA_SELF_MONITORING__OTLP_ENDPOINT`. Every key is in the
+[configuration reference](/docs/self-hosting/configuration-reference/#self_monitoring).
+
+- **What is sent.** One OTLP log record per event that passes `level`: the message, the event's
+  fields, its level, its target (as the scope name) and its event name (`event <file>:<line>`
+  of cetra's source). The resource holds `service.name = "cetra"`,
+  `service.version`, `service.instance.id` (new at each start), `host.arch`, `os.type`, and the
+  attributes of `resource`, which replace cetra's own on the same key. The records carry what the
+  server's stdout carries, and stdout never carries prompts, completions, attribute values,
+  secrets, API keys or email addresses. `rmcp` events are capped at `warn`, as for stdout.
+- **How.** Protobuf, gzip-compressed, `POST <otlp_endpoint>/v1/logs`, batched every second, with
+  the headers of `otlp_headers`. Redirects are not followed; a request times out after 10 s. A
+  failed export prints one warning on stdout at most once a minute and is not retried.
+- **Panics** also appear as an ERROR event `panic` with the code location. The panic message
+  stays on stderr only.
+- **At shutdown**, cetra flushes what is queued for at most 2 s, also when it fails to start (the
+  start-up error is exported as `cetra serve failed`).
+- **Restore mode** does not stop the export: it goes to your own endpoint.
+- **No `OTEL_*` variable is read.** Variables such as `OTEL_EXPORTER_OTLP_HEADERS` set for other
+  programs on the host change nothing.
+- **Another cetra instance is not a destination for these logs**: cetra drops the OTLP logs it
+  receives. Send them to a logs backend, or through a Collector.
+
+### Sentry
+
+In Sentry, open your project's settings, then **Client Keys (DSN)**. The DSN looks like
+`https://<public key>@o<org id>.ingest.<region>sentry.io/<project id>`; organizations in the EU
+have `ingest.de.sentry.io`. Use its parts:
+
+```bash
+CETRA_SELF_MONITORING__OTLP_ENDPOINT=https://o<org id>.ingest.de.sentry.io/api/<project id>/integration/otlp
+CETRA_SELF_MONITORING__OTLP_HEADERS="x-sentry-auth=sentry sentry_key=<public key>"
+```
+
+The records should arrive as Sentry logs (check in your project).
+
+### Grafana Cloud
+
+In your Grafana Cloud stack, open **Connections**, then **OpenTelemetry (OTLP)**. It shows the OTLP
+endpoint of your stack's region and generates a token. The header is `Authorization: Basic` with
+the base64 of `<instance id>:<token>`; the `%20` form that Grafana's snippet shows works too:
+
+```bash
+CETRA_SELF_MONITORING__OTLP_ENDPOINT=https://otlp-gateway-<region>.grafana.net/otlp
+CETRA_SELF_MONITORING__OTLP_HEADERS="Authorization=Basic%20<base64 of instance id:token>"
+```
+
+### OpenTelemetry Collector
+
+Point cetra at the Collector's OTLP/HTTP receiver (port 4318) and let the Collector add
+authentication, filter or forward to several backends:
+
+```bash
+CETRA_SELF_MONITORING__OTLP_ENDPOINT=http://otel-collector:4318
+```
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+exporters:
+  debug: {}
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [debug]
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
+```
+
+Replace the `debug` exporter with your backend's. The endpoint may be a private address:
+self-monitoring is operator configuration and skips the private-network egress guard.
+
+## Export traces over OTLP
+
+With `self_monitoring.otlp_endpoint` set, cetra also sends spans of its own work to
+`<otlp_endpoint>/v1/traces`: HTTP requests, OTLP ingest, SQL console and MCP queries, and
+background work. A traces backend then shows where time goes and which requests fail. The
+request is the same as for logs: protobuf, gzip-compressed, the headers of `otlp_headers`,
+batched every second.
+
+```toml
+[self_monitoring]
+otlp_endpoint = "https://otlp.example.com/otlp"
+traces = true              # the default
+trace_sample_ratio = 0.1   # the default: about one trace in ten
+```
+
+- **Sampling.** Each root span (an HTTP request, a gRPC export, a background job) is kept
+  with the probability `trace_sample_ratio`, and its child spans follow it, so a kept trace
+  is whole. `1.0` keeps every trace; `0.0` keeps none.
+- **Errors.** A span is marked failed when an error event is logged inside it, and an HTTP
+  request span also when the response is a 5xx. The events inside a span that pass
+  `self_monitoring.level` are recorded on it with their fields, as in the log records.
+- **What a span carries.** Ids, counts and fixed values only: never a URL, a query string, a
+  request body, SQL text, a name or an email address. The route is the route template, such as
+  `/api/v1/projects/{project}/traces`. Spans of the libraries cetra uses are not exported.
+- **Incoming `traceparent` headers are ignored.** A request always starts a new trace: a
+  caller cannot attach cetra's spans to its own trace.
+- **The health probes** `/healthz` and `/readyz`, and the UI's usage beacon `POST /api/v1/analytics/events`, get no span.
+- **No `OTEL_*` variable is read**, as for logs.
+- **Another cetra instance** can receive these traces: it stores OTLP traces (not logs).
+  Point it at a different instance. An instance that receives its own export creates one
+  more trace for each export batch it receives, at the same ratio.
+
+### The spans
+
+| Span | Covers | Attributes |
+|---|---|---|
+| `http.request` | One HTTP request, up to the response head | `http.request.method`, `http.route` (template), `http.response.status_code` |
+| `otlp.export` | One OTLP **trace** export, over HTTP (inside `http.request`) or gRPC. OTLP logs and metrics, which cetra drops, get no `otlp.export` span (over HTTP, only their `http.request`) | `protocol`, `project_id`, `spans`, `rejected`, `bytes`, `outcome` |
+| `query` | One SQL console query (`kind` `sql` or `sql_export`) or MCP tool call (`kind` `mcp`) | `kind`, `project_id`, `tool`, `rows`, `outcome` |
+| `eval.job` | One evaluation job | `job_id`, `project_id`, `evaluator_id`, `kind`, `outcome` |
+| `alerts.evaluate` | One alert rule's evaluation | `rule_id`, `project_id`, `outcome` |
+| `alerts.deliver` | One alert delivery attempt | `delivery_id`, `channel_id`, `kind`, `attempt`, `outcome` |
+| `deletion.apply` | One step of one deletion request | `deletion_id`, `kind`, `outcome` |
+| `retention.pass` | The hourly retention pass | `projects`, `files`, `failures`, `outcome` |
+| `issues.candidate` | One issue-detection candidate | `candidate_id`, `source_id`, `outcome` |
+| `backup` | One online backup | `mode`, `objects`, `bytes`, `outcome` |
+| `storage.flush` | One flush of the write-ahead log to Parquet files | `table`, `partitions`, `files`, `bytes`, `outcome` |
+| `storage.compaction` | One compaction job | `table`, `project_id`, `kind`, `files`, `bytes`, `outcome` |
+| `storage.gc` | One garbage collection pass, every 10 minutes | `files`, `bytes`, `outcome` |
+
+`outcome` is `ok` or a fixed word for what went wrong, such as `invalid`, `timeout` or
+`write_failed`. For `eval.job` and `issues.candidate` it says whether the run's result
+was saved: `recorded` (the job or candidate finished, as done, failed or skipped, and its
+result is in the database), `record_failed` (the result could not be saved; the job is
+retried later) or `panicked`. The evaluation's own result is in the UI, not on the span.
+With `self_monitoring.level = "info"`, each `http.request` span also carries the request
+line as an event.
 
 ## Alert examples
 

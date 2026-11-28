@@ -8,6 +8,9 @@ use axum::routing::{get, patch, post};
 use cetra_core::ids::OrgId;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::account::{CreateProjectRequest, OrgRole, Project, UpdateProjectRequest};
 use crate::api::common::{FieldError, Page, PageParams};
 use crate::audit::catalog::ProjectAction;
@@ -129,6 +132,7 @@ enum ProjectCreate {
 
 async fn create_project(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
     ctx: audit::Ctx,
     error::Json(body): error::Json<CreateProjectRequest>,
@@ -189,6 +193,11 @@ async fn create_project(
         }
     };
     // CreateProject requires an org admin, whose effective project role is admin.
+    record(
+        &state,
+        &CatalogEvent::ProjectCreated,
+        &Actor::org(&principal, &access),
+    );
     Ok((
         StatusCode::CREATED,
         error::Json(project_json(&project, Some(Role::Admin))),

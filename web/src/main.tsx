@@ -15,6 +15,7 @@ import {
   resolveTheme,
   ThemeProvider,
 } from "@/components/theme-provider";
+import { installAnalytics } from "@/lib/analytics-install";
 import { createAppRouter } from "@/router";
 import "./styles.css";
 
@@ -102,6 +103,7 @@ async function main(): Promise<void> {
 
   const queryClient = createAppQueryClient();
   const router = createAppRouter({ queryClient });
+  void installAnalytics(router, queryClient);
 
   createRoot(root).render(
     <StrictMode>

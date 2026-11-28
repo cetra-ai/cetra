@@ -13,6 +13,9 @@ use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page, PageParams, ProblemCode, TimeParam};
 use crate::api::prompts::{
     CreatePromptRequest, CreateVersionRequest, Prompt, PromptKind, PromptLabel, PromptLabelEvent,
@@ -502,6 +505,7 @@ async fn create_prompt(
     ctx: audit::Ctx,
     error::Json(body): error::Json<CreatePromptRequest>,
 ) -> Result<(StatusCode, error::Json<PromptVersion>), ApiError> {
+    let kind = body.kind;
     let prompt_type = prompt_type_of(body.kind);
     let mut errors = Vec::new();
     if let Err(error) = check_name(&body.name) {
@@ -582,6 +586,11 @@ async fn create_prompt(
         })
         .await?;
     let (prompt, version) = settle(outcome)?;
+    record(
+        &state,
+        &CatalogEvent::PromptCreated { kind },
+        &Actor::project(&principal, &access),
+    );
     Ok((
         StatusCode::CREATED,
         error::Json(version_json(&prompt, &version)?),
@@ -913,6 +922,11 @@ async fn create_version(
         })
         .await?;
     let (prompt, version) = settle(outcome)?;
+    record(
+        &state,
+        &CatalogEvent::PromptVersionCreated,
+        &Actor::project(&principal, &access),
+    );
     Ok((
         StatusCode::CREATED,
         error::Json(version_json(&prompt, &version)?),

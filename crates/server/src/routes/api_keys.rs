@@ -7,6 +7,9 @@ use axum::routing::{delete, get, post};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page, PageParams};
 use crate::api::keys::{ApiKey, ApiKeyKind, ApiKeyScope, CreateApiKeyRequest, CreatedApiKey};
 use crate::audit::catalog::ApiKeyAction;
@@ -85,6 +88,7 @@ async fn create_api_key(
     error::Json(body): error::Json<CreateApiKeyRequest>,
 ) -> Result<(StatusCode, error::Json<CreatedApiKey>), ApiError> {
     let user = principal::session_user(&principal)?;
+    let api_key_kind = body.kind;
     let name = optional_name(body.name)?;
     let (kind, scopes) = checked_scopes(body.kind, body.scopes)?;
     let now = state.clock.now_ns();
@@ -127,6 +131,11 @@ async fn create_api_key(
             })
         })
         .await?;
+    record(
+        &state,
+        &CatalogEvent::ApiKeyCreated { kind: api_key_kind },
+        &Actor::project(&principal, &access),
+    );
     Ok((
         StatusCode::CREATED,
         error::Json(CreatedApiKey {

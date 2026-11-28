@@ -6,12 +6,16 @@ use axum::routing::get;
 use cetra_storage as storage;
 use serde::Deserialize;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::{Page, TimeParam};
 use crate::api::convert;
 use crate::api::traces::{
     SpanDetail, SpanListParams, SpanSort, SpanSummary, TraceDetail, TraceDetailParams,
     TraceListParams, TraceSort, TraceSummary, TraceTotals, TraceTotalsParams, build_tree,
 };
+use crate::auth::principal::Principal;
 use crate::auth::roles::ProjectPerm;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
@@ -192,6 +196,7 @@ async fn list_spans(
 
 async fn get_trace(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
     error::Path(path): error::Path<TracePath>,
     error::Query(params): error::Query<TraceDetailParams>,
@@ -207,6 +212,11 @@ async fn get_trace(
         .ok_or(ApiError::NotFound)?;
     attach_trace_scores(&ctx, std::slice::from_mut(&mut trace), deadline).await?;
     let spans = build_tree(convert::span_summaries(&data.spans)?);
+    record(
+        &state,
+        &Event::TraceViewed,
+        &Actor::project(&principal, &access),
+    );
     Ok(error::Json(TraceDetail {
         trace,
         spans,

@@ -1,5 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { startAnalytics, type WireEvent } from "@/lib/analytics";
 import {
   getListLayout,
   LIST_LAYOUT_STORAGE_KEY,
@@ -12,6 +13,25 @@ describe("list layout preference", () => {
     vi.restoreAllMocks();
     localStorage.clear();
     setListLayout("drawer");
+  });
+
+  it("a layout change is tracked once", () => {
+    const sent: WireEvent[][] = [];
+    const stop = startAnalytics({
+      send: async (events) => {
+        sent.push(events);
+      },
+      flushMs: 60_000,
+    });
+    try {
+      setListLayout("bottom");
+      setListLayout("bottom");
+    } finally {
+      stop();
+    }
+    expect(sent.flat()).toEqual([
+      { name: "list_layout.changed", properties: { layout: "bottom" } },
+    ]);
   });
 
   it("defaults to split", () => {

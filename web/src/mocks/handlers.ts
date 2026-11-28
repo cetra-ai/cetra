@@ -52,9 +52,16 @@ const facetsFixture = http.post("/api/v1/projects/:project/facets", async ({ req
   });
 });
 
+/** The UI's product analytics batches (track TL M6): accepted and dropped, as a self-hosted server without `[analytics]` would. */
+const analyticsEvents = http.post(
+  "/api/v1/analytics/events",
+  () => new HttpResponse(null, { status: 204 }),
+);
+
 export const handlers: HttpHandler[] = [
   widgetQueryFixture,
   facetsFixture,
+  analyticsEvents,
   ...sortBySpecificity(operations).map((operation) =>
     http.get(operation.mswPath, ({ request, params }) => {
       const entry = selectEntry(operation, pathParamsOf(params), queryOf(request.url));

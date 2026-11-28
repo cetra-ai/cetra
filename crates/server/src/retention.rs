@@ -5,9 +5,11 @@ use std::time::Duration;
 
 use cetra_core::ids::{OrgId, ProjectId};
 use chrono::{DateTime, Days, NaiveDate};
+use tracing::Instrument as _;
 
 use crate::http::AppState;
 use crate::meta::MetaError;
+use crate::observability::spans;
 
 /// Time between two runs.
 pub(crate) const EVERY: Duration = Duration::from_secs(3600);
@@ -51,7 +53,32 @@ pub(crate) struct RetentionRun {
 /// # Errors
 ///
 /// [`MetaError`] when the projects cannot be listed.
+///
+/// Runs in a `retention.pass` span.
 pub(crate) async fn retention_once(state: &AppState) -> Result<RetentionRun, MetaError> {
+    let span = spans::retention_pass();
+    let result = retention_pass(state).instrument(span.clone()).await;
+    match &result {
+        Ok(run) => {
+            span.record(spans::PROJECTS, spans::count(run.projects));
+            span.record(spans::FILES, spans::count(run.files));
+            span.record(spans::FAILURES, spans::count(run.failures));
+            span.record(spans::OUTCOME, "ok");
+        }
+        Err(_) => {
+            span.record(spans::OUTCOME, "error");
+        }
+    }
+    result
+}
+
+/// Applies the effective retention of every active project of an active org.
+/// A storage error on one project is logged and counted; the others still run.
+///
+/// # Errors
+///
+/// [`MetaError`] when the projects cannot be listed.
+async fn retention_pass(state: &AppState) -> Result<RetentionRun, MetaError> {
     let now = state.clock.now_ns();
     let (projects, cap_failures) = effective_retention(state, now).await?;
     let mut run = RetentionRun {
@@ -182,6 +209,8 @@ mod tests {
     use crate::meta::entitlements::record_window_end;
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::{ProjectRow, insert_project};
+    use crate::observability::otlp::receiver::{int_attribute, string_attribute};
+    use crate::observability::subscriber::capture_spans;
     use crate::test_support::{Seeded, TestApp, dataset_span, raw_span_count, set_limits};
 
     /// 2026-01-01T00:00:00Z, the manual clock's start.
@@ -213,6 +242,23 @@ mod tests {
         assert_eq!(effective_days(Some(7), None), Some(7));
         assert_eq!(effective_days(None, Some(30)), Some(30));
         assert_eq!(effective_days(None, None), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retention_pass_runs_in_its_span() {
+        let app = TestApp::new().await;
+        let (result, captured) = capture_spans(retention_once(&app.state)).await;
+        assert!(result.is_ok());
+        let spans = captured.named("retention.pass");
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        let span = &spans[0];
+        assert!(int_attribute(&span.attributes, "projects").is_some());
+        assert!(int_attribute(&span.attributes, "files").is_some());
+        assert!(int_attribute(&span.attributes, "failures").is_some());
+        assert_eq!(
+            string_attribute(&span.attributes, "outcome").as_deref(),
+            Some("ok")
+        );
     }
 
     /// A trace id of the tests: `a3`, then `n` in 30 hex digits.

@@ -7,6 +7,13 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- cetra now makes one outbound HTTPS request a day, an anonymous heartbeat to
+  `https://telemetry.cetra.sh` (https://cetra.sh/docs/self-hosting/telemetry/). To turn it off,
+  set `CETRA_TELEMETRY=off` before you upgrade; otherwise allow that host in your egress rules.
+  A `CETRA_TELEMETRY` value other than `off`, `false` or `0` now stops cetra at startup.
+
 ### Added
 
 - Calls through the OpenAI client show the provider read from the endpoint's host when the instrumentation records it: cetra's Python SDK with `instrument=["openai"]` (which now records the client's host), OpenLLMetry, and OpenInference for TypeScript. This covers OpenRouter, Groq, Novita, Together, Fireworks, DeepSeek, xAI, Databricks and the other hosts in the host table.
@@ -30,6 +37,19 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Org owners can set up SAML 2.0 single sign-on for their org, with metadata import, automatic certificate rotation from a metadata URL, and the same domains and enforcement as OIDC (the `saml` licence feature).
 - LLM connections: **Test connection** checks the form's values before you save them, for a new connection too, and **Test embeddings** under Advanced checks an embedding model. The panel header shows when the saved values were last tested. `POST /api/v1/orgs/{org}/llm-connections/test` tests an unsaved connection, and `POST …/llm-connections/{id}/test` takes draft fields; a connection's `last_tested_at` and `last_test_ok` hold the last test of its saved values.
 - The connection form suggests common model ids for OpenAI, Anthropic and Gemini in the Default model field.
+- `cetra serve` can export its own logs to an OTLP/HTTP endpoint you choose, such as Sentry, Grafana Cloud or an OpenTelemetry Collector: set `self_monitoring.otlp_endpoint` and usually `self_monitoring.otlp_headers`. Off by default; warnings and errors are exported unless `self_monitoring.level` says otherwise. A panic is also logged as an ERROR event with its code location.
+- An anonymous heartbeat once a day to `telemetry.cetra.sh`: a random instance id, the version and
+  platform, bucketed counts and which features are in use, never names, emails, hosts or exact
+  counts. `CETRA_TELEMETRY=off`, `DO_NOT_TRACK=1` or `telemetry.heartbeat = false` turn it off; it
+  is off in restore mode, in CI and in debug builds. A startup line says whether it is on.
+- `cetra serve` can export its own traces (HTTP requests, OTLP ingest, SQL console and MCP queries, background work) to the same OTLP/HTTP endpoint as its logs: `self_monitoring.traces` (on once `self_monitoring.otlp_endpoint` is set) and `self_monitoring.trace_sample_ratio` (default `0.1`). Spans carry ids, counts and fixed values only, and incoming `traceparent` headers are ignored.
+- Opt-in crash reports (`telemetry.crash_reports = true`): each panic and error event is sent to
+  `telemetry.cetra.sh` as a code location, callsite field names and function names, never a
+  message, a value or an exact time. Reports are spooled in `<data_dir>/telemetry/spool/`, sent
+  every minute and turned off by `CETRA_TELEMETRY=off`, `DO_NOT_TRACK` or restore mode. The
+  heartbeat gains `features.crash_reports_on`.
+- `cetra debug-bundle` writes one JSON file for a bug report: build and host facts, the configuration with secret values redacted, and the running server's state and last log lines (or, when it is stopped, the data directory's file sizes and format versions). It contacts no network. The admin socket answers a new `debug_info` command for it. See https://cetra.sh/docs/help/reporting-a-bug/.
+- Product analytics to a PostHog project of your own can be turned on with `[analytics]` (`posthog_host`, `posthog_key`): the server forwards product events with user and organization ids only, and honours `DNT` and `Sec-GPC`. Self-hosted installs without it send no product events; the Telemetry page lists every event. While `[analytics]` is on, the web UI reports pages and a few UI actions to its own server. `GET /api/auth/config` gains `analytics`; `POST /api/v1/analytics/events` is new.
 - Media parts carry an optional `transcript`. OpenAI chat output audio keeps its transcript, a message with only audio previews its transcripts, and judges read `[audio: <transcript>]`.
 - The alert editor, the rule panel and the rule list chart an issue occurrence rule's occurrences per window with its threshold, through `GET /api/v1/projects/{project}/alert-rules/issue-preview`.
 - The playground compares versions of a prompt side by side: each column of a draft opened from a prompt can run one of its versions, with the version's template, answer, tokens, cost and latency; `?compare=` opens two versions.

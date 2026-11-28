@@ -23,6 +23,9 @@ use sqlx::{SqliteConnection, SqlitePool};
 use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::{Event as CatalogEvent, ItemSource};
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page};
 use crate::api::datasets::{
     AddItemsRequest, AddItemsResponse, CreateDatasetRequest, Dataset, DatasetItem,
@@ -514,6 +517,7 @@ async fn list_datasets(
 
 async fn create_dataset(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
     ctx: audit::Ctx,
     error::Json(body): error::Json<CreateDatasetRequest>,
@@ -537,6 +541,11 @@ async fn create_dataset(
             })
         })
         .await?;
+    record(
+        &state,
+        &CatalogEvent::DatasetCreated,
+        &Actor::project(&principal, &access),
+    );
     Ok((StatusCode::CREATED, error::Json(dataset_json(&row)?)))
 }
 
@@ -973,6 +982,7 @@ struct ExportCursor {
 /// cannot change under the reader.
 async fn export_items(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
     ctx: audit::Ctx,
     error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
@@ -1014,6 +1024,11 @@ async fn export_items(
     let pages = futures::stream::try_unfold(cursor, move |cursor| {
         export_page(pool.clone(), dataset, project, version, format, cursor)
     });
+    record(
+        &state,
+        &CatalogEvent::DatasetExported { format },
+        &Actor::project(&principal, &access),
+    );
     Ok((StatusCode::OK, headers, Body::from_stream(pages)).into_response())
 }
 
@@ -1165,6 +1180,13 @@ async fn add_items(
         count = response.item_ids.len(),
         version = response.version,
         "dataset items added"
+    );
+    record(
+        &state,
+        &CatalogEvent::DatasetItemsAdded {
+            source: ItemSource::Manual,
+        },
+        &Actor::project(&principal, &access),
     );
     Ok((StatusCode::CREATED, error::Json(response)))
 }
@@ -2032,6 +2054,11 @@ async fn import_items(
         "dataset items imported"
     );
     let listed = errors.into_iter().take(import::MAX_LISTED_ERRORS).collect();
+    record(
+        &state,
+        &CatalogEvent::DatasetImported { format },
+        &Actor::project(&principal, &access),
+    );
     Ok((
         StatusCode::CREATED,
         error::Json(ImportResult {
@@ -2294,6 +2321,13 @@ async fn add_from_trace(
     let row = store::get_item(state.meta.reader(), used.id, item_id, version)
         .await?
         .ok_or(ApiError::NotFound)?;
+    record(
+        &state,
+        &CatalogEvent::DatasetItemsAdded {
+            source: ItemSource::Trace,
+        },
+        &Actor::project(&principal, &access),
+    );
     Ok((StatusCode::CREATED, error::Json(item_json(&row))))
 }
 
@@ -2494,6 +2528,13 @@ async fn add_from_traces(
         &Map::new(),
     )
     .await?;
+    record(
+        &state,
+        &CatalogEvent::DatasetItemsAdded {
+            source: ItemSource::Traces,
+        },
+        &Actor::project(&principal, &access),
+    );
     Ok((StatusCode::CREATED, error::Json(result)))
 }
 

@@ -22,6 +22,9 @@ use cetra_core::ids::ProjectId;
 use cetra_core::time_serde::parse_rfc3339;
 use cetra_storage as storage;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page};
 use crate::api::convert;
 use crate::api::dashboards::{
@@ -437,6 +440,11 @@ async fn create_dashboard(
             })
         })
         .await?;
+    record(
+        &state,
+        &CatalogEvent::DashboardCreated,
+        &Actor::project(&principal, &access),
+    );
     Ok((StatusCode::CREATED, error::Json(Dashboard::from(row))).into_response())
 }
 
@@ -494,7 +502,14 @@ async fn update_dashboard(
         })
         .await?;
     match outcome {
-        UpdateOutcome::Updated(row) => Ok(error::Json(Dashboard::from(row))),
+        UpdateOutcome::Updated(row) => {
+            record(
+                &state,
+                &CatalogEvent::DashboardEdited,
+                &Actor::project(&principal, &access),
+            );
+            Ok(error::Json(Dashboard::from(row)))
+        }
         UpdateOutcome::Stale(current) => Err(ApiError::StaleVersion {
             what: "dashboard",
             current,
@@ -593,6 +608,11 @@ async fn save_overview(
             } else {
                 StatusCode::OK
             };
+            record(
+                &state,
+                &CatalogEvent::DashboardEdited,
+                &Actor::project(&principal, &access),
+            );
             Ok((status, error::Json(Dashboard::from(row))).into_response())
         }
         OverviewSave::Stale(current) => Err(ApiError::StaleVersion {

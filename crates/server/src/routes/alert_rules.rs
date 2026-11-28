@@ -16,6 +16,9 @@ use uuid::Uuid;
 
 use crate::alerts::condition::normalize_condition;
 use crate::alerts::quota;
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::alerts::{
     AlertCondition, AlertDelivery, AlertEvent, AlertRule, AlertWindow, CreateAlertRuleRequest,
     IssueAlertPoint, IssueAlertPreview, IssueAlertPreviewParams, UpdateAlertRuleRequest,
@@ -289,6 +292,11 @@ async fn create_rule(
             })
         })
         .await?;
+    record(
+        &state,
+        &CatalogEvent::AlertRuleCreated,
+        &Actor::project(&principal, &access),
+    );
     Ok((StatusCode::CREATED, error::Json(rule_json(&row))))
 }
 

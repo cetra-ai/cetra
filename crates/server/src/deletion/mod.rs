@@ -15,6 +15,7 @@ use cetra_storage::{
     Deletion, DeletionScope, DeletionStatus, MAX_FILTER_DELETION_TRACES, RunError,
 };
 use tokio::sync::Notify;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::audit::catalog::{DeletionAction, OrgAction, ProjectAction};
@@ -30,6 +31,7 @@ use crate::meta::deletions::{
 };
 use crate::meta::orgs::{OrgRow, delete_org, mark_org_deleting, org_by_id, org_by_id_tx};
 use crate::meta::projects::{delete_project, project_by_id, project_ids_of_org};
+use crate::observability::spans;
 
 /// Time between two runs when nothing wakes the worker.
 pub(crate) const TICK: Duration = Duration::from_secs(2);
@@ -128,6 +130,15 @@ enum Step {
 
 fn from_meta(error: &MetaError) -> Step {
     Step::Retry("meta", Some(error.to_string()))
+}
+
+/// The `outcome` of a deletion step's span: `ok`, `retry` or `failed`.
+fn step_outcome(result: &Result<(), Step>) -> &'static str {
+    match result {
+        Ok(()) => "ok",
+        Err(Step::Retry(..) | Step::RetryForever(..)) => "retry",
+        Err(Step::Fail(_)) => "failed",
+    }
 }
 
 fn forever_meta(error: &MetaError) -> Step {
@@ -275,19 +286,31 @@ pub(crate) async fn run_once(state: &AppState) -> Result<(), MetaError> {
         if !state.deletions.due(row.id, now) {
             continue;
         }
-        let result = match row.kind {
-            DeletionKind::TraceIds | DeletionKind::Filter | DeletionKind::User => {
-                data_step(state, &row, now).await
+        let span = spans::deletion_apply(row.id, row.kind.as_str());
+        let result = async {
+            match row.kind {
+                DeletionKind::TraceIds | DeletionKind::Filter | DeletionKind::User => {
+                    data_step(state, &row, now).await
+                }
+                DeletionKind::Project => drop_project_step(state, &row, now).await,
+                DeletionKind::Org => drop_org_step(state, &row, now).await,
             }
-            DeletionKind::Project => drop_project_step(state, &row, now).await,
-            DeletionKind::Org => drop_org_step(state, &row, now).await,
-        };
-        match result {
-            Ok(()) => state.deletions.settled(row.id),
-            Err(Step::Retry(label, cause)) => retry(state, &row, label, cause, true).await,
-            Err(Step::RetryForever(label, cause)) => retry(state, &row, label, cause, false).await,
-            Err(Step::Fail(reason)) => fail(state, &row, reason).await,
         }
+        .instrument(span.clone())
+        .await;
+        span.record(spans::OUTCOME, step_outcome(&result));
+        async {
+            match result {
+                Ok(()) => state.deletions.settled(row.id),
+                Err(Step::Retry(label, cause)) => retry(state, &row, label, cause, true).await,
+                Err(Step::RetryForever(label, cause)) => {
+                    retry(state, &row, label, cause, false).await;
+                }
+                Err(Step::Fail(reason)) => fail(state, &row, reason).await,
+            }
+        }
+        .instrument(span)
+        .await;
     }
     Ok(())
 }

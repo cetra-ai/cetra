@@ -18,6 +18,9 @@ use uuid::Uuid;
 
 use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::annotation_queues::{
     AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem,
     AnnotationQueueItemListParams, AnnotationQueueListParams, CreateAnnotationQueue, NextQueueItem,
@@ -401,6 +404,13 @@ async fn create_queue(
     match outcome {
         QueueCreate::Created(row) => {
             let json = queue_json(&row, None);
+            record(
+                &state,
+                &CatalogEvent::AnnotationQueueCreated {
+                    target: body.target,
+                },
+                &Actor::project(&principal, &access),
+            );
             Ok((StatusCode::CREATED, error::Json(json)).into_response())
         }
         QueueCreate::OverPlanLimit(limit) => Err(crate::entitlements::plan_limit(
@@ -1361,7 +1371,13 @@ async fn complete_item(
     Extension(access): Extension<ProjectAccess>,
     error::Path(path): error::Path<ItemPath>,
 ) -> Result<error::Json<AnnotationQueueItem>, ApiError> {
-    finish(&state, &principal, &access, path, store::Finish::Complete).await
+    let item = finish(&state, &principal, &access, path, store::Finish::Complete).await?;
+    record(
+        &state,
+        &CatalogEvent::AnnotationQueueItemCompleted,
+        &Actor::project(&principal, &access),
+    );
+    Ok(item)
 }
 
 /// `POST /annotation-queues/{id}/items/{item_id}/skip`: skips a pending item, with an optional

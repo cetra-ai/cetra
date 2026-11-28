@@ -8,6 +8,9 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::{Page, ProblemCode};
 use crate::api::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use crate::auth::principal::{self, Principal};
@@ -151,6 +154,7 @@ async fn create_view(
     Extension(access): Extension<ProjectAccess>,
     error::Json(body): error::Json<CreateSavedView>,
 ) -> Result<Response, ApiError> {
+    let kind = body.kind;
     let user = principal::session_user(&principal)?.id;
     let role = role_of(&access)?;
     let name = checked_name(&body.name)?;
@@ -186,6 +190,11 @@ async fn create_view(
         view_id = %row.id,
         kind = kind_str(row.kind),
         "saved view created"
+    );
+    record(
+        &state,
+        &Event::SavedViewCreated { kind },
+        &Actor::project(&principal, &access),
     );
     Ok((StatusCode::CREATED, error::Json(SavedView::from(row))).into_response())
 }

@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { track } from "@/lib/analytics";
 import { STORAGE_PREFIX } from "@/product";
 
 const OPEN_KEY = `${STORAGE_PREFIX}assistant.open`;
@@ -56,8 +57,12 @@ function isOpen(): boolean {
 }
 
 export function setPanelOpen(open: boolean): void {
+  const opening = open && !isOpen();
   writeItem(OPEN_KEY, open ? "1" : "0");
   emit();
+  if (opening) {
+    track({ name: "assistant.panel_opened" });
+  }
 }
 
 export function togglePanel(): void {

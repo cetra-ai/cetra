@@ -124,6 +124,7 @@ test("finds the subcommands of the real CLI reference", () => {
       "admin",
       "version",
       "health",
+      "debug-bundle",
       "login",
       "logout",
       "query",

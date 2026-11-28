@@ -1,0 +1,56 @@
+name: Bug report
+description: Something in cetra does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Do not report a security problem here: see https://cetra.sh/docs/help/support/#report-a-vulnerability.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The smallest steps that show the problem.
+  - type: input
+    id: version
+    attributes:
+      label: cetra version
+      description: The output of `cetra version`.
+      placeholder: cetra 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How you run cetra
+      options:
+        - The binary on a host
+        - Docker or Docker Compose
+        - Kubernetes (Helm chart)
+        - npx @cetra-ai/cli init
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: bundle
+    attributes:
+      label: Debug bundle
+      description: >-
+        Run `cetra debug-bundle` (https://cetra.sh/docs/help/reporting-a-bug/), read the file,
+        then drag it here. If GitHub refuses the .json file, rename it to .txt. If you cannot
+        attach it, say why.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server log lines
+      description: Only when the server does not start or stops: its last log lines (`docker compose logs --tail 500 cetra`, `kubectl logs`, `journalctl`).
+      render: text

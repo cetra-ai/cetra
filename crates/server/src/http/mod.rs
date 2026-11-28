@@ -24,6 +24,7 @@ use axum::response::Response;
 use cetra_core::ids::ProjectId;
 use cetra_storage::Storage;
 use tower::ServiceExt;
+use tracing::Instrument as _;
 
 use crate::auth::Limits;
 use crate::auth::last_used::LastUsed;
@@ -31,6 +32,7 @@ use crate::auth::principal::{ApiKeyCache, PatCache, ScimCache, authenticate};
 use crate::clock::Clock;
 use crate::config::ServerConfig;
 use crate::meta::MetaDb;
+use crate::observability::spans;
 use crate::routes::dashboards::WidgetCache;
 
 /// Bodies on this router. Later tracks raise it on a single route.
@@ -115,6 +117,8 @@ pub(crate) struct AppInner {
     pub(crate) issue_workers: Arc<tokio::sync::Semaphore>,
     /// Wakes the IC candidate loop: a candidate was queued, or a worker finished.
     pub(crate) issue_wake: tokio::sync::Notify,
+    /// Product analytics: the PostHog sink (track TL M6).
+    pub(crate) analytics: crate::analytics::Analytics,
 }
 
 impl AppState {
@@ -139,6 +143,12 @@ impl AppState {
             Ok(inner) => Ok(inner),
             Err(arc) => Err(Self(arc)),
         }
+    }
+
+    /// How many handles to the state are alive. Tests wait for spawned work to drop its clones.
+    #[cfg(test)]
+    pub(crate) fn handle_count(&self) -> usize {
+        Arc::strong_count(&self.0)
     }
 }
 
@@ -200,6 +210,8 @@ fn finish(state: AppState, routed: Router<AppState>, ui: Option<Router>) -> Rout
         .layer(middleware::from_fn_with_state(state.clone(), csrf::csrf))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .layer(middleware::from_fn(crate::ee::scim::error::scim_errors))
+        // DNT and Sec-GPC for the length of the request (D-TL-15).
+        .layer(middleware::from_fn(crate::analytics::actor::privacy_signal))
         .layer(middleware::from_fn(log_request))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -235,7 +247,11 @@ async fn method_not_allowed() -> Response {
     error::problem_response(&error::method_not_allowed_problem())
 }
 
-/// One `info` event per request. The route is the matched template (D150).
+/// One `info` event per request, and the `http.request` span around the handler and that
+/// event, so events inside nest under it (track TL M2). The route is the matched template (D150); the URL,
+/// its query and the body are never recorded. The health probes get no span, nor does the
+/// UI's analytics beacon (track TL M6): they are polled every few seconds. A 5xx marks the
+/// span failed.
 async fn log_request(request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let route = request
@@ -243,31 +259,53 @@ async fn log_request(request: Request, next: Next) -> Response {
         .get::<MatchedPath>()
         .map_or("<unmatched>", MatchedPath::as_str)
         .to_owned();
+    let span = if matches!(
+        route.as_str(),
+        "/healthz" | "/readyz" | "/api/v1/analytics/events"
+    ) {
+        tracing::Span::none()
+    } else {
+        spans::http_request(&method, &route)
+    };
     let started = Instant::now();
-    let response = next.run(request).await;
+    let response = next.run(request).instrument(span.clone()).await;
     let status = response.status().as_u16();
+    span.record(spans::STATUS_CODE, i64::from(status));
+    if response.status().is_server_error() {
+        span.record(spans::OTEL_STATUS, "error");
+    }
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    tracing::info!(
-        target: "http",
-        %method,
-        %route,
-        status,
-        duration_ms,
-        "request"
-    );
+    // Inside the span, so `self_monitoring.level = "info"` records it on `http.request`.
+    // The stdout layer sees no span, so the stdout line is byte-identical.
+    span.in_scope(|| {
+        tracing::info!(
+            target: "http",
+            %method,
+            %route,
+            status,
+            duration_ms,
+            "request"
+        );
+    });
     response
 }
 
 #[cfg(test)]
 mod tests {
     use axum::Router;
+    use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use axum::routing::{get, post};
+    use opentelemetry_proto::tonic::trace::v1::Span as ProtoSpan;
+    use opentelemetry_proto::tonic::trace::v1::span::SpanKind;
+    use opentelemetry_proto::tonic::trace::v1::status::StatusCode as ProtoStatusCode;
     use serde::Deserialize;
 
     use super::client_ip::ClientIp;
     use super::error::{ApiError, Json, Path, Query};
     use crate::api::common::ProblemCode;
+    use crate::observability::otlp::receiver::{Captured, int_attribute, string_attribute};
+    use crate::observability::subscriber::capture_spans;
     use crate::test_support::{TestApp, assert_logs_clean, capture_logs};
 
     #[tokio::test(flavor = "current_thread")]
@@ -407,6 +445,195 @@ mod tests {
         .await;
         assert!(logs.contains("/echo/{id}"), "{logs}");
         assert!(!logs.contains("super-secret-token"), "{logs}");
+    }
+
+    async fn inside() -> &'static str {
+        tracing::info!(n = 1_i64, "inside");
+        "ok"
+    }
+
+    async fn boom() -> StatusCode {
+        tracing::error!(error = "boom", "handler failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+
+    async fn quiet_500() -> StatusCode {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+
+    async fn take_body(_body: axum::body::Bytes) -> StatusCode {
+        StatusCode::NO_CONTENT
+    }
+
+    /// The `http.request` span of the request whose matched route is `route`.
+    fn request_span(captured: &Captured, route: &str) -> ProtoSpan {
+        captured
+            .named("http.request")
+            .into_iter()
+            .find(|span| string_attribute(&span.attributes, "http.route").as_deref() == Some(route))
+            .unwrap_or_else(|| panic!("no http.request span for {route}"))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_runs_in_an_http_request_span() {
+        let app = TestApp::with_routes(Router::new().route("/spans/{id}", get(inside))).await;
+        let (response, captured) =
+            capture_spans(app.request(axum::http::Method::GET, "/spans/42").send()).await;
+        assert_eq!(response.status, 200);
+        let span = request_span(&captured, "/spans/{id}");
+        assert_eq!(
+            string_attribute(&span.attributes, "http.request.method").as_deref(),
+            Some("GET")
+        );
+        assert_eq!(
+            int_attribute(&span.attributes, "http.response.status_code"),
+            Some(200)
+        );
+        assert_eq!(span.kind, SpanKind::Server as i32);
+        assert_ne!(
+            span.status.as_ref().map_or(0, |status| status.code),
+            ProtoStatusCode::Error as i32
+        );
+        let events: Vec<&str> = span
+            .events
+            .iter()
+            .map(|event| event.name.as_str())
+            .collect();
+        assert!(events.contains(&"inside"), "{events:?}");
+        assert!(events.contains(&"request"), "{events:?}");
+        assert!(!captured.text().contains("/spans/42"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_server_error_marks_the_request_span_as_error() {
+        let app = TestApp::with_routes(
+            Router::new()
+                .route("/boom", get(boom))
+                .route("/quiet-500", get(quiet_500)),
+        )
+        .await;
+        let ((), captured) = capture_spans(async {
+            let boom = app.request(axum::http::Method::GET, "/boom").send().await;
+            assert_eq!(boom.status, 500);
+            let quiet = app
+                .request(axum::http::Method::GET, "/quiet-500")
+                .send()
+                .await;
+            assert_eq!(quiet.status, 500);
+        })
+        .await;
+        let failed = request_span(&captured, "/boom");
+        assert_eq!(
+            failed.status.as_ref().map(|status| status.code),
+            Some(ProtoStatusCode::Error as i32)
+        );
+        assert!(
+            failed
+                .events
+                .iter()
+                .any(|event| event.name == "handler failed"),
+            "{failed:?}"
+        );
+        let quiet = request_span(&captured, "/quiet-500");
+        assert_eq!(
+            quiet.status.as_ref().map(|status| status.code),
+            Some(ProtoStatusCode::Error as i32)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_client_error_leaves_the_request_span_unset() {
+        let app = TestApp::new().await;
+        let (response, captured) =
+            capture_spans(app.request(axum::http::Method::GET, "/missing").send()).await;
+        assert_eq!(response.status, 404);
+        let span = request_span(&captured, "<unmatched>");
+        assert_eq!(
+            int_attribute(&span.attributes, "http.response.status_code"),
+            Some(404)
+        );
+        assert_ne!(
+            span.status.as_ref().map_or(0, |status| status.code),
+            ProtoStatusCode::Error as i32
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_spans_never_carry_the_url_query_or_body() {
+        let app = TestApp::with_routes(Router::new().route("/spans/{id}", post(take_body))).await;
+        let (response, captured) = capture_spans(
+            app.request(
+                axum::http::Method::POST,
+                "/spans/sk-cetra-planted00000000000000000000000000?token=sk-cetra-planted11111111111111111111111111&email=user@example.com",
+            )
+            .body(r#"{"prompt":"secret prompt text","key":"sk-cetra-planted22222222222222222222222222"}"#)
+            .origin(None)
+            .send(),
+        )
+        .await;
+        assert_eq!(response.status, 204);
+        let text = captured.text();
+        for secret in ["sk-cetra-planted", "user@example.com", "secret prompt text"] {
+            assert!(!text.contains(secret), "{text}");
+        }
+        request_span(&captured, "/spans/{id}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn health_probes_have_no_span() {
+        // The real analytics route (M6) is in the router already, so a test route at its path
+        // would be a duplicate: the beacon is posted with a session, as the UI posts it.
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let ((), captured) = capture_spans(async {
+            let live = app
+                .request(axum::http::Method::GET, "/healthz")
+                .send()
+                .await;
+            assert_eq!(live.status, 200);
+            let ready = app.request(axum::http::Method::GET, "/readyz").send().await;
+            assert_eq!(ready.status, 200);
+            let beacon = app
+                .request(axum::http::Method::POST, "/api/v1/analytics/events")
+                .header("cookie", &seeded.cookie)
+                .json(&serde_json::json!({"events": []}))
+                .send()
+                .await;
+            assert_eq!(beacon.status, 204);
+            // A request that does get a span, so the empty list above means something.
+            let missing = app
+                .request(axum::http::Method::GET, "/missing")
+                .send()
+                .await;
+            assert_eq!(missing.status, 404);
+        })
+        .await;
+        let spans = captured.named("http.request");
+        assert_eq!(spans.len(), 1, "{spans:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_incoming_traceparent_is_ignored() {
+        let app = TestApp::with_routes(Router::new().route("/spans/{id}", get(inside))).await;
+        let ((), captured) = capture_spans(async {
+            let response = app
+                .request(axum::http::Method::GET, "/spans/1")
+                .header(
+                    "traceparent",
+                    "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+                )
+                .send()
+                .await;
+            assert_eq!(response.status, 200);
+        })
+        .await;
+        let span = request_span(&captured, "/spans/{id}");
+        let planted: [u8; 16] = [
+            0x0a, 0xf7, 0x65, 0x19, 0x16, 0xcd, 0x43, 0xdd, 0x84, 0x48, 0xeb, 0x21, 0x1c, 0x80,
+            0x31, 0x9c,
+        ];
+        assert_ne!(span.trace_id, planted);
+        assert!(span.parent_span_id.is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

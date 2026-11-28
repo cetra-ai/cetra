@@ -7,6 +7,9 @@ use axum::routing::{delete, get, post};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page, PageParams};
 use crate::api::keys::{
     CreatePersonalTokenRequest, CreatedPersonalToken, PersonalToken, PersonalTokenScope,
@@ -92,6 +95,7 @@ async fn create_token(
 ) -> Result<(StatusCode, error::Json<CreatedPersonalToken>), ApiError> {
     let user = principal::session_user(&principal)?;
     let name = checked_name(&body.name)?;
+    let write = body.scopes.contains(&PersonalTokenScope::Write);
     let scopes = token_scopes(&body.scopes)?;
     let now = state.clock.now_ns();
     let expires_at = checked_expiry(body.expires_at.map(|time| time.ns()), now)?;
@@ -127,6 +131,11 @@ async fn create_token(
             })
         })
         .await?;
+    record(
+        &state,
+        &CatalogEvent::PersonalTokenCreated { write },
+        &Actor::principal(&principal),
+    );
     Ok((
         StatusCode::CREATED,
         error::Json(CreatedPersonalToken {

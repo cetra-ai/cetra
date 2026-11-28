@@ -27,7 +27,11 @@ use rmcp::transport::streamable_http_server::session::never::NeverSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
 use serde_json::Value;
+use tracing::Instrument as _;
 
+use crate::analytics::actor::{Actor, Via};
+use crate::analytics::catalog::Event as CatalogEvent;
+use crate::analytics::record;
 use crate::api::common::ProblemCode;
 use crate::audit::catalog::McpAction;
 use crate::audit::{self, Event};
@@ -35,6 +39,7 @@ use crate::auth::principal::{AuthUser, Principal};
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::ApiError;
+use crate::observability::spans;
 
 /// Largest JSON-RPC body rmcp reads (it answers 413 above this).
 const MCP_BODY_LIMIT: usize = 1024 * 1024;
@@ -76,6 +81,8 @@ async fn mcp(
     let server = McpServer {
         state,
         user,
+        request_span: tracing::Span::current(),
+        opted_out: crate::analytics::actor::request_opted_out(),
         audit: ctx,
     };
     let service = StreamableHttpService::new(
@@ -102,6 +109,10 @@ fn service_config() -> StreamableHttpServerConfig {
 pub(crate) struct McpServer {
     state: AppState,
     user: AuthUser,
+    /// The request's `http.request` span: rmcp runs a tool call in a spawned task, so the call's span names it as its parent explicitly.
+    request_span: tracing::Span,
+    /// The request opted out of per-user analytics (captured here: rmcp runs tools in spawned tasks, outside the request's scope).
+    opted_out: bool,
     audit: audit::Ctx,
 }
 
@@ -149,6 +160,7 @@ impl ServerHandler for McpServer {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let started = Instant::now();
+        let span = spans::query(&self.request_span, spans::QUERY_MCP);
         let arguments = request.arguments.unwrap_or_default();
         // rmcp runs this in a spawned task and cancels `context.ct` when the client disconnects,
         // while the concurrency guard in the axum handler is already
@@ -159,11 +171,15 @@ impl ServerHandler for McpServer {
         // until the tool's own time limit.
         let (tool, outcome) = tokio::select! {
             biased;
-            result = self.run_tool(&request.name, arguments) => match result {
+            result = self.run_tool(&request.name, arguments).instrument(span.clone()) => match result {
                 Ok(pair) => pair,
-                Err(error) => return Err(error),
+                Err(error) => {
+                    span.record(spans::OUTCOME, "unknown_tool");
+                    return Err(error);
+                }
             },
             () = context.ct.cancelled() => {
+                span.record(spans::OUTCOME, "cancelled");
                 let duration_ms =
                     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 tracing::info!(target: "mcp", tool = %request.name, user_id = %self.user.id,
@@ -174,18 +190,29 @@ impl ServerHandler for McpServer {
                 ));
             }
         };
+        span.record(spans::TOOL, tool);
+        let ok = outcome.is_ok();
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let result = match outcome {
             Ok(body) => {
+                span.record(spans::OUTCOME, "ok");
                 tracing::info!(target: "mcp", tool, user_id = %self.user.id, status = 200u16, duration_ms, "tool call");
                 output::success(&body)
             }
             Err(error) => {
+                span.record(spans::OUTCOME, "error");
                 let status = error.problem().status;
                 tracing::info!(target: "mcp", tool, user_id = %self.user.id, status, duration_ms, "tool call");
                 output::failure(&error)
             }
         };
+        let actor = Actor {
+            opted_out: self.opted_out,
+            ..Actor::user(self.user.id, Via::Pat)
+        };
+        for event in tool_events(tool, ok) {
+            record(&self.state, &event, &actor);
+        }
         Ok(result.into())
     }
 }
@@ -243,6 +270,20 @@ impl McpServer {
         };
         Ok(pair)
     }
+}
+
+/// The catalog events of one finished tool call: `mcp.tool_called`, plus the event of the
+/// same action in the UI or API for the tools that have one (`query_sql` is a SQL console
+/// run, `get_trace` a trace read), so those count whichever client ran them.
+fn tool_events(tool: &'static str, ok: bool) -> Vec<CatalogEvent> {
+    let mut events = vec![CatalogEvent::McpToolCalled { tool, ok }];
+    if ok && tool == sql::QUERY_SQL {
+        events.push(CatalogEvent::SqlConsoleRun);
+    }
+    if ok && tool == traces::GET_TRACE {
+        events.push(CatalogEvent::TraceViewed);
+    }
+    events
 }
 
 #[cfg(test)]
@@ -377,6 +418,7 @@ mod tests {
 
     use super::test_helpers::*;
     use super::{INSTRUCTIONS, output};
+    use super::{sql, tool_events, tools, traces};
     use crate::api::convert;
     use crate::audit;
     use crate::auth::roles::{KeyScope, OrgRole, ProjectOverride};
@@ -387,8 +429,11 @@ mod tests {
     use crate::meta::projects::insert_project;
     use crate::meta::prompts::{self as store, NewPrompt, NewVersion, PromptType};
     use crate::meta::users::{self, NewUser, insert_user};
+    use crate::observability::otlp::receiver::{Captured, string_attribute};
+    use crate::observability::subscriber::capture_spans;
     use crate::test_support::TestApp;
     use cetra_core::ids::{OrgId, ProjectId};
+    use opentelemetry_proto::tonic::trace::v1::Span as ProtoSpan;
 
     const TOOLS: [&str; 10] = [
         "list_projects",
@@ -632,6 +677,37 @@ mod tests {
         assert_eq!(body["error"]["code"], json!(-32602));
         assert_eq!(body["error"]["message"], json!("unknown tool"));
         assert!(body.get("result").is_none());
+    }
+
+    #[test]
+    fn tool_events_add_sql_and_trace_reads() {
+        use crate::analytics::catalog::Event;
+        assert_eq!(
+            tool_events(sql::QUERY_SQL, true),
+            vec![
+                Event::McpToolCalled {
+                    tool: "query_sql",
+                    ok: true,
+                },
+                Event::SqlConsoleRun,
+            ]
+        );
+        let trace = tool_events(traces::GET_TRACE, true);
+        assert_eq!(trace.last(), Some(&Event::TraceViewed));
+        assert_eq!(
+            tool_events(sql::QUERY_SQL, false),
+            vec![Event::McpToolCalled {
+                tool: "query_sql",
+                ok: false,
+            }]
+        );
+        assert_eq!(
+            tool_events(tools::LIST_PROJECTS, true),
+            vec![Event::McpToolCalled {
+                tool: "list_projects",
+                ok: true,
+            }]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1683,5 +1759,83 @@ mod tests {
         .await;
         assert_eq!(response.status, StatusCode::BAD_REQUEST);
         assert!(!logs.contains("CANARY-51b2"), "{logs}");
+    }
+
+    /// The one span named `name` that a test captured.
+    fn only(captured: &Captured, name: &str) -> ProtoSpan {
+        let mut spans = captured.named(name);
+        assert_eq!(spans.len(), 1, "{name}: {spans:?}");
+        spans.remove(0)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_tool_call_runs_in_a_query_span_under_its_request() {
+        let (app, _, tok) = app_with_token().await;
+        let ((is_error, _), captured) = capture_spans(async {
+            let before = app.state.handle_count();
+            let outcome = call(&app, &tok, "list_projects", &json!({})).await;
+            // rmcp answers from a spawned task it does not await. That task holds an
+            // `McpServer`, which holds its copy of the request span (`McpServer::request_span`)
+            // and a clone of `AppState`. Wait until it drops them, so `http.request` closes
+            // before the capture flushes. Stops after 5 s; the assertions below then report it.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while app.state.handle_count() > before && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            outcome
+        })
+        .await;
+        assert!(!is_error);
+
+        let request = only(&captured, "http.request");
+        let query = only(&captured, "query");
+        assert_eq!(
+            string_attribute(&query.attributes, "kind"),
+            Some("mcp".to_owned())
+        );
+        assert_eq!(
+            string_attribute(&query.attributes, "tool"),
+            Some("list_projects".to_owned())
+        );
+        assert_eq!(
+            string_attribute(&query.attributes, "outcome"),
+            Some("ok".to_owned())
+        );
+        assert_eq!(
+            string_attribute(&request.attributes, "http.route"),
+            Some("/mcp".to_owned())
+        );
+        assert_eq!(query.parent_span_id, request.span_id);
+        assert!(
+            captured
+                .spans()
+                .iter()
+                .all(|span| !span.name.starts_with("rmcp"))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unknown_tool_records_no_tool_name() {
+        let (app, _, tok) = app_with_token().await;
+        let ((), captured) = capture_spans(async {
+            let body: Value = rpc(
+                &app,
+                Some(tok.as_str()),
+                &json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                        "params": {"name": "sk-cetra-planted-tool"}}),
+            )
+            .await
+            .json();
+            assert_eq!(body["error"]["code"], json!(-32602));
+        })
+        .await;
+
+        let query = only(&captured, "query");
+        assert_eq!(
+            string_attribute(&query.attributes, "outcome"),
+            Some("unknown_tool".to_owned())
+        );
+        assert_eq!(string_attribute(&query.attributes, "tool"), None);
+        assert!(!captured.text().contains("sk-cetra-planted-tool"));
     }
 }

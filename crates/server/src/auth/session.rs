@@ -11,6 +11,9 @@ use axum_extra::extract::cookie::Cookie;
 use cetra_core::ids::OrgId;
 
 use super::secret::{hash_token, is_opaque_token, new_opaque_token};
+use crate::analytics::actor::{Actor, Via};
+use crate::analytics::catalog::{Event as CatalogEvent, SignInMethod};
+use crate::analytics::record;
 use crate::audit::catalog::{AuthAction, LoginMethod};
 use crate::audit::{self, Event};
 use crate::http::AppState;
@@ -102,6 +105,21 @@ pub(crate) async fn start_session(
             })
         })
         .await?;
+    let sign_in_method = match origin {
+        SessionOrigin::Password => SignInMethod::Password,
+        SessionOrigin::Provider => SignInMethod::Provider,
+        SessionOrigin::OrgProvider(_) => SignInMethod::OrgProvider,
+    };
+    record(
+        state,
+        &CatalogEvent::UserSignedIn {
+            method: sign_in_method,
+        },
+        &Actor {
+            org_id: sso_org,
+            ..Actor::user(user_id, Via::Session)
+        },
+    );
     Ok(set_cookie(state, &token.plaintext, LIFETIME.as_secs()))
 }
 

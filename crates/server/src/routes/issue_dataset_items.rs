@@ -15,6 +15,9 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::{Event, ItemSource};
+use crate::analytics::record;
 use crate::api::common::FieldError;
 use crate::api::datasets::{FromTracesResult, IssueDatasetItemsRequest, TraceRef};
 use crate::auth::principal::Principal;
@@ -126,6 +129,13 @@ async fn add_issue_examples(
     metadata.insert(ISSUE_KEY.to_owned(), Value::String(id.to_string()));
     let result =
         add_trace_refs(&state, &principal, &access, &body.dataset, &refs, &metadata).await?;
+    record(
+        &state,
+        &Event::DatasetItemsAdded {
+            source: ItemSource::Issue,
+        },
+        &Actor::project(&principal, &access),
+    );
     Ok((StatusCode::CREATED, error::Json(result)))
 }
 

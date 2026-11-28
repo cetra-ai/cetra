@@ -17,6 +17,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { track } from "@/lib/analytics";
 
 const OPTIONS = [
   { value: "light", label: "Light" },
@@ -56,6 +57,7 @@ export function ThemeMenuItems() {
       <DropdownMenuRadioGroup
         value={theme}
         onValueChange={(value) => {
+          track({ name: "theme.changed", properties: { theme: value as Theme } });
           setTheme(value as Theme);
         }}
       >

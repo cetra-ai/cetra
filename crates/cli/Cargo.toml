@@ -26,7 +26,6 @@ serde_json.workspace = true
 mimalloc.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [[bin]]
 name = "cetra"
@@ -35,6 +34,7 @@ path = "src/main.rs"
 [dev-dependencies]
 axum.workspace = true
 bytes.workspace = true
+flate2.workspace = true
 insta.workspace = true
 cetra-capture.workspace = true
 opentelemetry-proto.workspace = true
