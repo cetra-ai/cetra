@@ -1578,10 +1578,467 @@ pub fn probe_semi_anti_streams(
         .collect())
 }
 
+struct SharedInnerLeftTable {
+    table: BuildTable, // `matched` is always `None` (immutable during probe)
+    right_key_evals: Vec<KeyEval>,
+    seed: u64,
+    join_type: JoinType, // Inner or Left
+    null_equals_null: bool,
+    residual_filter: Option<Expr>,
+    output_schema: Arc<Schema>,
+    combined_schema: Arc<Schema>,
+    _build_res: Reservation,
+}
+
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<SharedInnerLeftTable>();
+};
+
+/// Wraps a left partition stream when `JoinType::Left` has an empty RHS,
+/// appending constant-NULL right columns without copying left column buffers.
+struct LeftEmptyRightStream {
+    left_stream: Box<dyn PartitionStream>,
+    output_schema: Arc<Schema>,
+    right_types: Vec<DataType>,
+    done: bool,
+}
+
+impl PartitionStream for LeftEmptyRightStream {
+    fn next_batch(
+        &mut self,
+        cancel: &CancelToken,
+        mut res: Option<&mut Reservation>,
+    ) -> Result<Option<Batch>, QueryError> {
+        let before = res.as_ref().map_or(0, |r| r.size());
+        loop {
+            if cancel.is_cancelled() {
+                rollback_res(res, before);
+                self.done = true;
+                return Err(QueryError::Cancelled);
+            }
+            if self.done {
+                rollback_res(res, before);
+                return Ok(None);
+            }
+            let batch = match self.left_stream.next_batch(cancel, res.as_deref_mut()) {
+                Ok(Some(b)) => b,
+                Ok(None) => {
+                    rollback_res(res, before);
+                    self.done = true;
+                    return Ok(None);
+                }
+                Err(err) => {
+                    rollback_res(res, before);
+                    self.done = true;
+                    return Err(err);
+                }
+            };
+            if batch.is_empty() {
+                drop(batch);
+                rollback_res(res.as_deref_mut(), before);
+                continue;
+            }
+            let raw_len = batch.raw_len();
+            let selection = batch.selection().clone();
+            let mut cols: Vec<Arc<Column>> =
+                Vec::with_capacity(batch.columns().len() + self.right_types.len());
+            cols.extend(batch.columns().iter().cloned());
+            for dt in &self.right_types {
+                match Column::try_new_const(ScalarValue::Null(dt.clone()), raw_len) {
+                    Ok(col) => cols.push(Arc::new(col)),
+                    Err(err) => {
+                        rollback_res(res, before);
+                        self.done = true;
+                        return Err(err.into());
+                    }
+                }
+            }
+            let out = match Batch::try_new_shared(
+                Arc::clone(&self.output_schema),
+                cols,
+                raw_len,
+                selection,
+            ) {
+                Ok(b) => b,
+                Err(err) => {
+                    rollback_res(res, before);
+                    self.done = true;
+                    return Err(err.into());
+                }
+            };
+            let out_bytes = out.memory_bytes();
+            if let Err(err) = reconcile_res(res.as_deref_mut(), before, out_bytes) {
+                self.done = true;
+                return Err(err);
+            }
+            return Ok(Some(out));
+        }
+    }
+}
+
+struct ParallelInnerLeftStream {
+    left_stream: Box<dyn PartitionStream>,
+    left_key_evals: Vec<KeyEval>,
+    shared: Arc<SharedInnerLeftTable>,
+    ctx: ExecContext,
+    batch_size: usize,
+    pull_res: Reservation,
+    scratch_res: Reservation,
+    pending_res: Reservation,
+    pending_out: VecDeque<Batch>,
+    cur: Option<ProbeBatchState>,
+    done: bool,
+}
+
+impl ParallelInnerLeftStream {
+    fn check_cancel(&self, cancel: &CancelToken) -> Result<(), QueryError> {
+        if cancel.is_cancelled() || self.ctx.eval.cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        Ok(())
+    }
+
+    fn eval_ctx(&self, cancel: &CancelToken) -> EvalContext {
+        if self.ctx.eval.cancel.is_cancelled() {
+            self.ctx.eval.clone()
+        } else {
+            self.ctx.eval.with_cancel(cancel.clone())
+        }
+    }
+
+    fn cleanup(&mut self) {
+        self.pull_res.free();
+        self.scratch_res.free();
+        self.pending_res.free();
+        self.pending_out.clear();
+        self.cur = None;
+        self.done = true;
+    }
+
+    fn next_batch_inner(
+        &mut self,
+        cancel: &CancelToken,
+        mut res: Option<&mut Reservation>,
+    ) -> Result<Option<Batch>, QueryError> {
+        let eval_ctx = self.eval_ctx(cancel);
+        let shared = Arc::clone(&self.shared);
+        let emit_unmatched_left = shared.join_type == JoinType::Left;
+        let table = &shared.table;
+        let bucket_mask = table.buckets.len() - 1;
+
+        loop {
+            self.check_cancel(cancel)?;
+            if let Some(batch) = pop_pending(
+                &mut self.pending_out,
+                &mut self.pending_res,
+                res.as_deref_mut(),
+            )? {
+                return Ok(Some(batch));
+            }
+            if self.done {
+                return Ok(None);
+            }
+
+            if self.cur.is_none() {
+                loop {
+                    self.check_cancel(cancel)?;
+                    let Some(raw_batch) = self
+                        .left_stream
+                        .next_batch(cancel, Some(&mut self.pull_res))?
+                    else {
+                        self.pull_res.free();
+                        self.done = true;
+                        return Ok(None);
+                    };
+                    if raw_batch.is_empty() {
+                        drop(raw_batch);
+                        self.pull_res.free();
+                        continue;
+                    }
+                    let batch = compact_for_join(raw_batch, &mut self.pull_res)?;
+                    let key_cols = evaluate_owned_keys(
+                        &self.left_key_evals,
+                        &batch,
+                        &eval_ctx,
+                        Some(&mut self.pull_res),
+                    )?;
+                    let n = batch.num_rows();
+                    self.cur = Some(ProbeBatchState {
+                        batch,
+                        key_cols,
+                        next_row: 0,
+                        active_bucket_next: None,
+                        active_hash: 0,
+                        unmatched_scan_pos: 0,
+                        row_matched: vec![false; n],
+                        row_emitted: vec![false; n],
+                        row_chain_done: vec![false; n],
+                    });
+                    break;
+                }
+            }
+
+            let Some(mut cur) = self.cur.take() else {
+                continue;
+            };
+            let l_len = cur.batch.num_rows();
+            let l_krefs = resolve_key_refs(&self.left_key_evals, &cur.batch, &cur.key_cols)?;
+            let mut rhs_krefs = Vec::with_capacity(table.batches.len());
+            for b_idx in 0..table.batches.len() {
+                rhs_krefs.push(table.key_cols_for_batch(b_idx, &shared.right_key_evals)?);
+            }
+
+            if let Some(pred) = &shared.residual_filter {
+                let mut cand_pairs: Vec<(u32, Option<u32>)> = Vec::with_capacity(self.batch_size);
+                while cur.next_row < l_len && cand_pairs.len() < self.batch_size {
+                    let lr = cur.next_row;
+                    if (lr & CANCEL_CHECK_MASK) == 0 {
+                        self.check_cancel(cancel)?;
+                    }
+                    if cur.active_bucket_next.is_none() {
+                        if !shared.null_equals_null && row_has_null_key(&l_krefs, lr) {
+                            cur.row_chain_done[lr] = true;
+                            cur.next_row += 1;
+                            continue;
+                        }
+                        let h = hash_key_row(&l_krefs, lr, shared.seed);
+                        let head = table.buckets[(h as usize) & bucket_mask];
+                        if head == 0 {
+                            cur.row_chain_done[lr] = true;
+                            cur.next_row += 1;
+                            continue;
+                        }
+                        cur.active_hash = h;
+                        cur.active_bucket_next = Some(head);
+                    }
+
+                    let h = cur.active_hash;
+                    while let Some(entry_plus_one) = cur.active_bucket_next {
+                        if cand_pairs.len() >= self.batch_size {
+                            break;
+                        }
+                        let bid = (entry_plus_one - 1) as usize;
+                        let nxt = table.next[bid];
+                        cur.active_bucket_next = if nxt == 0 { None } else { Some(nxt) };
+
+                        if table.row_hashes[bid] != h {
+                            continue;
+                        }
+                        let (b_idx, r_idx) = table.row_locs[bid];
+                        if !keys_equal(
+                            &l_krefs,
+                            lr,
+                            &rhs_krefs[b_idx as usize],
+                            r_idx as usize,
+                            shared.null_equals_null,
+                        )? {
+                            continue;
+                        }
+                        cand_pairs.push((lr as u32, Some(bid as u32)));
+                    }
+
+                    if cur.active_bucket_next.is_none() {
+                        cur.row_chain_done[lr] = true;
+                        cur.next_row += 1;
+                    }
+                }
+
+                if !cand_pairs.is_empty() {
+                    let cand_batch = build_paired_batch(
+                        &cur.batch,
+                        Some(table),
+                        &cand_pairs,
+                        &shared.combined_schema,
+                        true,
+                        &eval_ctx,
+                        Some(&mut self.scratch_res),
+                    )?;
+                    let mask =
+                        eval_filter(pred, &cand_batch, &eval_ctx, Some(&mut self.scratch_res))?;
+                    let mut keep_mask = Bitmap::new_zeroed(cand_pairs.len());
+                    for (idx, &(lr, _)) in cand_pairs.iter().enumerate() {
+                        if !mask.get(idx) {
+                            continue;
+                        }
+                        cur.row_matched[lr as usize] = true;
+                        let _ = keep_mask.set(idx, true);
+                    }
+                    drop(mask);
+                    if !keep_mask.all_zeros() {
+                        let kept = cand_batch.into_filter_mask(&keep_mask)?;
+                        let compacted = kept.compact(Some(&mut self.scratch_res))?;
+                        drop(kept);
+                        queue_sliced_batch(
+                            compacted,
+                            self.batch_size,
+                            &mut self.scratch_res,
+                            &mut self.pending_res,
+                            &mut self.pending_out,
+                        )?;
+                    } else {
+                        drop(cand_batch);
+                    }
+                    self.scratch_res.free();
+                }
+
+                let mut unmatched_left = Vec::new();
+                while cur.unmatched_scan_pos < cur.next_row {
+                    let lr = cur.unmatched_scan_pos;
+                    cur.unmatched_scan_pos += 1;
+                    if cur.row_chain_done[lr] && !cur.row_matched[lr] && !cur.row_emitted[lr] {
+                        cur.row_emitted[lr] = true;
+                        if emit_unmatched_left {
+                            unmatched_left.push(lr as u32);
+                        }
+                    }
+                }
+                if !unmatched_left.is_empty() {
+                    let unmatched_batch = build_unmatched_left_batch(
+                        &cur.batch,
+                        &unmatched_left,
+                        shared.join_type,
+                        &shared.output_schema,
+                        Some(&mut self.scratch_res),
+                    )?;
+                    queue_sliced_batch(
+                        unmatched_batch,
+                        self.batch_size,
+                        &mut self.scratch_res,
+                        &mut self.pending_res,
+                        &mut self.pending_out,
+                    )?;
+                    self.scratch_res.free();
+                }
+            } else {
+                let mut pairs: Vec<(u32, Option<u32>)> = Vec::with_capacity(self.batch_size);
+                while cur.next_row < l_len && pairs.len() < self.batch_size {
+                    let lr = cur.next_row;
+                    if (lr & CANCEL_CHECK_MASK) == 0 {
+                        self.check_cancel(cancel)?;
+                    }
+                    if cur.active_bucket_next.is_none() {
+                        if !shared.null_equals_null && row_has_null_key(&l_krefs, lr) {
+                            if emit_unmatched_left {
+                                pairs.push((lr as u32, None));
+                            }
+                            cur.next_row += 1;
+                            continue;
+                        }
+                        let h = hash_key_row(&l_krefs, lr, shared.seed);
+                        let head = table.buckets[(h as usize) & bucket_mask];
+                        if head == 0 {
+                            if emit_unmatched_left {
+                                pairs.push((lr as u32, None));
+                            }
+                            cur.next_row += 1;
+                            continue;
+                        }
+                        cur.active_hash = h;
+                        cur.active_bucket_next = Some(head);
+                    }
+
+                    let h = cur.active_hash;
+                    while let Some(entry_plus_one) = cur.active_bucket_next {
+                        if pairs.len() >= self.batch_size {
+                            break;
+                        }
+                        let bid = (entry_plus_one - 1) as usize;
+                        let nxt = table.next[bid];
+                        cur.active_bucket_next = if nxt == 0 { None } else { Some(nxt) };
+
+                        if table.row_hashes[bid] != h {
+                            continue;
+                        }
+                        let (b_idx, r_idx) = table.row_locs[bid];
+                        if !keys_equal(
+                            &l_krefs,
+                            lr,
+                            &rhs_krefs[b_idx as usize],
+                            r_idx as usize,
+                            shared.null_equals_null,
+                        )? {
+                            continue;
+                        }
+
+                        cur.row_matched[lr] = true;
+                        pairs.push((lr as u32, Some(bid as u32)));
+                    }
+
+                    if cur.active_bucket_next.is_none() {
+                        if !cur.row_matched[lr] && emit_unmatched_left {
+                            pairs.push((lr as u32, None));
+                        }
+                        cur.next_row += 1;
+                    }
+                }
+
+                if !pairs.is_empty() {
+                    let out = build_paired_batch(
+                        &cur.batch,
+                        Some(table),
+                        &pairs,
+                        &shared.output_schema,
+                        true,
+                        &eval_ctx,
+                        Some(&mut self.scratch_res),
+                    )?;
+                    queue_sliced_batch(
+                        out,
+                        self.batch_size,
+                        &mut self.scratch_res,
+                        &mut self.pending_res,
+                        &mut self.pending_out,
+                    )?;
+                    self.scratch_res.free();
+                }
+            }
+
+            let batch_done = cur.next_row >= l_len;
+            drop(l_krefs);
+            if batch_done {
+                drop(cur);
+                self.pull_res.free();
+            } else {
+                self.cur = Some(cur);
+            }
+        }
+    }
+}
+
+impl PartitionStream for ParallelInnerLeftStream {
+    fn next_batch(
+        &mut self,
+        cancel: &CancelToken,
+        mut res: Option<&mut Reservation>,
+    ) -> Result<Option<Batch>, QueryError> {
+        let before = res.as_ref().map_or(0, |r| r.size());
+        match self.next_batch_inner(cancel, res.as_deref_mut()) {
+            Ok(Some(batch)) => {
+                if let Err(err) = reconcile_res(res.as_deref_mut(), before, batch.memory_bytes()) {
+                    rollback_res(res, before);
+                    self.cleanup();
+                    return Err(err);
+                }
+                Ok(Some(batch))
+            }
+            Ok(None) => {
+                rollback_res(res, before);
+                Ok(None)
+            }
+            Err(err) => {
+                rollback_res(res, before);
+                self.cleanup();
+                Err(err)
+            }
+        }
+    }
+}
+
 /// Executes a join between `left` (probe) and `right` (build) partition streams, returning
-/// parallel [`PartitionStream`]s for eligible in-memory [`JoinType::LeftSemi`],
-/// [`JoinType::LeftAnti`], and [`JoinType::LeftAntiNullAware`] joins (with `residual_filter: None`
-/// and `left.len() > 1`), and falling back to [`execute_hash_join`] otherwise or on memory spill.
+/// parallel [`PartitionStream`]s for eligible in-memory [`JoinType::Inner`], [`JoinType::Left`],
+/// [`JoinType::LeftSemi`], [`JoinType::LeftAnti`], and [`JoinType::LeftAntiNullAware`] joins
+/// (when `left.len() > 1`), and falling back to [`execute_hash_join`] otherwise or on memory spill.
 pub fn execute_hash_join_parallel(
     left: Vec<Box<dyn PartitionStream>>,
     left_schema: Arc<Schema>,
@@ -1590,12 +2047,12 @@ pub fn execute_hash_join_parallel(
     spec: HashJoinSpec,
     ctx: &ExecContext,
 ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
-    if !(matches!(
+    let is_parallel_semi_anti = matches!(
         spec.join_type,
         JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftAntiNullAware
-    ) && spec.residual_filter.is_none()
-        && left.len() > 1)
-    {
+    ) && spec.residual_filter.is_none();
+    let is_parallel_inner_left = matches!(spec.join_type, JoinType::Inner | JoinType::Left);
+    if !(left.len() > 1 && (is_parallel_semi_anti || is_parallel_inner_left)) {
         return Ok(vec![execute_hash_join(
             left,
             left_schema,
@@ -1647,96 +2104,50 @@ pub fn execute_hash_join_parallel(
         if drain.total_rows == 0 {
             drain.build_res.free();
             return match spec.join_type {
-                JoinType::LeftSemi => Ok(Vec::new()),
+                JoinType::LeftSemi | JoinType::Inner => Ok(Vec::new()),
                 JoinType::LeftAnti | JoinType::LeftAntiNullAware => Ok(left),
+                JoinType::Left => {
+                    let output_schema =
+                        join_output_schema(JoinType::Left, &left_schema, &right_schema);
+                    let right_types: Vec<DataType> = right_schema
+                        .fields()
+                        .iter()
+                        .map(|f| f.data_type.clone())
+                        .collect();
+                    Ok(left
+                        .into_iter()
+                        .map(|left_stream| {
+                            Box::new(LeftEmptyRightStream {
+                                left_stream,
+                                output_schema: Arc::clone(&output_schema),
+                                right_types: right_types.clone(),
+                                done: false,
+                            }) as Box<dyn PartitionStream>
+                        })
+                        .collect())
+                }
                 _ => Ok(Vec::new()),
             };
         }
 
-        let right_key_types: Vec<DataType> = spec.right_keys.iter().map(Expr::data_type).collect();
-        let use_fixed16 = spec.left_keys.len() == 1
-            && !spec.null_equals_null
-            && matches!(
-                left_key_evals[0],
-                KeyEval::Column {
-                    data_type: DataType::FixedBytes16,
-                    ..
-                }
-            )
-            && matches!(
-                right_key_evals[0],
-                KeyEval::Column {
-                    data_type: DataType::FixedBytes16,
-                    ..
-                }
-            );
-
-        if use_fixed16 {
-            let (max_bytes, num_buckets) = Fixed16HashSet::max_index_bytes(drain.total_rows);
-            let headroom = HashJoinStream::pull_headroom(
+        if is_parallel_inner_left {
+            let workers = ctx.workers.num_workers().min(left.len()).max(1);
+            let base = HashJoinStream::pull_headroom(
                 drain.max_batch_bytes,
                 live_join_frame_budget(&ctx.pool),
             );
-            match drain.build_res.try_grow(max_bytes.saturating_add(headroom)) {
-                Ok(()) => {
-                    if headroom > 0 {
-                        drain.build_res.shrink(headroom);
-                    }
-                    let set = Fixed16HashSet::build_from_batches(
-                        &buffered_batches,
-                        &buffered_keys,
-                        &right_key_evals,
-                        drain.total_rows,
-                        num_buckets,
-                        table_hash_seed(0),
-                        &ctx.eval.cancel,
-                    )?;
-                    drop(buffered_keys);
-                    drop(buffered_batches);
-                    reconcile_res(Some(&mut drain.build_res), 0, set.memory_bytes())?;
-                    let table = Arc::new(SharedProbeTable {
-                        join_type: spec.join_type,
-                        null_equals_null: spec.null_equals_null,
-                        right_key_types,
-                        inner: ProbeTableInner::Fixed16(set),
-                        _build_res: drain.build_res,
-                    });
-                    return Ok(left
-                        .into_iter()
-                        .map(|left_stream| {
-                            Box::new(ParallelSemiAntiStream {
-                                left_stream,
-                                left_key_evals: left_key_evals.clone(),
-                                table: Arc::clone(&table),
-                                ctx: ctx.clone(),
-                                pull_res: ctx.pool.register("hash_join_probe_pull", false),
-                                scratch_res: ctx.pool.register("hash_join_probe_scratch", false),
-                                done: false,
-                            }) as Box<dyn PartitionStream>
-                        })
-                        .collect());
-                }
-                Err(ColumnError::MemoryLimit { .. }) if !ctx.eval.cancel.is_cancelled() => {}
-                Err(_) if ctx.eval.cancel.is_cancelled() => {
-                    drain.build_res.free();
-                    return Err(QueryError::Cancelled);
-                }
-                Err(err) => {
-                    drain.build_res.free();
-                    return Err(err.into());
-                }
-            }
-        } else {
+            let live_share = ctx.pool.spill_share();
+            let probe_headroom = if live_share >= base.saturating_mul(2) {
+                base.saturating_mul(workers).min(live_share / 2)
+            } else {
+                base
+            };
             let table_seed = table_hash_seed(0);
-            let headroom = HashJoinStream::pull_headroom(
-                drain.max_batch_bytes,
-                live_join_frame_budget(&ctx.pool),
-            );
             let (_, num_buckets) = BuildTable::index_bytes(drain.total_rows, false);
             match BuildTable::try_reserve_index(
                 drain.total_rows,
                 false,
-                headroom,
+                probe_headroom,
                 &mut drain.build_res,
             ) {
                 Ok(_) => {
@@ -1754,27 +2165,35 @@ pub fn execute_hash_join_parallel(
                         &cfg,
                         &ctx.eval.cancel,
                     )?;
-                    let shared = Arc::new(SharedProbeTable {
+                    let output_schema =
+                        join_output_schema(spec.join_type, &left_schema, &right_schema);
+                    let combined_schema = Arc::clone(&output_schema);
+                    let shared = Arc::new(SharedInnerLeftTable {
+                        table,
+                        right_key_evals,
+                        seed: table_seed,
                         join_type: spec.join_type,
                         null_equals_null: spec.null_equals_null,
-                        right_key_types,
-                        inner: ProbeTableInner::General(GeneralProbeTable {
-                            table,
-                            right_key_evals,
-                            seed: table_seed,
-                        }),
+                        residual_filter: spec.residual_filter,
+                        output_schema,
+                        combined_schema,
                         _build_res: drain.build_res,
                     });
+                    let batch_size = ctx.batch_size.max(1);
                     return Ok(left
                         .into_iter()
                         .map(|left_stream| {
-                            Box::new(ParallelSemiAntiStream {
+                            Box::new(ParallelInnerLeftStream {
                                 left_stream,
                                 left_key_evals: left_key_evals.clone(),
-                                table: Arc::clone(&shared),
+                                shared: Arc::clone(&shared),
                                 ctx: ctx.clone(),
+                                batch_size,
                                 pull_res: ctx.pool.register("hash_join_probe_pull", false),
                                 scratch_res: ctx.pool.register("hash_join_probe_scratch", false),
+                                pending_res: ctx.pool.register("hash_join_probe_pending", false),
+                                pending_out: VecDeque::new(),
+                                cur: None,
                                 done: false,
                             }) as Box<dyn PartitionStream>
                         })
@@ -1790,13 +2209,164 @@ pub fn execute_hash_join_parallel(
                     return Err(err.into());
                 }
             }
+        } else {
+            let right_key_types: Vec<DataType> =
+                spec.right_keys.iter().map(Expr::data_type).collect();
+            let use_fixed16 = spec.left_keys.len() == 1
+                && !spec.null_equals_null
+                && matches!(
+                    left_key_evals[0],
+                    KeyEval::Column {
+                        data_type: DataType::FixedBytes16,
+                        ..
+                    }
+                )
+                && matches!(
+                    right_key_evals[0],
+                    KeyEval::Column {
+                        data_type: DataType::FixedBytes16,
+                        ..
+                    }
+                );
+
+            if use_fixed16 {
+                let (max_bytes, num_buckets) = Fixed16HashSet::max_index_bytes(drain.total_rows);
+                let headroom = HashJoinStream::pull_headroom(
+                    drain.max_batch_bytes,
+                    live_join_frame_budget(&ctx.pool),
+                );
+                match drain.build_res.try_grow(max_bytes.saturating_add(headroom)) {
+                    Ok(()) => {
+                        if headroom > 0 {
+                            drain.build_res.shrink(headroom);
+                        }
+                        let set = Fixed16HashSet::build_from_batches(
+                            &buffered_batches,
+                            &buffered_keys,
+                            &right_key_evals,
+                            drain.total_rows,
+                            num_buckets,
+                            table_hash_seed(0),
+                            &ctx.eval.cancel,
+                        )?;
+                        drop(buffered_keys);
+                        drop(buffered_batches);
+                        reconcile_res(Some(&mut drain.build_res), 0, set.memory_bytes())?;
+                        let table = Arc::new(SharedProbeTable {
+                            join_type: spec.join_type,
+                            null_equals_null: spec.null_equals_null,
+                            right_key_types,
+                            inner: ProbeTableInner::Fixed16(set),
+                            _build_res: drain.build_res,
+                        });
+                        return Ok(left
+                            .into_iter()
+                            .map(|left_stream| {
+                                Box::new(ParallelSemiAntiStream {
+                                    left_stream,
+                                    left_key_evals: left_key_evals.clone(),
+                                    table: Arc::clone(&table),
+                                    ctx: ctx.clone(),
+                                    pull_res: ctx.pool.register("hash_join_probe_pull", false),
+                                    scratch_res: ctx
+                                        .pool
+                                        .register("hash_join_probe_scratch", false),
+                                    done: false,
+                                }) as Box<dyn PartitionStream>
+                            })
+                            .collect());
+                    }
+                    Err(ColumnError::MemoryLimit { .. }) if !ctx.eval.cancel.is_cancelled() => {}
+                    Err(_) if ctx.eval.cancel.is_cancelled() => {
+                        drain.build_res.free();
+                        return Err(QueryError::Cancelled);
+                    }
+                    Err(err) => {
+                        drain.build_res.free();
+                        return Err(err.into());
+                    }
+                }
+            } else {
+                let table_seed = table_hash_seed(0);
+                let headroom = HashJoinStream::pull_headroom(
+                    drain.max_batch_bytes,
+                    live_join_frame_budget(&ctx.pool),
+                );
+                let (_, num_buckets) = BuildTable::index_bytes(drain.total_rows, false);
+                match BuildTable::try_reserve_index(
+                    drain.total_rows,
+                    false,
+                    headroom,
+                    &mut drain.build_res,
+                ) {
+                    Ok(_) => {
+                        let cfg = BuildTableConfig {
+                            total_rows: drain.total_rows,
+                            num_buckets,
+                            key_evals: &right_key_evals,
+                            null_equals_null: spec.null_equals_null,
+                            track_matched: false,
+                            seed: table_seed,
+                        };
+                        let table = BuildTable::populate_from_buffers(
+                            buffered_batches,
+                            buffered_keys,
+                            &cfg,
+                            &ctx.eval.cancel,
+                        )?;
+                        let shared = Arc::new(SharedProbeTable {
+                            join_type: spec.join_type,
+                            null_equals_null: spec.null_equals_null,
+                            right_key_types,
+                            inner: ProbeTableInner::General(GeneralProbeTable {
+                                table,
+                                right_key_evals,
+                                seed: table_seed,
+                            }),
+                            _build_res: drain.build_res,
+                        });
+                        return Ok(left
+                            .into_iter()
+                            .map(|left_stream| {
+                                Box::new(ParallelSemiAntiStream {
+                                    left_stream,
+                                    left_key_evals: left_key_evals.clone(),
+                                    table: Arc::clone(&shared),
+                                    ctx: ctx.clone(),
+                                    pull_res: ctx.pool.register("hash_join_probe_pull", false),
+                                    scratch_res: ctx
+                                        .pool
+                                        .register("hash_join_probe_scratch", false),
+                                    done: false,
+                                }) as Box<dyn PartitionStream>
+                            })
+                            .collect());
+                    }
+                    Err(ColumnError::MemoryLimit { .. }) if !ctx.eval.cancel.is_cancelled() => {}
+                    Err(_) if ctx.eval.cancel.is_cancelled() => {
+                        drain.build_res.free();
+                        return Err(QueryError::Cancelled);
+                    }
+                    Err(err) => {
+                        drain.build_res.free();
+                        return Err(err.into());
+                    }
+                }
+            }
         }
     }
 
     // Spill fallback: seed a single spillable `HashJoinStream` with already-buffered batches,
     // any overflow batch, and any remaining right streams without re-reading `right`.
     let output_schema = join_output_schema(spec.join_type, &left_schema, &right_schema);
-    let combined_schema = join_output_schema(JoinType::Inner, &left_schema, &right_schema);
+    let combined_schema = if matches!(
+        spec.join_type,
+        JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftAntiNullAware
+    ) {
+        join_output_schema(JoinType::Inner, &left_schema, &right_schema)
+    } else {
+        Arc::clone(&output_schema)
+    };
     let batch_size = ctx.batch_size.max(1);
     let pull_res = ctx.pool.register("hash_join_pull", false);
     let scratch_res = ctx.pool.register("hash_join_scratch", false);
@@ -2098,7 +2668,7 @@ fn hash_elem_ref(mut state: u64, elem: ElemRef<'_>) -> u64 {
             state = mix_u64(state, key as u64);
             mix_u64(state, (key >> 64) as u64)
         }
-        DataType::Utf8 => mix_bytes(state, elem.read_str().unwrap_or("").as_bytes()),
+        DataType::Utf8 => mix_bytes(state, elem.read_str_bytes().unwrap_or(&[])),
         DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16 => {
             mix_bytes(state, elem.read_bytes().unwrap_or(&[]))
         }
@@ -2131,15 +2701,13 @@ fn hash_elem_ref(mut state: u64, elem: ElemRef<'_>) -> u64 {
                     MapRef::Flat { data, start, end } => {
                         state = mix_u64(state, (end - start) as u64);
                         for idx in start..end {
-                            state = mix_bytes(state, data.keys().get(idx).unwrap_or("").as_bytes());
+                            state = mix_bytes(state, data.keys().get_bytes(idx).unwrap_or(&[]));
                             if data.value_nulls().is_some_and(|bm| !bm.get(idx)) {
                                 state = mix_u64(state, 0);
                             } else {
                                 state = mix_u64(state, 1);
-                                state = mix_bytes(
-                                    state,
-                                    data.values().get(idx).unwrap_or("").as_bytes(),
-                                );
+                                state =
+                                    mix_bytes(state, data.values().get_bytes(idx).unwrap_or(&[]));
                             }
                         }
                     }
@@ -2168,15 +2736,14 @@ fn hash_elem_ref(mut state: u64, elem: ElemRef<'_>) -> u64 {
                         state = mix_u64(state, (end - start) as u64);
                         for idx in start..end {
                             state = mix_u64(state, data.times()[idx] as u64);
-                            state =
-                                mix_bytes(state, data.names().get(idx).unwrap_or("").as_bytes());
+                            state = mix_bytes(state, data.names().get_bytes(idx).unwrap_or(&[]));
                             if data.attribute_nulls().is_some_and(|bm| !bm.get(idx)) {
                                 state = mix_u64(state, 0);
                             } else {
                                 state = mix_u64(state, 1);
                                 state = mix_bytes(
                                     state,
-                                    data.attributes().get(idx).unwrap_or("").as_bytes(),
+                                    data.attributes().get_bytes(idx).unwrap_or(&[]),
                                 );
                             }
                         }
@@ -2213,7 +2780,7 @@ fn hash_elem_ref(mut state: u64, elem: ElemRef<'_>) -> u64 {
                                 state = mix_u64(state, 1);
                                 state = mix_bytes(
                                     state,
-                                    data.attributes().get(idx).unwrap_or("").as_bytes(),
+                                    data.attributes().get_bytes(idx).unwrap_or(&[]),
                                 );
                             }
                         }
@@ -2275,7 +2842,7 @@ fn elem_eq(ea: ElemRef<'_>, eb: ElemRef<'_>) -> Result<bool, QueryError> {
             Ok(ea.read_interval().map(|x| x.canonical_key())
                 == eb.read_interval().map(|x| x.canonical_key()))
         }
-        (DataType::Utf8, DataType::Utf8) => Ok(ea.read_str() == eb.read_str()),
+        (DataType::Utf8, DataType::Utf8) => Ok(ea.read_str_bytes() == eb.read_str_bytes()),
         (
             DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16,
             DataType::Binary | DataType::FixedBytes8 | DataType::FixedBytes16,
@@ -3024,6 +3591,59 @@ struct EmitUnmatchedProbeFileState {
     remaining_tasks: Vec<PartitionTask>,
 }
 
+fn queue_sliced_batch(
+    batch: Batch,
+    batch_size: usize,
+    scratch_res: &mut Reservation,
+    pending_res: &mut Reservation,
+    pending_out: &mut VecDeque<Batch>,
+) -> Result<(), QueryError> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let orig_bytes = batch.memory_bytes();
+    if batch.num_rows() <= batch_size {
+        transfer_or_grow(scratch_res, pending_res, orig_bytes)?;
+        pending_out.push_back(batch);
+        return Ok(());
+    }
+    let pending_before = pending_res.size();
+    let mut slices = Vec::new();
+    let mut offset = 0usize;
+    while offset < batch.num_rows() {
+        let len = (batch.num_rows() - offset).min(batch_size);
+        match batch.slice(offset, len, Some(pending_res)) {
+            Ok(slice) => slices.push(slice),
+            Err(err) => {
+                rollback_res(Some(pending_res), pending_before);
+                return Err(err.into());
+            }
+        }
+        offset += len;
+    }
+    drop(batch);
+    scratch_res.shrink(orig_bytes.min(scratch_res.size()));
+    pending_out.extend(slices);
+    Ok(())
+}
+
+fn pop_pending(
+    pending_out: &mut VecDeque<Batch>,
+    pending_res: &mut Reservation,
+    res: Option<&mut Reservation>,
+) -> Result<Option<Batch>, QueryError> {
+    let Some(b) = pending_out.pop_front() else {
+        return Ok(None);
+    };
+    let bytes = b.memory_bytes();
+    if let Some(cr) = res {
+        transfer_or_grow(pending_res, cr, bytes)?;
+    } else {
+        pending_res.shrink(bytes.min(pending_res.size()));
+    }
+    Ok(Some(b))
+}
+
 impl HashJoinStream {
     fn check_cancel(&self, cancel: &CancelToken) -> Result<(), QueryError> {
         if cancel.is_cancelled() || self.ctx.eval.cancel.is_cancelled() {
@@ -3052,47 +3672,17 @@ impl HashJoinStream {
     }
 
     fn queue_sliced_batch(&mut self, batch: Batch) -> Result<(), QueryError> {
-        if batch.is_empty() {
-            return Ok(());
-        }
-        let orig_bytes = batch.memory_bytes();
-        if batch.num_rows() <= self.batch_size {
-            transfer_or_grow(&mut self.scratch_res, &mut self.pending_res, orig_bytes)?;
-            self.pending_out.push_back(batch);
-            return Ok(());
-        }
-        let pending_before = self.pending_res.size();
-        let mut slices = Vec::new();
-        let mut offset = 0usize;
-        while offset < batch.num_rows() {
-            let len = (batch.num_rows() - offset).min(self.batch_size);
-            match batch.slice(offset, len, Some(&mut self.pending_res)) {
-                Ok(slice) => slices.push(slice),
-                Err(err) => {
-                    rollback_res(Some(&mut self.pending_res), pending_before);
-                    return Err(err.into());
-                }
-            }
-            offset += len;
-        }
-        drop(batch);
-        self.scratch_res
-            .shrink(orig_bytes.min(self.scratch_res.size()));
-        self.pending_out.extend(slices);
-        Ok(())
+        queue_sliced_batch(
+            batch,
+            self.batch_size,
+            &mut self.scratch_res,
+            &mut self.pending_res,
+            &mut self.pending_out,
+        )
     }
 
     fn pop_pending(&mut self, res: Option<&mut Reservation>) -> Result<Option<Batch>, QueryError> {
-        let Some(b) = self.pending_out.pop_front() else {
-            return Ok(None);
-        };
-        let bytes = b.memory_bytes();
-        if let Some(cr) = res {
-            transfer_or_grow(&mut self.pending_res, cr, bytes)?;
-        } else {
-            self.pending_res.shrink(bytes.min(self.pending_res.size()));
-        }
-        Ok(Some(b))
+        pop_pending(&mut self.pending_out, &mut self.pending_res, res)
     }
 
     fn cleanup_reservations(&mut self) {
@@ -7658,6 +8248,459 @@ mod tests {
                 actual, expected,
                 "large-batch tight pool spill parity mismatch for {jt:?}"
             );
+            assert_eq!(tight_ctx.pool.reserved(), 0);
+            assert_eq!(tight_ctx.spill.spilled_bytes(), 0);
+        }
+    }
+
+    fn make_utf8_i64_batch(
+        schema: &Arc<Schema>,
+        keys: &[Option<&str>],
+        vals: &[i64],
+        selection: Selection,
+    ) -> Batch {
+        let mut raw_keys = Vec::with_capacity(keys.len());
+        let mut valid = Bitmap::new_ones(keys.len());
+        for (i, k) in keys.iter().enumerate() {
+            match k {
+                Some(s) => raw_keys.push(*s),
+                None => {
+                    raw_keys.push("");
+                    valid.set(i, false).unwrap();
+                }
+            }
+        }
+        let nulls = if valid.all_ones() { None } else { Some(valid) };
+        Batch::try_new(
+            Arc::clone(schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(raw_keys).unwrap()),
+                        nulls,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vals.to_vec()), None).unwrap()),
+            ],
+            keys.len(),
+            selection,
+        )
+        .unwrap()
+    }
+
+    type Utf8I64PairRow = (Option<String>, i64, Option<String>, Option<i64>);
+
+    fn extract_utf8_i64_pair_rows(batches: &[Batch]) -> Vec<Utf8I64PairRow> {
+        let mut rows = Vec::new();
+        for b in batches {
+            let indices = b.selection().to_indices(b.raw_len()).unwrap();
+            for r_u32 in indices {
+                let r = r_u32 as usize;
+                let lk = (!b.column(0).unwrap().is_null(r))
+                    .then(|| read_str(b.column(0).unwrap(), r).unwrap().to_owned());
+                let lv = read_i64(b.column(1).unwrap(), r).unwrap();
+                let rk = (!b.column(2).unwrap().is_null(r))
+                    .then(|| read_str(b.column(2).unwrap(), r).unwrap().to_owned());
+                let rv = (!b.column(3).unwrap().is_null(r))
+                    .then(|| read_i64(b.column(3).unwrap(), r).unwrap());
+                rows.push((lk, lv, rk, rv));
+            }
+        }
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn parallel_inner_and_left_join_match_single_stream_with_and_without_residual() {
+        let left_schema = Schema::try_new_arc(vec![
+            Field::new("lk", DataType::Utf8, true),
+            Field::new("lv", DataType::I64, false),
+        ])
+        .unwrap();
+        let right_schema = Schema::try_new_arc(vec![
+            Field::new("rk", DataType::Utf8, true),
+            Field::new("rv", DataType::I64, false),
+        ])
+        .unwrap();
+
+        // 3 left partitions including Selection::All, Selection::Mask, and Selection::Indices.
+        let lb0 = make_utf8_i64_batch(
+            &left_schema,
+            &[Some("k1"), None, Some("miss"), Some("dup")],
+            &[10, 20, 30, 40],
+            Selection::All,
+        );
+        let lb1 = make_utf8_i64_batch(
+            &left_schema,
+            &[Some("skip"), Some("k2"), Some("dup"), None, Some("k1")],
+            &[999, 50, 60, 70, 80],
+            Selection::Mask(Bitmap::from_bools(&[false, true, true, true, true])),
+        );
+        let lb2 = make_utf8_i64_batch(
+            &left_schema,
+            &[Some("miss2"), Some("k1"), Some("k3"), Some("dup")],
+            &[90, 100, 110, 120],
+            Selection::Indices(vec![3, 1, 0, 1]),
+        );
+
+        // 2 right partitions with duplicates, NULL keys, and unmatched rows.
+        let rb0 = make_utf8_i64_batch(
+            &right_schema,
+            &[Some("k1"), Some("dup"), None, Some("only_rhs")],
+            &[50, 45, 500, 600],
+            Selection::All,
+        );
+        let rb1 = make_utf8_i64_batch(
+            &right_schema,
+            &[Some("dup"), Some("k2"), Some("k1"), None],
+            &[150, 25, 120, 700],
+            Selection::All,
+        );
+
+        let l_src = BatchSource::new(Arc::clone(&left_schema), vec![lb0, lb1, lb2]).unwrap();
+        let r_src = BatchSource::new(Arc::clone(&right_schema), vec![rb0, rb1]).unwrap();
+
+        let (base_ctx, _dir) = make_ctx(8 * 1024 * 1024, 8 * 1024 * 1024);
+        let residual = Expr::Binary {
+            left: Box::new(col_expr(1, "lv", DataType::I64)),
+            op: BinaryOp::Lt,
+            right: Box::new(col_expr(3, "rv", DataType::I64)),
+            data_type: DataType::Bool,
+        };
+
+        for batch_size in [2usize, 8192usize] {
+            let ctx = ExecContext {
+                target_partitions: 3,
+                batch_size,
+                ..base_ctx.clone()
+            };
+            for jt in [JoinType::Inner, JoinType::Left] {
+                let expected_schema = join_output_schema(jt, &left_schema, &right_schema);
+                for null_equals_null in [false, true] {
+                    for res_filter in [None, Some(residual.clone())] {
+                        let spec = HashJoinSpec {
+                            join_type: jt,
+                            left_keys: vec![col_expr(0, "lk", DataType::Utf8)],
+                            right_keys: vec![col_expr(0, "rk", DataType::Utf8)],
+                            null_equals_null,
+                            residual_filter: res_filter,
+                        };
+                        let expected = extract_utf8_i64_pair_rows(
+                            &drain_stream(
+                                execute_hash_join(
+                                    l_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+                                    Arc::clone(&left_schema),
+                                    r_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+                                    Arc::clone(&right_schema),
+                                    spec.clone(),
+                                    &ctx,
+                                )
+                                .unwrap(),
+                                &ctx.eval.cancel,
+                            )
+                            .unwrap(),
+                        );
+
+                        let l_streams = l_src.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+                        let left_len = l_streams.len();
+                        assert_eq!(left_len, 3);
+                        let par_streams = execute_hash_join_parallel(
+                            l_streams,
+                            Arc::clone(&left_schema),
+                            r_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+                            Arc::clone(&right_schema),
+                            spec,
+                            &ctx,
+                        )
+                        .unwrap();
+                        assert_eq!(par_streams.len(), left_len);
+
+                        let mut caller_res = ctx.pool.register("caller_inner_left", false);
+                        caller_res.try_grow(512).unwrap();
+                        let mut out_batches = Vec::new();
+                        for mut s in par_streams {
+                            while let Some(b) = s
+                                .next_batch(&ctx.eval.cancel, Some(&mut caller_res))
+                                .unwrap()
+                            {
+                                assert_eq!(b.schema().as_ref(), expected_schema.as_ref());
+                                assert!(b.num_rows() <= batch_size);
+                                assert_eq!(caller_res.size(), 512 + b.memory_bytes());
+                                caller_res.shrink(b.memory_bytes());
+                                out_batches.push(b);
+                            }
+                            assert_eq!(caller_res.size(), 512);
+                        }
+                        drop(caller_res);
+
+                        let actual = extract_utf8_i64_pair_rows(&out_batches);
+                        assert_eq!(
+                            actual, expected,
+                            "parity mismatch for {jt:?} null_eq={null_equals_null} batch_size={batch_size}"
+                        );
+                        assert_eq!(ctx.pool.reserved(), 0);
+                        assert_eq!(ctx.spill.spilled_bytes(), 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_left_join_empty_right_pads_nulls_across_all_partitions() {
+        let left_schema = Schema::try_new_arc(vec![
+            Field::new("lk", DataType::Utf8, true),
+            Field::new("lv", DataType::I64, false),
+        ])
+        .unwrap();
+        let right_schema = Schema::try_new_arc(vec![
+            Field::new("rk", DataType::Utf8, false),
+            Field::new("rv", DataType::I64, false),
+        ])
+        .unwrap();
+
+        let lb0 = make_utf8_i64_batch(&left_schema, &[Some("a"), None], &[1, 2], Selection::All);
+        let lb1 = make_utf8_i64_batch(
+            &left_schema,
+            &[Some("skip"), Some("b"), Some("c")],
+            &[9, 3, 4],
+            Selection::Mask(Bitmap::from_bools(&[false, true, true])),
+        );
+        let lb2 = make_utf8_i64_batch(
+            &left_schema,
+            &[Some("x"), Some("y")],
+            &[5, 6],
+            Selection::Indices(vec![1, 0, 1]),
+        );
+        let lb_empty_mask = make_utf8_i64_batch(
+            &left_schema,
+            &[Some("z")],
+            &[7],
+            Selection::Mask(Bitmap::from_bools(&[false])),
+        );
+
+        let l_src =
+            BatchSource::new(Arc::clone(&left_schema), vec![lb0, lb1, lb2, lb_empty_mask]).unwrap();
+        let r_src = BatchSource::empty(Arc::clone(&right_schema));
+        let (ctx, _dir) = make_ctx(4 * 1024 * 1024, 4 * 1024 * 1024);
+        let ctx = ExecContext {
+            target_partitions: 4,
+            ..ctx
+        };
+
+        let expected_schema = join_output_schema(JoinType::Left, &left_schema, &right_schema);
+        let spec = HashJoinSpec {
+            join_type: JoinType::Left,
+            left_keys: vec![col_expr(0, "lk", DataType::Utf8)],
+            right_keys: vec![col_expr(0, "rk", DataType::Utf8)],
+            null_equals_null: false,
+            residual_filter: None,
+        };
+        let expected = extract_utf8_i64_pair_rows(
+            &drain_stream(
+                execute_hash_join(
+                    l_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+                    Arc::clone(&left_schema),
+                    r_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+                    Arc::clone(&right_schema),
+                    spec.clone(),
+                    &ctx,
+                )
+                .unwrap(),
+                &ctx.eval.cancel,
+            )
+            .unwrap(),
+        );
+
+        let l_streams = l_src.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+        let left_len = l_streams.len();
+        assert_eq!(left_len, 4);
+        let par_streams = execute_hash_join_parallel(
+            l_streams,
+            Arc::clone(&left_schema),
+            r_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            Arc::clone(&right_schema),
+            spec,
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(par_streams.len(), left_len);
+
+        let mut caller_res = ctx.pool.register("caller_left_empty_rhs", false);
+        caller_res.try_grow(256).unwrap();
+        let mut out_batches = Vec::new();
+        for mut s in par_streams {
+            while let Some(b) = s
+                .next_batch(&ctx.eval.cancel, Some(&mut caller_res))
+                .unwrap()
+            {
+                assert_eq!(b.schema().as_ref(), expected_schema.as_ref());
+                assert_eq!(caller_res.size(), 256 + b.memory_bytes());
+                caller_res.shrink(b.memory_bytes());
+                out_batches.push(b);
+            }
+            assert_eq!(caller_res.size(), 256);
+        }
+        drop(caller_res);
+
+        let actual = extract_utf8_i64_pair_rows(&out_batches);
+        assert_eq!(actual, expected);
+        assert!(
+            actual
+                .iter()
+                .all(|(_, _, rk, rv)| rk.is_none() && rv.is_none())
+        );
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        // Inner join with empty RHS returns 0 streams.
+        let inner_streams = execute_hash_join_parallel(
+            l_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            Arc::clone(&left_schema),
+            r_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            Arc::clone(&right_schema),
+            HashJoinSpec {
+                join_type: JoinType::Inner,
+                left_keys: vec![col_expr(0, "lk", DataType::Utf8)],
+                right_keys: vec![col_expr(0, "rk", DataType::Utf8)],
+                null_equals_null: false,
+                residual_filter: None,
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert!(inner_streams.is_empty());
+        assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn parallel_inner_join_tight_pool_falls_back_to_spillable_stream() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("k", DataType::I64, true),
+            Field::new("pad", DataType::Utf8, false),
+        ])
+        .unwrap();
+
+        let make_batches = |num_batches: usize,
+                            rows_per_batch: usize,
+                            key_offset: i64|
+         -> Vec<Batch> {
+            let mut out = Vec::with_capacity(num_batches);
+            for b in 0..num_batches {
+                let mut keys = Vec::with_capacity(rows_per_batch);
+                let mut pads = Vec::with_capacity(rows_per_batch);
+                for r in 0..rows_per_batch {
+                    let g = (b * rows_per_batch + r) as i64;
+                    keys.push((key_offset + g) % 500);
+                    pads.push(format!(
+                        "row-{g:05}-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                    ));
+                }
+                out.push(
+                    Batch::try_new_all(
+                        Arc::clone(&schema),
+                        vec![
+                            Column::Flat(FlatColumn::try_new(FlatData::I64(keys), None).unwrap()),
+                            Column::Flat(
+                                FlatColumn::try_new(
+                                    FlatData::Utf8(
+                                        Utf8Data::try_from_slices(pads.iter().map(String::as_str))
+                                            .unwrap(),
+                                    ),
+                                    None,
+                                )
+                                .unwrap(),
+                            ),
+                        ],
+                        rows_per_batch,
+                    )
+                    .unwrap(),
+                );
+            }
+            out
+        };
+
+        let l_src = BatchSource::new(Arc::clone(&schema), make_batches(4, 150, 0)).unwrap();
+        let r_src = BatchSource::new(Arc::clone(&schema), make_batches(12, 200, 100)).unwrap();
+
+        let (big_ctx, _big_dir) = make_ctx(16 * 1024 * 1024, 32 * 1024 * 1024);
+        let big_ctx = ExecContext {
+            workers: Arc::new(WorkerPool::new(4).unwrap()),
+            target_partitions: 4,
+            ..big_ctx
+        };
+        let (tight_ctx, _tight_dir) = make_ctx(64 * 1024, 32 * 1024 * 1024);
+        let tight_ctx = ExecContext {
+            workers: Arc::new(WorkerPool::new(4).unwrap()),
+            target_partitions: 4,
+            ..tight_ctx
+        };
+
+        for jt in [JoinType::Inner, JoinType::Left] {
+            let spec = HashJoinSpec {
+                join_type: jt,
+                left_keys: vec![col_expr(0, "k", DataType::I64)],
+                right_keys: vec![col_expr(0, "k", DataType::I64)],
+                null_equals_null: false,
+                residual_filter: None,
+            };
+
+            let extract_rows = |batches: &[Batch]| {
+                let mut rows = Vec::new();
+                for b in batches {
+                    for r in 0..b.num_rows() {
+                        let lk = read_i64(b.column(0).unwrap(), r).unwrap();
+                        let lp = read_str(b.column(1).unwrap(), r).unwrap().to_owned();
+                        let rk = (!b.column(2).unwrap().is_null(r))
+                            .then(|| read_i64(b.column(2).unwrap(), r).unwrap());
+                        let rp = (!b.column(3).unwrap().is_null(r))
+                            .then(|| read_str(b.column(3).unwrap(), r).unwrap().to_owned());
+                        rows.push((lk, lp, rk, rp));
+                    }
+                }
+                rows.sort();
+                rows
+            };
+
+            let expected = extract_rows(
+                &drain_stream(
+                    execute_hash_join(
+                        l_src
+                            .open_partitions(&ScanSpec::default(), &big_ctx)
+                            .unwrap(),
+                        Arc::clone(&schema),
+                        r_src
+                            .open_partitions(&ScanSpec::default(), &big_ctx)
+                            .unwrap(),
+                        Arc::clone(&schema),
+                        spec.clone(),
+                        &big_ctx,
+                    )
+                    .unwrap(),
+                    &big_ctx.eval.cancel,
+                )
+                .unwrap(),
+            );
+
+            let par_streams = execute_hash_join_parallel(
+                l_src
+                    .open_partitions(&ScanSpec::default(), &tight_ctx)
+                    .unwrap(),
+                Arc::clone(&schema),
+                r_src
+                    .open_partitions(&ScanSpec::default(), &tight_ctx)
+                    .unwrap(),
+                Arc::clone(&schema),
+                spec,
+                &tight_ctx,
+            )
+            .unwrap();
+            assert_eq!(par_streams.len(), 1);
+            assert!(!tight_ctx.eval.cancel.is_cancelled());
+
+            let actual =
+                extract_rows(&drain_parallel(par_streams, &tight_ctx.eval.cancel).unwrap());
+            assert_eq!(actual, expected, "tight pool fallback mismatch for {jt:?}");
             assert_eq!(tight_ctx.pool.reserved(), 0);
             assert_eq!(tight_ctx.spill.spilled_bytes(), 0);
         }
