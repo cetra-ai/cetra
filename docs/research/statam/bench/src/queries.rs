@@ -13,10 +13,10 @@ use arrow::datatypes::SchemaRef;
 use bytes::Bytes;
 use cetra_column::{Batch, Column, FlatData, Selection};
 use cetra_statam::{
-    ChunkPackBuilder, ChunkPackReader, CoalesceMode, IdLookup, InMemoryPackResolver, PackResolver,
-    PackWriteOptions, Predicate, RangeReader, S3_CACHE_BLOCK_BYTES, ScanRequest, SimulatedS3Config,
-    SliceReader, StatamError, StatamReader, StatamWriter, SubstringQuery, TableKind, TimeRange,
-    WriteOptions, WriteProfile, ZonePred, ZoneValue,
+    ChunkPackBuilder, ChunkPackReader, CoalesceMode, IdLookup, InMemoryPackResolver, MapReadMode,
+    PackResolver, PackWriteOptions, Predicate, RangeReader, S3_CACHE_BLOCK_BYTES, ScanRequest,
+    SimulatedS3Config, SliceReader, StatamError, StatamReader, StatamWriter, SubstringQuery,
+    TableKind, TimeRange, WriteOptions, WriteProfile, ZonePred, ZoneValue,
 };
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
@@ -1635,7 +1635,10 @@ pub fn run_statam_query(
         },
         (TableKindBench::Spans, "map_key_lookup") => ScanRequest {
             projection: Some(vec![1, 6]),
-            map_keys: vec![("metadata".to_owned(), "customer_id".to_owned())],
+            map_projections: HashMap::from([(
+                "metadata".to_owned(),
+                MapReadMode::Keys(vec!["customer_id".to_owned()]),
+            )]),
             predicates: vec![Predicate::map_key(
                 "metadata",
                 "customer_id",
@@ -1645,7 +1648,10 @@ pub fn run_statam_query(
         },
         (TableKindBench::Scores, "map_key_lookup") => ScanRequest {
             projection: Some(vec![1, 20]),
-            map_keys: vec![("metadata".to_owned(), "customer_id".to_owned())],
+            map_projections: HashMap::from([(
+                "metadata".to_owned(),
+                MapReadMode::Keys(vec!["customer_id".to_owned()]),
+            )]),
             predicates: vec![Predicate::map_key(
                 "metadata",
                 "customer_id",
@@ -1655,12 +1661,12 @@ pub fn run_statam_query(
         },
         (TableKindBench::Spans, "substring_rare") => ScanRequest {
             projection: Some(vec![1]),
-            substrings: vec![SubstringQuery::ilike("input", RARE_NEEDLE)],
+            substrings: vec![vec![SubstringQuery::ilike("input", RARE_NEEDLE)]],
             ..ScanRequest::default()
         },
         (TableKindBench::Spans, "substring_absent") => ScanRequest {
             projection: Some(vec![1]),
-            substrings: vec![SubstringQuery::ilike("input", ABSENT_NEEDLE)],
+            substrings: vec![vec![SubstringQuery::ilike("input", ABSENT_NEEDLE)]],
             ..ScanRequest::default()
         },
         _ => ScanRequest::default(),
@@ -1795,7 +1801,7 @@ fn agg_statam_batch(b: &Batch, agg: &mut BTreeMap<(i64, String), (usize, f64, i6
     let tok_view = I64ColView::from_col(&b.columns()[2]);
     let cost_view = F64ColView::from_col(&b.columns()[3]);
 
-    match model_col {
+    match model_col.as_ref() {
         Column::Dict(d) => {
             if let FlatData::Utf8(dict_utf8) = d.values().data() {
                 let codes = d.codes();

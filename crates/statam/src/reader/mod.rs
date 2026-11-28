@@ -29,9 +29,10 @@ use crate::codec::nested::{
 };
 use crate::codec::{ZonePred, decode_mini_block};
 use crate::format::{
-    BLOCK_FRAME_HEADER_LEN, BlockEntry, CHECKSUM_ALG_CRC32C, COL_FLAG_HAS_FILE_DICT,
-    COL_FLAG_HAS_TRIGRAM_INDEX, Encoding, FILE_HEADER_LEN, FileHeader, LocalityGroup,
-    MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, RowGroupEntry, read_framed_block_checked_cow,
+    BLOCK_FLAG_NO_INLINE_PAYLOADS, BLOCK_FRAME_HEADER_LEN, BlockEntry, CHECKSUM_ALG_CRC32C,
+    COL_FLAG_HAS_FILE_DICT, COL_FLAG_HAS_TRIGRAM_INDEX, Encoding, FILE_HEADER_LEN, FileHeader,
+    LocalityGroup, MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES, RowGroupEntry,
+    read_framed_block_checked_cow,
 };
 use crate::io::RangeReader;
 use crate::parallel::{
@@ -39,7 +40,7 @@ use crate::parallel::{
     parallel_map_in_order_static,
 };
 use crate::payload::pack::ChunkPackReader;
-use crate::payload::search::RetainedPackChunks;
+use crate::payload::search::{RetainedPackChunks, pack_short_circuits_all};
 use crate::payload::{
     FlatPayloadRefs, PayloadRefRow, decode_payload_refs_flat, decode_payload_refs_selected,
 };
@@ -541,6 +542,116 @@ impl StatamReader {
             && !self.meta.schema_meta.pack_ids.is_empty()
             && self.meta.schema_meta.pack_ids.len() <= 4
             && self.has_uncached_packs()
+    }
+
+    /// Returns `Ok(true)` if Row Group `rg_idx` is guaranteed to have zero matches for at least
+    /// one CNF substring clause using ONLY external `.stpk` trigram filters, allowing the caller
+    /// to skip Wave 1 `.statam` data fetches (`0` `.statam` data GETs).
+    ///
+    /// Soundness invariants:
+    /// 1. `rg.l0_payload_len == 0` (no local L0 chunks exist in this RG).
+    /// 2. `!self.meta.schema_meta.pack_ids.is_empty()` and `self.packs.is_some()`.
+    /// 3. Some non-empty CNF clause in `subs` contains ONLY `ExternalPayload` disjuncts whose
+    ///    surviving mini-blocks are all either `Encoding::ConstNull` or
+    ///    `(Encoding::PayloadRefs && (block_flags & BLOCK_FLAG_NO_INLINE_PAYLOADS) != 0)`.
+    /// 4. For every disjunct in that clause with at least one non-`ConstNull` surviving MB,
+    ///    every pack in `self.meta.schema_meta.pack_ids` resolves and
+    ///    `pack_short_circuits_all(&pack, &sq.needle, sq.case_insensitive)?` returns `true`.
+    /// 5. When `!allow_open_packs` (narrow filters are also present and might prune the RG
+    ///    without opening `.stpk`), only already-cached packs are consulted.
+    /// 6. If `resolve_pack` returns `Err(StatamError::MissingPack { .. })`, fall through to normal
+    ///    Wave 1 instead of failing early.
+    pub(super) fn rg_pruned_by_external_packs(
+        &self,
+        rg_idx: usize,
+        surviving_mbs: &[usize],
+        subs: &[Vec<(usize, SubstringQuery)>],
+        allow_open_packs: bool,
+    ) -> Result<bool, StatamError> {
+        if subs.is_empty()
+            || surviving_mbs.is_empty()
+            || self.packs.is_none()
+            || self.meta.schema_meta.pack_ids.is_empty()
+            || self.meta.rg_dir[rg_idx].l0_payload_len != 0
+        {
+            return Ok(false);
+        }
+
+        let mut resolved_packs: Option<Vec<Arc<ChunkPackReader>>> = None;
+
+        'clause: for clause in subs {
+            if clause.is_empty() {
+                continue;
+            }
+            let mut active_disjuncts: Vec<&SubstringQuery> = Vec::new();
+            for (cidx, sq) in clause {
+                if self.meta.col_dir[*cidx].locality_group != LocalityGroup::ExternalPayload {
+                    continue 'clause;
+                }
+                let blks = self.meta.rg_blocks(*cidx, rg_idx);
+                let mut has_non_null = false;
+                for &mb_idx in surviving_mbs {
+                    let blk = &blks[mb_idx];
+                    if blk.encoding == Encoding::ConstNull {
+                        continue;
+                    }
+                    if blk.encoding != Encoding::PayloadRefs
+                        || (blk.block_flags & BLOCK_FLAG_NO_INLINE_PAYLOADS) == 0
+                    {
+                        continue 'clause;
+                    }
+                    has_non_null = true;
+                }
+                if has_non_null {
+                    active_disjuncts.push(sq);
+                }
+            }
+            if active_disjuncts.is_empty() {
+                return Ok(true);
+            }
+
+            let packs: &[Arc<ChunkPackReader>] = match resolved_packs {
+                Some(ref p) => p.as_slice(),
+                None => {
+                    let mut loaded = Vec::with_capacity(self.meta.schema_meta.pack_ids.len());
+                    if allow_open_packs {
+                        for &pack_id in &self.meta.schema_meta.pack_ids {
+                            match self.resolve_pack(pack_id) {
+                                Ok(pack) => loaded.push(pack),
+                                Err(StatamError::MissingPack { .. }) => return Ok(false),
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    } else {
+                        let guard = self.caches.lock().unwrap_or_else(|p| p.into_inner());
+                        for &pack_id in &self.meta.schema_meta.pack_ids {
+                            let Some(pack) = guard.packs.get(&pack_id) else {
+                                return Ok(false);
+                            };
+                            loaded.push(Arc::clone(pack));
+                        }
+                    }
+                    resolved_packs.insert(loaded).as_slice()
+                }
+            };
+
+            let mut clause_pruned = true;
+            for sq in active_disjuncts {
+                for pack in packs {
+                    if !pack_short_circuits_all(pack, &sq.needle, sq.case_insensitive)? {
+                        clause_pruned = false;
+                        break;
+                    }
+                }
+                if !clause_pruned {
+                    break;
+                }
+            }
+            if clause_pruned {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Speculatively opens uncached `.stpk` packs (`ChunkPackReader::open` ONLY — never
@@ -1076,6 +1187,18 @@ impl StatamReader {
                 &dict_sub_bitmaps,
             )?;
             if surviving_mbs.is_empty() {
+                continue;
+            }
+            let allow_pre_wave1_pack_open = resolved_preds.is_empty()
+                && resolved_filter_exprs.is_empty()
+                && time_col_idx.is_none()
+                && resolved_lookups.is_empty();
+            if self.rg_pruned_by_external_packs(
+                rg_idx,
+                &surviving_mbs,
+                &resolved_subs,
+                allow_pre_wave1_pack_open,
+            )? {
                 continue;
             }
 
@@ -2379,8 +2502,20 @@ impl StatamReader {
             .iter()
             .any(|&cidx| self.meta.col_dir[cidx].locality_group == LocalityGroup::ExternalPayload);
 
+        let allow_pre_wave1_pack_open = preds.is_empty()
+            && filter_exprs.is_empty()
+            && time_col_idx.is_none()
+            && lookups.is_empty();
         let mut planned = Vec::with_capacity(surviving_rgs.len());
         for (rg_idx, surviving_mbs) in surviving_rgs {
+            if self.rg_pruned_by_external_packs(
+                rg_idx,
+                &surviving_mbs,
+                subs,
+                allow_pre_wave1_pack_open,
+            )? {
+                continue;
+            }
             let rg = &self.meta.rg_dir[rg_idx];
             let plan = Arc::new(self.build_rg_io_plan(
                 rg_idx,

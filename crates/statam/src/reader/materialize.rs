@@ -18,8 +18,8 @@ use crate::codec::{
     decode_mini_block_selected, decode_mini_block_selected_parallel_bytes, decode_mini_block_take,
 };
 use crate::format::{
-    BLOCK_FLAG_FSST_SUBCHUNKED, COL_FLAG_HAS_FILE_DICT, Encoding, LocalityGroup,
-    MAX_BATCH_DECODED_BYTES,
+    BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_PLAIN_SUBCHUNKED, COL_FLAG_HAS_FILE_DICT, Encoding,
+    LocalityGroup, MAX_BATCH_DECODED_BYTES,
 };
 use crate::parallel::{MAX_PARALLEL_THREADS, in_parallel_scope, parallel_map_in_order_static};
 use crate::payload::{decode_payload_refs_flat, decode_payload_refs_selected};
@@ -537,12 +537,12 @@ fn materialize_phase2_mb_with_meta(
             }
         }
 
-        let can_parallel_fsst =
+        let can_parallel_subchunked =
             !in_parallel_scope() && (mask.all_ones() || mask.count_ones() >= 1024);
         let mut slots: Vec<Option<Column>> = vec![None; proj_indices.len()];
         let mut regular_tasks: Vec<(usize, usize, Option<Arc<FileDict>>)> = Vec::new();
-        let mut large_fsst_tasks: Vec<(usize, Vec<usize>)> = Vec::new();
-        let mut large_fsst_pos: HashMap<usize, usize> = HashMap::new();
+        let mut large_subchunked_tasks: Vec<(usize, Vec<usize>)> = Vec::new();
+        let mut large_subchunked_pos: HashMap<usize, usize> = HashMap::new();
         for (pos, &cidx) in proj_indices.iter().enumerate() {
             let dt = &fields[cidx].data_type;
             let cd = &meta.col_dir[cidx];
@@ -564,18 +564,21 @@ fn materialize_phase2_mb_with_meta(
                 )?);
             } else {
                 let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
-                if can_parallel_fsst
-                    && blk.encoding == Encoding::Fsst
-                    && (blk.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0
+                let is_subchunked_varlen = (blk.encoding == Encoding::Fsst
+                    && (blk.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0)
+                    || (blk.encoding == Encoding::Plain
+                        && (blk.block_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0);
+                if can_parallel_subchunked
+                    && is_subchunked_varlen
                     && matches!(dt, DataType::Utf8 | DataType::Binary)
                     && blk.raw_len >= 128 * 1024
                 {
-                    if let Some(&idx) = large_fsst_pos.get(&cidx) {
-                        large_fsst_tasks[idx].1.push(pos);
+                    if let Some(&idx) = large_subchunked_pos.get(&cidx) {
+                        large_subchunked_tasks[idx].1.push(pos);
                     } else {
-                        let idx = large_fsst_tasks.len();
-                        large_fsst_pos.insert(cidx, idx);
-                        large_fsst_tasks.push((cidx, vec![pos]));
+                        let idx = large_subchunked_tasks.len();
+                        large_subchunked_pos.insert(cidx, idx);
+                        large_subchunked_tasks.push((cidx, vec![pos]));
                     }
                 } else {
                     regular_tasks.push((pos, cidx, pre_dicts.get(&cidx).map(Arc::clone)));
@@ -640,9 +643,9 @@ fn materialize_phase2_mb_with_meta(
             }
         }
 
-        // Large sub-chunked FSST columns run at top level (outside `in_parallel_scope()`) so
+        // Large sub-chunked FSST/Plain columns run at top level (outside `in_parallel_scope()`) so
         // they fan out across all `threads` workers per column via zero-copy `Bytes`.
-        for (cidx, positions) in large_fsst_tasks {
+        for (cidx, positions) in large_subchunked_tasks {
             let dt = &fields[cidx].data_type;
             let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
             let raw_bytes = read_block.read_block_bytes(blk)?;

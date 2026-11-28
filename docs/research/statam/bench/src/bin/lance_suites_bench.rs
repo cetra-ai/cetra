@@ -5221,7 +5221,7 @@ async fn run_fineweb_suite(
 
         let statam_req = ScanRequest {
             projection: Some(pq_proj),
-            substrings: vec![SubstringQuery::like("text", needle)],
+            substrings: vec![vec![SubstringQuery::like("text", needle)]],
             read_threads,
             ..ScanRequest::default()
         };

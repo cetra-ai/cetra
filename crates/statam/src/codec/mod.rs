@@ -19,16 +19,17 @@ use crate::StatamError;
 use crate::codec::dict::{FileDict, decode_dict_column, decode_dict_take, encode_dict_codes_body};
 use crate::codec::nested::{decode_nested_column, encode_nested_column};
 use crate::codec::numeric::{
-    decode_const_block, decode_inner_flat, decode_inner_flat_selected, decode_inner_take,
-    decode_narrow_column, decode_narrow_column_selected, decode_narrow_column_take,
-    decode_plain_varlen_selected, encode_narrow_column_with_locality, parse_rle_header,
-    read_optional_nulls, split_optional_null_bytes, try_encode_const_or_null,
+    PlainSubchunkedView, decode_const_block, decode_inner_flat, decode_inner_flat_selected,
+    decode_inner_take, decode_narrow_column, decode_narrow_column_selected,
+    decode_narrow_column_take, decode_plain_varlen_selected, encode_narrow_column_with_locality,
+    parse_rle_header, read_optional_nulls, split_optional_null_bytes, try_encode_const_or_null,
     validate_inner_take_body, write_optional_nulls,
 };
 use crate::codec::zonemap::{compute_zone_map, count_col_nulls};
 use crate::format::{
     BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_HAS_NULLS,
-    BLOCK_FLAG_MIN_MAX_VALID, BlockEntry, Codec, Encoding, KNOWN_BLOCK_FLAGS, MAX_NESTING_DEPTH,
+    BLOCK_FLAG_MIN_MAX_VALID, BLOCK_FLAG_NO_INLINE_PAYLOADS, BLOCK_FLAG_PLAIN_SUBCHUNKED,
+    BlockEntry, Codec, Encoding, MAX_NESTING_DEPTH, write_framed_block_adaptive,
     write_framed_block_with_min_savings,
 };
 
@@ -202,6 +203,66 @@ impl EncodedMiniBlock {
             0,
             out,
         )
+    }
+
+    /// Frames this mini-block into `out` (unless inline `ConstNull`/`Const`) using single-pass
+    /// adaptive LZ4-vs-Zstd selection when `preferred_codec == Codec::Zstd && lz4_pct_cap > 0`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_framed_entry_adaptive(
+        &self,
+        first_row: u32,
+        row_count: u16,
+        base_offset: u64,
+        zstd_level: i32,
+        lz4_pct_cap: u16,
+        min_savings_pct: u8,
+        out: &mut Vec<u8>,
+    ) -> Result<BlockEntry, StatamError> {
+        if self.encoding == Encoding::ConstNull || self.encoding == Encoding::Const {
+            return Ok(BlockEntry {
+                first_row,
+                row_count,
+                null_count: self.null_count,
+                offset: 0,
+                stored_len: 0,
+                raw_len: 0,
+                encoding: self.encoding,
+                codec: Codec::None,
+                block_flags: self.block_flags,
+                min_inline_len: self.min_inline_len,
+                max_inline_len: self.max_inline_len,
+                reserved: [0; 3],
+                min_inline: self.min_inline,
+                max_inline: self.max_inline,
+            });
+        }
+
+        let offset = base_offset + out.len() as u64;
+        let info = write_framed_block_adaptive(
+            self.encoding,
+            &self.raw_body,
+            self.preferred_codec,
+            zstd_level,
+            lz4_pct_cap,
+            min_savings_pct,
+            out,
+        )?;
+        Ok(BlockEntry {
+            first_row,
+            row_count,
+            null_count: self.null_count,
+            offset,
+            stored_len: info.stored_len,
+            raw_len: info.raw_len,
+            encoding: self.encoding,
+            codec: info.codec,
+            block_flags: self.block_flags,
+            min_inline_len: self.min_inline_len,
+            max_inline_len: self.max_inline_len,
+            reserved: [0; 3],
+            min_inline: self.min_inline,
+            max_inline: self.max_inline,
+        })
     }
 
     /// Frames this mini-block into `out` (unless inline `ConstNull`/`Const`), requiring at
@@ -458,14 +519,23 @@ pub(crate) fn encode_dict_codes_precomputed(
 
 #[inline]
 fn validate_block_entry_flags(entry: &BlockEntry) -> Result<(), StatamError> {
-    if (entry.block_flags & !KNOWN_BLOCK_FLAGS) != 0 {
-        return Err(StatamError::Corrupt {
-            reason: "unknown block directory flags",
-        });
-    }
     if (entry.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0 && entry.encoding != Encoding::Fsst {
         return Err(StatamError::Corrupt {
             reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst encoding",
+        });
+    }
+    if (entry.block_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0
+        && (entry.encoding != Encoding::Plain || entry.codec != Codec::None)
+    {
+        return Err(StatamError::Corrupt {
+            reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED requires Plain encoding with Codec::None",
+        });
+    }
+    if (entry.block_flags & BLOCK_FLAG_NO_INLINE_PAYLOADS) != 0
+        && entry.encoding != Encoding::PayloadRefs
+    {
+        return Err(StatamError::Corrupt {
+            reason: "BLOCK_FLAG_NO_INLINE_PAYLOADS set on non-PayloadRefs encoding",
         });
     }
     Ok(())
@@ -582,6 +652,8 @@ pub fn decode_mini_block_selected(
             return decode_nested_column_selected(raw_body, entry, dt, MAX_NESTING_DEPTH, mask);
         }
         if entry.encoding == Encoding::Fsst
+            || (entry.encoding == Encoding::Plain
+                && (entry.block_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0)
             || (matches!(
                 entry.encoding,
                 Encoding::Plain
@@ -599,7 +671,8 @@ pub fn decode_mini_block_selected(
 }
 
 /// Decodes one mini-block from owned zero-copy `raw_body: Bytes`, parallelizing sub-chunked
-/// `Fsst` (`Utf8` / `Binary`) decode across `threads` when eligible and outside a parallel scope.
+/// `Fsst` and `Plain` (`Utf8` / `Binary`) decode across `threads` when eligible and outside a
+/// parallel scope.
 pub(crate) fn decode_mini_block_selected_parallel_bytes(
     raw_body: Bytes,
     entry: &BlockEntry,
@@ -615,6 +688,42 @@ pub(crate) fn decode_mini_block_selected_parallel_bytes(
         return Err(StatamError::Corrupt {
             reason: "selection mask length mismatch",
         });
+    }
+    if threads > 1
+        && !crate::parallel::in_parallel_scope()
+        && row_count > 0
+        && entry.encoding == Encoding::Plain
+        && (entry.block_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0
+        && matches!(dt, DataType::Utf8 | DataType::Binary)
+        && (mask.all_ones() || mask.count_ones() >= 1024)
+    {
+        let (nulls, after_nulls) = read_optional_nulls(&raw_body, row_count, entry.block_flags)?;
+        let nulls_prefix_len = raw_body.len() - after_nulls.len();
+        let (offsets, bytes) = if mask.all_ones() {
+            PlainSubchunkedView::decode_all_parallel_bytes(
+                raw_body,
+                nulls_prefix_len,
+                row_count,
+                crate::MAX_BLOCK_RAW_BYTES,
+                threads,
+            )?
+        } else {
+            PlainSubchunkedView::decode_selected_parallel_bytes(
+                raw_body,
+                nulls_prefix_len,
+                row_count,
+                mask,
+                nulls.as_ref(),
+                crate::MAX_BLOCK_RAW_BYTES,
+                threads,
+            )?
+        };
+        let data = match dt {
+            DataType::Utf8 => FlatData::Utf8(Utf8Data::try_new(offsets, bytes)?),
+            DataType::Binary => FlatData::Binary(BinaryData::try_new(offsets, bytes)?),
+            _ => unreachable!(),
+        };
+        return Ok(Column::Flat(FlatColumn::try_new(data, nulls)?));
     }
     if threads > 1
         && !crate::parallel::in_parallel_scope()
@@ -824,7 +933,7 @@ fn decode_rle_block_selected(
     }
 
     if selected_runs == 0 || !any_valid_run {
-        validate_inner_take_body(inner_body, inner_enc, false, dt, num_runs)?;
+        validate_inner_take_body(inner_body, inner_enc, 0, dt, num_runs)?;
         return Ok(Column::Const {
             value: ScalarValue::Null(dt.clone()),
             len: row_count,
@@ -4432,7 +4541,13 @@ mod tests {
         assert!(matches!(
             decode_shredded_subcol(&build_bad_subcol(Encoding::Fsst as u8, 0x40), 2),
             Err(StatamError::Corrupt {
-                reason: "unknown shredded subcol flags",
+                reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED set on non-Plain shredded subcol",
+            })
+        ));
+        assert!(matches!(
+            decode_shredded_subcol(&build_bad_subcol(Encoding::Plain as u8, 0x80), 2),
+            Err(StatamError::Corrupt {
+                reason: "BLOCK_FLAG_NO_INLINE_PAYLOADS forbidden on shredded subcol",
             })
         ));
     }

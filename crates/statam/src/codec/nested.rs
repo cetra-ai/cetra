@@ -22,21 +22,20 @@ use crate::codec::fsst::{
     decode_fsst_utf8_selected_with_flag, decode_fsst_utf8_subchunked, encode_fsst_body,
 };
 use crate::codec::numeric::{
-    decode_const_block, decode_inner_data, decode_plain_map_keys_only, decode_plain_map_selected,
-    decode_plain_varlen_selected, decode_rle_block, encode_delta_bitpack_body,
-    encode_for_bitpack_body, encode_plain_body, encode_plain_utf8, read_optional_nulls,
-    read_u32_le_at, try_encode_const_or_null, validate_plain_offsets_raw, write_optional_nulls,
+    PlainSubchunkedView, decode_const_block, decode_inner_data, decode_plain_map_keys_only,
+    decode_plain_map_selected, decode_plain_varlen_selected, decode_rle_block,
+    encode_delta_bitpack_body, encode_for_bitpack_body, encode_plain_body, encode_plain_utf8,
+    read_optional_nulls, read_u32_le_at, try_encode_const_or_null, validate_plain_offsets_raw,
+    write_optional_nulls,
 };
 use crate::codec::zonemap::{ZoneMapSummary, compute_zone_map, count_col_nulls};
 use crate::codec::{
     EncodedMiniBlock, FastUtf8Ref, WriteProfile, preferred_block_codec, utf8_bytes_at, utf8_len_at,
 };
 use crate::format::{
-    BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_HAS_NULLS, BlockEntry, Codec, Encoding,
-    KNOWN_BLOCK_FLAGS, MAX_SHREDDED_KEYS,
+    BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_HAS_NULLS, BLOCK_FLAG_NO_INLINE_PAYLOADS,
+    BLOCK_FLAG_PLAIN_SUBCHUNKED, BlockEntry, Codec, Encoding, MAX_SHREDDED_KEYS,
 };
-#[cfg(not(miri))]
-use crate::format::{MAX_DECOMPRESS_RATIO, MAX_DECOMPRESS_SLACK};
 use crate::simd::bitpack::{min_bits_u32, pack_u32, packed_bytes_len, unpack_u32, unpack_u32_at};
 use crate::{MAX_BLOCK_RAW_BYTES, MAX_DICT_BYTES, StatamError};
 
@@ -1196,7 +1195,7 @@ pub(crate) fn encode_shredded_subcol_with_codec(
     out.extend_from_slice(&(child_payload.body.len() as u32).to_le_bytes());
     out.extend_from_slice(&child_payload.body);
 
-    let codec = if child_payload.has_subchunked_fsst {
+    let codec = if child_payload.has_subchunked {
         Codec::None
     } else {
         preferred_block_codec(profile, out.len(), true)
@@ -1236,14 +1235,19 @@ fn parse_shredded_subcol_header(
     }
     let enc = Encoding::from_u8(rest[0])?;
     let flags = rest[1];
-    if (flags & !KNOWN_BLOCK_FLAGS) != 0 {
-        return Err(StatamError::Corrupt {
-            reason: "unknown shredded subcol flags",
-        });
-    }
     if (flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0 && enc != Encoding::Fsst {
         return Err(StatamError::Corrupt {
             reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst shredded subcol",
+        });
+    }
+    if (flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0 && enc != Encoding::Plain {
+        return Err(StatamError::Corrupt {
+            reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED set on non-Plain shredded subcol",
+        });
+    }
+    if (flags & BLOCK_FLAG_NO_INLINE_PAYLOADS) != 0 {
+        return Err(StatamError::Corrupt {
+            reason: "BLOCK_FLAG_NO_INLINE_PAYLOADS forbidden on shredded subcol",
         });
     }
     let min_inline_len = rest[2];
@@ -1388,8 +1392,25 @@ pub fn decode_shredded_subcol_selected(
         Column::Flat(FlatColumn::try_new(FlatData::Utf8(u), out_nulls)?)
     } else if hdr.enc == Encoding::Plain {
         let (nulls, after_nulls) = read_optional_nulls(hdr.body, row_count, hdr.flags)?;
-        let (offsets, bytes) =
-            decode_plain_varlen_selected(after_nulls, row_count, mask, nulls.as_ref())?;
+        let (offsets, bytes) = if (hdr.flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0 {
+            let mut budget = MAX_BLOCK_RAW_BYTES;
+            let base_bytes = row_count
+                .div_ceil(8)
+                .saturating_mul(2 + usize::from(nulls.is_some()))
+                .saturating_add(row_count.saturating_add(1).saturating_mul(4));
+            debit_budget(
+                &mut budget,
+                base_bytes,
+                "shredded subcol exceeds MAX_BLOCK_RAW_BYTES",
+            )?;
+            PlainSubchunkedView::parse(after_nulls, row_count)?.decode_selected(
+                mask,
+                nulls.as_ref(),
+                budget,
+            )?
+        } else {
+            decode_plain_varlen_selected(after_nulls, row_count, mask, nulls.as_ref())?
+        };
         Column::Flat(FlatColumn::try_new(
             FlatData::Utf8(Utf8Data::try_new(offsets, bytes)?),
             nulls,
@@ -1537,43 +1558,7 @@ fn encode_shredded_residual_block_with_zm(
         raw.extend_from_slice(&val_bytes);
     }
 
-    let preferred_codec = if profile == WriteProfile::L1Compact && raw.len() >= 128 * 1024 {
-        #[cfg(not(miri))]
-        {
-            let ratio_ok = |stored_len: usize| -> bool {
-                (raw.len() as u64)
-                    <= (stored_len as u64)
-                        .saturating_mul(MAX_DECOMPRESS_RATIO)
-                        .saturating_add(MAX_DECOMPRESS_SLACK)
-            };
-            let lz4_len = lz4_flex::block::compress(&raw).len();
-            let lz4_ok = lz4_len.saturating_add(16) < raw.len() && ratio_ok(lz4_len);
-            if lz4_ok {
-                let zstd_len = probe_shredded_residual_zstd_len(&raw)?;
-                let effective_zstd_len =
-                    if zstd_len.saturating_add(16) < raw.len() && ratio_ok(zstd_len) {
-                        zstd_len
-                    } else {
-                        raw.len()
-                    };
-                if (lz4_len as u64).saturating_mul(100)
-                    <= (effective_zstd_len as u64).saturating_mul(112)
-                {
-                    Codec::Lz4
-                } else {
-                    Codec::Zstd
-                }
-            } else {
-                Codec::Zstd
-            }
-        }
-        #[cfg(miri)]
-        {
-            preferred_block_codec(profile, raw.len(), true)
-        }
-    } else {
-        preferred_block_codec(profile, raw.len(), true)
-    };
+    let preferred_codec = preferred_block_codec(profile, raw.len(), true);
 
     Ok(EncodedMiniBlock {
         encoding: Encoding::ShreddedMap,
@@ -1585,31 +1570,6 @@ fn encode_shredded_residual_block_with_zm(
         max_inline: [0u8; 16],
         raw_body: raw,
         preferred_codec,
-    })
-}
-
-#[cfg(not(miri))]
-fn probe_shredded_residual_zstd_len(raw: &[u8]) -> Result<usize, StatamError> {
-    use std::cell::RefCell;
-    thread_local! {
-        static RESIDUAL_ZSTD_COMP: RefCell<Option<zstd::bulk::Compressor<'static>>> =
-            const { RefCell::new(None) };
-    }
-    RESIDUAL_ZSTD_COMP.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        if guard.is_none() {
-            let comp = zstd::bulk::Compressor::new(3).map_err(|_| StatamError::Corrupt {
-                reason: "shredded residual zstd compressor init failed",
-            })?;
-            *guard = Some(comp);
-        }
-        let comp = guard.as_mut().ok_or(StatamError::Corrupt {
-            reason: "shredded residual zstd compressor missing",
-        })?;
-        let compressed = comp.compress(raw).map_err(|_| StatamError::Corrupt {
-            reason: "shredded residual zstd compression failed",
-        })?;
-        Ok(compressed.len())
     })
 }
 
@@ -2929,8 +2889,8 @@ fn encode_nested_column_inner(
             raw.extend_from_slice(&(child_payload.body.len() as u32).to_le_bytes());
             raw.extend_from_slice(&child_payload.body);
 
-            let has_subchunked_fsst = child_payload.has_subchunked_fsst;
-            let preferred_codec = if has_subchunked_fsst {
+            let has_subchunked = child_payload.has_subchunked;
+            let preferred_codec = if has_subchunked {
                 Codec::None
             } else {
                 preferred_block_codec(profile, raw.len(), true)
@@ -2947,7 +2907,7 @@ fn encode_nested_column_inner(
                     raw_body: raw,
                     preferred_codec,
                 },
-                has_subchunked_fsst,
+                has_subchunked,
             ))
         }
         DataType::MapUtf8 => {
@@ -3219,7 +3179,9 @@ fn decode_selected_utf8_or_binary(
     nulls: Option<&Bitmap>,
     budget: &mut usize,
 ) -> Result<SelectedVarlenResult, StatamError> {
-    if enc == Encoding::Fsst && (flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0 {
+    if (enc == Encoding::Fsst && (flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0)
+        || (enc == Encoding::Plain && (flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0)
+    {
         let active_count: usize = mask
             .iter_ones()
             .take_while(|&r| r < row_count)
@@ -3247,9 +3209,13 @@ fn decode_selected_utf8_or_binary(
             base_bytes,
             "active varlen bytes exceed MAX_BLOCK_RAW_BYTES",
         )?;
-        let view = FsstSubchunkedView::parse(body, total_len)?;
-        let (out_offsets, out_bytes, out_nulls) =
-            view.decode_ranges(offsets, row_count, mask, nulls, *budget)?;
+        let (out_offsets, out_bytes, out_nulls) = if enc == Encoding::Fsst {
+            let view = FsstSubchunkedView::parse(body, total_len)?;
+            view.decode_ranges(offsets, row_count, mask, nulls, *budget)?
+        } else {
+            let view = PlainSubchunkedView::parse(body, total_len)?;
+            view.decode_ranges(offsets, row_count, mask, nulls, *budget)?
+        };
         debit_budget(
             budget,
             out_bytes.len(),
@@ -3362,10 +3328,18 @@ fn decode_selected_utf8_or_binary(
 
 fn validate_list_child_header(
     child_enc: Encoding,
+    child_flags: u8,
     child_len: usize,
     inner: &DataType,
     dict: Option<&FileDict>,
 ) -> Result<(), StatamError> {
+    if (child_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0
+        && !(child_enc == Encoding::Plain && matches!(inner, DataType::Utf8 | DataType::Binary))
+    {
+        return Err(StatamError::Corrupt {
+            reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED is only valid for Plain Utf8/Binary ListEncoded child",
+        });
+    }
     if child_len == 0 && child_enc == Encoding::Plain {
         return Ok(());
     }
@@ -3447,14 +3421,19 @@ fn parse_list_child_header(
     }
     let child_enc = Encoding::from_u8(rest[0])?;
     let child_flags = rest[1];
-    if (child_flags & !KNOWN_BLOCK_FLAGS) != 0 {
-        return Err(StatamError::Corrupt {
-            reason: "unknown ListEncoded child flags",
-        });
-    }
     if (child_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0 && child_enc != Encoding::Fsst {
         return Err(StatamError::Corrupt {
             reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst ListEncoded child",
+        });
+    }
+    if (child_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0 && child_enc != Encoding::Plain {
+        return Err(StatamError::Corrupt {
+            reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED set on non-Plain ListEncoded child",
+        });
+    }
+    if (child_flags & BLOCK_FLAG_NO_INLINE_PAYLOADS) != 0 {
+        return Err(StatamError::Corrupt {
+            reason: "BLOCK_FLAG_NO_INLINE_PAYLOADS forbidden on ListEncoded child",
         });
     }
     let child_len = u32::from_le_bytes([rest[2], rest[3], rest[4], rest[5]]) as usize;
@@ -3684,7 +3663,7 @@ fn decode_list_body_selected(
     let dict = hdr.dict;
     let child_body = hdr.child_body;
 
-    validate_list_child_header(child_enc, child_len, inner, dict.as_ref())?;
+    validate_list_child_header(child_enc, child_flags, child_len, inner, dict.as_ref())?;
     if (child_len == 0 || matches!(child_enc, Encoding::ConstNull | Encoding::Const))
         && !child_body.is_empty()
     {
@@ -4711,6 +4690,40 @@ fn decode_child_column(
                 });
             }
             let (nulls, after_nulls) = read_optional_nulls(body, len, flags)?;
+            if (flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0 {
+                if enc != Encoding::Plain || !matches!(dt, DataType::Utf8 | DataType::Binary) {
+                    return Err(StatamError::Corrupt {
+                        reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED is only valid for Plain Utf8/Binary",
+                    });
+                }
+                let nulls_bytes = if nulls.is_some() { len.div_ceil(8) } else { 0 };
+                let offs_bytes = len.checked_add(1).and_then(|n| n.checked_mul(4)).ok_or(
+                    StatamError::BoundsExceeded {
+                        reason: "nested child exceeds MAX_BLOCK_RAW_BYTES",
+                    },
+                )?;
+                let base_bytes =
+                    nulls_bytes
+                        .checked_add(offs_bytes)
+                        .ok_or(StatamError::BoundsExceeded {
+                            reason: "nested child exceeds MAX_BLOCK_RAW_BYTES",
+                        })?;
+                debit_budget(
+                    budget,
+                    base_bytes,
+                    "nested child exceeds MAX_BLOCK_RAW_BYTES",
+                )?;
+                let (offsets, data_bytes) =
+                    PlainSubchunkedView::parse(after_nulls, len)?.decode_all(*budget)?;
+                let n = data_bytes.len();
+                let data = match dt {
+                    DataType::Utf8 => FlatData::Utf8(Utf8Data::try_new(offsets, data_bytes)?),
+                    DataType::Binary => FlatData::Binary(BinaryData::try_new(offsets, data_bytes)?),
+                    _ => unreachable!(),
+                };
+                debit_budget(budget, n, "nested child exceeds MAX_BLOCK_RAW_BYTES")?;
+                return Ok(Column::Flat(FlatColumn::try_new(data, nulls)?));
+            }
             if enc == Encoding::Fsst && (flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0 {
                 let nulls_bytes = if nulls.is_some() { len.div_ceil(8) } else { 0 };
                 let offs_bytes = len.checked_add(1).and_then(|n| n.checked_mul(4)).ok_or(
@@ -4772,7 +4785,7 @@ struct ChildEncodedPayload {
     min_inline: [u8; 16],
     inline_dict: Option<(bool, Vec<u8>)>,
     body: Vec<u8>,
-    has_subchunked_fsst: bool,
+    has_subchunked: bool,
 }
 
 fn encode_child_column_payload(
@@ -4789,7 +4802,7 @@ fn encode_child_column_payload(
             min_inline: [0u8; 16],
             inline_dict: None,
             body: Vec::new(),
-            has_subchunked_fsst: false,
+            has_subchunked: false,
         });
     }
 
@@ -4815,7 +4828,7 @@ fn encode_child_column_payload(
             min_inline: [0u8; 16],
             inline_dict: Some((dict.is_sorted(), dict_bytes)),
             body,
-            has_subchunked_fsst: false,
+            has_subchunked: false,
         });
     }
 
@@ -4848,19 +4861,20 @@ fn encode_child_column_payload(
                 min_inline: [0u8; 16],
                 inline_dict: Some((dict.is_sorted(), dict_bytes)),
                 body,
-                has_subchunked_fsst: false,
+                has_subchunked: false,
             });
         }
     }
 
-    let (enc_block, has_subchunked_fsst) = if matches!(
+    let (enc_block, has_subchunked) = if matches!(
         dt,
         DataType::List(_) | DataType::MapUtf8 | DataType::Events | DataType::Links
     ) {
         encode_nested_column_inner(col, dt, profile, remaining_depth, None)?
     } else {
         let block = crate::codec::numeric::encode_narrow_column(col, dt, profile, None)?;
-        let sub = (block.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0;
+        let sub =
+            (block.block_flags & (BLOCK_FLAG_FSST_SUBCHUNKED | BLOCK_FLAG_PLAIN_SUBCHUNKED)) != 0;
         (block, sub)
     };
     Ok(ChildEncodedPayload {
@@ -4870,7 +4884,7 @@ fn encode_child_column_payload(
         min_inline: enc_block.min_inline,
         inline_dict: None,
         body: enc_block.raw_body,
-        has_subchunked_fsst,
+        has_subchunked,
     })
 }
 

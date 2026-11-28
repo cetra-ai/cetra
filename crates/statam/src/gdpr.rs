@@ -352,7 +352,7 @@ where
                 zstd_level: 3,
                 target_frame_raw_bytes: 64 * 1024,
                 enable_trigram_skip: (toc.postscript.flags & PACK_FLAG_HAS_TRIGRAM) != 0
-                    || toc.frames.iter().any(|f| f.filter_len > 0),
+                    || toc.postscript.trigram_len > 0,
                 compress_toc_lz4: (toc.postscript.flags & (PACK_FLAG_TOC_LZ4 | PACK_FLAG_TOC_ZSTD))
                     != 0,
                 emit_hash_table: toc.postscript.hash_table_off != 0,
@@ -362,8 +362,8 @@ where
             builder.enable_boundary_tracking();
 
             let hashes = pack.read_hash_table()?;
-            let has_hashes = hashes.len() == total_chunks;
-            let trigrams = pack.read_trigram_section()?;
+            let hashes_ok = !pack_opts.emit_hash_table || hashes.len() == total_chunks;
+            let trigrams = pack.trigram_section_cached()?;
             let edges = pack.read_edge_table()?;
             chunk_remap = vec![None; total_chunks];
 
@@ -395,6 +395,10 @@ where
                                     && (edges[cid].0.is_empty() || edges[cid].1.is_empty()))
                             })
                     };
+                    // Never copy a super-frame (`frame_span > 1`) bloom verbatim: prevents both
+                    // GDPR trigram leaks from dead sibling frames and 8x bloom duplication.
+                    let trigram_verbatim_ok =
+                        !pack_opts.enable_trigram_skip || trigrams.group_frame_span(fid) == 1;
 
                     if live_in_frame == cnt
                         && frame_has_no_slack(
@@ -402,18 +406,26 @@ where
                             f_entry.raw_len,
                         )
                         && (f_entry.flags & PACK_FRAME_FLAG_USES_DICT) == 0
-                        && has_hashes
+                        && hashes_ok
                         && edges_ok
+                        && trigram_verbatim_ok
                     {
                         let raw_frame = pack.read_frame_raw(fid as u32)?;
-                        let chunk_meta: Vec<([u8; 16], u32, u32)> = (first_cid..first_cid + cnt)
+                        let chunk_meta: Vec<(u32, u32)> = (first_cid..first_cid + cnt)
                             .map(|cid| {
                                 let loc = toc.chunks[cid];
-                                (hashes[cid], loc.offset_in_frame, loc.raw_len)
+                                (loc.offset_in_frame, loc.raw_len)
                             })
                             .collect();
-                        let filter_slice =
-                            trigrams[fid].as_ref().map(|b| b.as_bytes()).unwrap_or(&[]);
+                        let frame_hashes = if hashes.len() == total_chunks {
+                            Some(&hashes[first_cid..first_cid + cnt])
+                        } else {
+                            None
+                        };
+                        let filter_slice = trigrams
+                            .frame_bloom(fid)
+                            .map(|b| b.as_bytes())
+                            .unwrap_or(&[]);
                         let empty_edges: Vec<(Vec<u8>, Vec<u8>)>;
                         let edge_slice = if edges.is_empty() {
                             empty_edges = vec![(Vec::new(), Vec::new()); cnt];
@@ -426,6 +438,7 @@ where
                             &raw_frame,
                             *f_entry,
                             &chunk_meta,
+                            frame_hashes,
                             filter_slice,
                             edge_slice,
                         )?;
@@ -831,7 +844,7 @@ pub fn gdpr_rewrite_day(
             zstd_level: 3,
             target_frame_raw_bytes: 64 * 1024,
             enable_trigram_skip: (toc.postscript.flags & PACK_FLAG_HAS_TRIGRAM) != 0
-                || toc.frames.iter().any(|f| f.filter_len > 0),
+                || toc.postscript.trigram_len > 0,
             compress_toc_lz4: (toc.postscript.flags & (PACK_FLAG_TOC_LZ4 | PACK_FLAG_TOC_ZSTD))
                 != 0,
             emit_hash_table: toc.postscript.hash_table_off != 0,
@@ -842,8 +855,8 @@ pub fn gdpr_rewrite_day(
         let boundary_utf8 = &boundary_utf8_chunks[&old_pack_id];
 
         let hashes = pack.read_hash_table()?;
-        let has_hashes = hashes.len() == total_chunks;
-        let trigrams = pack.read_trigram_section()?;
+        let hashes_ok = !pack_opts.emit_hash_table || hashes.len() == total_chunks;
+        let trigrams = pack.trigram_section_cached()?;
         let edges = pack.read_edge_table()?;
         let mut chunk_remap = vec![None; total_chunks];
 
@@ -879,21 +892,34 @@ pub fn gdpr_rewrite_day(
                                 && (edges[cid].0.is_empty() || edges[cid].1.is_empty()))
                         })
                 };
+                // Never copy a super-frame (`frame_span > 1`) bloom verbatim: prevents both
+                // GDPR trigram leaks from dead sibling frames and 8x bloom duplication.
+                let trigram_verbatim_ok =
+                    !pack_opts.enable_trigram_skip || trigrams.group_frame_span(fid) == 1;
 
                 if live_in_frame == cnt
                     && frame_has_no_slack(&toc.chunks[first_cid..first_cid + cnt], f_entry.raw_len)
                     && (f_entry.flags & PACK_FRAME_FLAG_USES_DICT) == 0
-                    && has_hashes
+                    && hashes_ok
                     && edges_ok
+                    && trigram_verbatim_ok
                 {
                     let raw_frame = pack.read_frame_raw(fid as u32)?;
-                    let chunk_meta: Vec<([u8; 16], u32, u32)> = (first_cid..first_cid + cnt)
+                    let chunk_meta: Vec<(u32, u32)> = (first_cid..first_cid + cnt)
                         .map(|cid| {
                             let loc = toc.chunks[cid];
-                            (hashes[cid], loc.offset_in_frame, loc.raw_len)
+                            (loc.offset_in_frame, loc.raw_len)
                         })
                         .collect();
-                    let filter_slice = trigrams[fid].as_ref().map(|b| b.as_bytes()).unwrap_or(&[]);
+                    let frame_hashes = if hashes.len() == total_chunks {
+                        Some(&hashes[first_cid..first_cid + cnt])
+                    } else {
+                        None
+                    };
+                    let filter_slice = trigrams
+                        .frame_bloom(fid)
+                        .map(|b| b.as_bytes())
+                        .unwrap_or(&[]);
                     let empty_edges: Vec<(Vec<u8>, Vec<u8>)>;
                     let edge_slice = if edges.is_empty() {
                         empty_edges = vec![(Vec::new(), Vec::new()); cnt];
@@ -906,6 +932,7 @@ pub fn gdpr_rewrite_day(
                         &raw_frame,
                         *f_entry,
                         &chunk_meta,
+                        frame_hashes,
                         filter_slice,
                         edge_slice,
                     )?;
@@ -3176,6 +3203,349 @@ mod tests {
             .verify_full_with_pack(
                 Some(([0xD2u8; 16], &new_pr)),
                 (rows - 1) as u64,
+                TableKind::Spans,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn pass26_gdpr_superframe_zero_trigram_leak_and_no_hash_table_verbatim_copy() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("user_id", DataType::Utf8, false),
+            Field::new("input", DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        // 1. Verbatim copy works when emit_hash_table == false (default) on single-frame groups!
+        let old_pack_id = [0xE1u8; 16];
+        let mut pb = ChunkPackBuilder::new(
+            old_pack_id,
+            PackWriteOptions {
+                codec: Codec::Lz4,
+                zstd_level: 1,
+                target_frame_raw_bytes: 128 * 1024,
+                enable_trigram_skip: true,
+                compress_toc_lz4: true,
+                write_threads: 1,
+                emit_hash_table: false,
+            },
+        );
+        let mut opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        opts.pack_id = Some(old_pack_id);
+
+        let n_rows = 240usize;
+        let users: Vec<String> = (0..n_rows)
+            .map(|i| {
+                if i == 0 {
+                    "u_dead".to_owned()
+                } else {
+                    "u_live".to_owned()
+                }
+            })
+            .collect();
+        let mut rng_h = 0x1111_2222_3333_4444u64;
+        let words_h = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima", "mike", "november", "oscar", "papa", "quebec", "romeo",
+            "sierra", "tango", "uniform", "victor", "whiskey", "yankee",
+        ];
+        let mut word_tail = |count: usize| -> String {
+            let mut s = String::with_capacity(count * 8);
+            for _ in 0..count {
+                rng_h = rng_h
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                s.push_str(words_h[((rng_h >> 48) as usize) % words_h.len()]);
+                s.push(' ');
+            }
+            s
+        };
+        let inputs: Vec<String> = (0..n_rows)
+            .map(|i| {
+                if i == 0 {
+                    format!("ERASED_HASHLESS_SECRET_{i:04}_{}", word_tail(280))
+                } else {
+                    format!("LIVE_HASHLESS_PAYLOAD_{i:04}_{}", word_tail(280))
+                }
+            })
+            .collect();
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(users.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(inputs.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            n_rows,
+        )
+        .unwrap();
+
+        let mut old_s = Vec::new();
+        {
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut old_s),
+                Arc::clone(&schema),
+                opts,
+                Some(&mut pb),
+            )
+            .unwrap();
+            w.write_batch(&batch).unwrap();
+            w.finish().unwrap();
+        }
+        let mut old_p = Vec::new();
+        pb.finish(&mut old_p).unwrap();
+        let old_pr = ChunkPackReader::open(Arc::new(SliceReader::new(old_p.clone()))).unwrap();
+        assert_eq!(old_pr.postscript().hash_table_off, 0);
+        assert!(old_pr.toc().frames.len() >= 3);
+
+        let (new_s_c, new_p_opt, stats) = gdpr_rewrite_single_file_streaming(
+            Arc::new(SliceReader::new(old_s)),
+            Some((old_pack_id, Arc::new(SliceReader::new(old_p)))),
+            [0xE2u8; 16],
+            std::io::Cursor::new(Vec::new()),
+            Some(std::io::Cursor::new(Vec::new())),
+            None,
+            &mut |b| {
+                let mut bm = Bitmap::new_zeroed(b.raw_len());
+                if b.raw_len() > 0 {
+                    let _ = bm.set(0, true);
+                }
+                Ok(bm)
+            },
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(stats.erased_rows, 1);
+        assert!(
+            stats.frames_copied_verbatim >= 1,
+            "surviving single-frame groups must still copy verbatim when emit_hash_table == false"
+        );
+        let new_p_bytes = new_p_opt.unwrap().into_inner();
+        assert!(memmem::find(&new_p_bytes, b"ERASED_HASHLESS_SECRET").is_none());
+        let new_pr = ChunkPackReader::open(Arc::new(SliceReader::new(new_p_bytes))).unwrap();
+        assert!(
+            crate::payload::search::pack_short_circuits_all(
+                &new_pr,
+                b"ERASED_HASHLESS_SECRET",
+                false
+            )
+            .unwrap()
+        );
+        let new_sr =
+            StatamReader::open(Arc::new(SliceReader::new(new_s_c.into_inner())), None).unwrap();
+        new_sr
+            .verify_full_with_pack(
+                Some(([0xE2u8; 16], &new_pr)),
+                (n_rows - 1) as u64,
+                TableKind::Spans,
+            )
+            .unwrap();
+
+        // 2. Super-frame (`frame_span = 8`) GDPR zero-trigram-leak:
+        //    Build >= 3 MiB adaptive prose pack so later frames merge into `frame_span = 8` groups,
+        //    place a unique erased token in ONE frame of a `frame_span = 8` group while its 7
+        //    sibling frames stay 100% live, then verify the rewritten pack's trigram filter
+        //    short-circuits the erased token (ZERO trigram leak from sibling super-frame bloom!).
+        let mut rng = 0xfeed_2626_aaaa_5555u64;
+        let alpha = b"abcdefghijklmnoprstuvwy"; // 23 letters (excludes q, x, z so erased needle is disjoint)
+        // 1,800 distinct 10-char words: LZ4 compresses repeated words at ~2x (avoiding W4 bypass),
+        // while ~12k distinct trigrams per 128 KiB frame trigger 32 KiB adaptive prose super-frames
+        // with ~0.24 super-frame bloom density (< 0.72) for strict GDPR trigram-leak verification.
+        let vocab: Vec<String> = (0..1_800)
+            .map(|_| {
+                let mut w = String::with_capacity(10);
+                for _ in 0..10 {
+                    rng = rng
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    w.push(alpha[((rng >> 48) as usize) % alpha.len()] as char);
+                }
+                w
+            })
+            .collect();
+        let mut next_word = || -> &str {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            &vocab[((rng >> 48) as usize) % vocab.len()]
+        };
+
+        let sf_old_id = [0xE3u8; 16];
+        let mut sf_pb = ChunkPackBuilder::new(
+            sf_old_id,
+            PackWriteOptions {
+                codec: Codec::Lz4,
+                zstd_level: 1,
+                target_frame_raw_bytes: crate::payload::pack::DEFAULT_TARGET_FRAME_RAW_BYTES,
+                enable_trigram_skip: true,
+                compress_toc_lz4: true,
+                write_threads: 1,
+                emit_hash_table: false,
+            },
+        );
+        let sf_rows = 950usize;
+        let erased_row = 780usize; // deep inside adaptive prose `frame_span = 8` region!
+        let sf_users: Vec<String> = (0..sf_rows)
+            .map(|i| {
+                if i == erased_row {
+                    "u_sf_dead".to_owned()
+                } else {
+                    "u_sf_live".to_owned()
+                }
+            })
+            .collect();
+        let common = [
+            "the ", "and ", "that ", "with ", "from ", "this ", "have ", "were ", "into ", "over ",
+            "also ", "some ",
+        ];
+        let sf_inputs: Vec<String> = (0..sf_rows)
+            .map(|i| {
+                let mut doc = String::with_capacity(3_600);
+                // Mix repeated common English clauses (so single-chunk LZ4 ratio > 1.05 and W4
+                // bypass stays off) with varied 10-char vocabulary (so 128 KiB frames hit
+                // high_density and switch to 32 KiB frame_span == 8 super-frames).
+                for j in 0..240usize {
+                    doc.push_str(common[(i + j) % common.len()]);
+                    doc.push_str(next_word());
+                    doc.push(' ');
+                }
+                if i == erased_row {
+                    doc.push_str("ZXQ_ERASED_SUPERFRAME_SECRET_991");
+                }
+                doc
+            })
+            .collect();
+        let sf_batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(sf_users.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(sf_inputs.iter().map(String::as_str))
+                                .unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            sf_rows,
+        )
+        .unwrap();
+
+        let mut sf_opts = WriteOptions::for_table(TableKind::Spans, WriteProfile::L1Compact);
+        sf_opts.pack_id = Some(sf_old_id);
+        let mut sf_old_s = Vec::new();
+        {
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut sf_old_s),
+                Arc::clone(&schema),
+                sf_opts,
+                Some(&mut sf_pb),
+            )
+            .unwrap();
+            w.write_batch(&sf_batch).unwrap();
+            w.finish().unwrap();
+        }
+        let mut sf_old_p = Vec::new();
+        sf_pb.finish(&mut sf_old_p).unwrap();
+
+        let sf_old_pr =
+            ChunkPackReader::open(Arc::new(SliceReader::new(sf_old_p.clone()))).unwrap();
+        let sf_old_ts = sf_old_pr.trigram_section_cached().unwrap();
+        assert!(
+            sf_old_ts.group_frame_spans.contains(&8),
+            "expected adaptive prose pack to contain frame_span == 8 super-frames, got {:?}",
+            sf_old_ts.group_frame_spans
+        );
+        // Locate the actual chunk(s) containing the erased secret (rows may CDC-split into >1 chunk).
+        let all_cids: Vec<u32> = (0..sf_old_pr.toc().chunks.len() as u32).collect();
+        let all_chunks = sf_old_pr.read_chunks(&all_cids).unwrap();
+        let erased_cid = all_chunks
+            .iter()
+            .find_map(|(&cid, bytes)| {
+                memmem::find(bytes, b"ZXQ_ERASED_SUPERFRAME_SECRET_991").map(|_| cid)
+            })
+            .expect("erased secret chunk must exist in original pack");
+        let erased_fid = sf_old_pr.toc().chunks[erased_cid as usize].frame_id;
+        assert!(
+            sf_old_ts.group_frame_span(erased_fid as usize) > 1,
+            "erased row must reside inside a multi-frame super-frame group"
+        );
+        assert!(
+            !crate::payload::search::pack_short_circuits_all(
+                &sf_old_pr,
+                b"ZXQ_ERASED_SUPERFRAME_SECRET_991",
+                false
+            )
+            .unwrap()
+        );
+
+        let (sf_new_s, sf_new_p_opt, sf_stats) = gdpr_rewrite_single_file_streaming(
+            Arc::new(SliceReader::new(sf_old_s)),
+            Some((sf_old_id, Arc::new(SliceReader::new(sf_old_p)))),
+            [0xE4u8; 16],
+            std::io::Cursor::new(Vec::new()),
+            Some(std::io::Cursor::new(Vec::new())),
+            None,
+            &mut |b| {
+                let mut bm = Bitmap::new_zeroed(b.raw_len());
+                for r in 0..b.raw_len() {
+                    if matches!(
+                        b.column(0).and_then(|c| c.get_scalar(r).ok()),
+                        Some(cetra_column::ScalarValue::Utf8(ref u)) if u == "u_sf_dead"
+                    ) {
+                        let _ = bm.set(r, true);
+                    }
+                }
+                Ok(bm)
+            },
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(sf_stats.erased_rows, 1);
+        let sf_new_p_bytes = sf_new_p_opt.unwrap().into_inner();
+        assert!(memmem::find(&sf_new_p_bytes, b"ZXQ_ERASED_SUPERFRAME_SECRET_991").is_none());
+        let sf_new_pr = ChunkPackReader::open(Arc::new(SliceReader::new(sf_new_p_bytes))).unwrap();
+        assert!(
+            crate::payload::search::pack_short_circuits_all(
+                &sf_new_pr,
+                b"ZXQ_ERASED_SUPERFRAME_SECRET_991",
+                false
+            )
+            .unwrap(),
+            "GDPR rewrite must NEVER leak erased super-frame trigrams through surviving sibling frames"
+        );
+        let sf_new_sr =
+            StatamReader::open(Arc::new(SliceReader::new(sf_new_s.into_inner())), None).unwrap();
+        sf_new_sr
+            .verify_full_with_pack(
+                Some(([0xE4u8; 16], &sf_new_pr)),
+                (sf_rows - 1) as u64,
                 TableKind::Spans,
             )
             .unwrap();

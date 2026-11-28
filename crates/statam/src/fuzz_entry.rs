@@ -1704,6 +1704,64 @@ pub(crate) mod tests {
             "seed-22-binary-blobs-stpk",
             &encode_paired_seed(&blob_statam, &blob_pack),
         );
+
+        // 23: L1Compact `BLOCK_FLAG_PLAIN_SUBCHUNKED` (`Binary` > 512 rows, >= 64 KiB raw, tiny Zstd-compressed seed).
+        let ps_schema = Schema::try_new_arc(vec![
+            Field::new("id", DataType::I64, false),
+            Field::new("bin", DataType::Binary, true),
+        ])
+        .unwrap();
+        let ps_rows = 520usize;
+        let ps_ids: Vec<i64> = (0..ps_rows as i64).collect();
+        let ps_bins: Vec<Vec<u8>> = (0..ps_rows)
+            .map(|i| {
+                let mut v = format!("plain_subchunked_seed_row_{i:04}_").into_bytes();
+                v.extend_from_slice(&[b'A' + (i % 26) as u8; 110]);
+                v
+            })
+            .collect();
+        let mut ps_valid = vec![true; ps_rows];
+        ps_valid[0] = false;
+        ps_valid[256] = false;
+        let ps_batch = Batch::try_new_all(
+            Arc::clone(&ps_schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::I64(ps_ids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Binary(
+                            BinaryData::try_from_slices(ps_bins.iter().map(Vec::as_slice)).unwrap(),
+                        ),
+                        Some(Bitmap::from_bools(&ps_valid)),
+                    )
+                    .unwrap(),
+                ),
+            ],
+            ps_rows,
+        )
+        .unwrap();
+        let mut ps_opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+        ps_opts.row_group_size = ps_rows;
+        ps_opts.mini_block_size = ps_rows;
+        let mut ps_bytes = Vec::new();
+        {
+            let mut w = StatamWriter::new(
+                std::io::Cursor::new(&mut ps_bytes),
+                Arc::clone(&ps_schema),
+                ps_opts,
+                None,
+            )
+            .unwrap();
+            w.write_batch(&ps_batch).unwrap();
+            w.finish().unwrap();
+        }
+        let ps_meta = StatamFileMeta::read_from(&SliceReader::new(ps_bytes.clone()), None).unwrap();
+        assert_ne!(
+            ps_meta.rg_blocks(1, 0)[0].block_flags & crate::format::BLOCK_FLAG_PLAIN_SUBCHUNKED,
+            0,
+            "seed-23 must trigger BLOCK_FLAG_PLAIN_SUBCHUNKED"
+        );
+        write("seed-23-plain-subchunked-l1", &ps_bytes);
     }
 
     /// Writes the seed corpus for `statam_file` (`just fuzz-seed`).

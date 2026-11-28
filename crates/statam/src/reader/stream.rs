@@ -553,6 +553,18 @@ impl StatamScanIter {
                 if surviving_mbs.is_empty() {
                     continue;
                 }
+                let allow_pre_wave1_pack_open = self.resolved_preds.is_empty()
+                    && self.resolved_filter_exprs.is_empty()
+                    && self.time_col_idx.is_none()
+                    && self.resolved_lookups.is_empty();
+                if self.reader.rg_pruned_by_external_packs(
+                    rg_idx,
+                    &surviving_mbs,
+                    &self.resolved_subs,
+                    allow_pre_wave1_pack_open,
+                )? {
+                    continue;
+                }
 
                 if self.desc_limit {
                     surviving_mbs.reverse();

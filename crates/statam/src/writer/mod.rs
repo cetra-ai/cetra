@@ -18,15 +18,15 @@ use crate::StatamError;
 use crate::codec::WriteProfile;
 use crate::codec::dict::FileDict;
 use crate::format::{
-    BLOCK_ENTRY_LEN, BLOCK_FRAME_HEADER_LEN, BlockEntry, CHECKSUM_ALG_CRC32C, COL_FLAG_DICT_SORTED,
-    COL_FLAG_HAS_FILE_DICT, COL_FLAG_IS_PAYLOAD_REFS, COL_FLAG_IS_SHREDDED_SUBCOL,
-    COLUMN_DIR_ENTRY_LEN, Codec, ColumnDirEntry, DEFAULT_TAIL_HINT, FILE_HEADER_LEN,
-    FLAG_HAS_PACK_REFS, FLAG_HAS_SHREDDED_MAPS, FLAG_HAS_TRIGRAM_INDEX, FLAG_HOT_TAIL_LZ4,
-    FLAG_L1_COMPACT, FORMAT_VERSION, FileHeader, FileSchemaMeta, LAZY_INDEX_ENTRY_LEN,
-    LocalityGroup, MAX_BATCH_DECODED_BYTES, MAX_COLUMNS, MAX_FRAME_RAW_BYTES, MAX_MINI_BLOCK_SIZE,
-    MAX_PACK_REFS, MAX_ROW_GROUP_SIZE, MAX_ROW_PAYLOAD_BYTES, MAX_TOTAL_BLOCKS, MINI_BLOCK_SIZE,
-    POSTSCRIPT_LEN, Postscript, ROW_GROUP_ENTRY_LEN, ROW_GROUP_SIZE, RowGroupEntry, ShreddedMapDir,
-    TableKind, encode_schema,
+    BLOCK_ENTRY_LEN, BLOCK_FLAG_NO_INLINE_PAYLOADS, BLOCK_FRAME_HEADER_LEN, BlockEntry,
+    CHECKSUM_ALG_CRC32C, COL_FLAG_DICT_SORTED, COL_FLAG_HAS_FILE_DICT, COL_FLAG_IS_PAYLOAD_REFS,
+    COL_FLAG_IS_SHREDDED_SUBCOL, COLUMN_DIR_ENTRY_LEN, Codec, ColumnDirEntry, DEFAULT_TAIL_HINT,
+    FILE_HEADER_LEN, FLAG_HAS_PACK_REFS, FLAG_HAS_SHREDDED_MAPS, FLAG_HAS_TRIGRAM_INDEX,
+    FLAG_HOT_TAIL_LZ4, FLAG_L1_COMPACT, FORMAT_VERSION, FileHeader, FileSchemaMeta,
+    LAZY_INDEX_ENTRY_LEN, LocalityGroup, MAX_BATCH_DECODED_BYTES, MAX_COLUMNS, MAX_FRAME_RAW_BYTES,
+    MAX_MINI_BLOCK_SIZE, MAX_PACK_REFS, MAX_ROW_GROUP_SIZE, MAX_ROW_PAYLOAD_BYTES,
+    MAX_TOTAL_BLOCKS, MINI_BLOCK_SIZE, POSTSCRIPT_LEN, Postscript, ROW_GROUP_ENTRY_LEN,
+    ROW_GROUP_SIZE, RowGroupEntry, ShreddedMapDir, TableKind, encode_schema,
 };
 use crate::payload::chunker::{DedupBypassDetector, INLINE_PAYLOAD_THRESHOLD};
 use crate::payload::pack::ChunkPackBuilder;
@@ -355,6 +355,8 @@ impl<PW: Write + Seek> PackBuilderTarget<'_, PW> {
     }
 }
 
+type PendingL0MiniBlock = (u16, u16, u8, Vec<u8>);
+
 /// Streaming bounded-memory PAX writer producing `.statam` files.
 pub struct StatamWriter<'a, W: Write + Seek, PW: Write + Seek = std::io::Cursor<Vec<u8>>> {
     out: W,
@@ -379,7 +381,7 @@ pub struct StatamWriter<'a, W: Write + Seek, PW: Write + Seek = std::io::Cursor<
     rg_buf_cur_mb_col_raw: Vec<usize>,
     // Zero-copy L0Fast / local ExternalPayload accumulators for the current partial RG.
     pending_l0_local: LocalL0PayloadBuilder,
-    pending_l0_mbs: HashMap<usize, Vec<(u16, u16, Vec<u8>)>>,
+    pending_l0_mbs: HashMap<usize, Vec<PendingL0MiniBlock>>,
     pending_l0_partial: HashMap<usize, Vec<PayloadRefRow>>,
 
     // RG0-initialized file-level schema/dict state.
@@ -939,7 +941,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
             .pending_l0_mbs
             .values()
             .flat_map(|v| v.iter())
-            .map(|(_, _, body)| body.len().saturating_add(BLOCK_FRAME_HEADER_LEN))
+            .map(|(_, _, _, body)| body.len().saturating_add(BLOCK_FRAME_HEADER_LEN))
             .sum();
         let partial_bytes: usize = self
             .pending_l0_partial
@@ -1279,6 +1281,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                         self.pending_l0_mbs.entry(cidx).or_default().push((
                             mb_size as u16,
                             null_count,
+                            0,
                             raw_body,
                         ));
                         partial.clear();
@@ -1290,7 +1293,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                 self.pending_l0_mbs
                     .entry(cidx)
                     .or_default()
-                    .push((mb_u16, mb_u16, Vec::new()));
+                    .push((mb_u16, mb_u16, 0, Vec::new()));
                 pos += mb_size;
             }
             if pos < take {
@@ -1376,6 +1379,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                 self.pending_l0_mbs.entry(cidx).or_default().push((
                     mb_size as u16,
                     null_count,
+                    0,
                     raw_body,
                 ));
                 partial.clear();
@@ -1410,6 +1414,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
             self.pending_l0_mbs.entry(cidx).or_default().push((
                 mb_size as u16,
                 null_count,
+                0,
                 raw_body,
             ));
             pos += mb_size;
@@ -1454,16 +1459,22 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                             .filter(|r| matches!(r, PayloadRefRow::Null))
                             .count();
                         let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
-                        let raw_body = if null_count_usize == mb_size {
-                            Vec::new()
+                        let (extra_flags, raw_body) = if null_count_usize == mb_size {
+                            (0u8, Vec::new())
                         } else {
                             let mut rb = Vec::new();
                             encode_payload_refs(partial, &mut rb)?;
-                            rb
+                            let f = if rg_encode::payload_ref_rows_all_external_or_null(partial) {
+                                BLOCK_FLAG_NO_INLINE_PAYLOADS
+                            } else {
+                                0
+                            };
+                            (f, rb)
                         };
                         self.pending_l0_mbs.entry(cidx).or_default().push((
                             mb_size as u16,
                             null_count,
+                            extra_flags,
                             raw_body,
                         ));
                         partial.clear();
@@ -1475,7 +1486,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                 self.pending_l0_mbs
                     .entry(cidx)
                     .or_default()
-                    .push((mb_u16, mb_u16, Vec::new()));
+                    .push((mb_u16, mb_u16, 0, Vec::new()));
                 pos += mb_size;
             }
             if pos < take {
@@ -1504,16 +1515,22 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                     .filter(|r| matches!(r, PayloadRefRow::Null))
                     .count();
                 let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
-                let raw_body = if null_count_usize == mb_size {
-                    Vec::new()
+                let (extra_flags, raw_body) = if null_count_usize == mb_size {
+                    (0u8, Vec::new())
                 } else {
                     let mut rb = Vec::new();
                     encode_payload_refs(&partial, &mut rb)?;
-                    rb
+                    let f = if rg_encode::payload_ref_rows_all_external_or_null(&partial) {
+                        BLOCK_FLAG_NO_INLINE_PAYLOADS
+                    } else {
+                        0
+                    };
+                    (f, rb)
                 };
                 self.pending_l0_mbs.entry(cidx).or_default().push((
                     mb_size as u16,
                     null_count,
+                    extra_flags,
                     raw_body,
                 ));
             } else {
@@ -1530,16 +1547,22 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                 .filter(|r| matches!(r, PayloadRefRow::Null))
                 .count();
             let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
-            let raw_body = if null_count_usize == mb_size {
-                Vec::new()
+            let (extra_flags, raw_body) = if null_count_usize == mb_size {
+                (0u8, Vec::new())
             } else {
                 let mut rb = Vec::new();
                 encode_payload_refs(&refs, &mut rb)?;
-                rb
+                let f = if rg_encode::payload_ref_rows_all_external_or_null(&refs) {
+                    BLOCK_FLAG_NO_INLINE_PAYLOADS
+                } else {
+                    0
+                };
+                (f, rb)
             };
             self.pending_l0_mbs.entry(cidx).or_default().push((
                 mb_size as u16,
                 null_count,
+                extra_flags,
                 raw_body,
             ));
             pos += mb_size;

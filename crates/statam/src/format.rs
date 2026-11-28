@@ -155,13 +155,21 @@ pub const BLOCK_FLAG_CONST_EMPTY_COLLECTION: u8 = 0x10;
 /// `Encoding::Fsst` mini-block uses 256-row adaptive `LZ4`/`Zstd`/`None` sub-chunks
 /// (`outer codec = Codec::None`, `raw_len == stored_len`).
 pub const BLOCK_FLAG_FSST_SUBCHUNKED: u8 = 0x20;
+/// `Encoding::Plain` (`Utf8` / `Binary`) mini-block uses 256-row adaptive `LZ4`/`Zstd`/`None`
+/// sub-chunks (`outer codec = Codec::None`, `raw_len == stored_len`).
+pub const BLOCK_FLAG_PLAIN_SUBCHUNKED: u8 = 0x40;
+/// `Encoding::PayloadRefs` mini-block contains zero `Inline` rows and zero `L0_LOCAL_PACK_IDX`
+/// chunk refs (only external `.stpk` chunk refs and/or nulls).
+pub const BLOCK_FLAG_NO_INLINE_PAYLOADS: u8 = 0x80;
 /// Mask of all recognized mini-block flags in v1.
 pub const KNOWN_BLOCK_FLAGS: u8 = BLOCK_FLAG_HAS_NULLS
     | BLOCK_FLAG_ALL_NULL
     | BLOCK_FLAG_MIN_MAX_VALID
     | BLOCK_FLAG_HAS_NAN
     | BLOCK_FLAG_CONST_EMPTY_COLLECTION
-    | BLOCK_FLAG_FSST_SUBCHUNKED;
+    | BLOCK_FLAG_FSST_SUBCHUNKED
+    | BLOCK_FLAG_PLAIN_SUBCHUNKED
+    | BLOCK_FLAG_NO_INLINE_PAYLOADS;
 
 // --- Hard Untrusted-Input Bounds (spec-v0.md §7) ---
 
@@ -1466,14 +1474,23 @@ impl BlockEntry {
         let encoding = Encoding::from_u8(buf[24])?;
         let codec = Codec::from_u8(buf[25])?;
         let block_flags = buf[26];
-        if block_flags & !KNOWN_BLOCK_FLAGS != 0 {
-            return Err(StatamError::Corrupt {
-                reason: "unknown block directory flags",
-            });
-        }
+        // All 8 bits of `block_flags` are currently allocated in `KNOWN_BLOCK_FLAGS` (0xFF).
+        let _ = KNOWN_BLOCK_FLAGS;
         if (block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0 && encoding != Encoding::Fsst {
             return Err(StatamError::Corrupt {
                 reason: "BLOCK_FLAG_FSST_SUBCHUNKED set on non-Fsst encoding",
+            });
+        }
+        if (block_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0
+            && (encoding != Encoding::Plain || codec != Codec::None)
+        {
+            return Err(StatamError::Corrupt {
+                reason: "BLOCK_FLAG_PLAIN_SUBCHUNKED requires Plain encoding with Codec::None",
+            });
+        }
+        if (block_flags & BLOCK_FLAG_NO_INLINE_PAYLOADS) != 0 && encoding != Encoding::PayloadRefs {
+            return Err(StatamError::Corrupt {
+                reason: "BLOCK_FLAG_NO_INLINE_PAYLOADS set on non-PayloadRefs encoding",
             });
         }
         let min_inline_len = buf[27];
@@ -2605,6 +2622,100 @@ pub fn write_framed_block(
     out: &mut Vec<u8>,
 ) -> Result<FramedWriteInfo, StatamError> {
     write_framed_block_with_min_savings(encoding, raw, codec, zstd_level, 0, out)
+}
+
+/// Single-pass adaptive `SB` block framing comparing LZ4 vs Zstd once (zero duplicate Zstd
+/// compression) when `codec == Codec::Zstd` and `lz4_pct_cap > 0` under non-Miri builds.
+///
+/// Chooses `Codec::Lz4` when eligible and `lz4_len * 100 <= zstd_len * lz4_pct_cap` (or within
+/// a `64 B` tiny-block tie-breaker), while still strictly enforcing `min_savings_pct`,
+/// `compressed.len() + 16 < raw.len()`, and `MAX_DECOMPRESS_RATIO`.
+pub fn write_framed_block_adaptive(
+    encoding: Encoding,
+    raw: &[u8],
+    codec: Codec,
+    zstd_level: i32,
+    lz4_pct_cap: u16,
+    min_savings_pct: u8,
+    out: &mut Vec<u8>,
+) -> Result<FramedWriteInfo, StatamError> {
+    #[cfg(miri)]
+    let _ = lz4_pct_cap;
+
+    #[cfg(not(miri))]
+    if codec == Codec::Zstd && lz4_pct_cap > 0 && !raw.is_empty() {
+        if raw.len() > MAX_BLOCK_RAW_BYTES {
+            return Err(StatamError::BoundsExceeded {
+                reason: "block raw payload exceeds MAX_BLOCK_RAW_BYTES",
+            });
+        }
+        let raw_len = u32::try_from(raw.len()).map_err(|_| StatamError::BoundsExceeded {
+            reason: "block raw_len overflows u32",
+        })?;
+        let is_eligible = |stored_len: usize| -> bool {
+            let ratio_ok = (raw.len() as u64)
+                <= (stored_len as u64)
+                    .saturating_mul(MAX_DECOMPRESS_RATIO)
+                    .saturating_add(MAX_DECOMPRESS_SLACK);
+            let savings_ok = if min_savings_pct > 0 && raw.len() >= 1024 {
+                let keep_pct = u64::from(100u8.saturating_sub(min_savings_pct));
+                (stored_len as u64).saturating_mul(100)
+                    <= (raw.len() as u64).saturating_mul(keep_pct)
+            } else {
+                true
+            };
+            stored_len.saturating_add(16) < raw.len() && ratio_ok && savings_ok
+        };
+
+        let lz4_buf = lz4_flex::block::compress(raw);
+        let lz4_ok = is_eligible(lz4_buf.len());
+        let zstd_buf = compress_zstd(raw, zstd_level)?;
+        let zstd_ok = is_eligible(zstd_buf.len());
+
+        let (actual_codec, stored): (Codec, &[u8]) = if lz4_ok && zstd_ok {
+            let lz4_len = lz4_buf.len();
+            let zstd_len = zstd_buf.len();
+            if (lz4_len as u64).saturating_mul(100)
+                <= (zstd_len as u64).saturating_mul(u64::from(lz4_pct_cap))
+                || lz4_len <= zstd_len.saturating_add(64)
+            {
+                (Codec::Lz4, &lz4_buf)
+            } else {
+                (Codec::Zstd, &zstd_buf)
+            }
+        } else if lz4_ok {
+            (Codec::Lz4, &lz4_buf)
+        } else if zstd_ok {
+            (Codec::Zstd, &zstd_buf)
+        } else {
+            (Codec::None, raw)
+        };
+
+        let stored_len = u32::try_from(stored.len()).map_err(|_| StatamError::BoundsExceeded {
+            reason: "block stored_len overflows u32",
+        })?;
+        let mut header_prefix = [0u8; 12];
+        header_prefix[0..2].copy_from_slice(&BLOCK_MAGIC);
+        header_prefix[2] = encoding as u8;
+        header_prefix[3] = actual_codec as u8;
+        header_prefix[4..8].copy_from_slice(&raw_len.to_le_bytes());
+        header_prefix[8..12].copy_from_slice(&stored_len.to_le_bytes());
+        let crc = block_frame_crc(&header_prefix, stored);
+
+        out.reserve(BLOCK_FRAME_HEADER_LEN + stored.len());
+        out.extend_from_slice(&header_prefix);
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(stored);
+
+        return Ok(FramedWriteInfo {
+            codec: actual_codec,
+            stored_len,
+            raw_len,
+            crc32c: crc,
+        });
+    }
+
+    write_framed_block_with_min_savings(encoding, raw, codec, zstd_level, min_savings_pct, out)
 }
 
 /// Reads, checksum-verifies, and decompresses a framed `.statam` `SB` data block,

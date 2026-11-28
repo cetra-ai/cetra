@@ -15,15 +15,15 @@ use crate::codec::fsst::{FsstBlockView, FsstSubchunkedView};
 use crate::codec::nested::{
     ShreddedSubCol, decode_shredded_residual_block, decode_shredded_subcol, decode_single_map_key,
 };
-use crate::codec::numeric::read_optional_nulls;
+use crate::codec::numeric::{PlainSubchunkedView, read_optional_nulls};
 use crate::codec::{
     FastUtf8Ref, ZonePred, ZoneValue, decode_mini_block, utf8_bytes_at, zone_map_always_matches,
     zone_map_may_match,
 };
 use crate::format::{
-    BLOCK_FLAG_CONST_EMPTY_COLLECTION, BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_HAS_NAN, BlockEntry,
-    COL_FLAG_HAS_FILE_DICT, COL_FLAG_IS_SHREDDED_SUBCOL, Encoding, LocalityGroup,
-    MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES,
+    BLOCK_FLAG_CONST_EMPTY_COLLECTION, BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_HAS_NAN,
+    BLOCK_FLAG_PLAIN_SUBCHUNKED, BlockEntry, COL_FLAG_HAS_FILE_DICT, COL_FLAG_IS_SHREDDED_SUBCOL,
+    Encoding, LocalityGroup, MAX_BATCH_DECODED_BYTES, MAX_BLOCK_RAW_BYTES,
 };
 use crate::parallel::{MAX_PARALLEL_THREADS, parallel_map_in_order_static};
 use crate::payload::search::{
@@ -2332,6 +2332,15 @@ pub(super) fn eval_utf8_block_substring_raw(
         }
         Encoding::Plain => {
             let (nulls, body) = read_optional_nulls(raw, mb_row_count, blk.block_flags)?;
+            if (blk.block_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0 {
+                let view = PlainSubchunkedView::parse(body, mb_row_count)?;
+                if needle.is_empty() {
+                    return Ok(nulls.unwrap_or_else(|| Bitmap::new_ones(mb_row_count)));
+                }
+                let mut matcher = Utf8Matcher::new(needle, case_insensitive);
+                return view
+                    .eval_substring(active_mask, nulls.as_ref(), |slice| matcher.matches(slice));
+            }
             let (off_raw, data) = parse_plain_varlen_slices(body, mb_row_count)?;
             if needle.is_empty() {
                 return Ok(nulls.unwrap_or_else(|| Bitmap::new_ones(mb_row_count)));
