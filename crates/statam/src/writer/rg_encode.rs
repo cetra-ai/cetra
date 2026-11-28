@@ -35,8 +35,8 @@ use super::l0_payload::{L0_LOCAL_PACK_IDX, LocalL0PayloadBuilder};
 use super::{
     HIGH_CARDINALITY_ID_COLS, HOT_ANALYTICS_POST_TRACE_COLS, HOT_ANALYTICS_TIER1_SMALL_COLS,
     HOT_ANALYTICS_TIER1_TIME_COLS, HOT_ANALYTICS_TIER2_COLS, ID_CORE_COLS,
-    KNOWN_LOW_CARD_DICT_COLS, PackBuilderTarget, PhysColWriteState, PrechunkedRefs, Rg0DictResult,
-    StatamWriter, default_l1_codec,
+    KNOWN_LOW_CARD_DICT_COLS, PackBuilderTarget, PendingPayloadMb, PhysColWriteState,
+    PrechunkedRefs, Rg0DictResult, StatamWriter, default_l1_codec,
 };
 
 /// Minimum compressed mini-block bytes required to emit a narrow-column trigram filter.
@@ -47,6 +47,8 @@ const BLOOM_FPP: f64 = 0.01;
 pub(super) const MIN_PARALLEL_RG_ROWS: usize = 1_024;
 /// Maximum bit density for narrow-column trigram blooms.
 const MAX_NARROW_TRIGRAM_DENSITY: f64 = 0.50;
+/// Maximum bit density for `L1Compact` `ExternalPayload` inline-string trigram blooms.
+const MAX_PAYLOAD_INLINE_TRIGRAM_DENSITY: f64 = 0.72;
 
 type PayloadPrefixCacheEntry = (usize, usize, Vec<(u16, u32)>);
 type PayloadExactCacheEntry = (usize, Vec<(u16, u32)>);
@@ -1191,6 +1193,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
         wide_buf: &mut Vec<u8>,
         l0_local: &mut LocalL0PayloadBuilder,
     ) -> Result<(), StatamError> {
+        let track_trigram = self.narrow_trigram_col_set.contains(&cidx);
         if prechunked.is_none()
             && (self.pending_l0_mbs.contains_key(&cidx)
                 || self.pending_l0_partial.contains_key(&cidx))
@@ -1205,10 +1208,10 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                     .filter(|r| matches!(r, PayloadRefRow::Null))
                     .count();
                 let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
-                let (extra_flags, raw_body) = if null_count_usize == mb_len {
-                    (0u8, EncodedPayloadRefs::empty())
+                let (extra_flags, encoded, inline_trigram) = if null_count_usize == mb_len {
+                    (0u8, EncodedPayloadRefs::empty(), None)
                 } else {
-                    let rb = if self.options.profile == WriteProfile::L0Fast {
+                    let enc = if self.options.profile == WriteProfile::L0Fast {
                         let mut v = Vec::new();
                         encode_payload_refs_l0_direct(&partial, &mut v)?;
                         EncodedPayloadRefs::Raw(v)
@@ -1220,21 +1223,38 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                     } else {
                         0
                     };
-                    (f, rb)
+                    let tri = if track_trigram
+                        && self.options.profile != WriteProfile::L0Fast
+                        && self.pack_builder.is_some()
+                    {
+                        build_payload_inline_trigram_for_mb(
+                            &partial,
+                            encoded_payload_refs_trigram_len(&enc),
+                        )
+                    } else {
+                        None
+                    };
+                    (f, enc, tri)
                 };
-                mbs.push((mb_len as u16, null_count, extra_flags, raw_body));
+                mbs.push(PendingPayloadMb {
+                    mb_len: mb_len as u16,
+                    null_count,
+                    extra_flags,
+                    encoded,
+                    inline_trigram,
+                });
             }
 
             let mut cur_first = first_row_u32;
-            for (mb_len_u16, null_count, extra_flags, encoded) in mbs {
+            for mb in mbs {
                 self.phys_col_meta[cidx].null_count_total = self.phys_col_meta[cidx]
                     .null_count_total
-                    .saturating_add(u32::from(null_count));
-                if null_count == mb_len_u16 {
+                    .saturating_add(u32::from(mb.null_count));
+                if mb.null_count == mb.mb_len {
                     self.phys_blocks[cidx].push(BlockEntry {
                         first_row: cur_first,
-                        row_count: mb_len_u16,
-                        null_count,
+                        row_count: mb.mb_len,
+                        null_count: mb.null_count,
                         offset: 0,
                         stored_len: 0,
                         raw_len: 0,
@@ -1247,24 +1267,27 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                         min_inline: [0; 16],
                         max_inline: [0; 16],
                     });
+                    if let Some(tris) = self.narrow_trigrams.get_mut(&cidx) {
+                        tris.push(None);
+                    }
                 } else {
                     let blk_off = base_offset + wide_buf.len() as u64;
                     let info = write_encoded_payload_refs_block(
-                        &encoded,
+                        &mb.encoded,
                         self.options.profile,
                         preferred_codec,
                         zstd_level,
                         wide_buf,
                     )?;
-                    let block_flags = if null_count > 0 {
+                    let block_flags = if mb.null_count > 0 {
                         BLOCK_FLAG_HAS_NULLS
                     } else {
                         0
-                    } | extra_flags;
+                    } | mb.extra_flags;
                     self.phys_blocks[cidx].push(BlockEntry {
                         first_row: cur_first,
-                        row_count: mb_len_u16,
-                        null_count,
+                        row_count: mb.mb_len,
+                        null_count: mb.null_count,
                         offset: blk_off,
                         stored_len: info.stored_len,
                         raw_len: info.raw_len,
@@ -1277,8 +1300,12 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                         min_inline: [0; 16],
                         max_inline: [0; 16],
                     });
+                    self.phys_col_meta[cidx].has_non_dict_data_block = true;
+                    if let Some(tris) = self.narrow_trigrams.get_mut(&cidx) {
+                        tris.push(mb.inline_trigram);
+                    }
                 }
-                cur_first += u32::from(mb_len_u16);
+                cur_first += u32::from(mb.mb_len);
             }
             return Ok(());
         }
@@ -1312,6 +1339,9 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                         min_inline: [0; 16],
                         max_inline: [0; 16],
                     });
+                    if let Some(tris) = self.narrow_trigrams.get_mut(&cidx) {
+                        tris.push(None);
+                    }
                     row_off += mb_len;
                 }
                 return Ok(());
@@ -1374,6 +1404,9 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                         min_inline: [0; 16],
                         max_inline: [0; 16],
                     });
+                    if let Some(tris) = self.narrow_trigrams.get_mut(&cidx) {
+                        tris.push(None);
+                    }
                 } else {
                     let block_codec = payload_refs_block_codec(
                         self.options.profile,
@@ -1409,6 +1442,10 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                         min_inline: [0; 16],
                         max_inline: [0; 16],
                     });
+                    self.phys_col_meta[cidx].has_non_dict_data_block = true;
+                    if let Some(tris) = self.narrow_trigrams.get_mut(&cidx) {
+                        tris.push(None);
+                    }
                 }
                 row_off += mb_len;
             }
@@ -1502,6 +1539,9 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                     min_inline: [0; 16],
                     max_inline: [0; 16],
                 });
+                if let Some(tris) = self.narrow_trigrams.get_mut(&cidx) {
+                    tris.push(None);
+                }
             } else {
                 let encoded = if self.options.profile == WriteProfile::L0Fast {
                     let mut raw_body = Vec::new();
@@ -1543,6 +1583,13 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                     min_inline: [0; 16],
                     max_inline: [0; 16],
                 });
+                self.phys_col_meta[cidx].has_non_dict_data_block = true;
+                if let Some(tris) = self.narrow_trigrams.get_mut(&cidx) {
+                    tris.push(build_payload_inline_trigram_for_mb(
+                        &ref_rows,
+                        encoded_payload_refs_trigram_len(&encoded),
+                    ));
+                }
             }
 
             row_off += mb_len;
@@ -2871,6 +2918,13 @@ fn build_narrow_trigram_for_mb(col: &Column, stored_len: usize) -> Option<Vec<u8
     Some(bloom.as_bytes().to_vec())
 }
 
+pub(super) fn encoded_payload_refs_trigram_len(encoded: &EncodedPayloadRefs) -> usize {
+    match encoded {
+        EncodedPayloadRefs::Raw(b) | EncodedPayloadRefs::Subchunked(b) => b.len(),
+        EncodedPayloadRefs::PrecompressedZstd { raw_len, .. } => *raw_len as usize,
+    }
+}
+
 fn write_encoded_payload_refs_block(
     encoded: &EncodedPayloadRefs,
     profile: WriteProfile,
@@ -2896,4 +2950,41 @@ fn write_encoded_payload_refs_block(
             write_framed_block(Encoding::PayloadRefs, raw, block_codec, zstd_level, out)
         }
     }
+}
+
+pub(super) fn build_payload_inline_trigram_for_mb(
+    refs: &[PayloadRefRow],
+    raw_body_len: usize,
+) -> Option<Vec<u8>> {
+    if raw_body_len < 512 {
+        return None;
+    }
+    let max_bytes = (raw_body_len / 10).clamp(MIN_TRIGRAM_BLOOM_BYTES, 8_192);
+    let cap_pow2 = 1usize << (usize::BITS as usize - 1 - max_bytes.leading_zeros() as usize);
+
+    let mut bloom = TrigramBloom::new(cap_pow2);
+    let mut any_inline_trigram = false;
+    for row in refs {
+        if let PayloadRefRow::Inline(bytes) = row
+            && bytes.len() >= 3
+        {
+            any_inline_trigram = true;
+            bloom.insert_bytes_ilike_folded(bytes);
+        }
+    }
+    if !any_inline_trigram {
+        return Some(
+            TrigramBloom::new(MIN_TRIGRAM_BLOOM_BYTES)
+                .as_bytes()
+                .to_vec(),
+        );
+    }
+
+    while bloom.as_bytes().len() > MIN_TRIGRAM_BLOOM_BYTES && bloom.bit_density() < 0.25 {
+        bloom = bloom.fold_half();
+    }
+    if bloom.bit_density() > MAX_PAYLOAD_INLINE_TRIGRAM_DENSITY {
+        return None;
+    }
+    Some(bloom.as_bytes().to_vec())
 }

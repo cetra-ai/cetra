@@ -3142,32 +3142,6 @@ impl StatamReader {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn eval_payload_refs_substring(
-        &self,
-        refs: &FlatPayloadRefs,
-        active_mask: &Bitmap,
-        needle: &[u8],
-        case_insensitive: bool,
-        l0_local: Option<&ParsedL0Payload>,
-        read_threads: usize,
-        retain: Option<&RetainedPackChunks>,
-        cancel: Option<&CancelToken>,
-    ) -> Result<Bitmap, StatamError> {
-        let mut out = self.eval_payload_refs_substring_batch(
-            &[(refs, active_mask)],
-            needle,
-            case_insensitive,
-            l0_local,
-            read_threads,
-            retain,
-            cancel,
-        )?;
-        out.pop().ok_or(StatamError::Corrupt {
-            reason: "missing single-mb payload substring result",
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn eval_payload_refs_substring_batch(
         &self,
         mb_inputs: &[(&FlatPayloadRefs, &Bitmap)],

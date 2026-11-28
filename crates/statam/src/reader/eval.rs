@@ -27,8 +27,8 @@ use crate::format::{
 };
 use crate::parallel::{MAX_PARALLEL_THREADS, parallel_map_in_order_static};
 use crate::payload::search::{
-    RetainedPackChunks, extract_unicode_ilike_ascii_anchor, pack_short_circuits_all,
-    unicode_lowercase_context_free_into_bytes,
+    RetainedPackChunks, extract_ilike_trigram_hashes, extract_unicode_ilike_ascii_anchor,
+    pack_short_circuits_all, unicode_lowercase_context_free_into_bytes,
 };
 use crate::payload::{
     FLAT_REF_NULL, FlatPayloadRefs, decode_payload_refs_flat, scan_payload_refs_inline_substring,
@@ -37,6 +37,7 @@ use crate::simd::bitpack::{packed_bytes_len, unpack_u32};
 use crate::simd::filter::{FilterOp, filter_f64, filter_i64, filter_i64_between, filter_u32};
 use crate::simd::trigram::{
     ascii_lowercase_fold_ks_into, ascii_lowercase_into, contains_kelvin_or_long_s,
+    extract_trigram_hashes,
 };
 
 use super::meta::StatamFileMeta;
@@ -407,11 +408,10 @@ impl StatamReader {
                 }
             }
 
-            // 2b. ExternalPayload disjuncts ONLY on rows still unmatched in `remaining`.
-            for (di, (cidx, sq)) in clause.iter().enumerate() {
-                if self.meta.col_dir[*cidx].locality_group != LocalityGroup::ExternalPayload {
-                    continue;
-                }
+            // 2b. ExternalPayload disjuncts grouped by `(needle, case_insensitive)` ONLY on rows
+            // still unmatched in `remaining`, so all grouped columns share one `.stpk` pass.
+            let payload_groups = group_payload_or_disjuncts(&self.meta, clause);
+            for group in payload_groups {
                 if cancel.is_some_and(CancelToken::is_cancelled) {
                     return Err(StatamError::Cancelled);
                 }
@@ -419,118 +419,159 @@ impl StatamReader {
                     break;
                 }
 
-                let mut pack_chunk_counts = Vec::new();
-                let mut pack_has_edges = Vec::new();
-                let mut inline_fast_path_ok = false;
+                let needs_fast_path_meta = group.col_indices.iter().any(|&cidx| {
+                    let rg_blocks = self.meta.rg_blocks(cidx, rg_idx);
+                    active
+                        .iter()
+                        .enumerate()
+                        .any(|(pos, (mb_idx, _, decoded_p1))| {
+                            !remaining[pos].all_zeros()
+                                && !decoded_p1.contains_key(&cidx)
+                                && rg_blocks[*mb_idx].encoding != Encoding::ConstNull
+                        })
+                });
+                let fast_meta = if needs_fast_path_meta {
+                    self.compute_inline_fast_path_meta(subs, ci, &group, l0_local)?
+                } else {
+                    InlineFastPathMeta::default()
+                };
 
-                if l0_local.is_none() && !self.meta.schema_meta.pack_ids.is_empty() {
-                    let mut all_short_circuit = true;
-                    pack_chunk_counts.reserve(self.meta.schema_meta.pack_ids.len());
-                    pack_has_edges.reserve(self.meta.schema_meta.pack_ids.len());
-                    for &pack_id in &self.meta.schema_meta.pack_ids {
-                        let pack = self.resolve_pack(pack_id)?;
-                        if !pack_short_circuits_all(&pack, &sq.needle, sq.case_insensitive)? {
-                            all_short_circuit = false;
-                            break;
-                        }
-                        pack_chunk_counts.push(pack.toc().chunks.len());
-                        pack_has_edges.push(pack.postscript().edge_table_len > 0);
-                    }
-                    if all_short_circuit {
-                        let mut needed_by_other = false;
-                        'other: for (oci, oclause) in subs.iter().enumerate() {
-                            for (odi, (oc, osq)) in oclause.iter().enumerate() {
-                                if (oci != ci || odi != di) && *oc == *cidx {
-                                    for &pack_id in &self.meta.schema_meta.pack_ids {
-                                        let pack = self.resolve_pack(pack_id)?;
-                                        if !pack_short_circuits_all(
-                                            &pack,
-                                            &osq.needle,
-                                            osq.case_insensitive,
-                                        )? {
-                                            needed_by_other = true;
-                                            break 'other;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        inline_fast_path_ok = !needed_by_other;
-                    }
-                }
+                let mut inline_tasks: Vec<(usize, usize, usize, usize, BlockEntry, Bitmap)> =
+                    Vec::new();
+                let mut batch_pairs: Vec<(usize, usize)> = Vec::new();
+                let mut missing: Vec<(usize, usize, usize, BlockEntry)> = Vec::new();
 
-                let mut batch_positions: Vec<usize> = Vec::new();
-                for (pos, (mb_idx, _, decoded_p1)) in active.iter_mut().enumerate() {
-                    if remaining[pos].all_zeros() {
-                        continue;
-                    }
-                    let mb_row_count = self.meta.rg_blocks(0, rg_idx)[*mb_idx].row_count as usize;
-                    if !decoded_p1.contains_key(cidx) {
-                        let blk = &self.meta.rg_blocks(*cidx, rg_idx)[*mb_idx];
+                for &cidx in &group.col_indices {
+                    let col_inline_ok =
+                        fast_meta.col_inline_ok.get(&cidx).copied().unwrap_or(false);
+                    let rg_blocks = self.meta.rg_blocks(cidx, rg_idx);
+                    for (pos, (mb_idx, _, decoded_p1)) in active.iter().enumerate() {
+                        if remaining[pos].all_zeros() {
+                            continue;
+                        }
+                        let blk = &rg_blocks[*mb_idx];
                         if blk.encoding == Encoding::ConstNull {
                             // Disjunct produces 0 hits for this MB (do NOT zero other OR branches).
                             continue;
                         }
-                        if inline_fast_path_ok {
-                            let raw = read_block.read_block(blk)?;
-                            let mut matcher = Utf8Matcher::new(&sq.needle, sq.case_insensitive);
-                            let bm = scan_payload_refs_inline_substring(
-                                &raw,
+                        let mb_row_count =
+                            self.meta.rg_blocks(0, rg_idx)[*mb_idx].row_count as usize;
+                        if !decoded_p1.contains_key(&cidx) && col_inline_ok {
+                            inline_tasks.push((
+                                pos,
+                                cidx,
+                                *mb_idx,
                                 mb_row_count,
-                                &remaining[pos],
-                                &pack_chunk_counts,
-                                &pack_has_edges,
-                                |bytes| matcher.matches(bytes),
+                                *blk,
+                                remaining[pos].clone(),
+                            ));
+                        } else {
+                            if !decoded_p1.contains_key(&cidx) {
+                                missing.push((pos, cidx, mb_row_count, *blk));
+                            }
+                            batch_pairs.push((pos, cidx));
+                        }
+                    }
+                }
+
+                if !inline_tasks.is_empty() {
+                    let inline_results = self.eval_inline_fast_path_blocks(
+                        rg_idx,
+                        group.needle,
+                        group.case_insensitive,
+                        &fast_meta.pack_chunk_counts,
+                        &fast_meta.pack_has_edges,
+                        read_block,
+                        threads,
+                        inline_tasks,
+                        cancel,
+                    )?;
+                    for (pos, bm) in inline_results {
+                        let hits = bm.and(&remaining[pos])?;
+                        if !hits.all_zeros() {
+                            clause_matched[pos] = clause_matched[pos].or(&hits)?;
+                            remaining[pos] = remaining[pos].and(&hits.not())?;
+                        }
+                    }
+                }
+
+                if !batch_pairs.is_empty() {
+                    missing.retain(|&(pos, _, _, _)| !remaining[pos].all_zeros());
+                    if !missing.is_empty() {
+                        if threads > 1 && missing.len() >= 2 {
+                            let block_reader = read_block.clone();
+                            let decoded_missing = parallel_map_in_order_static(
+                                missing,
+                                threads,
+                                move |(pos, cidx, mb_row_count, blk)| {
+                                    let raw = block_reader.read_block(&blk)?;
+                                    let refs = decode_payload_refs_flat(
+                                        &raw,
+                                        mb_row_count,
+                                        MAX_BATCH_DECODED_BYTES,
+                                    )?;
+                                    Ok((pos, cidx, refs))
+                                },
                             )?;
+                            for (pos, cidx, refs) in decoded_missing {
+                                active[pos]
+                                    .2
+                                    .insert(cidx, DecodedPhase1::FlatPayloadRefs(refs));
+                            }
+                        } else {
+                            for (pos, cidx, mb_row_count, _) in missing {
+                                if cancel.is_some_and(CancelToken::is_cancelled) {
+                                    return Err(StatamError::Cancelled);
+                                }
+                                let mb_idx = active[pos].0;
+                                self.ensure_p1_col(
+                                    cidx,
+                                    rg_idx,
+                                    mb_idx,
+                                    mb_row_count,
+                                    read_block,
+                                    &mut active[pos].2,
+                                )?;
+                            }
+                        }
+                    }
+
+                    let mut entries: Vec<usize> = Vec::with_capacity(batch_pairs.len());
+                    let mut mb_inputs: Vec<(&FlatPayloadRefs, &Bitmap)> =
+                        Vec::with_capacity(batch_pairs.len());
+                    for (pos, cidx) in batch_pairs {
+                        if remaining[pos].all_zeros() {
+                            continue;
+                        }
+                        let (_, _, decoded_p1) = &active[pos];
+                        let DecodedPhase1::FlatPayloadRefs(refs) = &decoded_p1[&cidx] else {
+                            return Err(StatamError::Corrupt {
+                                reason: "unexpected Phase 1 variant for ExternalPayload substring query",
+                            });
+                        };
+                        entries.push(pos);
+                        mb_inputs.push((refs, &remaining[pos]));
+                    }
+                    if !mb_inputs.is_empty() {
+                        let any_projected = group
+                            .col_indices
+                            .iter()
+                            .any(|cidx| proj_indices.contains(cidx));
+                        let batch_bms = self.eval_payload_refs_substring_batch(
+                            &mb_inputs,
+                            group.needle,
+                            group.case_insensitive,
+                            l0_local,
+                            threads,
+                            any_projected.then_some(retained),
+                            cancel,
+                        )?;
+                        for (pos, bm) in entries.into_iter().zip(batch_bms) {
                             let hits = bm.and(&remaining[pos])?;
                             if !hits.all_zeros() {
                                 clause_matched[pos] = clause_matched[pos].or(&hits)?;
                                 remaining[pos] = remaining[pos].and(&hits.not())?;
                             }
-                            continue;
-                        }
-                        self.ensure_p1_col(
-                            *cidx,
-                            rg_idx,
-                            *mb_idx,
-                            mb_row_count,
-                            read_block,
-                            decoded_p1,
-                        )?;
-                    }
-                    batch_positions.push(pos);
-                }
-
-                if !batch_positions.is_empty() {
-                    let mut mb_inputs: Vec<(&FlatPayloadRefs, &Bitmap)> =
-                        Vec::with_capacity(batch_positions.len());
-                    for &pos in &batch_positions {
-                        let (_, _, decoded_p1) = &active[pos];
-                        let DecodedPhase1::FlatPayloadRefs(refs) = &decoded_p1[cidx] else {
-                            return Err(StatamError::Corrupt {
-                                reason: "unexpected Phase 1 variant for ExternalPayload substring query",
-                            });
-                        };
-                        mb_inputs.push((refs, &remaining[pos]));
-                    }
-                    let batch_bms = self.eval_payload_refs_substring_batch(
-                        &mb_inputs,
-                        &sq.needle,
-                        sq.case_insensitive,
-                        l0_local,
-                        threads,
-                        if proj_indices.contains(cidx) {
-                            Some(retained)
-                        } else {
-                            None
-                        },
-                        cancel,
-                    )?;
-                    for (pos, bm) in batch_positions.into_iter().zip(batch_bms) {
-                        let hits = bm.and(&remaining[pos])?;
-                        if !hits.all_zeros() {
-                            clause_matched[pos] = clause_matched[pos].or(&hits)?;
-                            remaining[pos] = remaining[pos].and(&hits.not())?;
                         }
                     }
                 }
@@ -633,111 +674,138 @@ impl StatamReader {
                 }
             }
 
-            // ExternalPayload disjuncts ONLY on rows still in `remaining`.
-            for (di, (cidx, sq)) in clause.iter().enumerate() {
-                if self.meta.col_dir[*cidx].locality_group != LocalityGroup::ExternalPayload {
-                    continue;
-                }
+            // ExternalPayload disjuncts grouped by `(needle, case_insensitive)` ONLY on rows
+            // still in `remaining`.
+            let payload_groups = group_payload_or_disjuncts(&self.meta, clause);
+            for group in payload_groups {
                 if remaining.all_zeros() {
                     break;
                 }
                 if cancel.is_some_and(CancelToken::is_cancelled) {
                     return Err(StatamError::Cancelled);
                 }
-                if !decoded_p1.contains_key(cidx) {
-                    let blk = &self.meta.rg_blocks(*cidx, rg_idx)[mb_idx];
+
+                let needs_fast_path_meta = !remaining.all_zeros()
+                    && group.col_indices.iter().any(|&cidx| {
+                        let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                        !decoded_p1.contains_key(&cidx) && blk.encoding != Encoding::ConstNull
+                    });
+                let fast_meta = if needs_fast_path_meta {
+                    self.compute_inline_fast_path_meta(subs, ci, &group, l0_local)?
+                } else {
+                    InlineFastPathMeta::default()
+                };
+
+                let mut inline_tasks: Vec<(usize, usize, usize, usize, BlockEntry, Bitmap)> =
+                    Vec::new();
+                let mut batch_cols: Vec<usize> = Vec::new();
+                let mut missing: Vec<(usize, BlockEntry)> = Vec::new();
+
+                for &cidx in &group.col_indices {
+                    let blk = &self.meta.rg_blocks(cidx, rg_idx)[mb_idx];
                     if blk.encoding == Encoding::ConstNull {
                         continue;
                     }
-                    if l0_local.is_none() && !self.meta.schema_meta.pack_ids.is_empty() {
-                        let mut all_short_circuit = true;
-                        let mut pack_chunk_counts =
-                            Vec::with_capacity(self.meta.schema_meta.pack_ids.len());
-                        let mut pack_has_edges =
-                            Vec::with_capacity(self.meta.schema_meta.pack_ids.len());
-                        for &pack_id in &self.meta.schema_meta.pack_ids {
-                            let pack = self.resolve_pack(pack_id)?;
-                            if !pack_short_circuits_all(&pack, &sq.needle, sq.case_insensitive)? {
-                                all_short_circuit = false;
-                                break;
-                            }
-                            pack_chunk_counts.push(pack.toc().chunks.len());
-                            pack_has_edges.push(pack.postscript().edge_table_len > 0);
+                    let col_inline_ok =
+                        fast_meta.col_inline_ok.get(&cidx).copied().unwrap_or(false);
+                    if !decoded_p1.contains_key(&cidx) && col_inline_ok {
+                        inline_tasks.push((0, cidx, mb_idx, mb_row_count, *blk, remaining.clone()));
+                    } else {
+                        if !decoded_p1.contains_key(&cidx) {
+                            missing.push((cidx, *blk));
                         }
-                        if all_short_circuit {
-                            let mut needed_by_other = false;
-                            'other: for (oci, oclause) in subs.iter().enumerate() {
-                                for (odi, (oc, osq)) in oclause.iter().enumerate() {
-                                    if (oci != ci || odi != di) && *oc == *cidx {
-                                        for &pack_id in &self.meta.schema_meta.pack_ids {
-                                            let pack = self.resolve_pack(pack_id)?;
-                                            if !pack_short_circuits_all(
-                                                &pack,
-                                                &osq.needle,
-                                                osq.case_insensitive,
-                                            )? {
-                                                needed_by_other = true;
-                                                break 'other;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            if !needed_by_other {
-                                let raw = read_block.read_block(blk)?;
-                                let mut matcher = Utf8Matcher::new(&sq.needle, sq.case_insensitive);
-                                let bm = scan_payload_refs_inline_substring(
-                                    &raw,
-                                    mb_row_count,
-                                    &remaining,
-                                    &pack_chunk_counts,
-                                    &pack_has_edges,
-                                    |bytes| matcher.matches(bytes),
-                                )?;
-                                let hits = bm.and(&remaining)?;
-                                if !hits.all_zeros() {
-                                    clause_matched = clause_matched.or(&hits)?;
-                                    remaining = remaining.and(&hits.not())?;
-                                }
-                                continue;
-                            }
+                        batch_cols.push(cidx);
+                    }
+                }
+
+                if !inline_tasks.is_empty() {
+                    let inline_results = self.eval_inline_fast_path_blocks(
+                        rg_idx,
+                        group.needle,
+                        group.case_insensitive,
+                        &fast_meta.pack_chunk_counts,
+                        &fast_meta.pack_has_edges,
+                        read_block,
+                        read_threads,
+                        inline_tasks,
+                        cancel,
+                    )?;
+                    for (_, bm) in inline_results {
+                        let hits = bm.and(&remaining)?;
+                        if !hits.all_zeros() {
+                            clause_matched = clause_matched.or(&hits)?;
+                            remaining = remaining.and(&hits.not())?;
                         }
                     }
                 }
-                self.ensure_p1_col(
-                    *cidx,
-                    rg_idx,
-                    mb_idx,
-                    mb_row_count,
-                    read_block,
-                    &mut decoded_p1,
-                )?;
-                let item = &decoded_p1[cidx];
-                let bm = match item {
-                    DecodedPhase1::FlatPayloadRefs(refs) => self.eval_payload_refs_substring(
-                        refs,
-                        &remaining,
-                        &sq.needle,
-                        sq.case_insensitive,
+
+                if !remaining.all_zeros() && !batch_cols.is_empty() {
+                    if !missing.is_empty() {
+                        if read_threads > 1 && missing.len() >= 2 {
+                            let block_reader = read_block.clone();
+                            let decoded_missing = parallel_map_in_order_static(
+                                missing,
+                                read_threads,
+                                move |(cidx, blk)| {
+                                    let raw = block_reader.read_block(&blk)?;
+                                    let refs = decode_payload_refs_flat(
+                                        &raw,
+                                        mb_row_count,
+                                        MAX_BATCH_DECODED_BYTES,
+                                    )?;
+                                    Ok((cidx, refs))
+                                },
+                            )?;
+                            for (cidx, refs) in decoded_missing {
+                                decoded_p1.insert(cidx, DecodedPhase1::FlatPayloadRefs(refs));
+                            }
+                        } else {
+                            for (cidx, _) in missing {
+                                if cancel.is_some_and(CancelToken::is_cancelled) {
+                                    return Err(StatamError::Cancelled);
+                                }
+                                self.ensure_p1_col(
+                                    cidx,
+                                    rg_idx,
+                                    mb_idx,
+                                    mb_row_count,
+                                    read_block,
+                                    &mut decoded_p1,
+                                )?;
+                            }
+                        }
+                    }
+
+                    let mut mb_inputs: Vec<(&FlatPayloadRefs, &Bitmap)> =
+                        Vec::with_capacity(batch_cols.len());
+                    for &cidx in &batch_cols {
+                        let DecodedPhase1::FlatPayloadRefs(refs) = &decoded_p1[&cidx] else {
+                            return Err(StatamError::Corrupt {
+                                reason: "unexpected Phase 1 variant for substring query",
+                            });
+                        };
+                        mb_inputs.push((refs, &remaining));
+                    }
+                    let any_projected = group
+                        .col_indices
+                        .iter()
+                        .any(|cidx| proj_indices.contains(cidx));
+                    let batch_bms = self.eval_payload_refs_substring_batch(
+                        &mb_inputs,
+                        group.needle,
+                        group.case_insensitive,
                         l0_local,
                         read_threads,
-                        if proj_indices.contains(cidx) {
-                            Some(retained)
-                        } else {
-                            None
-                        },
+                        any_projected.then_some(retained),
                         cancel,
-                    )?,
-                    _ => {
-                        return Err(StatamError::Corrupt {
-                            reason: "unexpected Phase 1 variant for substring query",
-                        });
+                    )?;
+                    for bm in batch_bms {
+                        let hits = bm.and(&remaining)?;
+                        if !hits.all_zeros() {
+                            clause_matched = clause_matched.or(&hits)?;
+                            remaining = remaining.and(&hits.not())?;
+                        }
                     }
-                };
-                let hits = bm.and(&remaining)?;
-                if !hits.all_zeros() {
-                    clause_matched = clause_matched.or(&hits)?;
-                    remaining = remaining.and(&hits.not())?;
                 }
             }
 
@@ -803,6 +871,219 @@ impl StatamReader {
             read_block,
             decoded_p1,
         )
+    }
+
+    fn compute_inline_fast_path_meta(
+        &self,
+        subs: &[Vec<(usize, SubstringQuery)>],
+        ci: usize,
+        group: &PayloadOrGroup<'_>,
+        l0_local: Option<&ParsedL0Payload>,
+    ) -> Result<InlineFastPathMeta, StatamError> {
+        let mut pack_chunk_counts = Vec::new();
+        let mut pack_has_edges = Vec::new();
+        let mut resolved_packs = Vec::new();
+        let mut all_short_circuit = false;
+
+        if l0_local.is_none() && !self.meta.schema_meta.pack_ids.is_empty() {
+            all_short_circuit = true;
+            pack_chunk_counts.reserve(self.meta.schema_meta.pack_ids.len());
+            pack_has_edges.reserve(self.meta.schema_meta.pack_ids.len());
+            resolved_packs.reserve(self.meta.schema_meta.pack_ids.len());
+            for &pack_id in &self.meta.schema_meta.pack_ids {
+                let pack = match self.resolve_pack(pack_id) {
+                    Ok(p) => p,
+                    Err(StatamError::MissingPack { .. }) => {
+                        all_short_circuit = false;
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                };
+                if !pack_short_circuits_all(&pack, group.needle, group.case_insensitive)? {
+                    all_short_circuit = false;
+                    break;
+                }
+                pack_chunk_counts.push(pack.toc().chunks.len());
+                pack_has_edges.push(pack.postscript().edge_table_len > 0);
+                resolved_packs.push(pack);
+            }
+        }
+
+        let mut col_inline_ok = HashMap::with_capacity(group.col_indices.len());
+        if all_short_circuit {
+            for &cidx in &group.col_indices {
+                let mut needed_by_other = false;
+                'other: for (oci, oclause) in subs.iter().enumerate() {
+                    for (oc, osq) in oclause {
+                        if (oci != ci
+                            || (osq.needle.as_slice(), osq.case_insensitive)
+                                != (group.needle, group.case_insensitive))
+                            && *oc == cidx
+                        {
+                            for pack in &resolved_packs {
+                                if !pack_short_circuits_all(
+                                    pack,
+                                    &osq.needle,
+                                    osq.case_insensitive,
+                                )? {
+                                    needed_by_other = true;
+                                    break 'other;
+                                }
+                            }
+                        }
+                    }
+                }
+                col_inline_ok.insert(cidx, !needed_by_other);
+            }
+        }
+
+        Ok(InlineFastPathMeta {
+            col_inline_ok,
+            pack_chunk_counts,
+            pack_has_edges,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_inline_fast_path_blocks(
+        &self,
+        rg_idx: usize,
+        needle: &[u8],
+        case_insensitive: bool,
+        pack_chunk_counts: &[usize],
+        pack_has_edges: &[bool],
+        read_block: &BlockCacheReader,
+        threads: usize,
+        tasks: Vec<(usize, usize, usize, usize, BlockEntry, Bitmap)>,
+        cancel: Option<&CancelToken>,
+    ) -> Result<Vec<(usize, Bitmap)>, StatamError> {
+        if tasks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tri_hashes = needle_trigram_hashes(needle, case_insensitive);
+        let surviving: Vec<(usize, usize, BlockEntry, Bitmap)> = if !tri_hashes.is_empty() {
+            let caches = self.caches.lock().unwrap_or_else(|p| p.into_inner());
+            tasks
+                .into_iter()
+                .filter_map(|(pos, cidx, mb_idx, mb_row_count, blk, mask)| {
+                    let pruned = caches
+                        .narrow_trigrams
+                        .get(&cidx)
+                        .and_then(|tri_vec| {
+                            let global_mb_idx = self.global_mb_idx(cidx, rg_idx, mb_idx);
+                            tri_vec.get(global_mb_idx).and_then(Option::as_ref)
+                        })
+                        .is_some_and(|bloom| !bloom.may_contain_hashes(&tri_hashes));
+                    (!pruned).then_some((pos, mb_row_count, blk, mask))
+                })
+                .collect()
+        } else {
+            tasks
+                .into_iter()
+                .map(|(pos, _, _, mb_row_count, blk, mask)| (pos, mb_row_count, blk, mask))
+                .collect()
+        };
+
+        if surviving.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if threads > 1 && surviving.len() >= 2 {
+            let needle_arc: Arc<[u8]> = Arc::from(needle);
+            let counts_arc = Arc::new(pack_chunk_counts.to_vec());
+            let edges_arc = Arc::new(pack_has_edges.to_vec());
+            let block_reader = read_block.clone();
+            let cancel_opt = cancel.cloned();
+            parallel_map_in_order_static(
+                surviving,
+                threads,
+                move |(pos, mb_row_count, blk, mask)| {
+                    if cancel_opt.as_ref().is_some_and(CancelToken::is_cancelled) {
+                        return Err(StatamError::Cancelled);
+                    }
+                    let mut matcher = Utf8Matcher::new(&needle_arc, case_insensitive);
+                    let raw = block_reader.read_block(&blk)?;
+                    let bm = scan_payload_refs_inline_substring(
+                        &raw,
+                        mb_row_count,
+                        &mask,
+                        &counts_arc,
+                        &edges_arc,
+                        |bytes| matcher.matches(bytes),
+                    )?;
+                    Ok((pos, bm))
+                },
+            )
+        } else {
+            let mut matcher = Utf8Matcher::new(needle, case_insensitive);
+            let mut out = Vec::with_capacity(surviving.len());
+            for (pos, mb_row_count, blk, mask) in surviving {
+                if cancel.is_some_and(CancelToken::is_cancelled) {
+                    return Err(StatamError::Cancelled);
+                }
+                let raw = read_block.read_block(&blk)?;
+                let bm = scan_payload_refs_inline_substring(
+                    &raw,
+                    mb_row_count,
+                    &mask,
+                    pack_chunk_counts,
+                    pack_has_edges,
+                    |bytes| matcher.matches(bytes),
+                )?;
+                out.push((pos, bm));
+            }
+            Ok(out)
+        }
+    }
+}
+
+struct PayloadOrGroup<'a> {
+    needle: &'a [u8],
+    case_insensitive: bool,
+    col_indices: Vec<usize>,
+}
+
+#[derive(Default)]
+struct InlineFastPathMeta {
+    col_inline_ok: HashMap<usize, bool>,
+    pack_chunk_counts: Vec<usize>,
+    pack_has_edges: Vec<bool>,
+}
+
+fn group_payload_or_disjuncts<'a>(
+    meta: &StatamFileMeta,
+    clause: &'a [(usize, SubstringQuery)],
+) -> Vec<PayloadOrGroup<'a>> {
+    let mut groups: Vec<PayloadOrGroup<'a>> = Vec::new();
+    for (cidx, sq) in clause {
+        if meta.col_dir[*cidx].locality_group != LocalityGroup::ExternalPayload {
+            continue;
+        }
+        if let Some(g) = groups
+            .iter_mut()
+            .find(|g| g.needle == sq.needle.as_slice() && g.case_insensitive == sq.case_insensitive)
+        {
+            if !g.col_indices.contains(cidx) {
+                g.col_indices.push(*cidx);
+            }
+        } else {
+            groups.push(PayloadOrGroup {
+                needle: sq.needle.as_slice(),
+                case_insensitive: sq.case_insensitive,
+                col_indices: vec![*cidx],
+            });
+        }
+    }
+    groups
+}
+
+fn needle_trigram_hashes(needle: &[u8], case_insensitive: bool) -> Vec<u32> {
+    if case_insensitive {
+        extract_ilike_trigram_hashes(needle)
+    } else {
+        let mut hashes = Vec::new();
+        extract_trigram_hashes(needle, false, &mut hashes);
+        hashes
     }
 }
 
@@ -3008,5 +3289,1243 @@ mod tests {
         assert!(ascii.matches(b"\xFF\xFEhas_NeEdLe\x80"));
         assert!(!ascii.matches(b"clean ascii without match"));
         assert!(ascii.matches(b"needle"));
+    }
+
+    fn collect_i64_ids(batches: &[cetra_column::Batch]) -> Vec<i64> {
+        let mut out = Vec::new();
+        for b in batches {
+            let col = b.columns()[0].materialize(None).unwrap();
+            let cetra_column::FlatData::I64(vals) = col.data() else {
+                panic!("expected I64 id column");
+            };
+            match b.selection() {
+                cetra_column::Selection::All => out.extend_from_slice(vals),
+                cetra_column::Selection::Mask(bm) => {
+                    for r in bm.iter_ones() {
+                        out.push(vals[r]);
+                    }
+                }
+                cetra_column::Selection::Indices(idxs) => {
+                    for &r in idxs {
+                        out.push(vals[r as usize]);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn collect_utf8_col(batches: &[cetra_column::Batch], col_idx: usize) -> Vec<Option<String>> {
+        let mut out = Vec::new();
+        for b in batches {
+            let col = b.columns()[col_idx].materialize(None).unwrap();
+            let cetra_column::FlatData::Utf8(u) = col.data() else {
+                panic!("expected Utf8 column");
+            };
+            let push_row = |r: usize, dst: &mut Vec<Option<String>>| {
+                if col.is_null(r) {
+                    dst.push(None);
+                } else {
+                    dst.push(
+                        crate::codec::utf8_bytes_at(u, r)
+                            .map(|bytes| String::from_utf8(bytes.to_vec()).unwrap()),
+                    );
+                }
+            };
+            match b.selection() {
+                cetra_column::Selection::All => {
+                    for r in 0..b.num_rows() {
+                        push_row(r, &mut out);
+                    }
+                }
+                cetra_column::Selection::Mask(bm) => {
+                    for r in bm.iter_ones() {
+                        push_row(r, &mut out);
+                    }
+                }
+                cetra_column::Selection::Indices(idxs) => {
+                    for &r in idxs {
+                        push_row(r as usize, &mut out);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn opt_utf8_col(vals: &[Option<String>]) -> cetra_column::Column {
+        let mut bm = cetra_column::Bitmap::new_zeroed(vals.len());
+        let refs: Vec<&str> = vals
+            .iter()
+            .enumerate()
+            .map(|(i, v)| match v {
+                Some(s) => {
+                    let _ = bm.set(i, true);
+                    s.as_str()
+                }
+                None => "",
+            })
+            .collect();
+        cetra_column::Column::Flat(
+            cetra_column::FlatColumn::try_new(
+                cetra_column::FlatData::Utf8(
+                    cetra_column::Utf8Data::try_from_slices(refs).unwrap(),
+                ),
+                Some(bm),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn make_opt_test_pack_opts() -> crate::payload::pack::PackWriteOptions {
+        crate::payload::pack::PackWriteOptions {
+            #[cfg(miri)]
+            codec: crate::format::Codec::Lz4,
+            #[cfg(not(miri))]
+            codec: crate::format::Codec::Zstd,
+            zstd_level: 1,
+            target_frame_raw_bytes: 16 * 1024,
+            enable_trigram_skip: true,
+            compress_toc_lz4: true,
+            write_threads: 1,
+            ..crate::payload::pack::PackWriteOptions::default()
+        }
+    }
+
+    struct CountingPackResolver {
+        inner: crate::reader::InMemoryPackResolver,
+        gets: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        bytes_map: std::collections::HashMap<[u8; 16], bytes::Bytes>,
+    }
+
+    impl crate::reader::PackResolver for CountingPackResolver {
+        fn resolve(
+            &self,
+            pack_id: [u8; 16],
+        ) -> Result<std::sync::Arc<crate::payload::pack::ChunkPackReader>, crate::StatamError>
+        {
+            struct CountingReader {
+                data: bytes::Bytes,
+                gets: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+            }
+            impl crate::io::RangeReader for CountingReader {
+                fn file_len(&self) -> u64 {
+                    self.data.len() as u64
+                }
+                fn is_remote(&self) -> bool {
+                    true
+                }
+                fn read_range(
+                    &self,
+                    range: std::ops::Range<u64>,
+                ) -> Result<bytes::Bytes, crate::StatamError> {
+                    self.gets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Ok(self.data.slice(range.start as usize..range.end as usize))
+                }
+                fn read_ranges(
+                    &self,
+                    ranges: &[std::ops::Range<u64>],
+                ) -> Result<Vec<bytes::Bytes>, crate::StatamError> {
+                    self.gets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Ok(ranges
+                        .iter()
+                        .map(|r| self.data.slice(r.start as usize..r.end as usize))
+                        .collect())
+                }
+            }
+            if let Some(bytes) = self.bytes_map.get(&pack_id) {
+                let rr = std::sync::Arc::new(CountingReader {
+                    data: bytes.clone(),
+                    gets: std::sync::Arc::clone(&self.gets),
+                });
+                Ok(std::sync::Arc::new(
+                    crate::payload::pack::ChunkPackReader::open(rr)?,
+                ))
+            } else {
+                self.inner.resolve(pack_id)
+            }
+        }
+    }
+
+    #[test]
+    fn opt4_multicol_payload_or_dedup_parity() {
+        use std::io::Cursor;
+        use std::sync::Arc;
+
+        let schema = cetra_column::Schema::try_new_arc(vec![
+            cetra_column::Field::new("id", cetra_column::DataType::I64, false),
+            cetra_column::Field::new("name", cetra_column::DataType::Utf8, false),
+            cetra_column::Field::new("input", cetra_column::DataType::Utf8, true),
+            cetra_column::Field::new("output", cetra_column::DataType::Utf8, true),
+            cetra_column::Field::new("system_instructions", cetra_column::DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        // Build a large string > MAX_CHUNK (8192) and extract a 12-byte slice straddling a chunk cut.
+        let mut seam_buf = String::with_capacity(11_000);
+        for i in 0..11_000 {
+            seam_buf.push((b'a' + ((i * 7 + (i >> 5)) % 26) as u8) as char);
+        }
+        let mut seam_cuts = Vec::new();
+        crate::payload::chunker::chunk_payload(seam_buf.as_bytes(), &mut seam_cuts);
+        assert!(seam_cuts.len() >= 2, "expected multi-chunk payload");
+        let seam_off = seam_cuts[0].len();
+        let seam_needle = seam_buf[seam_off - 6..seam_off + 6].to_owned();
+
+        let n = 64usize;
+        let ids: Vec<i64> = (0..n as i64).collect();
+        let names: Vec<String> = (0..n).map(|i| format!("span_name_{i:03}")).collect();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut inputs: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut outputs: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut sys: Vec<Option<String>> = Vec::with_capacity(n);
+
+        for r in 0..n {
+            // MB 2 (rows 32..48): output is all-null (ConstNull).
+            let inp = match r {
+                2 => Some("inline hit OR_DEDUP_TOK in input".to_owned()),
+                19 => Some(format!(
+                    "{} OR_DEDUP_TOK {}",
+                    "x".repeat(400),
+                    "y".repeat(300)
+                )),
+                25 => Some(seam_buf.clone()),
+                35 => Some(format!(
+                    "{} SECONDARY_PACK_TOK {}",
+                    "p".repeat(350),
+                    "q".repeat(350)
+                )),
+                _ => Some(format!("plain_input_{r:03}_{}", "z".repeat(300))),
+            };
+            let out = if (32..48).contains(&r) {
+                None
+            } else {
+                match r {
+                    5 => Some("inline hit or_dedup_tok in output".to_owned()),
+                    30 => Some(format!(
+                        "{} OR_DEDUP_TOK {}",
+                        "m".repeat(420),
+                        "n".repeat(300)
+                    )),
+                    _ => Some(format!("plain_output_{r:03}_{}", "w".repeat(300))),
+                }
+            };
+            let sy = match r {
+                12 => Some("inline Or_DeDuP_ToK in sys".to_owned()),
+                50 => Some(format!(
+                    "{} OR_DEDUP_TOK {}",
+                    "k".repeat(400),
+                    "j".repeat(300)
+                )),
+                51 => Some(seam_buf.clone()),
+                _ => Some(format!("plain_sys_{r:03}_{}", "v".repeat(300))),
+            };
+            inputs.push(inp);
+            outputs.push(out);
+            sys.push(sy);
+        }
+
+        let batch = cetra_column::Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(cetra_column::FlatData::I64(ids), None)
+                        .unwrap(),
+                ),
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(
+                        cetra_column::FlatData::Utf8(
+                            cetra_column::Utf8Data::try_from_slices(name_refs).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                opt_utf8_col(&inputs),
+                opt_utf8_col(&outputs),
+                opt_utf8_col(&sys),
+            ],
+            n,
+        )
+        .unwrap();
+
+        let pack_id = [0xA4u8; 16];
+        let mut pb =
+            crate::payload::pack::ChunkPackBuilder::new(pack_id, make_opt_test_pack_opts());
+        let mut l1_opts = crate::writer::WriteOptions::for_table(
+            crate::format::TableKind::Spans,
+            crate::WriteProfile::L1Compact,
+        );
+        l1_opts.mini_block_size = 16;
+        l1_opts.pack_id = Some(pack_id);
+        let mut l1_bytes = Vec::new();
+        let mut w1 = crate::writer::StatamWriter::new(
+            Cursor::new(&mut l1_bytes),
+            Arc::clone(&schema),
+            l1_opts,
+            Some(&mut pb),
+        )
+        .unwrap();
+        w1.write_batch(&batch).unwrap();
+        w1.finish().unwrap();
+        let mut pack_bytes = Vec::new();
+        pb.finish(&mut pack_bytes).unwrap();
+
+        let mut base_resolver = crate::reader::InMemoryPackResolver::new();
+        base_resolver
+            .insert_bytes(pack_id, pack_bytes.clone())
+            .unwrap();
+        let mut bytes_map = std::collections::HashMap::new();
+        bytes_map.insert(pack_id, bytes::Bytes::from(pack_bytes));
+        let pack_gets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counting_resolver = Arc::new(CountingPackResolver {
+            inner: base_resolver,
+            gets: Arc::clone(&pack_gets),
+            bytes_map,
+        });
+
+        let r_l1 = Arc::new(
+            crate::reader::StatamReader::open(
+                Arc::new(crate::io::SliceReader::new(l1_bytes.clone())),
+                Some(Arc::clone(&counting_resolver) as Arc<dyn crate::reader::PackResolver>),
+            )
+            .unwrap(),
+        );
+
+        // 1. Multi-column OR with duplicate `input` disjunct + projection on `input` only (RetainedPackChunks).
+        let or_clause = vec![
+            crate::reader::SubstringQuery::ilike("input", "or_dedup_tok"),
+            crate::reader::SubstringQuery::ilike("output", "or_dedup_tok"),
+            crate::reader::SubstringQuery::ilike("input", "or_dedup_tok"),
+            crate::reader::SubstringQuery::ilike("system_instructions", "or_dedup_tok"),
+        ];
+        pack_gets.store(0, std::sync::atomic::Ordering::Relaxed);
+        for (limit, read_threads) in [(None, 1usize), (None, 2usize), (Some(10usize), 2usize)] {
+            let req = crate::reader::ScanRequest {
+                projection: Some(vec![0, 2]),
+                substrings: vec![or_clause.clone()],
+                limit,
+                read_threads,
+                ..crate::reader::ScanRequest::default()
+            };
+            let res = r_l1.scan(&req).unwrap();
+            let got_ids = collect_i64_ids(&res);
+            assert_eq!(
+                got_ids,
+                vec![2, 5, 12, 19, 30, 50],
+                "limit={limit:?} read_threads={read_threads}"
+            );
+            assert!(pack_gets.load(std::sync::atomic::Ordering::Relaxed) > 0);
+            let got_inputs = collect_utf8_col(&res, 1);
+            for (idx, id) in got_ids.iter().enumerate() {
+                assert_eq!(got_inputs[idx], inputs[*id as usize]);
+            }
+            // Streaming iterator parity (`eval_phase1_mb` path).
+            if limit.is_none() {
+                let mut iter = r_l1.scan_iter(req).unwrap();
+                let mut iter_batches = Vec::new();
+                while let Some(b) = iter.next_batch(None, None).unwrap() {
+                    iter_batches.push(b);
+                }
+                assert_eq!(collect_i64_ids(&iter_batches), vec![2, 5, 12, 19, 30, 50]);
+            }
+        }
+
+        // Verify Phase-1 `.stpk` dedup: 3-column OR scan issues <= 1-column `input` scan `.stpk` reads
+        // on fresh readers (so ChunkPackReader frame caches start cold), using `projection: Some(vec![0])`
+        // so Phase-2 `input` chunk materialization for rows matched by `output`/`system_instructions`
+        // does not skew the Phase-1 dedup comparison.
+        let r_or = crate::reader::StatamReader::open(
+            Arc::new(crate::io::SliceReader::new(l1_bytes.clone())),
+            Some(Arc::clone(&counting_resolver) as Arc<dyn crate::reader::PackResolver>),
+        )
+        .unwrap();
+        pack_gets.store(0, std::sync::atomic::Ordering::Relaxed);
+        let dedup_or_res = r_or
+            .scan(&crate::reader::ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![or_clause.clone()],
+                read_threads: 1,
+                ..crate::reader::ScanRequest::default()
+            })
+            .unwrap();
+        assert_eq!(collect_i64_ids(&dedup_or_res), vec![2, 5, 12, 19, 30, 50]);
+        let or_gets = pack_gets.load(std::sync::atomic::Ordering::Relaxed);
+
+        let r_single = crate::reader::StatamReader::open(
+            Arc::new(crate::io::SliceReader::new(l1_bytes)),
+            Some(Arc::clone(&counting_resolver) as Arc<dyn crate::reader::PackResolver>),
+        )
+        .unwrap();
+        pack_gets.store(0, std::sync::atomic::Ordering::Relaxed);
+        let single_res = r_single
+            .scan(&crate::reader::ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![vec![crate::reader::SubstringQuery::ilike(
+                    "input",
+                    "or_dedup_tok",
+                )]],
+                read_threads: 1,
+                ..crate::reader::ScanRequest::default()
+            })
+            .unwrap();
+        assert_eq!(collect_i64_ids(&single_res), vec![2, 19]);
+        let single_gets = pack_gets.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            or_gets > 0 && or_gets <= single_gets,
+            "expected 3-col OR scan ({or_gets} .stpk gets) <= 1-col scan ({single_gets} .stpk gets)"
+        );
+
+        // 2. Boundary match across `.stpk` frame/chunk seam in `input` OR `system_instructions`.
+        let seam_res = r_l1
+            .scan(&crate::reader::ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![vec![
+                    crate::reader::SubstringQuery::like("input", seam_needle.as_str()),
+                    crate::reader::SubstringQuery::like(
+                        "system_instructions",
+                        seam_needle.as_str(),
+                    ),
+                ]],
+                read_threads: 2,
+                ..crate::reader::ScanRequest::default()
+            })
+            .unwrap();
+        assert_eq!(collect_i64_ids(&seam_res), vec![25, 51]);
+
+        // 3. `decoded_p1` reuse when same column appears in same clause with two different needles
+        //    (one inline-friendly or different needle, one requiring `.stpk`).
+        for limit in [None, Some(10usize)] {
+            let reuse_res = r_l1
+                .scan(&crate::reader::ScanRequest {
+                    projection: Some(vec![0]),
+                    substrings: vec![vec![
+                        crate::reader::SubstringQuery::ilike("input", "or_dedup_tok"),
+                        crate::reader::SubstringQuery::ilike("output", "or_dedup_tok"),
+                        crate::reader::SubstringQuery::like("input", "SECONDARY_PACK_TOK"),
+                    ]],
+                    limit,
+                    read_threads: 2,
+                    ..crate::reader::ScanRequest::default()
+                })
+                .unwrap();
+            assert_eq!(collect_i64_ids(&reuse_res), vec![2, 5, 19, 30, 35]);
+        }
+
+        // 4. L0Fast (`L0Local`) multi-column OR dedup parity.
+        let mut l0_opts = crate::writer::WriteOptions::for_table(
+            crate::format::TableKind::Spans,
+            crate::WriteProfile::L0Fast,
+        );
+        l0_opts.mini_block_size = 16;
+        let mut l0_bytes = Vec::new();
+        let mut w0 = crate::writer::StatamWriter::new(
+            Cursor::new(&mut l0_bytes),
+            Arc::clone(&schema),
+            l0_opts,
+            None,
+        )
+        .unwrap();
+        w0.write_batch(&batch).unwrap();
+        w0.finish().unwrap();
+        let r_l0 = crate::reader::StatamReader::open(
+            Arc::new(crate::io::SliceReader::new(l0_bytes)),
+            None,
+        )
+        .unwrap();
+        for limit in [None, Some(10usize)] {
+            let l0_res = r_l0
+                .scan(&crate::reader::ScanRequest {
+                    projection: Some(vec![0, 2]),
+                    substrings: vec![or_clause.clone()],
+                    limit,
+                    read_threads: 2,
+                    ..crate::reader::ScanRequest::default()
+                })
+                .unwrap();
+            assert_eq!(collect_i64_ids(&l0_res), vec![2, 5, 12, 19, 30, 50]);
+        }
+    }
+
+    #[test]
+    fn opt6_inline_narrow_trigram_soundness_and_zero_io() {
+        use std::io::Cursor;
+        use std::sync::Arc;
+
+        let schema = cetra_column::Schema::try_new_arc(vec![
+            cetra_column::Field::new("id", cetra_column::DataType::I64, false),
+            cetra_column::Field::new("name", cetra_column::DataType::Utf8, false),
+            cetra_column::Field::new("input", cetra_column::DataType::Utf8, true),
+            cetra_column::Field::new("output", cetra_column::DataType::Utf8, true),
+            cetra_column::Field::new("system_instructions", cetra_column::DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        // 4 mini-blocks of 160 rows each (640 rows total, ensuring raw_body_len >= 512 B for every
+        // non-ConstNull PayloadRefs MB including MB 2 which has 1/3 nulls + external chunk refs).
+        let mb_size = 160usize;
+        let mb1_hit_in = mb_size + 1;
+        let mb1_hit_name = mb_size + 6;
+        let mb1_hit_out = mb_size + 16;
+        let mb2_short = 2 * mb_size + 2;
+        let mb2_gamma = 2 * mb_size + 3;
+        let n = 4 * mb_size;
+        let ids: Vec<i64> = (0..n as i64).collect();
+        let mut names = Vec::with_capacity(n);
+        let mut inputs: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut outputs: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut sys: Vec<Option<String>> = Vec::with_capacity(n);
+
+        for r in 0..n {
+            let mb = r / mb_size;
+            names.push(if r == mb1_hit_name {
+                "ONLY_IN_NAME_DELTA".to_owned()
+            } else {
+                format!("span_unique_{r:04}")
+            });
+            let inp = match mb {
+                // MB 0: 100% external .stpk chunks -> zero inline rows -> all-zeros 256 B bloom.
+                0 => {
+                    if r == 10 {
+                        Some(format!(
+                            "{} CHUNKED_NEEDLE_ALPHA {}",
+                            "a".repeat(350),
+                            "b".repeat(350)
+                        ))
+                    } else {
+                        Some(format!("{} filler_mb0_{r:03}", "c".repeat(350)))
+                    }
+                }
+                // MB 1: mixed inline (<256 B) + external .stpk chunks.
+                1 => {
+                    if r == mb1_hit_in {
+                        Some("inline_hit_beta".to_owned())
+                    } else if r % 2 == 0 {
+                        Some(format!("inline_mb1_row_{r:03}"))
+                    } else {
+                        Some(format!("{} ext_mb1_{r:03}", "d".repeat(350)))
+                    }
+                }
+                // MB 2: only <3 B inline ("ab"), nulls, and .stpk chunks -> all-zeros 256 B bloom.
+                2 => {
+                    if r == mb2_short {
+                        Some("ab".to_owned())
+                    } else if r == mb2_gamma {
+                        Some(format!(
+                            "{} CHUNKED_NEEDLE_GAMMA {}",
+                            "e".repeat(350),
+                            "f".repeat(350)
+                        ))
+                    } else if r % 3 == 0 {
+                        None
+                    } else {
+                        Some(format!("{} ext_mb2_{r:03}", "g".repeat(350)))
+                    }
+                }
+                // MB 3: ConstNull.
+                _ => None,
+            };
+            let out = if mb == 3 {
+                None
+            } else if r == mb1_hit_out {
+                Some("inline_hit_beta_in_output".to_owned())
+            } else {
+                Some(format!("{} out_filler_{r:03}", "h".repeat(350)))
+            };
+            let sy = if mb == 3 {
+                None
+            } else {
+                Some(format!("{} sys_filler_{r:03}", "k".repeat(350)))
+            };
+            inputs.push(inp);
+            outputs.push(out);
+            sys.push(sy);
+        }
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+
+        let batch = cetra_column::Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(cetra_column::FlatData::I64(ids), None)
+                        .unwrap(),
+                ),
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(
+                        cetra_column::FlatData::Utf8(
+                            cetra_column::Utf8Data::try_from_slices(name_refs).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                opt_utf8_col(&inputs),
+                opt_utf8_col(&outputs),
+                opt_utf8_col(&sys),
+            ],
+            n,
+        )
+        .unwrap();
+
+        let pack_id = [0xB6u8; 16];
+        let mut pb =
+            crate::payload::pack::ChunkPackBuilder::new(pack_id, make_opt_test_pack_opts());
+        let mut opts = crate::writer::WriteOptions::for_table(
+            crate::format::TableKind::Spans,
+            crate::WriteProfile::L1Compact,
+        );
+        opts.mini_block_size = mb_size;
+        opts.pack_id = Some(pack_id);
+        let mut statam_bytes = Vec::new();
+        let mut w = crate::writer::StatamWriter::new(
+            Cursor::new(&mut statam_bytes),
+            Arc::clone(&schema),
+            opts,
+            Some(&mut pb),
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+        let mut pack_bytes = Vec::new();
+        pb.finish(&mut pack_bytes).unwrap();
+
+        let mut resolver = crate::reader::InMemoryPackResolver::new();
+        resolver.insert_bytes(pack_id, pack_bytes).unwrap();
+        let resolver = Arc::new(resolver);
+
+        let no_cache_cfg = crate::io::SimulatedS3Config {
+            cache_capacity_blocks: 0,
+            ..crate::io::SimulatedS3Config::default()
+        };
+        let s3_statam = Arc::new(
+            crate::io::SimulatedS3Reader::from_bytes(statam_bytes.clone(), no_cache_cfg)
+                .with_remote_hint(true),
+        );
+        let reader = Arc::new(
+            crate::reader::StatamReader::open(
+                s3_statam.clone(),
+                Some(Arc::clone(&resolver) as Arc<dyn crate::reader::PackResolver>),
+            )
+            .unwrap(),
+        );
+
+        assert_ne!(
+            reader.meta().postscript.flags & crate::format::FLAG_HAS_TRIGRAM_INDEX,
+            0
+        );
+        // Payload columns (input=2, output=3, system_instructions=4) must have
+        // COL_FLAG_HAS_TRIGRAM_INDEX; col 1 (`name`) is Dict-encoded so uses dict_sub_bitmaps.
+        for col_idx in [2usize, 3, 4] {
+            assert_ne!(
+                reader.meta().col_dir[col_idx].col_flags
+                    & crate::format::COL_FLAG_HAS_TRIGRAM_INDEX,
+                0,
+                "column {col_idx} must have COL_FLAG_HAS_TRIGRAM_INDEX"
+            );
+        }
+
+        // Warm lazy trigram indexes by running one miss first, then reset counters to measure Wave-1 I/O!
+        let miss_req = crate::reader::ScanRequest {
+            projection: Some(vec![0]),
+            substrings: vec![vec![
+                crate::reader::SubstringQuery::ilike("input", "nonexistent_needle_9x7z"),
+                crate::reader::SubstringQuery::ilike("output", "nonexistent_needle_9x7z"),
+                crate::reader::SubstringQuery::ilike(
+                    "system_instructions",
+                    "nonexistent_needle_9x7z",
+                ),
+            ]],
+            read_threads: 2,
+            ..crate::reader::ScanRequest::default()
+        };
+        assert!(reader.scan(&miss_req).unwrap().is_empty());
+
+        s3_statam.reset_counters();
+        let miss_res = reader.scan(&miss_req).unwrap();
+        assert!(miss_res.is_empty());
+        assert_eq!(
+            s3_statam.counters().gets,
+            0,
+            "Wave-1 pruning must issue ZERO .statam PayloadRefs block reads on miss"
+        );
+        let mut iter = reader.scan_iter(miss_req.clone()).unwrap();
+        assert!(iter.next_batch(None, None).unwrap().is_none());
+        assert_eq!(
+            s3_statam.counters().gets,
+            0,
+            "scan_iter Wave-1 pruning must issue ZERO .statam reads on miss"
+        );
+
+        // Cold local-reader (`is_remote() == false`) first-query assertion:
+        // with warm lazy trigrams and a cold `.stpk` pack, Wave-1 pruning issues 0 `.statam`
+        // `PayloadRefs` block GETs on the very first miss!
+        let local_s3 = Arc::new(
+            crate::io::SimulatedS3Reader::from_bytes(statam_bytes, no_cache_cfg)
+                .with_remote_hint(false),
+        );
+        let local_reader = Arc::new(
+            crate::reader::StatamReader::open(
+                local_s3.clone(),
+                Some(Arc::clone(&resolver) as Arc<dyn crate::reader::PackResolver>),
+            )
+            .unwrap(),
+        );
+        assert!(!local_reader.reader.is_remote());
+        local_reader
+            .ensure_lazy_indexes_loaded(&[], &[2, 3, 4], &[])
+            .unwrap();
+        local_s3.reset_counters();
+        assert!(local_reader.scan(&miss_req).unwrap().is_empty());
+        assert_eq!(
+            local_s3.counters().gets,
+            0,
+            "cold local-reader first miss must issue ZERO .statam PayloadRefs block GETs"
+        );
+
+        // Chunked .stpk hits when inline bloom is all-zeros (MB 0 and MB 2) MUST NOT false-negative!
+        for (needle, expected) in [
+            ("CHUNKED_NEEDLE_ALPHA", vec![10i64]),
+            ("CHUNKED_NEEDLE_GAMMA", vec![mb2_gamma as i64]),
+        ] {
+            let res = reader
+                .scan(&crate::reader::ScanRequest {
+                    projection: Some(vec![0]),
+                    substrings: vec![vec![crate::reader::SubstringQuery::like("input", needle)]],
+                    read_threads: 2,
+                    ..crate::reader::ScanRequest::default()
+                })
+                .unwrap();
+            assert_eq!(collect_i64_ids(&res), expected, "needle={needle}");
+        }
+
+        // Inline hits when `.stpk` packs short-circuit MUST match (sequential & parallel threads=2)!
+        for threads in [1usize, 2usize] {
+            let res_inline = reader
+                .scan(&crate::reader::ScanRequest {
+                    projection: Some(vec![0]),
+                    substrings: vec![vec![
+                        crate::reader::SubstringQuery::ilike("input", "INLINE_HIT_BETA"),
+                        crate::reader::SubstringQuery::ilike("output", "INLINE_HIT_BETA"),
+                        crate::reader::SubstringQuery::ilike(
+                            "system_instructions",
+                            "INLINE_HIT_BETA",
+                        ),
+                    ]],
+                    read_threads: threads,
+                    ..crate::reader::ScanRequest::default()
+                })
+                .unwrap();
+            assert_eq!(
+                collect_i64_ids(&res_inline),
+                vec![mb1_hit_in as i64, mb1_hit_out as i64]
+            );
+        }
+
+        // Short <3 B needle MUST NOT be pruned by the all-zeros 256 B bloom!
+        let short_res = reader
+            .scan(&crate::reader::ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![vec![crate::reader::SubstringQuery::like("input", "ab")]],
+                ..crate::reader::ScanRequest::default()
+            })
+            .unwrap();
+        assert_eq!(collect_i64_ids(&short_res), vec![mb2_short as i64]);
+
+        // Mixed OR (`name` matches MB 1, `input` inline trigram rejects inside `eval_inline_fast_path_blocks`).
+        let mixed_res = reader
+            .scan(&crate::reader::ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![vec![
+                    crate::reader::SubstringQuery::ilike("name", "ONLY_IN_NAME_DELTA"),
+                    crate::reader::SubstringQuery::ilike("input", "ONLY_IN_NAME_DELTA"),
+                ]],
+                read_threads: 2,
+                ..crate::reader::ScanRequest::default()
+            })
+            .unwrap();
+        assert_eq!(collect_i64_ids(&mixed_res), vec![mb1_hit_name as i64]);
+    }
+
+    #[test]
+    fn opt6_gdpr_rewrite_l1_no_pack_and_old_file_fallback() {
+        use std::io::Cursor;
+        use std::sync::Arc;
+
+        let schema = cetra_column::Schema::try_new_arc(vec![
+            cetra_column::Field::new("id", cetra_column::DataType::I64, false),
+            cetra_column::Field::new("name", cetra_column::DataType::Utf8, false),
+            cetra_column::Field::new("input", cetra_column::DataType::Utf8, true),
+            cetra_column::Field::new("output", cetra_column::DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        let mb_size = 64usize;
+        let n = 128usize;
+        let ids: Vec<i64> = (0..n as i64).collect();
+        let names: Vec<String> = (0..n).map(|i| format!("gdpr_name_{i:03}")).collect();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut inputs = Vec::with_capacity(n);
+        let mut outputs = Vec::with_capacity(n);
+        for r in 0..n {
+            inputs.push(if r == 5 {
+                Some("GDPR_ERASE_INLINE_SECRET".to_owned())
+            } else if r == 6 {
+                Some("SURVIVING_INLINE_TOKEN".to_owned())
+            } else if r == 70 {
+                Some(format!(
+                    "{} SURVIVING_EXT_TOKEN {}",
+                    "x".repeat(350),
+                    "y".repeat(350)
+                ))
+            } else {
+                Some(format!("{} normal_input_{r:03}", "z".repeat(350)))
+            });
+            outputs.push(Some(format!("inline_out_{r:03}")));
+        }
+        let batch = cetra_column::Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(cetra_column::FlatData::I64(ids), None)
+                        .unwrap(),
+                ),
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(
+                        cetra_column::FlatData::Utf8(
+                            cetra_column::Utf8Data::try_from_slices(name_refs).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                opt_utf8_col(&inputs),
+                opt_utf8_col(&outputs),
+            ],
+            n,
+        )
+        .unwrap();
+
+        // 1. L1Compact with `pack_builder = None` (Branch 2 Site 5) writes and reads cleanly.
+        let mut no_pack_opts = crate::writer::WriteOptions::for_table(
+            crate::format::TableKind::Spans,
+            crate::WriteProfile::L1Compact,
+        );
+        no_pack_opts.mini_block_size = mb_size;
+        let mut no_pack_bytes = Vec::new();
+        let mut w_np = crate::writer::StatamWriter::new(
+            Cursor::new(&mut no_pack_bytes),
+            Arc::clone(&schema),
+            no_pack_opts,
+            None,
+        )
+        .unwrap();
+        w_np.write_batch(&batch).unwrap();
+        w_np.finish().unwrap();
+        let r_np = crate::reader::StatamReader::open(
+            Arc::new(crate::io::SliceReader::new(no_pack_bytes)),
+            None,
+        )
+        .unwrap();
+        let np_hits = r_np
+            .scan(&crate::reader::ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![vec![crate::reader::SubstringQuery::like(
+                    "input",
+                    "SURVIVING_INLINE_TOKEN",
+                )]],
+                ..crate::reader::ScanRequest::default()
+            })
+            .unwrap();
+        assert_eq!(collect_i64_ids(&np_hits), vec![6]);
+
+        // 2. Old-file fallback (no COL_FLAG_HAS_TRIGRAM_INDEX on payload cols).
+        let old_pack_id = [0xC1u8; 16];
+        let mut pb_old =
+            crate::payload::pack::ChunkPackBuilder::new(old_pack_id, make_opt_test_pack_opts());
+        let mut old_opts = crate::writer::WriteOptions::for_table(
+            crate::format::TableKind::Spans,
+            crate::WriteProfile::L1Compact,
+        );
+        old_opts.mini_block_size = mb_size;
+        old_opts.pack_id = Some(old_pack_id);
+        old_opts.narrow_trigram_cols.clear();
+        let mut old_statam = Vec::new();
+        let mut w_old = crate::writer::StatamWriter::new(
+            Cursor::new(&mut old_statam),
+            Arc::clone(&schema),
+            old_opts,
+            Some(&mut pb_old),
+        )
+        .unwrap();
+        w_old.write_batch(&batch).unwrap();
+        w_old.finish().unwrap();
+        let mut old_pack_bytes = Vec::new();
+        pb_old.finish(&mut old_pack_bytes).unwrap();
+        let mut old_res = crate::reader::InMemoryPackResolver::new();
+        old_res
+            .insert_bytes(old_pack_id, old_pack_bytes.clone())
+            .unwrap();
+        let r_old = crate::reader::StatamReader::open(
+            Arc::new(crate::io::SliceReader::new(old_statam)),
+            Some(Arc::new(old_res)),
+        )
+        .unwrap();
+        assert_eq!(
+            r_old.meta().col_dir[2].col_flags & crate::format::COL_FLAG_HAS_TRIGRAM_INDEX,
+            0
+        );
+        let old_hit = r_old
+            .scan(&crate::reader::ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![vec![crate::reader::SubstringQuery::like(
+                    "input",
+                    "SURVIVING_INLINE_TOKEN",
+                )]],
+                ..crate::reader::ScanRequest::default()
+            })
+            .unwrap();
+        assert_eq!(collect_i64_ids(&old_hit), vec![6]);
+
+        // 3. GDPR rewrite parity on Opt-6 L1Compact file.
+        let mut pb_src =
+            crate::payload::pack::ChunkPackBuilder::new(old_pack_id, make_opt_test_pack_opts());
+        let mut src_opts = crate::writer::WriteOptions::for_table(
+            crate::format::TableKind::Spans,
+            crate::WriteProfile::L1Compact,
+        );
+        src_opts.mini_block_size = mb_size;
+        src_opts.pack_id = Some(old_pack_id);
+        let mut src_statam = Vec::new();
+        let mut w_src = crate::writer::StatamWriter::new(
+            Cursor::new(&mut src_statam),
+            Arc::clone(&schema),
+            src_opts,
+            Some(&mut pb_src),
+        )
+        .unwrap();
+        w_src.write_batch(&batch).unwrap();
+        w_src.finish().unwrap();
+        let mut src_pack_bytes = Vec::new();
+        pb_src.finish(&mut src_pack_bytes).unwrap();
+
+        let new_pack_id = [0xC2u8; 16];
+        let new_statam_cur = Cursor::new(Vec::new());
+        let new_pack_cur = Cursor::new(Vec::new());
+        let (out_s, out_p, _gdpr_stats) = crate::gdpr::gdpr_rewrite_single_file_streaming(
+            Arc::new(crate::io::SliceReader::new(src_statam)),
+            Some((
+                old_pack_id,
+                Arc::new(crate::io::SliceReader::new(src_pack_bytes)),
+            )),
+            new_pack_id,
+            new_statam_cur,
+            Some(new_pack_cur),
+            None,
+            &mut |b| {
+                let col = b.columns()[0].materialize(None)?;
+                let cetra_column::FlatData::I64(vals) = col.data() else {
+                    unreachable!();
+                };
+                let mut erase = cetra_column::Bitmap::new_zeroed(vals.len());
+                for (i, &id) in vals.iter().enumerate() {
+                    if id == 5 {
+                        let _ = erase.set(i, true);
+                    }
+                }
+                Ok(erase)
+            },
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        let rewritten_statam = out_s.into_inner();
+        let rewritten_pack = out_p.unwrap().into_inner();
+
+        let mut rw_res = crate::reader::InMemoryPackResolver::new();
+        rw_res.insert_bytes(new_pack_id, rewritten_pack).unwrap();
+        let s3_rw = Arc::new(
+            crate::io::SimulatedS3Reader::from_bytes(
+                rewritten_statam,
+                crate::io::SimulatedS3Config {
+                    cache_capacity_blocks: 0,
+                    ..crate::io::SimulatedS3Config::default()
+                },
+            )
+            .with_remote_hint(true),
+        );
+        let r_rw =
+            crate::reader::StatamReader::open(s3_rw.clone(), Some(Arc::new(rw_res))).unwrap();
+        assert_ne!(
+            r_rw.meta().col_dir[2].col_flags & crate::format::COL_FLAG_HAS_TRIGRAM_INDEX,
+            0
+        );
+
+        let erased_req = crate::reader::ScanRequest {
+            projection: Some(vec![0]),
+            substrings: vec![vec![crate::reader::SubstringQuery::like(
+                "input",
+                "GDPR_ERASE_INLINE_SECRET",
+            )]],
+            ..crate::reader::ScanRequest::default()
+        };
+        assert!(r_rw.scan(&erased_req).unwrap().is_empty());
+        s3_rw.reset_counters();
+        assert!(r_rw.scan(&erased_req).unwrap().is_empty());
+        assert_eq!(
+            s3_rw.counters().gets,
+            0,
+            "erased inline secret must NOT linger in rebuilt trigram bloom"
+        );
+
+        let surviving_inline = r_rw
+            .scan(&crate::reader::ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![vec![crate::reader::SubstringQuery::like(
+                    "input",
+                    "SURVIVING_INLINE_TOKEN",
+                )]],
+                ..crate::reader::ScanRequest::default()
+            })
+            .unwrap();
+        assert_eq!(collect_i64_ids(&surviving_inline), vec![6]);
+
+        let surviving_ext = r_rw
+            .scan(&crate::reader::ScanRequest {
+                projection: Some(vec![0]),
+                substrings: vec![vec![crate::reader::SubstringQuery::like(
+                    "input",
+                    "SURVIVING_EXT_TOKEN",
+                )]],
+                ..crate::reader::ScanRequest::default()
+            })
+            .unwrap();
+        assert_eq!(collect_i64_ids(&surviving_ext), vec![70]);
+    }
+
+    #[test]
+    fn opt6_inline_fast_path_const_null_and_inline_missing_pack_isolation() {
+        use std::io::Cursor;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::StatamError;
+        use crate::codec::{ZonePred, ZoneValue};
+        use crate::format::Encoding;
+        use cetra_column::{Bitmap, CancelToken};
+
+        struct MissingPackCountingResolver {
+            calls: Arc<AtomicUsize>,
+        }
+        impl crate::reader::PackResolver for MissingPackCountingResolver {
+            fn resolve(
+                &self,
+                pack_id: [u8; 16],
+            ) -> Result<Arc<crate::payload::pack::ChunkPackReader>, StatamError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Err(StatamError::MissingPack { pack_id })
+            }
+        }
+
+        let schema = cetra_column::Schema::try_new_arc(vec![
+            cetra_column::Field::new("id", cetra_column::DataType::I64, false),
+            cetra_column::Field::new("input", cetra_column::DataType::Utf8, true),
+            cetra_column::Field::new("output", cetra_column::DataType::Utf8, true),
+        ])
+        .unwrap();
+
+        // 2 RGs of 4 rows each (2 MBs of 2 rows each):
+        //  - RG 0 (ids 0..4): `input` has external `.stpk` chunks, `output` is inline.
+        //  - RG 1 (ids 4..8): `input` is all-null (`ConstNull`), `output` is inline (`"match_me"` at id=5).
+        let n = 8usize;
+        let ids: Vec<i64> = (0..n as i64).collect();
+        let inputs: Vec<Option<String>> = (0..n)
+            .map(|r| {
+                if r < 4 {
+                    Some(format!("{} rg0_chunk_{r}", "x".repeat(350)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let outputs: Vec<Option<String>> = (0..n)
+            .map(|r| {
+                if r == 5 {
+                    Some("match_me".to_owned())
+                } else {
+                    Some(format!("inline_out_{r}"))
+                }
+            })
+            .collect();
+
+        let batch = cetra_column::Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                cetra_column::Column::Flat(
+                    cetra_column::FlatColumn::try_new(cetra_column::FlatData::I64(ids), None)
+                        .unwrap(),
+                ),
+                opt_utf8_col(&inputs),
+                opt_utf8_col(&outputs),
+            ],
+            n,
+        )
+        .unwrap();
+
+        let pack_id = [0xD7u8; 16];
+        let mut pb =
+            crate::payload::pack::ChunkPackBuilder::new(pack_id, make_opt_test_pack_opts());
+        let mut opts = crate::writer::WriteOptions::for_table(
+            crate::format::TableKind::Spans,
+            crate::WriteProfile::L1Compact,
+        );
+        opts.row_group_size = 4;
+        opts.mini_block_size = 2;
+        opts.pack_id = Some(pack_id);
+        let mut statam_bytes = Vec::new();
+        let mut w = crate::writer::StatamWriter::new(
+            Cursor::new(&mut statam_bytes),
+            Arc::clone(&schema),
+            opts,
+            Some(&mut pb),
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+        let mut pack_bytes = Vec::new();
+        pb.finish(&mut pack_bytes).unwrap();
+
+        let resolve_calls = Arc::new(AtomicUsize::new(0));
+        let reader = Arc::new(
+            crate::reader::StatamReader::open(
+                Arc::new(crate::io::SliceReader::new(statam_bytes)),
+                Some(Arc::new(MissingPackCountingResolver {
+                    calls: Arc::clone(&resolve_calls),
+                })),
+            )
+            .unwrap(),
+        );
+        assert_eq!(reader.meta().rg_dir.len(), 2);
+        assert_eq!(reader.meta().schema_meta.pack_ids, vec![pack_id]);
+        for blk in reader.meta().rg_blocks(1, 1) {
+            assert_eq!(blk.encoding, Encoding::ConstNull);
+        }
+        for blk in reader.meta().rg_blocks(2, 1) {
+            assert_eq!(blk.encoding, Encoding::PayloadRefs);
+        }
+
+        let req_or = crate::reader::ScanRequest {
+            projection: Some(vec![0]),
+            predicates: vec![crate::reader::Predicate::new(
+                "id",
+                ZonePred::Eq(ZoneValue::I64(5)),
+            )],
+            substrings: vec![vec![
+                crate::reader::SubstringQuery::like("input", "aaa"),
+                crate::reader::SubstringQuery::like("output", "match_me"),
+            ]],
+            limit: Some(10),
+            ..crate::reader::ScanRequest::default()
+        };
+        let res_scan = reader.scan(&req_or).unwrap();
+        assert_eq!(collect_i64_ids(&res_scan), vec![5]);
+
+        let mut iter = reader
+            .scan_iter(crate::reader::ScanRequest {
+                limit: None,
+                ..req_or
+            })
+            .unwrap();
+        let mut iter_batches = Vec::new();
+        while let Some(b) = iter.next_batch(None, None).unwrap() {
+            iter_batches.push(b);
+        }
+        assert_eq!(collect_i64_ids(&iter_batches), vec![5]);
+
+        // Also cover `eval_phase1_mbs_batched_payload` (2 surviving MBs in RG 1, `limit: None`).
+        let res_batched = reader
+            .scan(&crate::reader::ScanRequest {
+                projection: Some(vec![0]),
+                predicates: vec![crate::reader::Predicate::new(
+                    "id",
+                    ZonePred::Ge(ZoneValue::I64(4)),
+                )],
+                substrings: vec![vec![
+                    crate::reader::SubstringQuery::like("input", "aaa"),
+                    crate::reader::SubstringQuery::like("output", "match_me"),
+                ]],
+                read_threads: 2,
+                ..crate::reader::ScanRequest::default()
+            })
+            .unwrap();
+        assert_eq!(collect_i64_ids(&res_batched), vec![5]);
+
+        // Pure `ConstNull` payload column must never invoke `resolve_pack`.
+        resolve_calls.store(0, Ordering::Relaxed);
+        let res_null_only = reader
+            .scan(&crate::reader::ScanRequest {
+                projection: Some(vec![0]),
+                predicates: vec![crate::reader::Predicate::new(
+                    "id",
+                    ZonePred::Eq(ZoneValue::I64(5)),
+                )],
+                substrings: vec![vec![crate::reader::SubstringQuery::like("input", "aaa")]],
+                limit: Some(10),
+                ..crate::reader::ScanRequest::default()
+            })
+            .unwrap();
+        assert!(res_null_only.is_empty());
+        assert_eq!(
+            resolve_calls.load(Ordering::Relaxed),
+            0,
+            "ConstNull payload column must not call resolve_pack"
+        );
+
+        // Active RG 0 external-chunk row must still surface `StatamError::MissingPack`.
+        let err = reader
+            .scan(&crate::reader::ScanRequest {
+                projection: Some(vec![0]),
+                predicates: vec![crate::reader::Predicate::new(
+                    "id",
+                    ZonePred::Eq(ZoneValue::I64(0)),
+                )],
+                substrings: vec![vec![crate::reader::SubstringQuery::like(
+                    "input",
+                    "rg0_chunk",
+                )]],
+                ..crate::reader::ScanRequest::default()
+            })
+            .unwrap_err();
+        assert!(matches!(err, StatamError::MissingPack { pack_id: pid } if pid == pack_id));
+
+        // Cooperative cancellation in `eval_inline_fast_path_blocks` (sequential & parallel).
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let rg1_out_blks = reader.meta().rg_blocks(2, 1);
+        let dummy_reader = super::BlockCacheReader::Slice {
+            base_offset: 0,
+            bytes: bytes::Bytes::new(),
+        };
+        for threads in [1usize, 2usize] {
+            let tasks = vec![
+                (0, 2, 0, 2, rg1_out_blks[0], Bitmap::new_ones(2)),
+                (1, 2, 1, 2, rg1_out_blks[1], Bitmap::new_ones(2)),
+            ];
+            let err = reader
+                .eval_inline_fast_path_blocks(
+                    1,
+                    b"match_me",
+                    false,
+                    &[0],
+                    &[false],
+                    &dummy_reader,
+                    threads,
+                    tasks,
+                    Some(&cancel),
+                )
+                .unwrap_err();
+            assert!(
+                matches!(err, StatamError::Cancelled),
+                "threads={threads} expected Cancelled, got {err:?}"
+            );
+        }
     }
 }

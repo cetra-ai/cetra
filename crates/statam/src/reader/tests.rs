@@ -3512,7 +3512,7 @@ fn reader_rejects_multi_chunk_payload_referencing_pack_without_edge_table() {
         }
     ));
 
-    // Direct `eval_payload_refs_substring` short-circuit loop also rejects the 2-chunk row.
+    // Direct `eval_payload_refs_substring_batch` short-circuit loop also rejects the 2-chunk row.
     let mut ref_bytes = Vec::new();
     encode_payload_refs(
         &[
@@ -3525,9 +3525,8 @@ fn reader_rejects_multi_chunk_payload_referencing_pack_without_edge_table() {
     let crafted_flat = decode_payload_refs_flat(&ref_bytes, 2, MAX_BATCH_DECODED_BYTES).unwrap();
     let mask = Bitmap::new_ones(2);
     let err_eval = reader
-        .eval_payload_refs_substring(
-            &crafted_flat,
-            &mask,
+        .eval_payload_refs_substring_batch(
+            &[(&crafted_flat, &mask)],
             b"XYZ_ABSENT_999",
             false,
             None,

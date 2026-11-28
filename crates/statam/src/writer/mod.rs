@@ -280,7 +280,12 @@ impl WriteOptions {
             TableKind::Traces | TableKind::Scores | TableKind::Generic => Vec::new(),
         };
         let narrow_trigram_cols = match (table_kind, profile) {
-            (TableKind::Spans, WriteProfile::L1Compact) => vec!["name".to_owned()],
+            (TableKind::Spans, WriteProfile::L1Compact) => vec![
+                "name".to_owned(),
+                "input".to_owned(),
+                "output".to_owned(),
+                "system_instructions".to_owned(),
+            ],
             _ => Vec::new(),
         };
         let row_group_size = ROW_GROUP_SIZE;
@@ -355,7 +360,13 @@ impl<PW: Write + Seek> PackBuilderTarget<'_, PW> {
     }
 }
 
-type PendingL0MiniBlock = (u16, u16, u8, EncodedPayloadRefs);
+pub(super) struct PendingPayloadMb {
+    pub(super) mb_len: u16,
+    pub(super) null_count: u16,
+    pub(super) extra_flags: u8,
+    pub(super) encoded: EncodedPayloadRefs,
+    pub(super) inline_trigram: Option<Vec<u8>>,
+}
 
 /// Streaming bounded-memory PAX writer producing `.statam` files.
 pub struct StatamWriter<'a, W: Write + Seek, PW: Write + Seek = std::io::Cursor<Vec<u8>>> {
@@ -381,7 +392,7 @@ pub struct StatamWriter<'a, W: Write + Seek, PW: Write + Seek = std::io::Cursor<
     rg_buf_cur_mb_col_raw: Vec<usize>,
     // Zero-copy L0Fast / local ExternalPayload accumulators for the current partial RG.
     pending_l0_local: LocalL0PayloadBuilder,
-    pending_l0_mbs: HashMap<usize, Vec<PendingL0MiniBlock>>,
+    pending_l0_mbs: HashMap<usize, Vec<PendingPayloadMb>>,
     pending_l0_partial: HashMap<usize, Vec<PayloadRefRow>>,
 
     // RG0-initialized file-level schema/dict state.
@@ -612,7 +623,6 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
             for name in &options.narrow_trigram_cols {
                 if let Some(idx) = schema.index_of(name)
                     && fields[idx].data_type == DataType::Utf8
-                    && logical_locality[idx] != LocalityGroup::ExternalPayload
                 {
                     narrow_trigram_col_set.insert(idx);
                     narrow_trigrams.insert(idx, Vec::new());
@@ -941,7 +951,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
             .pending_l0_mbs
             .values()
             .flat_map(|v| v.iter())
-            .map(|(_, _, _, body)| body.byte_len().saturating_add(BLOCK_FRAME_HEADER_LEN))
+            .map(|mb| mb.encoded.byte_len().saturating_add(BLOCK_FRAME_HEADER_LEN))
             .sum();
         let partial_bytes: usize = self
             .pending_l0_partial
@@ -1271,31 +1281,39 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                             .filter(|r| matches!(r, PayloadRefRow::Null))
                             .count();
                         let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
-                        let raw_body = if null_count_usize == mb_size {
+                        let encoded = if null_count_usize == mb_size {
                             EncodedPayloadRefs::empty()
                         } else {
                             let mut rb = Vec::new();
                             encode_payload_refs_l0_direct(partial, &mut rb)?;
                             EncodedPayloadRefs::Raw(rb)
                         };
-                        self.pending_l0_mbs.entry(cidx).or_default().push((
-                            mb_size as u16,
-                            null_count,
-                            0,
-                            raw_body,
-                        ));
+                        self.pending_l0_mbs
+                            .entry(cidx)
+                            .or_default()
+                            .push(PendingPayloadMb {
+                                mb_len: mb_size as u16,
+                                null_count,
+                                extra_flags: 0,
+                                encoded,
+                                inline_trigram: None,
+                            });
                         partial.clear();
                     }
                 }
             }
             while take - pos >= mb_size {
                 let mb_u16 = mb_size as u16;
-                self.pending_l0_mbs.entry(cidx).or_default().push((
-                    mb_u16,
-                    mb_u16,
-                    0,
-                    EncodedPayloadRefs::empty(),
-                ));
+                self.pending_l0_mbs
+                    .entry(cidx)
+                    .or_default()
+                    .push(PendingPayloadMb {
+                        mb_len: mb_u16,
+                        null_count: mb_u16,
+                        extra_flags: 0,
+                        encoded: EncodedPayloadRefs::empty(),
+                        inline_trigram: None,
+                    });
                 pos += mb_size;
             }
             if pos < take {
@@ -1371,19 +1389,23 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                     .filter(|r| matches!(r, PayloadRefRow::Null))
                     .count();
                 let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
-                let raw_body = if null_count_usize == mb_size {
+                let encoded = if null_count_usize == mb_size {
                     EncodedPayloadRefs::empty()
                 } else {
                     let mut rb = Vec::new();
                     encode_payload_refs_l0_direct(&partial, &mut rb)?;
                     EncodedPayloadRefs::Raw(rb)
                 };
-                self.pending_l0_mbs.entry(cidx).or_default().push((
-                    mb_size as u16,
-                    null_count,
-                    0,
-                    raw_body,
-                ));
+                self.pending_l0_mbs
+                    .entry(cidx)
+                    .or_default()
+                    .push(PendingPayloadMb {
+                        mb_len: mb_size as u16,
+                        null_count,
+                        extra_flags: 0,
+                        encoded,
+                        inline_trigram: None,
+                    });
                 partial.clear();
             }
             if !partial.is_empty() {
@@ -1413,12 +1435,16 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                 },
                 &mut raw_body,
             )?;
-            self.pending_l0_mbs.entry(cidx).or_default().push((
-                mb_size as u16,
-                null_count,
-                0,
-                EncodedPayloadRefs::Raw(raw_body),
-            ));
+            self.pending_l0_mbs
+                .entry(cidx)
+                .or_default()
+                .push(PendingPayloadMb {
+                    mb_len: mb_size as u16,
+                    null_count,
+                    extra_flags: 0,
+                    encoded: EncodedPayloadRefs::Raw(raw_body),
+                    inline_trigram: None,
+                });
             pos += mb_size;
         }
 
@@ -1461,10 +1487,11 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                             .filter(|r| matches!(r, PayloadRefRow::Null))
                             .count();
                         let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
-                        let (extra_flags, raw_body) = if null_count_usize == mb_size {
-                            (0u8, EncodedPayloadRefs::empty())
+                        let (extra_flags, encoded, inline_trigram) = if null_count_usize == mb_size
+                        {
+                            (0u8, EncodedPayloadRefs::empty(), None)
                         } else {
-                            let rb = encode_payload_refs_adaptive(
+                            let enc = encode_payload_refs_adaptive(
                                 partial,
                                 self.options.profile,
                                 self.options.zstd_level,
@@ -1474,26 +1501,42 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                             } else {
                                 0
                             };
-                            (f, rb)
+                            let tri = if self.narrow_trigram_col_set.contains(&cidx) {
+                                rg_encode::build_payload_inline_trigram_for_mb(
+                                    partial,
+                                    rg_encode::encoded_payload_refs_trigram_len(&enc),
+                                )
+                            } else {
+                                None
+                            };
+                            (f, enc, tri)
                         };
-                        self.pending_l0_mbs.entry(cidx).or_default().push((
-                            mb_size as u16,
-                            null_count,
-                            extra_flags,
-                            raw_body,
-                        ));
+                        self.pending_l0_mbs
+                            .entry(cidx)
+                            .or_default()
+                            .push(PendingPayloadMb {
+                                mb_len: mb_size as u16,
+                                null_count,
+                                extra_flags,
+                                encoded,
+                                inline_trigram,
+                            });
                         partial.clear();
                     }
                 }
             }
             while take - pos >= mb_size {
                 let mb_u16 = mb_size as u16;
-                self.pending_l0_mbs.entry(cidx).or_default().push((
-                    mb_u16,
-                    mb_u16,
-                    0,
-                    EncodedPayloadRefs::empty(),
-                ));
+                self.pending_l0_mbs
+                    .entry(cidx)
+                    .or_default()
+                    .push(PendingPayloadMb {
+                        mb_len: mb_u16,
+                        null_count: mb_u16,
+                        extra_flags: 0,
+                        encoded: EncodedPayloadRefs::empty(),
+                        inline_trigram: None,
+                    });
                 pos += mb_size;
             }
             if pos < take {
@@ -1522,10 +1565,10 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                     .filter(|r| matches!(r, PayloadRefRow::Null))
                     .count();
                 let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
-                let (extra_flags, raw_body) = if null_count_usize == mb_size {
-                    (0u8, EncodedPayloadRefs::empty())
+                let (extra_flags, encoded, inline_trigram) = if null_count_usize == mb_size {
+                    (0u8, EncodedPayloadRefs::empty(), None)
                 } else {
-                    let rb = encode_payload_refs_adaptive(
+                    let enc = encode_payload_refs_adaptive(
                         &partial,
                         self.options.profile,
                         self.options.zstd_level,
@@ -1535,14 +1578,26 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                     } else {
                         0
                     };
-                    (f, rb)
+                    let tri = if self.narrow_trigram_col_set.contains(&cidx) {
+                        rg_encode::build_payload_inline_trigram_for_mb(
+                            &partial,
+                            rg_encode::encoded_payload_refs_trigram_len(&enc),
+                        )
+                    } else {
+                        None
+                    };
+                    (f, enc, tri)
                 };
-                self.pending_l0_mbs.entry(cidx).or_default().push((
-                    mb_size as u16,
-                    null_count,
-                    extra_flags,
-                    raw_body,
-                ));
+                self.pending_l0_mbs
+                    .entry(cidx)
+                    .or_default()
+                    .push(PendingPayloadMb {
+                        mb_len: mb_size as u16,
+                        null_count,
+                        extra_flags,
+                        encoded,
+                        inline_trigram,
+                    });
             } else {
                 self.pending_l0_partial.insert(cidx, partial);
             }
@@ -1557,10 +1612,10 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                 .filter(|r| matches!(r, PayloadRefRow::Null))
                 .count();
             let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
-            let (extra_flags, raw_body) = if null_count_usize == mb_size {
-                (0u8, EncodedPayloadRefs::empty())
+            let (extra_flags, encoded, inline_trigram) = if null_count_usize == mb_size {
+                (0u8, EncodedPayloadRefs::empty(), None)
             } else {
-                let rb = encode_payload_refs_adaptive(
+                let enc = encode_payload_refs_adaptive(
                     &refs,
                     self.options.profile,
                     self.options.zstd_level,
@@ -1570,14 +1625,26 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                 } else {
                     0
                 };
-                (f, rb)
+                let tri = if self.narrow_trigram_col_set.contains(&cidx) {
+                    rg_encode::build_payload_inline_trigram_for_mb(
+                        &refs,
+                        rg_encode::encoded_payload_refs_trigram_len(&enc),
+                    )
+                } else {
+                    None
+                };
+                (f, enc, tri)
             };
-            self.pending_l0_mbs.entry(cidx).or_default().push((
-                mb_size as u16,
-                null_count,
-                extra_flags,
-                raw_body,
-            ));
+            self.pending_l0_mbs
+                .entry(cidx)
+                .or_default()
+                .push(PendingPayloadMb {
+                    mb_len: mb_size as u16,
+                    null_count,
+                    extra_flags,
+                    encoded,
+                    inline_trigram,
+                });
             pos += mb_size;
         }
 
@@ -1802,13 +1869,14 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
         let mut trigram_indices: Vec<usize> = self.narrow_trigram_col_set.iter().copied().collect();
         trigram_indices.sort_unstable();
         for cidx in trigram_indices {
-            if !self.phys_col_meta[cidx].has_non_dict_data_block {
-                continue;
-            }
-            if let Some(filters) = self.narrow_trigrams.get(&cidx)
-                && let Some(sec_bytes) = encode_narrow_trigram_section(filters)?
-            {
-                trigram_items.push((cidx, sec_bytes));
+            if let Some(filters) = self.narrow_trigrams.get(&cidx) {
+                debug_assert_eq!(filters.len(), self.phys_blocks[cidx].len());
+                if !self.phys_col_meta[cidx].has_non_dict_data_block {
+                    continue;
+                }
+                if let Some(sec_bytes) = encode_narrow_trigram_section(filters)? {
+                    trigram_items.push((cidx, sec_bytes));
+                }
             }
         }
         let has_any_trigram = !trigram_items.is_empty();
