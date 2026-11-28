@@ -47,6 +47,7 @@ Growth rules are enforced only when `hours ≥ max(warmup_hours, (retention_days
 | `20261122-vm-48h` | 2026-11-22 | 041b2b1 + #214 | VM, 12 vCPUs, virtual disk | local | 48 | 1,000 | fail: `rss_growth`, `rss_max`, `ingest_rate` | [`soak/20261122-vm-48h/`](soak/20261122-vm-48h/) |
 | `20261124-vm-noq-12h` | 2026-11-24 | b0e5710 | VM, 12 vCPUs, virtual disk | local | 12 | 1,000, no queries | fail: `rss_max`, `ingest_rate` (0.9885 at worst) | [`soak/20261124-vm-noq-12h/`](soak/20261124-vm-noq-12h/) |
 | `20261124-vm-q-12h` | 2026-11-24 | b0e5710 | VM, 12 vCPUs, virtual disk | local | 12 | 1,000, 1 query/s | fail: `rss_max`, `ingest_rate` | [`soak/20261124-vm-q-12h/`](soak/20261124-vm-q-12h/) |
+| `20261125-vm-q4-12h` | 2026-11-25 | 8487c09 | VM, 12 vCPUs, virtual disk | local | 12 | 1,000, 4 queries/s from 4 tasks | pass (28 rules; growth rules reported, not enforced) | [`soak/20261125-vm-q4-12h/`](soak/20261125-vm-q4-12h/) |
 
 The VM run is a dry run on a virtual disk, on a shared VM: its numbers are not publishable bare-metal numbers and back no claim.
 
@@ -163,6 +164,60 @@ The ingest ratio is appended / target spans in each hour, CPU the process's per 
   - **The test binary used glibc malloc, the `cetra` binary mimalloc (D56).** glibc keeps freed memory in per-thread arenas, a known cause of RSS that rises in steps and does not fall, so the RSS of these runs and of the 48 h run is glibc's, not the server's. The test binary now uses mimalloc.
 - **Caveats.** A and B ran at the same time on one VM, so each one's ingest and latencies include the other's load on the 12 vCPUs and the disk; the difference between them is what the queries add, not two clean baselines. 12 h runs do not enforce the growth rules.
 - **Deviations from the plan.** None beyond the coordinating session's: these A/B runs were added after the 48 h run to locate M7-2 and M7-4.
+
+## 20261125-vm-q4-12h: 12 h with 4 queries/s on the fixed harness
+
+The first run with clock pacing and mimalloc (§ Method), at four times the 48 h run's query load.
+
+- **Machine.** The same VM as `20261122-vm-48h`, alone on it.
+- **Code.** A `git archive` of 8487c09.
+- **Command.** In a `systemd-run --user` unit with `MemoryMax=16G` and `LimitNOFILE=65536`: `CETRA_SOAK_HOURS=12 CETRA_SOAK_RATE=1000 CETRA_SOAK_QPS=4 CETRA_SOAK_QUERY_TASKS=4 CETRA_SOAK_RETENTION_DAYS=0 CETRA_SOAK_LABEL=vm-q4-fixed … just soak`. Started 2026-11-25 00:15 UTC, ended 12:24 UTC (43,729 s, settle included). A run with the same settings on the old harness was stopped after 40 minutes, when the harness flaws were found; it is not recorded.
+- **Result.** Pass: 28 rules, none failed. The growth rules are reported, not enforced, at 12 h; `rss_growth` reports no growth, and every `query_growth_<kind>` reports growth (below).
+
+| hour | ingest | CPU, cores | RSS, GB | append p50, ms | append p99, ms | tick lateness p99, ms |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1.000 | 1.18 | 2.52 | 12.3 | 37.8 | 24.8 |
+| 2 | 1.000 | 1.86 | 2.06 | 11.6 | 62.8 | 60.9 |
+| 4 | 1.000 | 2.34 | 3.28 | 11.0 | 87.8 | 109.5 |
+| 6 | 1.000 | 2.60 | 2.75 | 11.3 | 123.1 | 148.7 |
+| 8 | 1.000 | 3.11 | 2.68 | 11.6 | 161.7 | 198.5 |
+| 10 | 1.000 | 3.39 | 3.09 | 11.9 | 202.9 | 256.6 |
+| 12 | 1.000 | 3.99 | 2.57 | 11.6 | 306.8 | 453.1 |
+
+Per hour: the ingest ratio, the process's CPU, RSS at the end of the hour, and the median over the hour's samples of each sample's append p50, append p99 and tick lateness p99.
+
+| series | min | median | p95 | max |
+|---|---:|---:|---:|---:|
+| RSS, GiB | 1.019 | 2.429 | 3.239 | 4.883 |
+| fds | 20 | 20 | 23 | 26 |
+| threads | 21 | 60 | 60 | 60 |
+| WAL, MiB | 50.74 | 117.1 | 172.3 | 182.4 |
+| memtable, MiB | 0 | 139 | 258.2 | 282.3 |
+| spans L0 files | 0 | 16 | 32 | 32 |
+| oldest L0 file, s | 0 | 180.2 | 366.6 | 402.4 |
+| objects, GiB | 4.217 | 21.78 | 37.74 | 40.52 |
+
+  - Ingest: 988 spans/s over the run, settle included; 1.000 of target in every hour. No backpressure.
+  - Queries: 3.9–4.0 per second, 154 k in all, no error. p95 of the per-minute p95s: list 965 ms, filter 997 ms, detail 314 ms, sessions 841 ms, metrics 1,737 ms (max 3,407 ms), scores 353 ms. Each kind's p95 grows with the retained data, about 2.5× (list) to 5.8× (metrics) from the first quarter to the last.
+  - Appends: 1.27 M; p50 11.4 ms all run; p99 (p95 of the samples) 347 ms, max 1,615 ms. Ticks: lateness p99 493 ms, max 1,531 ms.
+  - Deletions: 84 registered and applied, lag p95 1,020 s. Shutdown 1.7 s, reopen 0.38 s, settled in 3 passes. No warning in the log.
+- **Plots.**
+
+![memory](soak/20261125-vm-q4-12h/plots/memory.png)
+![appends](soak/20261125-vm-q4-12h/plots/appends.png)
+![ingest](soak/20261125-vm-q4-12h/plots/ingest.png)
+![queries](soak/20261125-vm-q4-12h/plots/queries.png)
+![lag](soak/20261125-vm-q4-12h/plots/lag.png)
+![files](soak/20261125-vm-q4-12h/plots/files.png)
+![wal and memtable](soak/20261125-vm-q4-12h/plots/wal_memtable.png)
+![disk](soak/20261125-vm-q4-12h/plots/disk.png)
+![fds and threads](soak/20261125-vm-q4-12h/plots/fds_threads.png)
+
+- **What it shows.**
+  - **Storage keeps up with 1,000 spans/s under 4 queries/s (M7-4 was the harness).** With the budget on the clock, every hour reaches 1.000 of target, where the old harness lost 3% by 3 h at a quarter of this query load.
+  - **RSS stays under 5 GiB with mimalloc (M7-2 was glibc's).** It moves between 2 and 3.5 GB with spikes to 4–4.9 GB on the hour (the hourly retention and oracle round), returns after each, and its baseline rises slowly with the retained data (about 1.8 → 2.6 GB). The glibc runs held 12–15 GB.
+  - **Queries delay ingest as the day grows (M7-5).** The append p50 stays at 11–12 ms, but the append p99 grows from 38 to 307 ms and the ticks' lateness p99 from 25 to 453 ms, in step with the queries' latency. A late tick means the ingest task waited for a runtime worker: the queries' DataFusion work runs on the same 8 Tokio workers and keeps them busy longer as the scans grow. Throughput holds; latency does not.
+- **Caveats.** A shared VM on a virtual disk. 12 h does not enforce the growth rules, nor cross a retention drop. The soak's runtime has 8 workers for load, queries and storage alike, like a server's one runtime.
 
 ## Claims
 
