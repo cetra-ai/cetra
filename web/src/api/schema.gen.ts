@@ -911,7 +911,7 @@ export interface paths {
         put?: never;
         /**
          * Send product analytics events
-         * @description Session only. Web events of the catalog (`page.viewed` with a route template, `command_palette.opened`, `live_tail.toggled`, `list_layout.changed`, `theme.changed`, `assistant.panel_opened`). At most 50 events and 64 KiB are read, and 60 requests a minute per user. Unknown names and properties and invalid values are dropped; when a PostHog sink runs, events of orgs or projects the user cannot read are dropped too. The user comes from the session. `DNT: 1` or `Sec-GPC: 1` keeps the events out of PostHog; they still count toward the anonymous feature counts. Always 204 once signed in.
+         * @description Session only. Web events of the catalog (`page.viewed` with a route template, `command_palette.opened`, `live_tail.toggled`, `list_layout.changed`, `theme.changed`, `assistant.panel_opened`). At most 50 events and 64 KiB are read, and 60 requests a minute per user. Unknown names and properties and invalid values are dropped; when a PostHog sink runs, events of orgs or projects the user cannot read are dropped too. The user comes from the session. `DNT: 1` or `Sec-GPC: 1` keeps the events out of PostHog. With no PostHog sink the events are dropped. Always 204 once signed in.
          */
         post: operations["post_analytics_events"];
         delete?: never;
@@ -5250,8 +5250,8 @@ export interface components {
         AuthConfig: {
             /**
              * @description Product analytics are on: the UI sends its catalog events to
-             *     `POST /api/v1/analytics/events` (track TL M6, D-TL-14). True when either sink runs: the
-             *     PostHog sink (`[analytics]` set, not restore mode) or the heartbeat's feature counters.
+             *     `POST /api/v1/analytics/events` (track TL M6, D-TL-14). True only when the PostHog sink
+             *     runs (`[analytics]` set, not restore mode); self-hosted installs send no events.
              */
             analytics: boolean;
             /** @description New accounts must verify their email before signing in. */
