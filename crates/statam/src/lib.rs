@@ -60,7 +60,7 @@ pub use payload::{
 };
 pub use reader::{
     CoalesceMode, FilterExpr, IdLookup, InMemoryPackResolver, MapReadMode, PackResolver, Predicate,
-    ScanRequest, StatamFileMeta, StatamReader, StatamScanIter, SubstringQuery, TimeRange,
+    ScanRequest, StatamFileMeta, StatamReader, StatamScanIter, SubstringQuery, TimeRange, TopKSpec,
 };
 pub use simd::{FilterOp, Sbbf, TrigramBloom, statam_bloom_hash};
 pub use writer::{L0_LOCAL_PACK_IDX, StatamWriter, WriteOptions, WriteStats};

@@ -13,10 +13,10 @@ use arrow::datatypes::SchemaRef;
 use bytes::Bytes;
 use cetra_column::{Batch, Column, FlatData, Selection};
 use cetra_statam::{
-    ChunkPackBuilder, ChunkPackReader, CoalesceMode, IdLookup, InMemoryPackResolver, PackResolver,
-    PackWriteOptions, Predicate, RangeReader, S3_CACHE_BLOCK_BYTES, ScanRequest, SimulatedS3Config,
-    SliceReader, StatamError, StatamReader, StatamWriter, SubstringQuery, TableKind, TimeRange,
-    WriteOptions, WriteProfile, ZonePred, ZoneValue,
+    ChunkPackBuilder, ChunkPackReader, CoalesceMode, IdLookup, InMemoryPackResolver, MapReadMode,
+    PackResolver, PackWriteOptions, Predicate, RangeReader, S3_CACHE_BLOCK_BYTES, ScanRequest,
+    SimulatedS3Config, SliceReader, StatamError, StatamReader, StatamWriter, SubstringQuery,
+    TableKind, TimeRange, WriteOptions, WriteProfile, ZonePred, ZoneValue,
 };
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
@@ -303,7 +303,7 @@ pub async fn encode_spans_workload(
         .and_then(|s| s.get(s.len() / 2))
         .map_or([1u8; 16], |r| r.trace_id);
 
-    encode_workload_inner(
+    let wl = encode_workload_inner(
         name,
         TableKindBench::Spans,
         raw_bytes,
@@ -316,7 +316,145 @@ pub async fn encode_spans_workload(
         vortex_session,
         write_threads,
     )
-    .await
+    .await?;
+    if std::env::var_os("STATAM_DUMP_STATS").is_some() && !wl.statam_l1.is_empty() {
+        dump_spans_statam_l1_stats(name, &wl.statam_l1, wl.statam_l1_pack.as_ref())?;
+    }
+    Ok(wl)
+}
+
+fn dump_spans_statam_l1_stats(
+    name: &str,
+    statam_files: &[Bytes],
+    pack_bytes: Option<&Bytes>,
+) -> BenchResult<()> {
+    let mut total_statam_bytes = 0u64;
+    let mut total_rows = 0u64;
+    let mut total_rgs = 0u64;
+    let mut total_blocks = 0u64;
+    let mut total_hot_tail = 0u64;
+    let mut total_hot_bloom = 0u64;
+    let mut total_hot_dict = 0u64;
+    let mut by_enc: BTreeMap<String, (usize, u64, u64)> = BTreeMap::new();
+    let mut by_col_map: BTreeMap<String, (u64, u64, usize, u8, u8)> = BTreeMap::new();
+    let mut lazy_by_kind: BTreeMap<String, u64> = BTreeMap::new();
+
+    for statam_bytes in statam_files {
+        total_statam_bytes += statam_bytes.len() as u64;
+        let reader = StatamReader::open(Arc::new(SliceReader::new(statam_bytes.clone())), None)?;
+        let meta = reader.meta();
+        total_rows += meta.postscript.row_count;
+        total_rgs += u64::from(meta.postscript.num_row_groups);
+        total_blocks += u64::from(meta.postscript.total_blocks);
+        total_hot_tail += meta.file_len.saturating_sub(meta.hot_tail_start);
+        total_hot_bloom += meta.hot_bloom_bytes.len() as u64;
+        total_hot_dict += meta.hot_dict_bytes.len() as u64;
+
+        for c in &meta.col_dir {
+            let col_name = meta
+                .schema_meta
+                .schema
+                .fields()
+                .get(usize::from(c.logical_col_id))
+                .map_or_else(|| format!("phys_{}", c.phys_col_id), |f| f.name.clone());
+            let key = format!("{col_name}(p{})", c.phys_col_id);
+            let start = c.first_block_idx as usize;
+            let end = start + c.num_blocks as usize;
+            let mut col_stored = 0u64;
+            let mut col_raw = 0u64;
+            let mut blk_flags_or = 0u8;
+            for b in &meta.block_dir[start..end] {
+                let e = by_enc
+                    .entry(format!("{:?}/{:?}", b.encoding, b.codec))
+                    .or_insert((0, 0, 0));
+                e.0 += 1;
+                e.1 += u64::from(b.stored_len);
+                e.2 += u64::from(b.raw_len);
+                col_stored += u64::from(b.stored_len);
+                col_raw += u64::from(b.raw_len);
+                blk_flags_or |= b.block_flags;
+            }
+            let entry = by_col_map.entry(key).or_insert((0, 0, 0, 0, 0));
+            entry.0 += col_stored;
+            entry.1 += col_raw;
+            entry.2 += c.num_blocks as usize;
+            entry.3 |= blk_flags_or;
+            entry.4 |= c.col_flags;
+        }
+        for le in &meta.lazy_dir {
+            *lazy_by_kind.entry(format!("{:?}", le.kind)).or_insert(0) += u64::from(le.len);
+        }
+    }
+
+    let mut by_col: Vec<(String, u64, u64, usize, u8, u8)> = by_col_map
+        .into_iter()
+        .map(|(k, (s, r, nb, bf, cf))| (k, s, r, nb, bf, cf))
+        .collect();
+    by_col.sort_by(|a, b| b.1.cmp(&a.1));
+
+    eprintln!(
+        "[STATAM_STATS:{name}] .statam={} KiB ({} files) | rows={total_rows} rgs={total_rgs} blocks={total_blocks} | hot_tail={} KiB (hot_bloom={} KiB, hot_dict={} KiB) | lazy={:?}",
+        total_statam_bytes / 1024,
+        statam_files.len(),
+        total_hot_tail / 1024,
+        total_hot_bloom / 1024,
+        total_hot_dict / 1024,
+        lazy_by_kind
+            .iter()
+            .map(|(k, v)| format!("{k}={}KiB", v / 1024))
+            .collect::<Vec<_>>()
+    );
+    eprintln!(
+        "[STATAM_STATS:{name}]   encodings: {:?}",
+        by_enc
+            .iter()
+            .map(|(k, (n, s, r))| format!("{k}:{n}blk/{}KiB(raw {}KiB)", s / 1024, r / 1024))
+            .collect::<Vec<_>>()
+    );
+    eprintln!(
+        "[STATAM_STATS:{name}]   top_cols: {:?}",
+        by_col
+            .iter()
+            .take(6)
+            .map(|(n, s, r, nb, bf, cf)| {
+                format!(
+                    "{n}={}KiB(raw {}KiB,{nb}mb,bflags=0x{bf:02x},cflags=0x{cf:02x})",
+                    s / 1024,
+                    r / 1024
+                )
+            })
+            .collect::<Vec<_>>()
+    );
+    if let Some(pb) = pack_bytes {
+        let pack = ChunkPackReader::open(Arc::new(SliceReader::new(pb.clone())))?;
+        let ps = pack.postscript();
+        let frame_stored: u64 = pack
+            .toc()
+            .frames
+            .iter()
+            .map(|f| u64::from(f.stored_len))
+            .sum();
+        let frame_raw: u64 = pack.toc().frames.iter().map(|f| u64::from(f.raw_len)).sum();
+        let hash_bytes = if ps.hash_table_off != 0 {
+            u64::from(ps.chunk_count) * 16
+        } else {
+            0
+        };
+        eprintln!(
+            "[STATAM_STATS:{name}] .stpk={} KiB | frames={} chunks={} | frame_data={} KiB (raw {} KiB) | hash_tbl={} KiB | edge_tbl={} KiB | trigram={} KiB | dict={} KiB | toc={} KiB",
+            pb.len() / 1024,
+            ps.frame_count,
+            ps.chunk_count,
+            frame_stored / 1024,
+            frame_raw / 1024,
+            hash_bytes / 1024,
+            ps.edge_table_len / 1024,
+            ps.trigram_len / 1024,
+            ps.dict_len / 1024,
+            ps.toc_stored_len / 1024,
+        );
+    }
+    Ok(())
 }
 
 pub async fn encode_scores_workload(
@@ -1631,11 +1769,15 @@ pub fn run_statam_query(
                 "span_kind",
                 ZonePred::Eq(ZoneValue::Bytes(b"llm".to_vec())),
             )],
+            top_k: Some(cetra_statam::TopKSpec::desc(6, 50)),
             ..ScanRequest::default()
         },
         (TableKindBench::Spans, "map_key_lookup") => ScanRequest {
             projection: Some(vec![1, 6]),
-            map_keys: vec![("metadata".to_owned(), "customer_id".to_owned())],
+            map_projections: HashMap::from([(
+                "metadata".to_owned(),
+                MapReadMode::Keys(vec!["customer_id".to_owned()]),
+            )]),
             predicates: vec![Predicate::map_key(
                 "metadata",
                 "customer_id",
@@ -1645,7 +1787,10 @@ pub fn run_statam_query(
         },
         (TableKindBench::Scores, "map_key_lookup") => ScanRequest {
             projection: Some(vec![1, 20]),
-            map_keys: vec![("metadata".to_owned(), "customer_id".to_owned())],
+            map_projections: HashMap::from([(
+                "metadata".to_owned(),
+                MapReadMode::Keys(vec!["customer_id".to_owned()]),
+            )]),
             predicates: vec![Predicate::map_key(
                 "metadata",
                 "customer_id",
@@ -1655,12 +1800,12 @@ pub fn run_statam_query(
         },
         (TableKindBench::Spans, "substring_rare") => ScanRequest {
             projection: Some(vec![1]),
-            substrings: vec![SubstringQuery::ilike("input", RARE_NEEDLE)],
+            substrings: vec![vec![SubstringQuery::ilike("input", RARE_NEEDLE)]],
             ..ScanRequest::default()
         },
         (TableKindBench::Spans, "substring_absent") => ScanRequest {
             projection: Some(vec![1]),
-            substrings: vec![SubstringQuery::ilike("input", ABSENT_NEEDLE)],
+            substrings: vec![vec![SubstringQuery::ilike("input", ABSENT_NEEDLE)]],
             ..ScanRequest::default()
         },
         _ => ScanRequest::default(),
@@ -1671,15 +1816,20 @@ pub fn run_statam_query(
     let mut agg: BTreeMap<(i64, String), (usize, f64, i64)> = BTreeMap::new();
     let mut topk: BinaryHeap<Reverse<(i64, usize)>> = BinaryHeap::new();
 
+    if qname == "top_k_list" {
+        let reader_refs: Vec<&StatamReader> = readers.iter().collect();
+        let batches = StatamReader::scan_top_k_files(&reader_refs, &req)?;
+        for b in &batches {
+            topk_statam_batch(b, &mut topk);
+        }
+        return Ok(topk.len());
+    }
+
     for r in readers {
         let batches = r.scan(&req)?;
         if qname == "time_bucket_agg" {
             for b in &batches {
                 agg_statam_batch(b, &mut agg);
-            }
-        } else if qname == "top_k_list" {
-            for b in &batches {
-                topk_statam_batch(b, &mut topk);
             }
         } else {
             total += batches.iter().map(Batch::num_rows).sum::<usize>();
@@ -1688,9 +1838,6 @@ pub fn run_statam_query(
 
     if qname == "time_bucket_agg" {
         return Ok(agg.values().map(|v| v.0).sum());
-    }
-    if qname == "top_k_list" {
-        return Ok(topk.len());
     }
     Ok(total)
 }
@@ -1795,7 +1942,7 @@ fn agg_statam_batch(b: &Batch, agg: &mut BTreeMap<(i64, String), (usize, f64, i6
     let tok_view = I64ColView::from_col(&b.columns()[2]);
     let cost_view = F64ColView::from_col(&b.columns()[3]);
 
-    match model_col {
+    match model_col.as_ref() {
         Column::Dict(d) => {
             if let FlatData::Utf8(dict_utf8) = d.values().data() {
                 let codes = d.codes();

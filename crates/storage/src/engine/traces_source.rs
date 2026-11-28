@@ -1563,6 +1563,7 @@ impl PartitionStream for NativeTraceMergeStream {
             };
 
             let mut ready_to_emit = false;
+            let reconcile_threshold = self.budget_bytes.min(64 * 1024);
             while offset < total {
                 if cancel.is_cancelled() {
                     self.scratch_res.free();
@@ -1602,7 +1603,10 @@ impl PartitionStream for NativeTraceMergeStream {
                     rollback_res(res, before);
                     return Err(err);
                 }
-                if let Err(err) = reconcile_res(Some(&mut self.merger_res), 0, self.merger.size()) {
+                if self.merger.size().abs_diff(self.merger_res.size()) >= reconcile_threshold
+                    && let Err(err) =
+                        reconcile_res(Some(&mut self.merger_res), 0, self.merger.size())
+                {
                     self.scratch_res.free();
                     self.merger_res.free();
                     self.input_res.free();
@@ -1611,6 +1615,16 @@ impl PartitionStream for NativeTraceMergeStream {
                 }
                 self.current_trace_id = Some(run_id);
                 offset = run_end;
+            }
+
+            if self.merger.size() != self.merger_res.size()
+                && let Err(err) = reconcile_res(Some(&mut self.merger_res), 0, self.merger.size())
+            {
+                self.scratch_res.free();
+                self.merger_res.free();
+                self.input_res.free();
+                rollback_res(res, before);
+                return Err(err);
             }
 
             if offset < total {
@@ -3076,4 +3090,184 @@ fn read_str_map_at(col: &Column, row: usize) -> Option<Vec<(String, String)>> {
             .filter_map(|(k, v)| v.map(|val| (k, val)))
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cetra_column::GlobalPool;
+
+    struct VecBatchesStream {
+        batches: VecDeque<Batch>,
+    }
+
+    impl PartitionStream for VecBatchesStream {
+        fn next_batch(
+            &mut self,
+            _cancel: &CancelToken,
+            res: Option<&mut Reservation>,
+        ) -> Result<Option<Batch>, QueryError> {
+            let Some(batch) = self.batches.pop_front() else {
+                return Ok(None);
+            };
+            if let Some(r) = res {
+                r.try_grow(batch.memory_bytes())
+                    .map_err(|_| QueryError::TooLarge)?;
+            }
+            Ok(Some(batch))
+        }
+    }
+
+    fn make_minimal_partial_batch(schema: &Arc<Schema>, rows: &[([u8; 16], i64)]) -> Batch {
+        let mut trace_ids = Vec::with_capacity(rows.len());
+        let mut starts = Vec::with_capacity(rows.len());
+        let mut has_roots = Bitmap::new_zeroed(rows.len());
+        let mut root_span_ids = Vec::with_capacity(rows.len());
+        for (i, &(tid, ts)) in rows.iter().enumerate() {
+            trace_ids.push(tid);
+            starts.push(ts);
+            let _ = has_roots.set(i, false);
+            root_span_ids.push([0u8; 8]);
+        }
+        Batch::try_new_all(
+            Arc::clone(schema),
+            vec![
+                Column::Flat(FlatColumn::try_new(FlatData::FixedBytes16(trace_ids), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::TimestampNs {
+                            values: starts,
+                            utc: true,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::Bool(has_roots), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::FixedBytes8(root_span_ids),
+                        Some(Bitmap::new_zeroed(rows.len())),
+                    )
+                    .unwrap(),
+                ),
+            ],
+            rows.len(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn pass26_native_trace_merge_stream_batched_reconcile_parity_and_tight_oom() {
+        let full_schema = Schema::try_new_arc(vec![
+            cetra_column::Field::new(traces::TRACE_ID, DataType::FixedBytes16, false),
+            cetra_column::Field::new(
+                traces::START_TIME,
+                DataType::TimestampNs { utc: true },
+                false,
+            ),
+            cetra_column::Field::new(traces::HAS_ROOT, DataType::Bool, false),
+            cetra_column::Field::new(traces::ROOT_SPAN_ID, DataType::FixedBytes8, true),
+        ])
+        .unwrap();
+        let merge_columns = MergeColumns::new(&[traces::TRACE_ID, traces::START_TIME]);
+
+        let make_rows = |count: usize, base: u32| -> Vec<([u8; 16], i64)> {
+            let mut out = Vec::with_capacity(count * 2);
+            for i in 0..count {
+                let mut tid = [0u8; 16];
+                tid[12..16].copy_from_slice(&(base + i as u32).to_be_bytes());
+                // Two partial rows per trace_id with different start_time -> merged min(start_time).
+                out.push((tid, 1_000 + (i as i64) * 10 + 5));
+                out.push((tid, 1_000 + (i as i64) * 10));
+            }
+            out
+        };
+
+        // 1. Batched reconcile parity across > 64 KiB of trace rows and multiple batches:
+        //    verifies exact merged row count, min(start_time) merge, and 0 leaked reservation bytes.
+        let global = GlobalPool::new(16 * 1024 * 1024);
+        let pool = global.try_admit(0, 16 * 1024 * 1024).unwrap();
+        let cancel = CancelToken::new();
+        let b1 = make_minimal_partial_batch(&full_schema, &make_rows(200, 0));
+        let b2 = make_minimal_partial_batch(&full_schema, &make_rows(200, 200));
+        let mut stream = NativeTraceMergeStream {
+            input: Box::new(VecBatchesStream {
+                batches: VecDeque::from([b1, b2]),
+            }),
+            input_res: pool.register("in", false),
+            merger: NativeTraceMerger::new(&merge_columns, &full_schema).unwrap(),
+            merger_res: pool.register("merger", false),
+            scratch_res: pool.register("scratch", false),
+            merge_columns: merge_columns.clone(),
+            full_schema: Arc::clone(&full_schema),
+            merged_start_idx: 1,
+            bounds: TimeBounds::default(),
+            post_filters: Vec::new(),
+            projection: None,
+            remaining: None,
+            eval: EvalContext::new(0, cancel.clone()),
+            active_input: None,
+            current_trace_id: None,
+            budget_bytes: 256 * 1024,
+            max_traces_per_chunk: 500,
+            done: false,
+        };
+
+        let mut out_res = pool.register("out", false);
+        let mut total_merged = 0usize;
+        while let Some(batch) = stream.next_batch(&cancel, Some(&mut out_res)).unwrap() {
+            total_merged += batch.num_rows();
+            assert_eq!(out_res.size(), batch.memory_bytes());
+            out_res.free();
+        }
+        assert_eq!(total_merged, 400);
+        assert_eq!(stream.merger_res.size(), 0);
+        assert_eq!(stream.input_res.size(), 0);
+        assert_eq!(stream.scratch_res.size(), 0);
+        assert_eq!(global.used(), 0);
+
+        // 2. Tight-budget OOM test: pool cap allows reading one small input batch (~4 KiB)
+        //    but cannot fit the merger's post-loop exact reconciliation -> must return
+        //    TooLarge and release ALL reservations cleanly (global.used() == 0).
+        let small_batch = make_minimal_partial_batch(&full_schema, &make_rows(80, 0));
+        let batch_mem = small_batch.memory_bytes();
+        let tight_global = GlobalPool::new(batch_mem + 256);
+        let tight_pool = tight_global.try_admit(0, batch_mem + 256).unwrap();
+        let mut tight_stream = NativeTraceMergeStream {
+            input: Box::new(VecBatchesStream {
+                batches: VecDeque::from([small_batch]),
+            }),
+            input_res: tight_pool.register("in", false),
+            merger: NativeTraceMerger::new(&merge_columns, &full_schema).unwrap(),
+            merger_res: tight_pool.register("merger", false),
+            scratch_res: tight_pool.register("scratch", false),
+            merge_columns,
+            full_schema: Arc::clone(&full_schema),
+            merged_start_idx: 1,
+            bounds: TimeBounds::default(),
+            post_filters: Vec::new(),
+            projection: None,
+            remaining: None,
+            eval: EvalContext::new(0, cancel.clone()),
+            active_input: None,
+            current_trace_id: None,
+            budget_bytes: 256 * 1024,
+            max_traces_per_chunk: 500,
+            done: false,
+        };
+        let mut tight_out = tight_pool.register("out", false);
+        let err = tight_stream
+            .next_batch(&cancel, Some(&mut tight_out))
+            .unwrap_err();
+        assert!(
+            matches!(err, QueryError::TooLarge),
+            "expected TooLarge under tight pool, got {err:?}"
+        );
+        assert_eq!(tight_out.size(), 0);
+        assert_eq!(tight_stream.merger_res.size(), 0);
+        assert_eq!(tight_stream.input_res.size(), 0);
+        assert_eq!(tight_stream.scratch_res.size(), 0);
+        assert_eq!(tight_global.used(), 0);
+    }
 }

@@ -18,8 +18,8 @@ use crate::codec::{
     decode_mini_block_selected, decode_mini_block_selected_parallel_bytes, decode_mini_block_take,
 };
 use crate::format::{
-    BLOCK_FLAG_FSST_SUBCHUNKED, COL_FLAG_HAS_FILE_DICT, Encoding, LocalityGroup,
-    MAX_BATCH_DECODED_BYTES,
+    BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_PLAIN_SUBCHUNKED, COL_FLAG_HAS_FILE_DICT, Encoding,
+    LocalityGroup, MAX_BATCH_DECODED_BYTES,
 };
 use crate::parallel::{MAX_PARALLEL_THREADS, in_parallel_scope, parallel_map_in_order_static};
 use crate::payload::{decode_payload_refs_flat, decode_payload_refs_selected};
@@ -424,56 +424,53 @@ fn materialize_phase2_mb_with_meta(
 
     let is_sparse_payload = !mask.all_ones() && mask.count_ones().saturating_mul(8) < mb_row_count;
 
-    let decode_payload_col = |cidx: usize,
-                              cached: Option<DecodedPhase1>|
-     -> Result<Column, StatamError> {
-        let dt = &fields[cidx].data_type;
-        match cached {
-            Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
-                reconstruct_payload_column_selected(
-                    mb_row_count,
-                    &selected,
-                    mask,
-                    resolved_chunks,
-                    dt,
-                    threads,
-                )
-            }
-            Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
-                reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks, dt, threads)
-            }
-            _ => {
-                let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
-                if blk.encoding == Encoding::ConstNull {
-                    return Ok(Column::try_new_const(
-                        ScalarValue::Null(dt.clone()),
-                        mb_row_count,
-                    )?);
-                }
-                let raw = read_block.read_block(blk)?;
-                if is_sparse_payload {
-                    let selected = decode_payload_refs_selected(
-                        &raw,
-                        mb_row_count,
-                        mask,
-                        MAX_BATCH_DECODED_BYTES,
-                    )?;
+    let decode_payload_col =
+        |cidx: usize, cached: Option<DecodedPhase1>| -> Result<Column, StatamError> {
+            let dt = &fields[cidx].data_type;
+            match cached {
+                Some(DecodedPhase1::SelectedPayloadRefs(selected)) => {
                     reconstruct_payload_column_selected(
                         mb_row_count,
                         &selected,
                         mask,
                         resolved_chunks,
                         dt,
-                        threads,
                     )
-                } else {
-                    let refs =
-                        decode_payload_refs_flat(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
-                    reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks, dt, threads)
+                }
+                Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
+                    reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks, dt)
+                }
+                _ => {
+                    let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    if blk.encoding == Encoding::ConstNull {
+                        return Ok(Column::try_new_const(
+                            ScalarValue::Null(dt.clone()),
+                            mb_row_count,
+                        )?);
+                    }
+                    let raw = read_block.read_block(blk)?;
+                    if is_sparse_payload {
+                        let selected = decode_payload_refs_selected(
+                            &raw,
+                            mb_row_count,
+                            mask,
+                            MAX_BATCH_DECODED_BYTES,
+                        )?;
+                        reconstruct_payload_column_selected(
+                            mb_row_count,
+                            &selected,
+                            mask,
+                            resolved_chunks,
+                            dt,
+                        )
+                    } else {
+                        let refs =
+                            decode_payload_refs_flat(&raw, mb_row_count, MAX_BATCH_DECODED_BYTES)?;
+                        reconstruct_payload_column_from_flat(&refs, mask, resolved_chunks, dt)
+                    }
                 }
             }
-        }
-    };
+        };
 
     let out_cols = if threads <= 1 {
         let mut out_cols = Vec::with_capacity(proj_indices.len());
@@ -537,12 +534,12 @@ fn materialize_phase2_mb_with_meta(
             }
         }
 
-        let can_parallel_fsst =
+        let can_parallel_subchunked =
             !in_parallel_scope() && (mask.all_ones() || mask.count_ones() >= 1024);
         let mut slots: Vec<Option<Column>> = vec![None; proj_indices.len()];
         let mut regular_tasks: Vec<(usize, usize, Option<Arc<FileDict>>)> = Vec::new();
-        let mut large_fsst_tasks: Vec<(usize, Vec<usize>)> = Vec::new();
-        let mut large_fsst_pos: HashMap<usize, usize> = HashMap::new();
+        let mut large_subchunked_tasks: Vec<(usize, Vec<usize>)> = Vec::new();
+        let mut large_subchunked_pos: HashMap<usize, usize> = HashMap::new();
         for (pos, &cidx) in proj_indices.iter().enumerate() {
             let dt = &fields[cidx].data_type;
             let cd = &meta.col_dir[cidx];
@@ -564,18 +561,21 @@ fn materialize_phase2_mb_with_meta(
                 )?);
             } else {
                 let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
-                if can_parallel_fsst
-                    && blk.encoding == Encoding::Fsst
-                    && (blk.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0
+                let is_subchunked_varlen = (blk.encoding == Encoding::Fsst
+                    && (blk.block_flags & BLOCK_FLAG_FSST_SUBCHUNKED) != 0)
+                    || (blk.encoding == Encoding::Plain
+                        && (blk.block_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0);
+                if can_parallel_subchunked
+                    && is_subchunked_varlen
                     && matches!(dt, DataType::Utf8 | DataType::Binary)
-                    && blk.raw_len >= 128 * 1024
+                    && blk.raw_len >= 32 * 1024
                 {
-                    if let Some(&idx) = large_fsst_pos.get(&cidx) {
-                        large_fsst_tasks[idx].1.push(pos);
+                    if let Some(&idx) = large_subchunked_pos.get(&cidx) {
+                        large_subchunked_tasks[idx].1.push(pos);
                     } else {
-                        let idx = large_fsst_tasks.len();
-                        large_fsst_pos.insert(cidx, idx);
-                        large_fsst_tasks.push((cidx, vec![pos]));
+                        let idx = large_subchunked_tasks.len();
+                        large_subchunked_pos.insert(cidx, idx);
+                        large_subchunked_tasks.push((cidx, vec![pos]));
                     }
                 } else {
                     regular_tasks.push((pos, cidx, pre_dicts.get(&cidx).map(Arc::clone)));
@@ -593,6 +593,11 @@ fn materialize_phase2_mb_with_meta(
             effective_read_threads(task_work_bytes, threads)
         };
         if regular_tasks.len() >= 4 && task_workers > 1 {
+            regular_tasks.sort_unstable_by(|a, b| {
+                let len_a = meta.rg_blocks(a.1, rg_idx)[mb_idx].raw_len;
+                let len_b = meta.rg_blocks(b.1, rg_idx)[mb_idx].raw_len;
+                len_b.cmp(&len_a).then_with(|| a.0.cmp(&b.0))
+            });
             let meta_arc = Arc::clone(meta);
             let plan_arc = Arc::clone(plan);
             let map_proj_arc = Arc::clone(map_proj_by_col);
@@ -640,9 +645,9 @@ fn materialize_phase2_mb_with_meta(
             }
         }
 
-        // Large sub-chunked FSST columns run at top level (outside `in_parallel_scope()`) so
+        // Large sub-chunked FSST/Plain columns run at top level (outside `in_parallel_scope()`) so
         // they fan out across all `threads` workers per column via zero-copy `Bytes`.
-        for (cidx, positions) in large_fsst_tasks {
+        for (cidx, positions) in large_subchunked_tasks {
             let dt = &fields[cidx].data_type;
             let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
             let raw_bytes = read_block.read_block_bytes(blk)?;
@@ -859,6 +864,14 @@ fn decode_non_payload_take_with_meta(
             .iter()
             .find(|s| s.logical_col_idx as usize == cidx)
     {
+        let keys_only = matches!(empty_map_proj.get(&cidx), Some(MapReadMode::KeysOnly));
+        let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
+        if keys_only && blk.encoding == Encoding::ConstNull {
+            return Ok(Column::try_new_const(
+                ScalarValue::Null(DataType::MapUtf8),
+                local_indices.len(),
+            )?);
+        }
         let mask = mask_ref.ok_or(StatamError::Corrupt {
             reason: "missing take_rows shredded map mask",
         })?;
@@ -869,13 +882,16 @@ fn decode_non_payload_take_with_meta(
         let residual_flat = if skip_residual {
             None
         } else {
-            let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
             let raw = if blk.stored_len > 0 {
                 read_block.read_block(blk)?
             } else {
                 Cow::Borrowed(&[][..])
             };
-            Some(decode_shredded_residual_block_selected(&raw, blk, mask)?)
+            Some(if keys_only {
+                decode_shredded_residual_block_keys_only(&raw, blk, mask)?
+            } else {
+                decode_shredded_residual_block_selected(&raw, blk, mask)?
+            })
         };
         let full_col = build_shredded_map_col_with_meta(
             mb_row_count,
@@ -890,12 +906,58 @@ fn decode_non_payload_take_with_meta(
         return Ok(Column::Flat(full_col.take(u32_idx, None)?));
     }
     let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
+    if *dt == DataType::MapUtf8 && matches!(empty_map_proj.get(&cidx), Some(MapReadMode::KeysOnly))
+    {
+        if blk.encoding == Encoding::ConstNull {
+            return Ok(Column::try_new_const(
+                ScalarValue::Null(DataType::MapUtf8),
+                local_indices.len(),
+            )?);
+        }
+        let owned_mask;
+        let mask = match mask_ref {
+            Some(m) => m,
+            None => {
+                owned_mask = mask_from_indices(mb_row_count, local_indices);
+                &owned_mask
+            }
+        };
+        let owned_u32;
+        let u32_idx = match u32_indices {
+            Some(u) => u,
+            None => {
+                owned_u32 = local_indices
+                    .iter()
+                    .map(|&r| {
+                        u32::try_from(r).map_err(|_| StatamError::BoundsExceeded {
+                            reason: "take row index exceeds u32::MAX",
+                        })
+                    })
+                    .collect::<Result<Vec<u32>, _>>()?;
+                &owned_u32
+            }
+        };
+        let raw = if blk.stored_len > 0 {
+            read_block.read_block(blk)?
+        } else {
+            Cow::Borrowed(&[][..])
+        };
+        let full = Column::Flat(decode_shredded_residual_block_keys_only(&raw, blk, mask)?);
+        return Ok(Column::Flat(full.take(u32_idx, None)?));
+    }
     let raw = if blk.stored_len > 0 {
         read_block.read_block(blk)?
     } else {
         Cow::Borrowed(&[][..])
     };
-    decode_mini_block_take(&raw, blk, dt, dict, local_indices)
+    let col = decode_mini_block_take(&raw, blk, dt, dict, local_indices)?;
+    if *dt == DataType::MapUtf8
+        && let Some(MapReadMode::Keys(req_keys)) = empty_map_proj.get(&cidx)
+    {
+        let flat = col.materialize(None)?;
+        return Ok(Column::Flat(filter_residual_to_keys(&flat, req_keys)?));
+    }
+    Ok(col)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -929,7 +991,8 @@ fn materialize_take_mb_with_meta(
     let threads = read_threads.clamp(1, MAX_PARALLEL_THREADS);
 
     let mut needs_shredded_map = false;
-    let mut uncached_subs: Vec<usize> = Vec::new();
+    let mut decoded_subs: HashMap<usize, DecodedSubCol> = HashMap::new();
+    let mut uncached_subs: Vec<(usize, bool)> = Vec::new();
     for &cidx in proj_indices {
         if meta.col_dir[cidx].locality_group != LocalityGroup::ExternalPayload
             && fields[cidx].data_type == DataType::MapUtf8
@@ -940,10 +1003,60 @@ fn materialize_take_mb_with_meta(
                 .find(|s| s.logical_col_idx as usize == cidx)
         {
             needs_shredded_map = true;
-            for ke in &sm.keys {
-                let sub_pidx = ke.sub_col_idx as usize;
-                if !uncached_subs.contains(&sub_pidx) {
-                    uncached_subs.push(sub_pidx);
+            let mode = empty_map_proj.get(&cidx).unwrap_or(&MapReadMode::Full);
+            match mode {
+                MapReadMode::KeysOnly => {
+                    let res_blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                    if res_blk.encoding == Encoding::ConstNull {
+                        continue;
+                    }
+                    for ke in &sm.keys {
+                        let sub_pidx = ke.sub_col_idx as usize;
+                        if decoded_subs.contains_key(&sub_pidx)
+                            || uncached_subs.iter().any(|&(p, _)| p == sub_pidx)
+                        {
+                            continue;
+                        }
+                        let sblk = &meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
+                        if sblk.null_count == 0 {
+                            decoded_subs.insert(
+                                sub_pidx,
+                                DecodedSubCol::InMapOnly(Bitmap::new_ones(mb_row_count)),
+                            );
+                        } else if sblk.null_count == sblk.row_count {
+                            decoded_subs.insert(
+                                sub_pidx,
+                                DecodedSubCol::InMapOnly(Bitmap::new_zeroed(mb_row_count)),
+                            );
+                        } else {
+                            uncached_subs.push((sub_pidx, true));
+                        }
+                    }
+                }
+                MapReadMode::Keys(req_keys) => {
+                    for ke in &sm.keys {
+                        if !req_keys.iter().any(|rk| rk == &ke.key) {
+                            continue;
+                        }
+                        let sub_pidx = ke.sub_col_idx as usize;
+                        if decoded_subs.contains_key(&sub_pidx)
+                            || uncached_subs.iter().any(|&(p, _)| p == sub_pidx)
+                        {
+                            continue;
+                        }
+                        uncached_subs.push((sub_pidx, false));
+                    }
+                }
+                MapReadMode::Full => {
+                    for ke in &sm.keys {
+                        let sub_pidx = ke.sub_col_idx as usize;
+                        if decoded_subs.contains_key(&sub_pidx)
+                            || uncached_subs.iter().any(|&(p, _)| p == sub_pidx)
+                        {
+                            continue;
+                        }
+                        uncached_subs.push((sub_pidx, false));
+                    }
                 }
             }
         }
@@ -966,13 +1079,12 @@ fn materialize_take_mb_with_meta(
         None
     };
 
-    let mut decoded_subs: HashMap<usize, DecodedSubCol> = HashMap::new();
     if let Some(mask) = mask_ref
         && !uncached_subs.is_empty()
     {
         let sub_work_bytes: usize = uncached_subs
             .iter()
-            .map(|&sub_pidx| meta.rg_blocks(sub_pidx, rg_idx)[mb_idx].raw_len as usize)
+            .map(|&(sub_pidx, _)| meta.rg_blocks(sub_pidx, rg_idx)[mb_idx].raw_len as usize)
             .fold(0usize, usize::saturating_add);
         let sub_workers = if uncached_subs.len() >= 8 {
             threads
@@ -983,22 +1095,43 @@ fn materialize_take_mb_with_meta(
             let meta_arc = Arc::clone(meta);
             let block_reader = read_block.clone();
             let mask_arc = Arc::new(mask.clone());
-            let decoded_pairs =
-                parallel_map_in_order_static(uncached_subs, sub_workers, move |sub_pidx| {
+            let decoded_pairs = parallel_map_in_order_static(
+                uncached_subs,
+                sub_workers,
+                move |(sub_pidx, in_map_only)| {
                     let blk = &meta_arc.rg_blocks(sub_pidx, rg_idx)[mb_idx];
                     let raw = block_reader.read_block(blk)?;
-                    let sub = decode_shredded_subcol_selected(&raw, mb_row_count, &mask_arc)?;
-                    Ok((sub_pidx, DecodedSubCol::Full(sub)))
-                })?;
+                    let sub = if in_map_only {
+                        DecodedSubCol::InMapOnly(decode_shredded_subcol_in_map_only(
+                            &raw,
+                            mb_row_count,
+                        )?)
+                    } else {
+                        DecodedSubCol::Full(decode_shredded_subcol_selected(
+                            &raw,
+                            mb_row_count,
+                            &mask_arc,
+                        )?)
+                    };
+                    Ok((sub_pidx, sub))
+                },
+            )?;
             for (sub_pidx, sub) in decoded_pairs {
                 decoded_subs.insert(sub_pidx, sub);
             }
         } else {
-            for sub_pidx in uncached_subs {
+            for (sub_pidx, in_map_only) in uncached_subs {
                 let blk = &meta.rg_blocks(sub_pidx, rg_idx)[mb_idx];
                 let raw = read_block.read_block(blk)?;
-                let sub = decode_shredded_subcol_selected(&raw, mb_row_count, mask)?;
-                decoded_subs.insert(sub_pidx, DecodedSubCol::Full(sub));
+                let sub = if in_map_only {
+                    DecodedSubCol::InMapOnly(decode_shredded_subcol_in_map_only(
+                        &raw,
+                        mb_row_count,
+                    )?)
+                } else {
+                    DecodedSubCol::Full(decode_shredded_subcol_selected(&raw, mb_row_count, mask)?)
+                };
+                decoded_subs.insert(sub_pidx, sub);
             }
         }
     }
@@ -1019,17 +1152,10 @@ fn materialize_take_mb_with_meta(
                     local_indices,
                     resolved_chunks,
                     dt,
-                    threads,
                 )
             }
             Some(DecodedPhase1::FlatPayloadRefs(refs)) => {
-                reconstruct_payload_column_take_from_flat(
-                    &refs,
-                    local_indices,
-                    resolved_chunks,
-                    dt,
-                    threads,
-                )
+                reconstruct_payload_column_take_from_flat(&refs, local_indices, resolved_chunks, dt)
             }
             _ => {
                 let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
@@ -1062,7 +1188,6 @@ fn materialize_take_mb_with_meta(
                         local_indices,
                         resolved_chunks,
                         dt,
-                        threads,
                     )
                 } else {
                     let refs =
@@ -1072,7 +1197,6 @@ fn materialize_take_mb_with_meta(
                         local_indices,
                         resolved_chunks,
                         dt,
-                        threads,
                     )
                 }
             }
@@ -1134,7 +1258,27 @@ fn materialize_take_mb_with_meta(
                 let cached = payload_p1.remove(&cidx);
                 slots[pos] = Some(decode_payload_take_col(cidx, cached, mask_ref)?);
             } else {
-                parallel_tasks.push((pos, cidx, pre_dicts.get(&cidx).map(Arc::clone)));
+                let blk = &meta.rg_blocks(cidx, rg_idx)[mb_idx];
+                let dt = &fields[cidx].data_type;
+                if !in_parallel_scope()
+                    && local_indices.len() >= 2
+                    && blk.encoding == Encoding::Plain
+                    && (blk.block_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0
+                    && matches!(dt, DataType::Utf8 | DataType::Binary)
+                    && blk.raw_len as usize >= 64 * 1024
+                {
+                    let raw_bytes = read_block.read_block_bytes(blk)?;
+                    slots[pos] = Some(crate::codec::decode_mini_block_take_parallel_bytes(
+                        raw_bytes,
+                        blk,
+                        dt,
+                        None,
+                        local_indices,
+                        threads,
+                    )?);
+                } else {
+                    parallel_tasks.push((pos, cidx, pre_dicts.get(&cidx).map(Arc::clone)));
+                }
             }
         }
 
@@ -1148,6 +1292,11 @@ fn materialize_take_mb_with_meta(
             effective_read_threads(task_work_bytes, threads)
         };
         if parallel_tasks.len() >= 4 && task_workers > 1 {
+            parallel_tasks.sort_unstable_by(|a, b| {
+                let len_a = meta.rg_blocks(a.1, rg_idx)[mb_idx].raw_len;
+                let len_b = meta.rg_blocks(b.1, rg_idx)[mb_idx].raw_len;
+                len_b.cmp(&len_a).then_with(|| a.0.cmp(&b.0))
+            });
             let meta_arc = Arc::clone(meta);
             let plan_arc = Arc::clone(plan);
             let map_proj_arc = Arc::clone(empty_map_proj);

@@ -3690,6 +3690,8 @@ fn take_rows_random_access_schema_compact_selection_all_and_min_savings_parity()
             "high-entropy F64 block should fall back to Codec::None via 12% savings guard"
         );
         assert_eq!(reader.meta.rg_blocks(3, 0)[0].encoding, Encoding::Dict);
+        // Col 4 (`msg`, ~65 B mean <= 128 B in TableKind::Generic) stays Core and uses FSST.
+        assert_eq!(reader.meta.col_dir[4].locality_group, LocalityGroup::Core);
         assert_eq!(reader.meta.rg_blocks(4, 0)[0].encoding, Encoding::Fsst);
         assert_eq!(
             reader.meta.rg_blocks(5, 0)[0].encoding,
@@ -8216,6 +8218,11 @@ fn pass18_remote_stpk_open_only_prefetch_and_all_guards() {
             let inputs: Vec<String> = (0..rows_per_rg)
                 .map(|k| {
                     let row = base + k;
+                    if k == rows_per_rg - 1 {
+                        // One inline row (< 256 B) per RG keeps `BLOCK_FLAG_NO_INLINE_PAYLOADS`
+                        // cleared so sub-test 1b exercises the Wave-1 speculative pack prefetch path.
+                        return format!("inline_short_{row:04}");
+                    }
                     // Vary chunk contents slightly across rows so frames benefit from Zstd dict
                     // (matching `pass14c_cold_zstd_dict_and_frames_coalesced_into_single_wave`).
                     let mut s = format!(
@@ -9436,15 +9443,10 @@ fn pass22_resolved_chunks_dense_and_sparse_and_parallel_reconstruct() {
 
     for dt in [DataType::Utf8, DataType::Binary] {
         for mask in [&all_mask, &partial_mask] {
-            let f1 = reconstruct_payload_column_from_flat(&flat_refs, mask, &recon_chunks, &dt, 1)
+            let f1 = reconstruct_payload_column_from_flat(&flat_refs, mask, &recon_chunks, &dt)
                 .unwrap()
                 .materialize(None)
                 .unwrap();
-            let f8 = reconstruct_payload_column_from_flat(&flat_refs, mask, &recon_chunks, &dt, 8)
-                .unwrap()
-                .materialize(None)
-                .unwrap();
-            assert_eq!(f1, f8);
 
             let s1 = reconstruct_payload_column_selected(
                 rows.len(),
@@ -9452,29 +9454,16 @@ fn pass22_resolved_chunks_dense_and_sparse_and_parallel_reconstruct() {
                 mask,
                 &recon_chunks,
                 &dt,
-                1,
-            )
-            .unwrap()
-            .materialize(None)
-            .unwrap();
-            let s8 = reconstruct_payload_column_selected(
-                rows.len(),
-                &selected_refs,
-                mask,
-                &recon_chunks,
-                &dt,
-                8,
             )
             .unwrap()
             .materialize(None)
             .unwrap();
             assert_eq!(f1, s1);
-            assert_eq!(s1, s8);
         }
 
         // Direct compact take: empty, all-null, sorted, unsorted + duplicate indices (>= 1 MiB).
         assert_eq!(
-            reconstruct_payload_column_take_from_flat(&flat_refs, &[], &recon_chunks, &dt, 8)
+            reconstruct_payload_column_take_from_flat(&flat_refs, &[], &recon_chunks, &dt)
                 .unwrap()
                 .len(),
             0
@@ -9486,7 +9475,6 @@ fn pass22_resolved_chunks_dense_and_sparse_and_parallel_reconstruct() {
                 &[],
                 &recon_chunks,
                 &dt,
-                8
             )
             .unwrap()
             .len(),
@@ -9498,57 +9486,27 @@ fn pass22_resolved_chunks_dense_and_sparse_and_parallel_reconstruct() {
             &[0, 4, 8, 12],
             &recon_chunks,
             &dt,
-            8,
         )
         .unwrap();
         assert!(matches!(null_only, Column::Const { len: 4, .. }));
 
         let take_idxs = vec![15, 3, 2, 3, 0, 7, 11, 14, 1, 15, 6, 10];
-        let tf1 = reconstruct_payload_column_take_from_flat(
-            &flat_refs,
-            &take_idxs,
-            &recon_chunks,
-            &dt,
-            1,
-        )
-        .unwrap()
-        .materialize(None)
-        .unwrap();
-        let tf8 = reconstruct_payload_column_take_from_flat(
-            &flat_refs,
-            &take_idxs,
-            &recon_chunks,
-            &dt,
-            8,
-        )
-        .unwrap()
-        .materialize(None)
-        .unwrap();
-        let ts1 = reconstruct_payload_column_take_selected(
+        let tf =
+            reconstruct_payload_column_take_from_flat(&flat_refs, &take_idxs, &recon_chunks, &dt)
+                .unwrap()
+                .materialize(None)
+                .unwrap();
+        let ts = reconstruct_payload_column_take_selected(
             rows.len(),
             &selected_refs,
             &take_idxs,
             &recon_chunks,
             &dt,
-            1,
         )
         .unwrap()
         .materialize(None)
         .unwrap();
-        let ts8 = reconstruct_payload_column_take_selected(
-            rows.len(),
-            &selected_refs,
-            &take_idxs,
-            &recon_chunks,
-            &dt,
-            8,
-        )
-        .unwrap()
-        .materialize(None)
-        .unwrap();
-        assert_eq!(tf1, tf8);
-        assert_eq!(tf1, ts1);
-        assert_eq!(ts1, ts8);
+        assert_eq!(tf, ts);
     }
 
     // 5. Enforce MAX_ROW_PAYLOAD_BYTES and MAX_BATCH_DECODED_BYTES in Pass 1.
@@ -9563,7 +9521,6 @@ fn pass22_resolved_chunks_dense_and_sparse_and_parallel_reconstruct() {
             &Bitmap::new_ones(1),
             &limit_chunks,
             &DataType::Binary,
-            4,
         ),
         Err(StatamError::BoundsExceeded { .. })
     ));
@@ -9578,7 +9535,6 @@ fn pass22_resolved_chunks_dense_and_sparse_and_parallel_reconstruct() {
             &Bitmap::new_ones(5),
             &limit_chunks,
             &DataType::Binary,
-            4,
         ),
         Err(StatamError::BoundsExceeded { .. })
     ));
@@ -10069,7 +10025,7 @@ fn pass23_hash_free_wave_plan_parity_and_multiwave_fallback() {
             p_small2_vals.push(Vec::new());
             p_mix_vals.push(String::new());
         } else {
-            // ~12 KiB per row -> 128 rows = ~1.5 MiB >= PARALLEL_RECONSTRUCT_MIN_BYTES (1 MiB).
+            // ~12 KiB per row -> 128 rows = ~1.5 MiB (single-copy Stage B reconstruction, well above the 64 KiB parallel threshold).
             p_big_vals.push(format!("BIG_{i:03}_") + &"B".repeat(12 * 1024));
             // Mix ~240 B inline payloads (<= INLINE_PAYLOAD_THRESHOLD = 256 B) + ~2 KiB chunked
             // payloads so `PayloadRefs` raw_len exceeds `MIN_PARALLEL_WORK_BYTES` (48 KiB) while
@@ -10904,7 +10860,7 @@ fn pass24_fused_take_rg_and_lpt_pack_frames_parity() {
         StatamReader::open(s3_file.clone(), Some(Arc::new(remote_resolver))).unwrap();
 
     // Multi-MB take across all 8 MBs (6 rows/MB = 48 rows, > 150 KiB payloads -> parallel Step 4)
-    // + single-MB take (Step 4 sequential with `recon_threads = threads`)
+    // + single-MB take (`mb_jobs.len() == 1` -> sequential single-copy Step 4 `assemble_fused_take_mb`)
     // + duplicate `proj_indices`.
     let multi_mb_rows: Vec<u64> = (0..8u64)
         .flat_map(|mb| {
@@ -12962,5 +12918,502 @@ fn m35_m1_phase1_map_key_filter_with_phase2_keys_only_projection() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn pass26_plain_subchunked_end_to_end_scan_substring_nested_and_take() {
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("body", DataType::Utf8, true),
+        Field::new("tags", DataType::List(Box::new(DataType::Utf8)), false),
+        Field::new("attrs", DataType::MapUtf8, false),
+    ])
+    .unwrap();
+
+    let n = 1_024usize;
+    let mut rng = 0x2626_5555_6666_7777u64;
+    let mut next_ascii = |len: usize| -> String {
+        let mut s = Vec::with_capacity(len);
+        for _ in 0..len {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            s.push(0x21 + ((rng >> 56) as u8 % 94));
+        }
+        String::from_utf8(s).unwrap()
+    };
+
+    let ids: Vec<i64> = (0..n as i64).collect();
+    let mut bodies = Vec::with_capacity(n);
+    let mut body_valid = vec![true; n];
+    for (i, valid) in body_valid.iter_mut().enumerate() {
+        if i % 50 == 0 {
+            *valid = false;
+            bodies.push(String::new());
+        } else if i == 601 {
+            bodies.push(format!("PASS26_SUBCHUNK_NEEDLE_601_{}", next_ascii(180)));
+        } else {
+            bodies.push(format!("doc_{i:04}_{}", next_ascii(180)));
+        }
+    }
+    let body_nulls = Bitmap::from_bools(&body_valid);
+
+    let mut list_offs = Vec::with_capacity(n + 1);
+    let mut list_vals = Vec::with_capacity(n);
+    list_offs.push(0u32);
+    for i in 0..n {
+        list_vals.push(format!("tag_{i:04}_{}", next_ascii(160)));
+        list_offs.push(list_vals.len() as u32);
+    }
+    let tags_col = Column::Flat(
+        FlatColumn::try_new(
+            FlatData::List {
+                item_type: DataType::Utf8,
+                offsets: list_offs,
+                values: Box::new(Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(list_vals.iter().map(String::as_str))
+                                .unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                )),
+            },
+            None,
+        )
+        .unwrap(),
+    );
+
+    let mut map_offs = Vec::with_capacity(n + 1);
+    let mut map_keys = Vec::with_capacity(n);
+    let mut map_vals = Vec::with_capacity(n);
+    map_offs.push(0u32);
+    for i in 0..n {
+        map_keys.push("detail".to_owned());
+        map_vals.push(format!("det_{i:04}_{}", next_ascii(160)));
+        map_offs.push(map_keys.len() as u32);
+    }
+    let attrs_col = Column::Flat(
+        FlatColumn::try_new(
+            FlatData::MapUtf8(Box::new(
+                MapData::try_new(
+                    map_offs,
+                    Utf8Data::try_from_slices(map_keys.iter().map(String::as_str)).unwrap(),
+                    Utf8Data::try_from_slices(map_vals.iter().map(String::as_str)).unwrap(),
+                    None,
+                )
+                .unwrap(),
+            )),
+            None,
+        )
+        .unwrap(),
+    );
+
+    let batch = Batch::try_new_all(
+        Arc::clone(&schema),
+        vec![
+            Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+            Column::Flat(
+                FlatColumn::try_new(
+                    FlatData::Utf8(
+                        Utf8Data::try_from_slices(bodies.iter().map(String::as_str)).unwrap(),
+                    ),
+                    Some(body_nulls),
+                )
+                .unwrap(),
+            ),
+            tags_col,
+            attrs_col,
+        ],
+        n,
+    )
+    .unwrap();
+
+    let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+    opts.row_group_size = n;
+    opts.mini_block_size = n;
+    let mut buf = Vec::new();
+    {
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut buf),
+            Arc::clone(&schema),
+            opts,
+            None,
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+        w.finish().unwrap();
+    }
+
+    let reader = StatamReader::open(Arc::new(SliceReader::new(buf)), None).unwrap();
+    reader.verify_full().unwrap();
+
+    let body_blk = &reader.meta().rg_blocks(1, 0)[0];
+    assert_eq!(body_blk.encoding, Encoding::Plain);
+    assert_ne!(
+        body_blk.block_flags & crate::format::BLOCK_FLAG_PLAIN_SUBCHUNKED,
+        0
+    );
+    assert_eq!(body_blk.codec, Codec::None);
+
+    let list_blk = &reader.meta().rg_blocks(2, 0)[0];
+    assert_eq!(list_blk.encoding, Encoding::ListEncoded);
+    assert_eq!(
+        list_blk.codec,
+        Codec::None,
+        "ListEncoded with PlainSubchunked child must skip outer compression"
+    );
+
+    // 1. Phase-1 substring evaluation on PlainSubchunked column.
+    let sub_out = reader
+        .scan(&ScanRequest {
+            projection: Some(vec![0, 1]),
+            substrings: vec![vec![SubstringQuery::like(
+                "body",
+                "PASS26_SUBCHUNK_NEEDLE_601",
+            )]],
+            ..ScanRequest::default()
+        })
+        .unwrap();
+    assert_eq!(sub_out.iter().map(Batch::num_rows).sum::<usize>(), 1);
+    let sub_cat = concat_scanned_batches(&Arc::new(schema.project(&[0, 1]).unwrap()), &sub_out);
+    assert_eq!(
+        sub_cat.column(0).unwrap().get_scalar(0).unwrap(),
+        ScalarValue::I64(601)
+    );
+    assert_eq!(
+        sub_cat.column(1).unwrap().get_scalar(0).unwrap(),
+        ScalarValue::Utf8(bodies[601].clone())
+    );
+
+    // 2. Selective Phase-2 materialization (both 1T and 4T) across Utf8 + List<Utf8> + ShreddedSubCol.
+    for threads in [1usize, 4] {
+        let sel_out = reader
+            .scan(&ScanRequest {
+                projection: Some(vec![0, 1, 2, 3]),
+                predicates: vec![Predicate::new(
+                    "id",
+                    ZonePred::Between(ZoneValue::I64(250), ZoneValue::I64(270)),
+                )],
+                map_projections: HashMap::from([(
+                    "attrs".to_owned(),
+                    MapReadMode::Keys(vec!["detail".to_owned()]),
+                )]),
+                read_threads: threads,
+                ..ScanRequest::default()
+            })
+            .unwrap();
+        let cat = concat_scanned_batches(&schema, &sel_out);
+        assert_eq!(cat.num_rows(), 21);
+        for (pos, row) in (250..=270usize).enumerate() {
+            assert_eq!(
+                cat.column(0).unwrap().get_scalar(pos).unwrap(),
+                ScalarValue::I64(row as i64)
+            );
+            let exp_body = if row % 50 == 0 {
+                ScalarValue::Null(DataType::Utf8)
+            } else {
+                ScalarValue::Utf8(bodies[row].clone())
+            };
+            assert_eq!(cat.column(1).unwrap().get_scalar(pos).unwrap(), exp_body);
+            assert_eq!(
+                cat.column(2).unwrap().get_scalar(pos).unwrap(),
+                batch.column(2).unwrap().get_scalar(row).unwrap()
+            );
+            assert_eq!(
+                cat.column(3).unwrap().get_scalar(pos).unwrap(),
+                batch.column(3).unwrap().get_scalar(row).unwrap()
+            );
+        }
+    }
+
+    // 3. take_rows parity across PlainSubchunked + nested columns.
+    let taken = reader.take_rows(&[0, 50, 256, 600, 1023], None, 2).unwrap();
+    let tcat = concat_scanned_batches(&schema, &taken);
+    assert_eq!(tcat.num_rows(), 5);
+    for (pos, &row) in [0usize, 50, 256, 600, 1023].iter().enumerate() {
+        assert_eq!(
+            tcat.column(0).unwrap().get_scalar(pos).unwrap(),
+            ScalarValue::I64(row as i64)
+        );
+        assert_eq!(
+            tcat.column(1).unwrap().get_scalar(pos).unwrap(),
+            batch.column(1).unwrap().get_scalar(row).unwrap()
+        );
+        assert_eq!(
+            tcat.column(2).unwrap().get_scalar(pos).unwrap(),
+            batch.column(2).unwrap().get_scalar(row).unwrap()
+        );
+    }
+}
+
+#[test]
+fn pass26_no_inline_payloads_pre_wave1_zero_data_get_pruning_and_fallthroughs() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct MissingResolver(AtomicUsize);
+    impl PackResolver for MissingResolver {
+        fn resolve(&self, pack_id: [u8; 16]) -> Result<Arc<ChunkPackReader>, StatamError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Err(StatamError::MissingPack { pack_id })
+        }
+    }
+
+    let schema = Schema::try_new_arc(vec![
+        Field::new("id", DataType::I64, false),
+        Field::new("input", DataType::Utf8, true),
+        Field::new("pad", DataType::Binary, false),
+    ])
+    .unwrap();
+
+    let n_rows = 400usize;
+    let pack_id = [0x99u8; 16];
+    let mut pb = ChunkPackBuilder::new(
+        pack_id,
+        PackWriteOptions {
+            codec: Codec::Lz4,
+            zstd_level: 1,
+            target_frame_raw_bytes: 64 * 1024,
+            enable_trigram_skip: true,
+            compress_toc_lz4: true,
+            write_threads: 1,
+            emit_hash_table: false,
+        },
+    );
+
+    let mut rng = 0x9999_2026_1234_5678u64;
+    let pads: Vec<Vec<u8>> = (0..n_rows)
+        .map(|_| {
+            let mut b = vec![0u8; 600];
+            for chunk in b.chunks_mut(8) {
+                rng = rng
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let bytes = rng.to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+            b
+        })
+        .collect();
+
+    let build_file = |profile: WriteProfile,
+                      with_inline_row: bool,
+                      pack_builder: Option<&mut ChunkPackBuilder>,
+                      multi_batch: bool|
+     -> Vec<u8> {
+        let mut opts = WriteOptions::for_table(TableKind::Spans, profile);
+        opts.row_group_size = n_rows;
+        opts.mini_block_size = 200;
+        if pack_builder.is_some() {
+            opts.pack_id = Some(pack_id);
+        }
+        let mut file_bytes = Vec::new();
+        let mut w = StatamWriter::new(
+            std::io::Cursor::new(&mut file_bytes),
+            Arc::clone(&schema),
+            opts,
+            pack_builder,
+        )
+        .unwrap();
+        let chunks: Vec<Range<usize>> = if multi_batch {
+            vec![0..150, 150..300, 300..n_rows]
+        } else {
+            std::iter::once(0..n_rows).collect()
+        };
+        for range in &chunks {
+            let ids: Vec<i64> = range.clone().map(|i| (i * 2) as i64).collect();
+            let mut inputs = Vec::with_capacity(range.len());
+            let mut valid = vec![true; range.len()];
+            for (pos, row) in range.clone().enumerate() {
+                if row % 25 == 0 {
+                    valid[pos] = false;
+                    inputs.push(String::new());
+                } else if with_inline_row && row == 5 {
+                    inputs.push("INLINE_SECRET_NEEDLE".to_owned());
+                } else {
+                    // Varied lowercase words so LZ4 stored frame >= MIN_FRAME_FOR_TRIGRAM (4 KiB)
+                    // while keeping trigram bloom density low enough to short-circuit absent needles.
+                    let words = [
+                        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+                        "india", "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+                    ];
+                    let mut s = format!("external_payload_row_{row:04}_");
+                    for j in 0..80usize {
+                        s.push_str(words[(row * 7 + j * 3) % words.len()]);
+                        s.push('_');
+                        s.push_str(&format!("{:02x}_", (row.wrapping_mul(31) + j * 13) & 0xFF));
+                    }
+                    inputs.push(s);
+                }
+            }
+            let batch = Batch::try_new_all(
+                Arc::clone(&schema),
+                vec![
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(ids), None).unwrap()),
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Utf8(
+                                Utf8Data::try_from_slices(inputs.iter().map(String::as_str))
+                                    .unwrap(),
+                            ),
+                            Some(Bitmap::from_bools(&valid)),
+                        )
+                        .unwrap(),
+                    ),
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Binary(
+                                BinaryData::try_from_slices(
+                                    pads[range.clone()].iter().map(Vec::as_slice),
+                                )
+                                .unwrap(),
+                            ),
+                            None,
+                        )
+                        .unwrap(),
+                    ),
+                ],
+                range.len(),
+            )
+            .unwrap();
+            w.write_batch(&batch).unwrap();
+        }
+        w.finish().unwrap();
+        file_bytes
+    };
+
+    // 1. Multi-batch L1Compact with external pack (all non-null rows > 256 B) sets
+    //    BLOCK_FLAG_NO_INLINE_PAYLOADS on every MB and prunes before Wave 1 with 0 .statam data GETs!
+    let l1_ext_bytes = build_file(WriteProfile::L1Compact, false, Some(&mut pb), true);
+    let mut pack_bytes = Vec::new();
+    pb.finish(&mut pack_bytes).unwrap();
+
+    let mut resolver = InMemoryPackResolver::new();
+    resolver.insert_bytes(pack_id, pack_bytes.clone()).unwrap();
+    let resolver = Arc::new(resolver);
+
+    let no_cache_cfg = SimulatedS3Config {
+        cache_capacity_blocks: 0,
+        ..SimulatedS3Config::default()
+    };
+    let s3_statam = Arc::new(
+        SimulatedS3Reader::from_bytes(l1_ext_bytes.clone(), no_cache_cfg).with_remote_hint(true),
+    );
+    let reader = Arc::new(StatamReader::open(s3_statam.clone(), Some(resolver)).unwrap());
+    for blk in reader.meta().rg_blocks(1, 0) {
+        assert_eq!(blk.encoding, Encoding::PayloadRefs);
+        assert_ne!(
+            blk.block_flags & BLOCK_FLAG_NO_INLINE_PAYLOADS,
+            0,
+            "multi-batch L1Compact external-only PayloadRefs MB must set BLOCK_FLAG_NO_INLINE_PAYLOADS"
+        );
+    }
+
+    s3_statam.reset_counters();
+    let req_absent = ScanRequest {
+        projection: Some(vec![0]),
+        substrings: vec![vec![SubstringQuery::like(
+            "input",
+            "ABSENT_PASS26_ZERO_GET_NEEDLE",
+        )]],
+        ..ScanRequest::default()
+    };
+    let out_scan = reader.scan(&req_absent).unwrap();
+    assert!(out_scan.is_empty());
+    assert_eq!(
+        s3_statam.counters().gets,
+        0,
+        "pre-Wave-1 pack pruning must issue ZERO .statam data GETs on absent needle (scan)"
+    );
+    // Also verify streaming `scan_iter` gets 0 .statam data GETs!
+    let mut iter = reader.scan_iter(req_absent.clone()).unwrap();
+    assert!(iter.next_batch(None, None).unwrap().is_none());
+    assert_eq!(
+        s3_statam.counters().gets,
+        0,
+        "pre-Wave-1 pack pruning must issue ZERO .statam data GETs on absent needle (scan_iter)"
+    );
+
+    // 2. MissingPack fallthrough: if resolver returns MissingPack, narrow filter that eliminates
+    //    all rows (id == 3, odd) still succeeds with empty result instead of failing early!
+    let missing_res = Arc::new(MissingResolver(AtomicUsize::new(0)));
+    let r_missing = StatamReader::open(
+        Arc::new(SliceReader::new(l1_ext_bytes)),
+        Some(missing_res.clone()),
+    )
+    .unwrap();
+    let out_narrow = r_missing
+        .scan(&ScanRequest {
+            projection: Some(vec![0]),
+            predicates: vec![Predicate::new("id", ZonePred::Eq(ZoneValue::I64(3)))],
+            substrings: vec![vec![SubstringQuery::like("input", "ABSENT_NEEDLE_XYZ")]],
+            ..ScanRequest::default()
+        })
+        .unwrap();
+    assert!(out_narrow.is_empty());
+    assert_eq!(
+        missing_res.0.load(Ordering::Relaxed),
+        0,
+        "narrow filter must not eagerly open missing pack before Phase 1"
+    );
+    // And pure payload substring with missing pack falls through to Wave 1 and returns MissingPack!
+    let err_missing = r_missing.scan(&req_absent).unwrap_err();
+    assert!(matches!(err_missing, StatamError::MissingPack { pack_id: pid } if pid == pack_id));
+
+    // 3. Mixed inline + external MB must NOT set BLOCK_FLAG_NO_INLINE_PAYLOADS and MUST still
+    //    find the inline needle even when the external pack short-circuits it!
+    let mut pb2 = ChunkPackBuilder::new(
+        pack_id,
+        PackWriteOptions {
+            codec: Codec::Lz4,
+            zstd_level: 1,
+            target_frame_raw_bytes: 64 * 1024,
+            enable_trigram_skip: true,
+            compress_toc_lz4: true,
+            write_threads: 1,
+            emit_hash_table: false,
+        },
+    );
+    let mixed_bytes = build_file(WriteProfile::L1Compact, true, Some(&mut pb2), false);
+    let mut pack2_bytes = Vec::new();
+    pb2.finish(&mut pack2_bytes).unwrap();
+    let mut resolver2 = InMemoryPackResolver::new();
+    resolver2.insert_bytes(pack_id, pack2_bytes).unwrap();
+    let r_mixed = StatamReader::open(
+        Arc::new(SliceReader::new(mixed_bytes)),
+        Some(Arc::new(resolver2)),
+    )
+    .unwrap();
+    assert_eq!(
+        r_mixed.meta().rg_blocks(1, 0)[0].block_flags & BLOCK_FLAG_NO_INLINE_PAYLOADS,
+        0,
+        "MB with an inline row must NOT set BLOCK_FLAG_NO_INLINE_PAYLOADS"
+    );
+    assert_ne!(
+        r_mixed.meta().rg_blocks(1, 0)[1].block_flags & BLOCK_FLAG_NO_INLINE_PAYLOADS,
+        0,
+        "second MB without inline rows must set BLOCK_FLAG_NO_INLINE_PAYLOADS"
+    );
+    let out_inline = r_mixed
+        .scan(&ScanRequest {
+            projection: Some(vec![0, 1]),
+            substrings: vec![vec![SubstringQuery::like("input", "INLINE_SECRET_NEEDLE")]],
+            ..ScanRequest::default()
+        })
+        .unwrap();
+    assert_eq!(out_inline.iter().map(Batch::num_rows).sum::<usize>(), 1);
+
+    // 4. L0Fast (local L0 payload) must NEVER set BLOCK_FLAG_NO_INLINE_PAYLOADS!
+    let l0_bytes = build_file(WriteProfile::L0Fast, false, None, true);
+    let r_l0 = StatamReader::open(Arc::new(SliceReader::new(l0_bytes)), None).unwrap();
+    for blk in r_l0.meta().rg_blocks(1, 0) {
+        assert_eq!(
+            blk.block_flags & BLOCK_FLAG_NO_INLINE_PAYLOADS,
+            0,
+            "L0Fast PayloadRefs blocks must never set BLOCK_FLAG_NO_INLINE_PAYLOADS"
+        );
     }
 }

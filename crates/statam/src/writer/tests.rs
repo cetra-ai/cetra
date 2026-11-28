@@ -166,15 +166,10 @@ fn w4_bypass_writes_uncompressed_raw_pack_frames_without_trigrams() {
 
     let pack_reader =
         Arc::new(ChunkPackReader::open(Arc::new(SliceReader::new(pack_bytes))).unwrap());
-    let bypass_frames: Vec<_> = pack_reader
-        .toc()
-        .frames
-        .iter()
-        .filter(|f| f.filter_len == 0)
-        .collect();
+    let blooms = pack_reader.read_trigram_section().unwrap();
     assert!(
-        !bypass_frames.is_empty(),
-        "W4 bypass must omit trigram blooms (filter_len == 0)"
+        blooms.iter().any(Option::is_none),
+        "W4 bypass must omit trigram blooms"
     );
 
     // Also verify append_raw_bypass falls back to Codec::None on truly incompressible bytes.
@@ -194,6 +189,7 @@ fn w4_bypass_writes_uncompressed_raw_pack_frames_without_trigrams() {
         ChunkPackReader::open(Arc::new(SliceReader::new(raw_pack_bytes))).unwrap();
     assert_eq!(raw_pack_reader.toc().frames[0].codec, Codec::None);
     assert_eq!(raw_pack_reader.toc().frames[0].filter_len, 0);
+    assert!(raw_pack_reader.read_trigram_section().unwrap()[0].is_none());
 
     let mut resolver = InMemoryPackResolver::new();
     resolver.insert(pack_id, pack_reader);
@@ -2439,4 +2435,160 @@ fn streaming_pack_builder_is_bit_exact_with_in_memory_and_owned_writer() {
     zero_reader
         .verify_full_with_pack(None, 2, TableKind::Spans)
         .unwrap();
+}
+
+#[test]
+fn pass26_generic_schema_wide_row_promotion_schema_order_and_shredded_map_preserved() {
+    let schema = Schema::try_new_arc(vec![
+        Field::new("comment", DataType::Utf8, false), // col 0: high-card > 128 B, >= 256 KiB -> promoted WideRow!
+        Field::new("amount", DataType::I64, false),   // col 1: Core (schema order)
+        Field::new("attrs", DataType::MapUtf8, false), // col 2: ShreddedMap (must be preserved!)
+        Field::new("status", DataType::Utf8, false),  // col 3: low-card Dict -> Core (schema order)
+        Field::new("ship_date", DataType::Date, false), // col 4: Core (schema order)
+        Field::new("medium_url", DataType::Utf8, false), // col 5: non-dict ~60 B (<= 128 B) -> stays Core!
+    ])
+    .unwrap();
+
+    let rows_per_rg = 2_048usize;
+    let n_rgs = 2usize;
+    let mut opts = WriteOptions::for_table(TableKind::Generic, WriteProfile::L1Compact);
+    opts.row_group_size = rows_per_rg;
+    opts.mini_block_size = rows_per_rg;
+
+    let mut out = Vec::new();
+    let mut w = StatamWriter::new(
+        std::io::Cursor::new(&mut out),
+        Arc::clone(&schema),
+        opts,
+        None,
+    )
+    .unwrap();
+
+    for rg in 0..n_rgs {
+        let base = rg * rows_per_rg;
+        let comments: Vec<String> = (0..rows_per_rg)
+            .map(|i| {
+                format!(
+                    "generic_long_comment_row_{:06}_descriptive_text_padding_for_wide_row_promotion_threshold_over_128_bytes_per_row_and_256kib_per_row_group_payload_segment_xyz",
+                    base + i
+                )
+            })
+            .collect();
+        let amounts: Vec<i64> = (0..rows_per_rg).map(|i| (base + i) as i64 * 10).collect();
+        let statuses: Vec<&str> = (0..rows_per_rg)
+            .map(|i| ["OPEN", "CLOSED", "PENDING"][i % 3])
+            .collect();
+        let dates: Vec<i32> = (0..rows_per_rg).map(|i| 19_000 + (i % 30) as i32).collect();
+        let medium_urls: Vec<String> = (0..rows_per_rg)
+            .map(|i| format!("https://example.org/items/cat_{:02}/id_{:06}_slug_segment", i % 19, base + i)) // ~58 B unique -> non-dict, <= 128 B -> stays Core!
+            .collect();
+
+        let mut map_offsets = Vec::with_capacity(rows_per_rg + 1);
+        let mut map_keys = Vec::with_capacity(rows_per_rg * 2);
+        let mut map_vals = Vec::with_capacity(rows_per_rg * 2);
+        map_offsets.push(0u32);
+        for i in 0..rows_per_rg {
+            map_keys.push("region");
+            map_vals.push(if i % 2 == 0 { "us-east" } else { "eu-west" });
+            map_keys.push("tier");
+            map_vals.push("gold");
+            map_offsets.push(map_keys.len() as u32);
+        }
+        let map_data = cetra_column::MapData::try_new(
+            map_offsets,
+            Utf8Data::try_from_slices(map_keys).unwrap(),
+            Utf8Data::try_from_slices(map_vals).unwrap(),
+            None,
+        )
+        .unwrap();
+
+        let batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(comments.iter().map(String::as_str)).unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(amounts), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::MapUtf8(Box::new(map_data)), None).unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(Utf8Data::try_from_slices(statuses).unwrap()),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::Date(dates), None).unwrap()),
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::Utf8(
+                            Utf8Data::try_from_slices(medium_urls.iter().map(String::as_str))
+                                .unwrap(),
+                        ),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+            ],
+            rows_per_rg,
+        )
+        .unwrap();
+        w.write_batch(&batch).unwrap();
+    }
+    w.finish().unwrap();
+
+    let reader = StatamReader::open(Arc::new(SliceReader::new(out)), None).unwrap();
+    reader.verify_full().unwrap();
+    assert_eq!(reader.meta().rg_dir.len(), 2);
+
+    // 1. `comment` (col 0, >128 B & >=256 KiB) promoted to WideRow; `medium_url` (col 5, ~58 B) stays Core.
+    assert_eq!(
+        reader.meta().col_dir[0].locality_group,
+        LocalityGroup::WideRow
+    );
+    assert_eq!(reader.meta().col_dir[5].locality_group, LocalityGroup::Core);
+    // 2. `attrs` (col 2) ShreddedMap preserved!
+    assert!(
+        !reader.meta().schema_meta.shredded_maps.is_empty(),
+        "Generic schema core_column_plan must preserve ShreddedMap sub-columns"
+    );
+    // 3. Physical block offset order inside BOTH RG0 and RG1 preserves natural schema order
+    //    for Core columns (`amount` < `status` < `ship_date` < `medium_url`), followed by
+    //    shredded map sub-columns, followed by WideRow (`comment`).
+    let sub_pidx = reader.meta().schema_meta.shredded_maps[0].keys[0].sub_col_idx as usize;
+    for rg in 0..n_rgs {
+        let off_amount = reader.meta().rg_blocks(1, rg)[0].offset;
+        let off_status = reader.meta().rg_blocks(3, rg)[0].offset;
+        let off_date = reader.meta().rg_blocks(4, rg)[0].offset;
+        let off_medium = reader.meta().rg_blocks(5, rg)[0].offset;
+        let off_sub = reader.meta().rg_blocks(sub_pidx, rg)[0].offset;
+        let off_comment = reader.meta().rg_blocks(0, rg)[0].offset;
+        assert!(
+            off_amount < off_status
+                && off_status < off_date
+                && off_date < off_medium
+                && off_medium < off_sub
+                && off_sub < off_comment,
+            "RG{rg} physical layout mismatch: amount={off_amount}, status={off_status}, date={off_date}, medium={off_medium}, sub={off_sub}, comment={off_comment}"
+        );
+    }
+
+    // 4. Full scan + map projection verify exact round-trip across both RGs.
+    let scanned = reader
+        .scan(&ScanRequest {
+            projection: Some(vec![0, 1, 2, 3, 4, 5]),
+            ..ScanRequest::default()
+        })
+        .unwrap();
+    assert_eq!(
+        scanned.iter().map(Batch::num_rows).sum::<usize>(),
+        rows_per_rg * n_rgs
+    );
 }

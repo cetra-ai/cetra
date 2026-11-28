@@ -5,7 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cetra_statam::format::{BLOCK_FLAG_FSST_SUBCHUNKED, Codec, Encoding, PACK_FLAG_HAS_DICT};
+use cetra_statam::format::{
+    BLOCK_FLAG_FSST_SUBCHUNKED, BLOCK_FLAG_PLAIN_SUBCHUNKED, Codec, Encoding, PACK_FLAG_HAS_DICT,
+};
 use cetra_statam::fuzz_entry::fuzz_statam_file;
 use cetra_statam::{ChunkPackReader, InMemoryPackResolver, ScanRequest, SliceReader, StatamReader};
 
@@ -55,11 +57,27 @@ fn valid_statam_and_paired_seeds_verify_and_scan() {
         "seed-08-shredded-nested",
         "seed-19-simd-1030-l1",
         "seed-21-fsst-subchunked-l1",
+        "seed-23-plain-subchunked-l1",
     ] {
         let data = std::fs::read(corpus_dir.join(name)).expect(name);
         let reader = StatamReader::open(Arc::new(SliceReader::new(data)), None).expect(name);
         reader.verify_full().expect(name);
         reader.scan(&ScanRequest::default()).expect(name);
+        if name == "seed-23-plain-subchunked-l1" {
+            let has_plain_sub = reader.meta().block_dir.iter().any(|b| {
+                b.encoding == Encoding::Plain
+                    && (b.block_flags & BLOCK_FLAG_PLAIN_SUBCHUNKED) != 0
+                    && b.codec == Codec::None
+                    && b.raw_len == b.stored_len
+            });
+            assert!(
+                has_plain_sub,
+                "seed-23-plain-subchunked-l1 must contain a BLOCK_FLAG_PLAIN_SUBCHUNKED block"
+            );
+            let taken = reader.take_rows(&[0, 1, 256, 519], None, 1).expect(name);
+            assert_eq!(taken.len(), 1);
+            assert_eq!(taken[0].num_rows(), 4);
+        }
         if name == "seed-21-fsst-subchunked-l1" {
             let has_subchunked = reader.meta().block_dir.iter().any(|b| {
                 b.encoding == Encoding::Fsst

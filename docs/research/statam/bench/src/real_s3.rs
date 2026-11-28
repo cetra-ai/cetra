@@ -311,11 +311,7 @@ impl Drop for LeaderGuard<'_> {
             return;
         }
         let drained = {
-            let mut guard = self
-                .batcher
-                .queue
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let mut guard = self.batcher.queue.lock().unwrap_or_else(|p| p.into_inner());
             guard.flushing = false;
             std::mem::take(&mut guard.pending)
         };
@@ -445,8 +441,8 @@ impl BenchS3Reader {
                 (_, SimS3Profile::WanGarage) => (SimulatedS3Config::wan_garage(), true),
                 (_, SimS3Profile::Default) => (s3_cfg, false),
             };
-            let sim = SimulatedS3Reader::from_bytes(bytes, effective_cfg)
-                .with_remote_hint(remote_hint);
+            let sim =
+                SimulatedS3Reader::from_bytes(bytes, effective_cfg).with_remote_hint(remote_hint);
             return Arc::new(Self {
                 inner: BenchS3Inner::Sim {
                     sim: Arc::new(sim),
@@ -799,8 +795,10 @@ impl BenchS3Reader {
                 if *mode == RealS3Mode::ReadCache1MiB {
                     return self.read_ranges_readcache_async(ranges).await;
                 }
-                // Direct mode: coalesce nearby ranges within DIRECT_COALESCE_GAP_BYTES
+                // Direct mode: coalesce nearby ranges within DIRECT_COALESCE_GAP_BYTES up to
+                // `DIRECT_COALESCE_MAX_SPAN_BYTES` (4 MiB, symmetric with `SCAN_COALESCE_MAX_SPAN`)
                 // and fetch disjoint spans concurrently (max 16 in-flight).
+                const DIRECT_COALESCE_MAX_SPAN_BYTES: u64 = 4 * 1024 * 1024;
                 for r in ranges {
                     if r.start > r.end || r.end > *file_len {
                         return Err(StatamError::BoundsExceeded {
@@ -818,6 +816,8 @@ impl BenchS3Reader {
                     let r = &ranges[idx];
                     if let Some((last_span, members)) = spans.last_mut()
                         && r.start <= last_span.end.saturating_add(DIRECT_COALESCE_GAP_BYTES)
+                        && last_span.end.max(r.end).saturating_sub(last_span.start)
+                            <= DIRECT_COALESCE_MAX_SPAN_BYTES
                     {
                         last_span.end = last_span.end.max(r.end);
                         members.push(idx);

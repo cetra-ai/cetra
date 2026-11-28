@@ -14,17 +14,18 @@ use crate::codec::{
     EncodedMiniBlock, WriteProfile, encode_dict_codes_precomputed, encode_mini_block_with_locality,
 };
 use crate::format::{
-    BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_HAS_NULLS, BlockEntry, Codec, Encoding, LocalityGroup,
-    MAX_BATCH_DECODED_BYTES, MAX_BLOOM_BYTES, MAX_COLUMNS, MAX_FRAME_RAW_BYTES, MAX_ROW_GROUPS,
-    MAX_ROW_PAYLOAD_BYTES, MAX_ROWS_PER_FILE, RowGroupEntry, ShreddedMapDir, ShreddedMapKeyEntry,
-    write_framed_block,
+    BLOCK_FLAG_ALL_NULL, BLOCK_FLAG_HAS_NULLS, BLOCK_FLAG_NO_INLINE_PAYLOADS, BlockEntry, Codec,
+    Encoding, FramedWriteInfo, LocalityGroup, MAX_BATCH_DECODED_BYTES, MAX_BLOOM_BYTES,
+    MAX_COLUMNS, MAX_FRAME_RAW_BYTES, MAX_ROW_GROUPS, MAX_ROW_PAYLOAD_BYTES, MAX_ROWS_PER_FILE,
+    RowGroupEntry, ShreddedMapDir, ShreddedMapKeyEntry, TableKind, write_framed_block,
+    write_framed_block_adaptive, write_precompressed_framed_block,
 };
 use crate::parallel::{enter_executor_scope, parallel_map_in_order_static};
 use crate::payload::chunker::{
     DedupBypassDetector, INLINE_PAYLOAD_THRESHOLD, chunk_json_array_continuation, chunk_payload,
 };
 use crate::payload::{
-    PayloadRefRow, encode_payload_refs, encode_payload_refs_l0_direct,
+    EncodedPayloadRefs, PayloadRefRow, encode_payload_refs_adaptive, encode_payload_refs_l0_direct,
     encode_payload_refs_l0_from_bytes,
 };
 use crate::simd::bloom::{BloomIndex, Sbbf, statam_bloom_hash};
@@ -56,12 +57,41 @@ pub(super) enum CoreWriteStep {
     OtherShredded,
 }
 
-/// Returns the deterministic 6-tier write ordering for `Core` columns and shredded map sub-columns.
+/// Returns `true` iff every non-null row in `rows` references at least one external `.stpk`
+/// chunk and ZERO rows are `Inline` or reference `L0_LOCAL_PACK_IDX`.
+#[inline]
+pub(super) fn payload_ref_rows_all_external_or_null(rows: &[PayloadRefRow]) -> bool {
+    rows.iter().all(|r| match r {
+        PayloadRefRow::Null => true,
+        PayloadRefRow::Inline(_) => false,
+        PayloadRefRow::Chunks(refs) => {
+            !refs.is_empty() && refs.iter().all(|&(pidx, _)| pidx != L0_LOCAL_PACK_IDX)
+        }
+    })
+}
+
+/// Returns the deterministic write ordering for `Core` columns and shredded map sub-columns.
+///
+/// - For `TableKind::Generic`: preserves natural schema order for all `LocalityGroup::Core`
+///   columns, followed by `MetadataShredded` and `OtherShredded`.
+/// - For Cetra `Spans` / `Traces` / `Scores`: preserves the hardcoded Analytics-Core 6-tier layout.
 pub(super) fn core_column_plan(
+    table_kind: TableKind,
     fields: &[Field],
     logical_locality: &[LocalityGroup],
 ) -> Vec<CoreWriteStep> {
     let mut steps = Vec::with_capacity(fields.len() + 2);
+    if table_kind == TableKind::Generic {
+        for (cidx, _) in fields.iter().enumerate() {
+            if logical_locality[cidx] == LocalityGroup::Core {
+                steps.push(CoreWriteStep::Col(cidx));
+            }
+        }
+        steps.push(CoreWriteStep::MetadataShredded);
+        steps.push(CoreWriteStep::OtherShredded);
+        return steps;
+    }
+
     let push_matching = |steps: &mut Vec<CoreWriteStep>, pred: fn(&str) -> bool| {
         for (cidx, field) in fields.iter().enumerate() {
             if logical_locality[cidx] == LocalityGroup::Core && pred(field.name.as_str()) {
@@ -144,6 +174,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
             } else {
                 self.init_rg0(rg_cols, base_row_off, rg_rows)?;
             }
+            self.promote_generic_wide_utf8_cols(rg_cols, base_row_off, rg_rows)?;
             self.rg0_initialized = true;
         }
 
@@ -248,7 +279,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
         } else {
             let mut deferred_wide_residuals: Vec<(usize, Vec<EncodedMiniBlock>, Vec<u16>)> =
                 Vec::new();
-            for step in core_column_plan(fields, &self.logical_locality) {
+            for step in core_column_plan(self.options.table_kind, fields, &self.logical_locality) {
                 match step {
                     CoreWriteStep::Col(cidx) => {
                         self.encode_rg_scalar_or_nested_col(
@@ -308,11 +339,18 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
             for (logical_col, mb_residuals, mb_row_counts) in deferred_wide_residuals {
                 let mut cur_first = first_row_u32;
                 for (enc, rc) in mb_residuals.iter().zip(mb_row_counts.iter()) {
-                    let entry = enc.write_framed_entry(
+                    let lz4_cap = if enc.raw_body.len() >= 8 * 1024 {
+                        108
+                    } else {
+                        0
+                    };
+                    let entry = enc.write_framed_entry_adaptive(
                         cur_first,
                         *rc,
                         wide_offset,
                         zstd_level,
+                        lz4_cap,
+                        0,
                         &mut wide_buf,
                     )?;
                     self.phys_blocks[logical_col].push(entry);
@@ -627,7 +665,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
         let schema = Arc::clone(&self.schema);
         let fields = schema.fields();
 
-        for step in core_column_plan(fields, &self.logical_locality) {
+        for step in core_column_plan(self.options.table_kind, fields, &self.logical_locality) {
             match step {
                 CoreWriteStep::Col(cidx) => {
                     commit_core_col(
@@ -815,11 +853,13 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                         self.options.profile,
                     )?;
                     let blk_off = core_offset + core_buf.len() as u64;
-                    let info = write_framed_block(
+                    let info = write_framed_block_adaptive(
                         Encoding::ShreddedMap,
                         &sub_raw,
                         sub_codec,
                         zstd_level,
+                        114,
+                        0,
                         core_buf,
                     )?;
                     let absent_count = u16::try_from(
@@ -906,6 +946,62 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
             }
         }
 
+        Ok(())
+    }
+
+    /// Freezes RG0 `WideRow` promotions once for `TableKind::Generic`: any non-dict `Core` `Utf8`
+    /// column whose RG0 mean raw length exceeds `128 B` and whose RG0 raw bytes are `>= 256 KiB`
+    /// is promoted to `LocalityGroup::WideRow` file-wide (identical across RG0 and all `rg_idx >= 1`).
+    fn promote_generic_wide_utf8_cols(
+        &mut self,
+        rg_cols: &[Arc<Column>],
+        base_row_off: usize,
+        rg_rows: usize,
+    ) -> Result<(), StatamError> {
+        if self.options.table_kind != TableKind::Generic || rg_rows == 0 {
+            return Ok(());
+        }
+        let schema = Arc::clone(&self.schema);
+        for (cidx, field) in schema.fields().iter().enumerate() {
+            if self.logical_locality[cidx] != LocalityGroup::Core
+                || field.data_type != DataType::Utf8
+                || self.phys_col_meta[cidx].dict.is_some()
+            {
+                continue;
+            }
+            let (raw_bytes, non_null) = match rg_cols[cidx].as_ref() {
+                Column::Flat(f) => {
+                    let FlatData::Utf8(u) = f.data() else {
+                        continue;
+                    };
+                    let offs = u.offsets();
+                    let raw =
+                        offs[base_row_off + rg_rows].saturating_sub(offs[base_row_off]) as usize;
+                    let nn = match f.nulls() {
+                        Some(bm) => bm.slice(base_row_off, rg_rows)?.count_ones(),
+                        None => rg_rows,
+                    };
+                    (raw, nn)
+                }
+                other => {
+                    let sliced = other.slice(base_row_off, rg_rows, None)?;
+                    let flat = sliced.materialize(None)?;
+                    let FlatData::Utf8(u) = flat.data() else {
+                        continue;
+                    };
+                    let raw = u.bytes().len();
+                    let nn = match flat.nulls() {
+                        Some(bm) => bm.count_ones(),
+                        None => rg_rows,
+                    };
+                    (raw, nn)
+                }
+            };
+            if raw_bytes >= 256 * 1024 && non_null > 0 && raw_bytes > non_null.saturating_mul(128) {
+                self.logical_locality[cidx] = LocalityGroup::WideRow;
+                self.phys_col_meta[cidx].locality_group = LocalityGroup::WideRow;
+            }
+        }
         Ok(())
     }
 
@@ -1109,22 +1205,28 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                     .filter(|r| matches!(r, PayloadRefRow::Null))
                     .count();
                 let null_count = u16::try_from(null_count_usize).unwrap_or(u16::MAX);
-                let raw_body = if null_count_usize == mb_len {
-                    Vec::new()
+                let (extra_flags, raw_body) = if null_count_usize == mb_len {
+                    (0u8, EncodedPayloadRefs::empty())
                 } else {
-                    let mut rb = Vec::new();
-                    if self.options.profile == WriteProfile::L0Fast {
-                        encode_payload_refs_l0_direct(&partial, &mut rb)?;
+                    let rb = if self.options.profile == WriteProfile::L0Fast {
+                        let mut v = Vec::new();
+                        encode_payload_refs_l0_direct(&partial, &mut v)?;
+                        EncodedPayloadRefs::Raw(v)
                     } else {
-                        encode_payload_refs(&partial, &mut rb)?;
-                    }
-                    rb
+                        encode_payload_refs_adaptive(&partial, self.options.profile, zstd_level)?
+                    };
+                    let f = if payload_ref_rows_all_external_or_null(&partial) {
+                        BLOCK_FLAG_NO_INLINE_PAYLOADS
+                    } else {
+                        0
+                    };
+                    (f, rb)
                 };
-                mbs.push((mb_len as u16, null_count, raw_body));
+                mbs.push((mb_len as u16, null_count, extra_flags, raw_body));
             }
 
             let mut cur_first = first_row_u32;
-            for (mb_len_u16, null_count, raw_body) in mbs {
+            for (mb_len_u16, null_count, extra_flags, encoded) in mbs {
                 self.phys_col_meta[cidx].null_count_total = self.phys_col_meta[cidx]
                     .null_count_total
                     .saturating_add(u32::from(null_count));
@@ -1146,16 +1248,11 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                         max_inline: [0; 16],
                     });
                 } else {
-                    let block_codec = payload_refs_block_codec(
+                    let blk_off = base_offset + wide_buf.len() as u64;
+                    let info = write_encoded_payload_refs_block(
+                        &encoded,
                         self.options.profile,
                         preferred_codec,
-                        raw_body.len(),
-                    );
-                    let blk_off = base_offset + wide_buf.len() as u64;
-                    let info = write_framed_block(
-                        Encoding::PayloadRefs,
-                        &raw_body,
-                        block_codec,
                         zstd_level,
                         wide_buf,
                     )?;
@@ -1163,7 +1260,7 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                         BLOCK_FLAG_HAS_NULLS
                     } else {
                         0
-                    };
+                    } | extra_flags;
                     self.phys_blocks[cidx].push(BlockEntry {
                         first_row: cur_first,
                         row_count: mb_len_u16,
@@ -1406,24 +1503,27 @@ impl<'a, W: Write + Seek, PW: Write + Seek> StatamWriter<'a, W, PW> {
                     max_inline: [0; 16],
                 });
             } else {
-                let mut raw_body = Vec::new();
-                if self.options.profile == WriteProfile::L0Fast {
+                let encoded = if self.options.profile == WriteProfile::L0Fast {
+                    let mut raw_body = Vec::new();
                     encode_payload_refs_l0_direct(&ref_rows, &mut raw_body)?;
+                    EncodedPayloadRefs::Raw(raw_body)
                 } else {
-                    encode_payload_refs(&ref_rows, &mut raw_body)?;
-                }
-                let block_codec =
-                    payload_refs_block_codec(self.options.profile, preferred_codec, raw_body.len());
+                    encode_payload_refs_adaptive(&ref_rows, self.options.profile, zstd_level)?
+                };
                 let blk_off = base_offset + wide_buf.len() as u64;
-                let info = write_framed_block(
-                    Encoding::PayloadRefs,
-                    &raw_body,
-                    block_codec,
+                let info = write_encoded_payload_refs_block(
+                    &encoded,
+                    self.options.profile,
+                    preferred_codec,
                     zstd_level,
                     wide_buf,
                 )?;
                 let block_flags = if null_count > 0 {
                     BLOCK_FLAG_HAS_NULLS
+                } else {
+                    0
+                } | if payload_ref_rows_all_external_or_null(&ref_rows) {
+                    BLOCK_FLAG_NO_INLINE_PAYLOADS
                 } else {
                     0
                 };
@@ -2149,11 +2249,18 @@ fn encode_scalar_or_nested_col_into(
                 used_dict_encoding = true;
             }
             null_count_total = null_count_total.saturating_add(u32::from(enc.null_count));
-            let entry = enc.write_framed_entry(
+            let (lz4_pct_cap, min_savings_pct) = if profile == WriteProfile::L1Compact {
+                (112, 12)
+            } else {
+                (0, 0)
+            };
+            let entry = enc.write_framed_entry_adaptive(
                 mb_first_row,
                 mb_len as u16,
                 base_offset,
                 zstd_level,
+                lz4_pct_cap,
+                min_savings_pct,
                 out_buf,
             )?;
             out_blocks.push(entry);
@@ -2264,10 +2371,28 @@ fn encode_scalar_or_nested_col_into(
         }
         null_count_total = null_count_total.saturating_add(u32::from(enc.null_count));
 
-        let min_savings_pct =
-            if matches!(enc.encoding, Encoding::ForBitpack | Encoding::BitpackBool)
-                || (enc.encoding == Encoding::Plain
-                    && matches!(
+        let (lz4_pct_cap, min_savings_pct) = if profile == WriteProfile::L1Compact {
+            match enc.encoding {
+                Encoding::ForBitpack
+                | Encoding::DeltaBitpack
+                | Encoding::BitpackBool
+                | Encoding::Dict => (112, 12),
+                Encoding::ShreddedMap => (
+                    if enc.raw_body.len() >= 8 * 1024 {
+                        108
+                    } else {
+                        0
+                    },
+                    0,
+                ),
+                Encoding::ListEncoded | Encoding::EventsStruct | Encoding::LinksStruct => (108, 0),
+                Encoding::Plain
+                    if matches!(dt, DataType::MapUtf8) && enc.raw_body.len() >= 8 * 1024 =>
+                {
+                    (108, 0)
+                }
+                Encoding::Plain
+                    if matches!(
                         dt,
                         DataType::Bool
                             | DataType::I64
@@ -2278,17 +2403,37 @@ fn encode_scalar_or_nested_col_into(
                             | DataType::Interval
                             | DataType::FixedBytes8
                             | DataType::FixedBytes16
-                    ))
-            {
-                12
-            } else {
-                0
-            };
-        let entry = enc.write_framed_entry_with_min_savings(
+                    ) =>
+                {
+                    (0, 12)
+                }
+                _ => (0, 0),
+            }
+        } else if matches!(enc.encoding, Encoding::ForBitpack | Encoding::BitpackBool)
+            || (enc.encoding == Encoding::Plain
+                && matches!(
+                    dt,
+                    DataType::Bool
+                        | DataType::I64
+                        | DataType::F64
+                        | DataType::TimestampNs { .. }
+                        | DataType::Date
+                        | DataType::Decimal128 { .. }
+                        | DataType::Interval
+                        | DataType::FixedBytes8
+                        | DataType::FixedBytes16
+                ))
+        {
+            (0, 12)
+        } else {
+            (0, 0)
+        };
+        let entry = enc.write_framed_entry_adaptive(
             mb_first_row,
             mb_len as u16,
             base_offset,
             zstd_level,
+            lz4_pct_cap,
             min_savings_pct,
             out_buf,
         )?;
@@ -2360,13 +2505,25 @@ fn encode_shredded_map_to_local(
             let (sub_codec, sub_raw) =
                 encode_shredded_subcol_with_codec(&shredded.sub_cols[k_idx], profile)?;
             let blk_off = local_core_buf.len() as u64;
-            let info = write_framed_block(
-                Encoding::ShreddedMap,
-                &sub_raw,
-                sub_codec,
-                zstd_level,
-                &mut local_core_buf,
-            )?;
+            let info = if profile == WriteProfile::L1Compact && sub_codec == Codec::Zstd {
+                write_framed_block_adaptive(
+                    Encoding::ShreddedMap,
+                    &sub_raw,
+                    sub_codec,
+                    zstd_level,
+                    114,
+                    0,
+                    &mut local_core_buf,
+                )?
+            } else {
+                write_framed_block(
+                    Encoding::ShreddedMap,
+                    &sub_raw,
+                    sub_codec,
+                    zstd_level,
+                    &mut local_core_buf,
+                )?
+            };
             let absent_count =
                 u16::try_from(mb_len.saturating_sub(shredded.sub_cols[k_idx].in_map.count_ones()))
                     .unwrap_or(u16::MAX);
@@ -2390,11 +2547,19 @@ fn encode_shredded_map_to_local(
 
         let res_enc = crate::codec::encode_shredded_residual_block(&shredded.residual, profile)?;
         res_null_count_total = res_null_count_total.saturating_add(u32::from(res_enc.null_count));
-        let res_entry = res_enc.write_framed_entry(
+        let res_lz4_cap =
+            if profile == WriteProfile::L1Compact && res_enc.raw_body.len() >= 8 * 1024 {
+                108
+            } else {
+                0
+            };
+        let res_entry = res_enc.write_framed_entry_adaptive(
             mb_first_row,
             mb_len as u16,
             0,
             zstd_level,
+            res_lz4_cap,
+            0,
             &mut local_wide_buf,
         )?;
         residual_blocks.push(res_entry);
@@ -2704,4 +2869,31 @@ fn build_narrow_trigram_for_mb(col: &Column, stored_len: usize) -> Option<Vec<u8
         return None;
     }
     Some(bloom.as_bytes().to_vec())
+}
+
+fn write_encoded_payload_refs_block(
+    encoded: &EncodedPayloadRefs,
+    profile: WriteProfile,
+    preferred_codec: Codec,
+    zstd_level: i32,
+    out: &mut Vec<u8>,
+) -> Result<FramedWriteInfo, StatamError> {
+    match encoded {
+        EncodedPayloadRefs::Subchunked(raw) => {
+            write_framed_block(Encoding::PayloadRefs, raw, Codec::None, zstd_level, out)
+        }
+        EncodedPayloadRefs::PrecompressedZstd { raw_len, stored } => {
+            write_precompressed_framed_block(
+                Encoding::PayloadRefs,
+                Codec::Zstd,
+                *raw_len,
+                stored,
+                out,
+            )
+        }
+        EncodedPayloadRefs::Raw(raw) => {
+            let block_codec = payload_refs_block_codec(profile, preferred_codec, raw.len());
+            write_framed_block(Encoding::PayloadRefs, raw, block_codec, zstd_level, out)
+        }
+    }
 }

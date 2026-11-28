@@ -39,10 +39,10 @@ use cetra_column::{
     Schema as ColSchema, Utf8Data,
 };
 use cetra_statam::{
-    ChunkPackBuilder, ChunkPackReader, CoalesceMode, IdLookup, InMemoryPackResolver, PackResolver,
-    PackWriteOptions, Predicate as StatamPred, RangeReader, ScanRequest, SimulatedS3Config,
-    SliceReader, StatamReader, StatamWriter, SubstringQuery, TableKind, WriteOptions, WriteProfile,
-    ZonePred, ZoneValue,
+    ChunkPackBuilder, ChunkPackReader, CoalesceMode, IdLookup, InMemoryPackResolver, MapReadMode,
+    PackResolver, PackWriteOptions, Predicate as StatamPred, RangeReader, ScanRequest,
+    SimulatedS3Config, SliceReader, StatamReader, StatamWriter, SubstringQuery, TableKind,
+    WriteOptions, WriteProfile, ZonePred, ZoneValue,
 };
 use flate2::read::GzDecoder;
 use futures::stream::TryStreamExt;
@@ -2767,7 +2767,7 @@ fn clickbench_statam_spec(qname: &str, p: &ClickBenchParams) -> ScanRequest {
         },
         "CB_Q23_like" => ScanRequest {
             projection: Some(vec![p.title_idx, p.url_idx]),
-            substrings: vec![SubstringQuery::like(p.like_col, p.like_needle)],
+            substrings: vec![vec![SubstringQuery::like(p.like_col, p.like_needle)]],
             ..ScanRequest::default()
         },
         "CB_Q24" => ScanRequest {
@@ -5163,7 +5163,10 @@ async fn run_jsonbench_suite(
             },
             "JB_Q3_map_type" => ScanRequest {
                 projection: Some(vec![0, 1]),
-                map_keys: vec![("attrs".to_owned(), "$type".to_owned())],
+                map_projections: HashMap::from([(
+                    "attrs".to_owned(),
+                    MapReadMode::Keys(vec!["$type".to_owned()]),
+                )]),
                 predicates: vec![StatamPred::map_key(
                     "attrs",
                     "$type",
@@ -5173,7 +5176,10 @@ async fn run_jsonbench_suite(
             },
             "JB_Q4_text_like" => ScanRequest {
                 projection: Some(vec![0, 7]),
-                substrings: vec![SubstringQuery::like("text", data.like_needle.as_str())],
+                substrings: vec![vec![SubstringQuery::like(
+                    "text",
+                    data.like_needle.as_str(),
+                )]],
                 ..ScanRequest::default()
             },
             "JB_Q5_did_full" => ScanRequest {
@@ -5981,15 +5987,15 @@ async fn run_wildchat_suite(
             },
             "WC_Q4_unicode_ilike" => ScanRequest {
                 projection: Some(vec![0, 7]),
-                substrings: vec![SubstringQuery::ilike(
+                substrings: vec![vec![SubstringQuery::ilike(
                     "output",
                     data.unicode_needle.as_str(),
-                )],
+                )]],
                 ..ScanRequest::default()
             },
             "WC_Q5_input_absent" => ScanRequest {
                 projection: Some(vec![0, 6]),
-                substrings: vec![SubstringQuery::like("input", absent_needle)],
+                substrings: vec![vec![SubstringQuery::like("input", absent_needle)]],
                 ..ScanRequest::default()
             },
             _ => ScanRequest::default(),
@@ -6702,15 +6708,15 @@ async fn run_hermes_suite(
             },
             "HF_Q3_tool_like" => ScanRequest {
                 projection: Some(vec![0, 1]),
-                substrings: vec![SubstringQuery::like(
+                substrings: vec![vec![SubstringQuery::like(
                     "tool_definitions",
                     data.tool_needle.as_str(),
-                )],
+                )]],
                 ..ScanRequest::default()
             },
             "HF_Q4_out_absent" => ScanRequest {
                 projection: Some(vec![0]),
-                substrings: vec![SubstringQuery::like("output", absent_needle)],
+                substrings: vec![vec![SubstringQuery::like("output", absent_needle)]],
                 ..ScanRequest::default()
             },
             _ => ScanRequest::default(),

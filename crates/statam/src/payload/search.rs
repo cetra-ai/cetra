@@ -1786,11 +1786,11 @@ pub(crate) fn pack_short_circuits_all(
         return Ok(false);
     }
 
-    let any_frame_may = ts
-        .frame_blooms
+    let any_group_may = ts
+        .group_blooms
         .iter()
         .any(|opt| opt.as_ref().is_none_or(|b| b.may_contain_hashes(&hashes)));
-    Ok(!any_frame_may)
+    Ok(!any_group_may)
 }
 
 #[derive(Default)]
@@ -1863,20 +1863,28 @@ fn filter_needed_bits_by_trigram(
         return Ok(collect_set_bits(needed_bits));
     }
 
-    let blooms = &pack.trigram_section_cached()?.frame_blooms;
-    let frame_matches: Vec<bool> = blooms
+    let ts = pack.trigram_section_cached()?;
+    let group_matches: Vec<bool> = ts
+        .group_blooms
         .iter()
         .map(|opt| match opt {
             None => true,
             Some(bloom) => bloom.may_contain_hashes(&hashes),
         })
         .collect();
+    let frame_matches = |fid: usize| -> bool {
+        ts.frame_to_group
+            .get(fid)
+            .and_then(|&g| group_matches.get(g as usize))
+            .copied()
+            .unwrap_or(true)
+    };
 
     let frames = &pack.toc().frames;
     let mut surviving = Vec::new();
     if pack.toc().frames_contiguous {
         for (fid, frame) in frames.iter().enumerate() {
-            if !frame_matches.get(fid).copied().unwrap_or(true) || frame.chunk_count == 0 {
+            if !frame_matches(fid) || frame.chunk_count == 0 {
                 continue;
             }
             let start = frame.first_chunk_id as usize;
@@ -1921,11 +1929,7 @@ fn filter_needed_bits_by_trigram(
                     .ok_or(StatamError::Corrupt {
                         reason: "chunk_id out of bounds during trigram filter",
                     })?;
-                if frame_matches
-                    .get(loc.frame_id as usize)
-                    .copied()
-                    .unwrap_or(true)
-                {
+                if frame_matches(loc.frame_id as usize) {
                     surviving.push(cid);
                 }
                 w &= w - 1;
@@ -1954,8 +1958,9 @@ fn filter_candidates_by_trigram(
         return Ok(chunk_ids.to_vec());
     }
 
-    let blooms = &pack.trigram_section_cached()?.frame_blooms;
-    let frame_matches: Vec<bool> = blooms
+    let ts = pack.trigram_section_cached()?;
+    let group_matches: Vec<bool> = ts
+        .group_blooms
         .iter()
         .map(|opt| match opt {
             None => true,
@@ -1972,11 +1977,13 @@ fn filter_candidates_by_trigram(
             .ok_or(StatamError::Corrupt {
                 reason: "chunk_id out of bounds during trigram filter",
             })?;
-        if frame_matches
+        let matched = ts
+            .frame_to_group
             .get(loc.frame_id as usize)
+            .and_then(|&g| group_matches.get(g as usize))
             .copied()
-            .unwrap_or(true)
-        {
+            .unwrap_or(true);
+        if matched {
             surviving.push(cid);
         }
     }

@@ -91,6 +91,7 @@ pub struct StatamScanIter {
     mode: CoalesceMode,
     desc_limit: bool,
     remaining_limit: Option<usize>,
+    top_k: Option<super::TopKSpec>,
     read_threads: usize,
     executor: Option<Arc<dyn TaskExecutor>>,
     rg_order: VecDeque<usize>,
@@ -144,6 +145,12 @@ impl StatamReader {
         let mut early_empty = req.time_range.is_empty()
             || self.meta.postscript.row_count == 0
             || req.limit == Some(0);
+        if let Some(spec) = req.top_k {
+            self.validate_top_k_spec(spec)?;
+            if spec.limit == 0 {
+                early_empty = true;
+            }
+        }
 
         let mut resolved_lookups = Vec::with_capacity(req.id_lookups.len());
         for lk in req.id_lookups {
@@ -281,11 +288,12 @@ impl StatamReader {
         let can_reverse_early_stop =
             req.sort_desc_hint && req.limit.is_some() && self.is_sort_col0_mb_monotonic();
         let desc_limit = can_reverse_early_stop;
-        let remaining_limit = if req.sort_desc_hint && !can_reverse_early_stop {
-            None
-        } else {
-            req.limit
-        };
+        let remaining_limit =
+            if req.top_k.is_none() && req.sort_desc_hint && !can_reverse_early_stop {
+                None
+            } else {
+                req.limit
+            };
         if desc_limit {
             rg_vec.reverse();
         }
@@ -368,6 +376,7 @@ impl StatamReader {
             mode,
             desc_limit,
             remaining_limit,
+            top_k: req.top_k,
             read_threads: req.read_threads,
             executor,
             rg_order: rg_vec.into(),
@@ -439,6 +448,53 @@ impl StatamScanIter {
             }
             self.dict_sub_bitmaps = self.reader.build_dict_sub_bitmaps(&self.resolved_subs);
             self.preloaded = true;
+        }
+
+        if let Some(spec) = self.top_k {
+            let effective_k = self
+                .remaining_limit
+                .map_or(spec.limit, |l| l.min(spec.limit));
+            let rg_slice: Vec<usize> = self.rg_order.iter().copied().collect();
+            let lookup_refs: Vec<(usize, &IdLookup)> =
+                self.resolved_lookups.iter().map(|(c, l)| (*c, l)).collect();
+            let pred_refs: Vec<(usize, &Predicate)> =
+                self.resolved_preds.iter().map(|(c, p)| (*c, p)).collect();
+            let outcome = self.reader.scan_top_k_with_limits(
+                spec,
+                effective_k,
+                &rg_slice,
+                &self.proj_indices,
+                &self.proj_schema,
+                &self.map_proj_by_col,
+                self.time_col_idx,
+                self.time_range,
+                &lookup_refs,
+                &self.lookup_hashes,
+                &pred_refs,
+                &self.resolved_filter_exprs,
+                &self.resolved_subs,
+                &mut self.dict_sub_bitmaps,
+                self.read_threads,
+                cancel,
+                res.as_deref_mut(),
+            );
+            self.done = true;
+            self.rg_order.clear();
+            let (batches, row_ids) = match outcome {
+                Ok(pair) => pair,
+                Err(e) => {
+                    if let (Some(r), Some(before)) = (res, res_before)
+                        && r.size() > before
+                    {
+                        r.shrink(r.size() - before);
+                    }
+                    return Err(e);
+                }
+            };
+            return Ok(batches.into_iter().next().map(|b| {
+                let ids = if want_row_ids { row_ids } else { Vec::new() };
+                (b, ids)
+            }));
         }
 
         loop {
@@ -551,6 +607,18 @@ impl StatamScanIter {
                     &self.dict_sub_bitmaps,
                 )?;
                 if surviving_mbs.is_empty() {
+                    continue;
+                }
+                let allow_pre_wave1_pack_open = self.resolved_preds.is_empty()
+                    && self.resolved_filter_exprs.is_empty()
+                    && self.time_col_idx.is_none()
+                    && self.resolved_lookups.is_empty();
+                if self.reader.rg_pruned_by_external_packs(
+                    rg_idx,
+                    &surviving_mbs,
+                    &self.resolved_subs,
+                    allow_pre_wave1_pack_open,
+                )? {
                     continue;
                 }
 

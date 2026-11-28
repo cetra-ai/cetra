@@ -31,8 +31,12 @@ pub const FSST_MAX_SYMBOLS: usize = 255;
 pub const FSST_MAX_SYM_LEN: usize = 8;
 
 /// Target row count per adaptive `LZ4`/`Zstd`/`None` sub-chunk inside `Encoding::Fsst`
-/// when `BLOCK_FLAG_FSST_SUBCHUNKED` is set.
+/// when `BLOCK_FLAG_FSST_SUBCHUNKED` is set on narrow columns.
 pub const FSST_SUBCHUNK_ROWS: u16 = 512;
+
+/// Target row count per adaptive `LZ4`/`Zstd`/`None` sub-chunk inside `Encoding::Fsst`
+/// when `BLOCK_FLAG_FSST_SUBCHUNKED` is set on `WideRow` columns.
+pub(crate) const FSST_WIDE_SUBCHUNK_ROWS: u16 = 256;
 
 /// Minimum row count (`> 512`) required to trigger sub-chunked FSST encoding.
 pub(crate) const FSST_SUBCHUNK_MIN_ROWS: usize = 512;
@@ -839,8 +843,7 @@ fn encode_fsst_body_impl(
 ///
 /// Returns `Ok(None)` if `values.len() <= FSST_SUBCHUNK_MIN_ROWS`, FSST achieves `< 1.15x`
 /// gain, `coded_bytes.len() < FSST_SUBCHUNK_MIN_CODED_BYTES`, or (outside Miri) the
-/// sub-chunked output plus `nulls_prefix_len` exceeds `115%` of `plain_with_nulls_for_guard`
-/// compressed with Zstd(3).
+/// sub-chunked output plus `nulls_prefix_len` exceeds the bounded Zstd(3) overhead cap.
 pub(crate) fn encode_fsst_subchunked_only(
     values: &[&[u8]],
     profile: WriteProfile,
@@ -856,7 +859,7 @@ pub(crate) fn encode_fsst_subchunked_only(
     if enc.coded_bytes.len() < FSST_SUBCHUNK_MIN_CODED_BYTES {
         return Ok(None);
     }
-    let subchunk_rows_usize = usize::from(FSST_SUBCHUNK_ROWS);
+    let subchunk_rows_usize = usize::from(FSST_WIDE_SUBCHUNK_ROWS);
     let num_chunks = values.len().div_ceil(subchunk_rows_usize);
     let Ok(num_chunks_u16) = u16::try_from(num_chunks) else {
         return Ok(None);
@@ -877,7 +880,7 @@ pub(crate) fn encode_fsst_subchunked_only(
         &enc.table,
         &enc.row_lens,
         &enc.coded_bytes,
-        FSST_SUBCHUNK_ROWS,
+        FSST_WIDE_SUBCHUNK_ROWS,
         num_chunks_u16,
         profile,
         #[cfg(not(miri))]
@@ -907,9 +910,15 @@ pub(crate) fn encode_fsst_subchunked_only(
             }
         };
         let subchunked_total_with_nulls = sub.total_out.saturating_add(nulls_prefix_len);
-        if (subchunked_total_with_nulls as u64).saturating_mul(100)
-            > (effective_plain_zstd_len as u64).saturating_mul(115)
-        {
+        let within_pct = (subchunked_total_with_nulls as u64).saturating_mul(100)
+            <= (effective_plain_zstd_len as u64).saturating_mul(122);
+        let within_small_cap = ((subchunked_total_with_nulls as u64).saturating_mul(100)
+            <= (effective_plain_zstd_len as u64).saturating_mul(130)
+            && subchunked_total_with_nulls <= effective_plain_zstd_len.saturating_add(4 * 1024))
+            || (plain_len >= 256 * 1024
+                && subchunked_total_with_nulls
+                    <= effective_plain_zstd_len.saturating_add(32 * 1024));
+        if !within_pct && !within_small_cap {
             return Ok(None);
         }
     }
@@ -918,7 +927,7 @@ pub(crate) fn encode_fsst_subchunked_only(
 
     Ok(Some(assemble_fsst_subchunked(
         &enc.table,
-        FSST_SUBCHUNK_ROWS,
+        FSST_WIDE_SUBCHUNK_ROWS,
         num_chunks_u16,
         sub,
     )))
@@ -1003,8 +1012,9 @@ fn compress_fsst_subchunks(
 
         let lz4_buf = lz4_flex::block::compress(&sub_raw);
         let lz4_len = lz4_buf.len();
+        let lz4_max_pct: u64 = 88;
         let lz4_ok = ratio_ok(lz4_len)
-            && (lz4_len as u64).saturating_mul(100) <= (raw_len as u64).saturating_mul(88);
+            && (lz4_len as u64).saturating_mul(100) <= (raw_len as u64).saturating_mul(lz4_max_pct);
 
         #[cfg(not(miri))]
         let zstd_buf: Option<Vec<u8>> = if let Some(comp) = zstd_comp.as_mut() {
@@ -1028,7 +1038,7 @@ fn compress_fsst_subchunks(
                 || cfg!(miri)
                 || !zstd_ok
                 || zstd_buf.as_ref().is_none_or(|zb| {
-                    (lz4_len as u64).saturating_mul(100) <= (zb.len() as u64).saturating_mul(112)
+                    (lz4_len as u64).saturating_mul(100) <= (zb.len() as u64).saturating_mul(110)
                 }));
 
         let chosen_codec = if use_lz4 {
@@ -1156,7 +1166,31 @@ struct FsstDecodeTable {
     words: [[u8; FSST_MAX_SYM_LEN]; 256],
     /// `1..=8` for valid symbol codes `0..sym_count`, `0xFF` for invalid codes `sym_count..256`.
     lens: [u8; 256],
+    /// `(len - 1)` in `0..=7` for valid symbol codes `0..sym_count`, `0` otherwise.
+    /// Allows branchless `usize::from(lens_m1[code] & 7) + 1` so LLVM proves `1..=8`
+    /// without per-symbol `cmp/jb/mov` clamps inside the 4x unrolled decode loop.
+    lens_m1: [u8; 256],
     sym_count: u8,
+}
+
+#[cold]
+#[inline(never)]
+fn grow_fsst_out_bytes(
+    out_bytes: &mut Vec<u8>,
+    needed: usize,
+    max_total_bytes: usize,
+    grow_exponential: bool,
+) {
+    let grown = if grow_exponential {
+        out_bytes
+            .len()
+            .saturating_mul(2)
+            .max(needed)
+            .min(max_total_bytes.saturating_add(FSST_DECODE_SLACK))
+    } else {
+        needed
+    };
+    out_bytes.resize(grown, 0);
 }
 
 impl fmt::Debug for FsstDecodeTable {
@@ -1172,6 +1206,7 @@ impl FsstDecodeTable {
         Self {
             words: [[0u8; FSST_MAX_SYM_LEN]; 256],
             lens: [FSST_ESCAPE; 256],
+            lens_m1: [0u8; 256],
             sym_count: 0,
         }
     }
@@ -1213,11 +1248,13 @@ impl FsstDecodeTable {
 
         let mut words = [[0u8; FSST_MAX_SYM_LEN]; 256];
         let mut lens = [FSST_ESCAPE; 256];
+        let mut lens_m1 = [0u8; 256];
         let mut off = lens_end;
         for (code, &slen) in sym_lens_slice.iter().enumerate() {
             let len_usize = usize::from(slen);
             words[code][..len_usize].copy_from_slice(&src[off..off + len_usize]);
             lens[code] = slen;
+            lens_m1[code] = slen - 1;
             off += len_usize;
         }
 
@@ -1225,10 +1262,47 @@ impl FsstDecodeTable {
             Self {
                 words,
                 lens,
+                lens_m1,
                 sym_count: sym_count_u8,
             },
             syms_end,
         ))
+    }
+
+    fn estimate_decoded_bytes(&self, coded: &[u8], max_total_bytes: usize) -> usize {
+        if coded.is_empty() {
+            return FSST_DECODE_SLACK;
+        }
+        let sample = &coded[..coded.len().min(512)];
+        let sc = self.sym_count;
+        let mut i = 0usize;
+        let mut sample_decoded = 0usize;
+        while i < sample.len() {
+            let b = sample[i];
+            if b == FSST_ESCAPE {
+                if i + 2 > sample.len() {
+                    break;
+                }
+                sample_decoded += 1;
+                i += 2;
+            } else if b < sc {
+                sample_decoded += usize::from(self.lens_m1[usize::from(b)] & 7) + 1;
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        let est = if i == 0 || sample_decoded == 0 {
+            coded.len().saturating_mul(2).saturating_add(64)
+        } else {
+            let scaled = (coded.len() as u128).saturating_mul(sample_decoded as u128) / (i as u128);
+            usize::try_from(scaled)
+                .unwrap_or(max_total_bytes)
+                .saturating_mul(115)
+                / 100
+                + 64
+        };
+        est.min(max_total_bytes).saturating_add(FSST_DECODE_SLACK)
     }
 
     fn decode_row_checked(
@@ -1277,6 +1351,112 @@ impl FsstDecodeTable {
         Ok(())
     }
 
+    #[inline(always)]
+    fn decode_row_into_prealloc(
+        &self,
+        coded_row: &[u8],
+        out_slice: &mut [u8],
+        pos: &mut usize,
+    ) -> Result<(), StatamError> {
+        let sc = self.sym_count;
+        let words = &self.words;
+        let lens_m1 = &self.lens_m1;
+        let mut p = *pos;
+        let mut rest = coded_row;
+
+        while let Some((&[b0, b1, b2, b3], next)) = rest.split_first_chunk::<4>() {
+            if (b0 < sc) & (b1 < sc) & (b2 < sc) & (b3 < sc) {
+                let l0 = usize::from(lens_m1[usize::from(b0)] & 7) + 1;
+                let l1 = usize::from(lens_m1[usize::from(b1)] & 7) + 1;
+                let l2 = usize::from(lens_m1[usize::from(b2)] & 7) + 1;
+                let l3 = usize::from(lens_m1[usize::from(b3)] & 7) + 1;
+                let Some(dst) = out_slice
+                    .get_mut(p..)
+                    .and_then(|s| s.first_chunk_mut::<FSST_DECODE_SLACK>())
+                else {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                    });
+                };
+                dst[0..8].copy_from_slice(&words[usize::from(b0)]);
+                let p1 = l0;
+                dst[p1..p1 + 8].copy_from_slice(&words[usize::from(b1)]);
+                let p2 = p1 + l1;
+                dst[p2..p2 + 8].copy_from_slice(&words[usize::from(b2)]);
+                let p3 = p2 + l2;
+                dst[p3..p3 + 8].copy_from_slice(&words[usize::from(b3)]);
+                p += p3 + l3;
+                rest = next;
+                continue;
+            }
+            if b0 == FSST_ESCAPE {
+                let Some(dst) = out_slice.get_mut(p) else {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                    });
+                };
+                *dst = b1;
+                p += 1;
+                rest = &rest[2..];
+            } else if b0 < sc {
+                let slen = usize::from(lens_m1[usize::from(b0)] & 7) + 1;
+                let Some(dst) = out_slice
+                    .get_mut(p..)
+                    .and_then(|s| s.first_chunk_mut::<FSST_MAX_SYM_LEN>())
+                else {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                    });
+                };
+                dst.copy_from_slice(&words[usize::from(b0)]);
+                p += slen;
+                rest = &rest[1..];
+            } else {
+                return Err(StatamError::Corrupt {
+                    reason: "fsst symbol code out of bounds",
+                });
+            }
+        }
+
+        while let Some((&b, tail)) = rest.split_first() {
+            if b == FSST_ESCAPE {
+                let Some((&lit, after_lit)) = tail.split_first() else {
+                    return Err(StatamError::Corrupt {
+                        reason: "truncated fsst literal escape",
+                    });
+                };
+                let Some(dst) = out_slice.get_mut(p) else {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                    });
+                };
+                *dst = lit;
+                p += 1;
+                rest = after_lit;
+            } else if b < sc {
+                let slen = usize::from(lens_m1[usize::from(b)] & 7) + 1;
+                let Some(dst) = out_slice
+                    .get_mut(p..)
+                    .and_then(|s| s.first_chunk_mut::<FSST_MAX_SYM_LEN>())
+                else {
+                    return Err(StatamError::BoundsExceeded {
+                        reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                    });
+                };
+                dst.copy_from_slice(&words[usize::from(b)]);
+                p += slen;
+                rest = tail;
+            } else {
+                return Err(StatamError::Corrupt {
+                    reason: "fsst symbol code out of bounds",
+                });
+            }
+        }
+
+        *pos = p;
+        Ok(())
+    }
+
     #[inline]
     fn decode_row_fast(
         &self,
@@ -1292,90 +1472,9 @@ impl FsstDecodeTable {
                 .saturating_add(max_row)
                 .saturating_add(FSST_DECODE_SLACK);
             if needed > out_bytes.len() {
-                let grown = if grow_exponential {
-                    out_bytes
-                        .len()
-                        .saturating_mul(2)
-                        .max(needed)
-                        .min(max_total_bytes.saturating_add(FSST_DECODE_SLACK))
-                } else {
-                    needed
-                };
-                out_bytes.resize(grown, 0);
+                grow_fsst_out_bytes(out_bytes, needed, max_total_bytes, grow_exponential);
             }
-            let out_slice = &mut out_bytes[..needed];
-            let sc = self.sym_count;
-            let mut p = *pos;
-            let mut i = 0usize;
-            while i + 4 <= coded_row.len() {
-                let b0 = coded_row[i];
-                let b1 = coded_row[i + 1];
-                let b2 = coded_row[i + 2];
-                let b3 = coded_row[i + 3];
-                if (b0 < sc) & (b1 < sc) & (b2 < sc) & (b3 < sc)
-                    && let Some(dst) = out_slice.get_mut(p..p + FSST_DECODE_SLACK)
-                {
-                    let l0 = usize::from(self.lens[usize::from(b0)]).min(FSST_MAX_SYM_LEN);
-                    let l1 = usize::from(self.lens[usize::from(b1)]).min(FSST_MAX_SYM_LEN);
-                    let l2 = usize::from(self.lens[usize::from(b2)]).min(FSST_MAX_SYM_LEN);
-                    let l3 = usize::from(self.lens[usize::from(b3)]).min(FSST_MAX_SYM_LEN);
-                    dst[0..8].copy_from_slice(&self.words[usize::from(b0)]);
-                    let p1 = l0;
-                    dst[p1..p1 + 8].copy_from_slice(&self.words[usize::from(b1)]);
-                    let p2 = p1 + l1;
-                    dst[p2..p2 + 8].copy_from_slice(&self.words[usize::from(b2)]);
-                    let p3 = p2 + l2;
-                    dst[p3..p3 + 8].copy_from_slice(&self.words[usize::from(b3)]);
-                    p += p3 + l3;
-                    i += 4;
-                    continue;
-                }
-                // Handle single byte (escape or invalid symbol) and resume 4x loop.
-                let b = b0;
-                if b == FSST_ESCAPE {
-                    if i + 1 >= coded_row.len() {
-                        return Err(StatamError::Corrupt {
-                            reason: "truncated fsst literal escape",
-                        });
-                    }
-                    out_slice[p] = coded_row[i + 1];
-                    p += 1;
-                    i += 2;
-                } else if b < sc {
-                    let slen = usize::from(self.lens[usize::from(b)]).min(FSST_MAX_SYM_LEN);
-                    out_slice[p..p + FSST_MAX_SYM_LEN].copy_from_slice(&self.words[usize::from(b)]);
-                    p += slen;
-                    i += 1;
-                } else {
-                    return Err(StatamError::Corrupt {
-                        reason: "fsst symbol code out of bounds",
-                    });
-                }
-            }
-            while i < coded_row.len() {
-                let b = coded_row[i];
-                if b == FSST_ESCAPE {
-                    if i + 1 >= coded_row.len() {
-                        return Err(StatamError::Corrupt {
-                            reason: "truncated fsst literal escape",
-                        });
-                    }
-                    out_slice[p] = coded_row[i + 1];
-                    p += 1;
-                    i += 2;
-                } else if b < sc {
-                    let slen = usize::from(self.lens[usize::from(b)]).min(FSST_MAX_SYM_LEN);
-                    out_slice[p..p + FSST_MAX_SYM_LEN].copy_from_slice(&self.words[usize::from(b)]);
-                    p += slen;
-                    i += 1;
-                } else {
-                    return Err(StatamError::Corrupt {
-                        reason: "fsst symbol code out of bounds",
-                    });
-                }
-            }
-            *pos = p;
-            Ok(())
+            self.decode_row_into_prealloc(coded_row, out_bytes.as_mut_slice(), pos)
         } else {
             out_bytes.truncate(*pos);
             self.decode_row_checked(coded_row, out_bytes, max_total_bytes)?;
@@ -1573,21 +1672,35 @@ impl<'a> FsstBlockView<'a> {
 
         let mut out_offsets = Vec::with_capacity(row_count + 1);
         out_offsets.push(0);
-        let initial_cap =
-            (self.coded.len().saturating_mul(2) + 64).min(MAX_BLOCK_RAW_BYTES) + FSST_DECODE_SLACK;
+        let initial_cap = self
+            .table
+            .estimate_decoded_bytes(self.coded, MAX_BLOCK_RAW_BYTES);
         let mut out_bytes = vec![0u8; initial_cap];
         let mut pos = 0usize;
 
         for row in 0..row_count {
             let start = self.offsets[row] as usize;
             let end = self.offsets[row + 1] as usize;
-            self.table.decode_row_fast(
-                &self.coded[start..end],
-                &mut out_bytes,
-                &mut pos,
-                MAX_BLOCK_RAW_BYTES,
-                true,
-            )?;
+            let coded_row = &self.coded[start..end];
+            let max_row = coded_row.len().saturating_mul(FSST_MAX_SYM_LEN);
+            if pos.saturating_add(max_row) <= MAX_BLOCK_RAW_BYTES {
+                let needed = pos
+                    .saturating_add(max_row)
+                    .saturating_add(FSST_DECODE_SLACK);
+                if needed > out_bytes.len() {
+                    grow_fsst_out_bytes(&mut out_bytes, needed, MAX_BLOCK_RAW_BYTES, true);
+                }
+                self.table.decode_row_into_prealloc(
+                    coded_row,
+                    out_bytes.as_mut_slice(),
+                    &mut pos,
+                )?;
+            } else {
+                out_bytes.truncate(pos);
+                self.table
+                    .decode_row_checked(coded_row, &mut out_bytes, MAX_BLOCK_RAW_BYTES)?;
+                pos = out_bytes.len();
+            }
             if pos > MAX_BLOCK_RAW_BYTES {
                 return Err(StatamError::BoundsExceeded {
                     reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
@@ -1781,16 +1894,12 @@ struct SubchunkMeta {
 }
 
 struct SubchunkDecompressor {
-    #[cfg(not(miri))]
-    zstd: Option<zstd::bulk::Decompressor<'static>>,
     scratch: Vec<u8>,
 }
 
 impl SubchunkDecompressor {
     fn new() -> Self {
         Self {
-            #[cfg(not(miri))]
-            zstd: None,
             scratch: Vec::new(),
         }
     }
@@ -1801,64 +1910,13 @@ impl SubchunkDecompressor {
         payload: &'a [u8],
     ) -> Result<&'a [u8], StatamError> {
         let stored = &payload[meta.stored_start as usize..meta.stored_end as usize];
-        let raw_len = meta.raw_len as usize;
-        check_decompress_bounds(raw_len, stored.len(), MAX_BLOCK_RAW_BYTES)?;
-        match meta.codec {
-            Codec::None => {
-                if stored.len() != raw_len {
-                    return Err(StatamError::Corrupt {
-                        reason: "uncompressed fsst subchunk raw_len mismatch",
-                    });
-                }
-                Ok(stored)
-            }
-            Codec::Lz4 => {
-                self.scratch.resize(raw_len, 0);
-                let written =
-                    lz4_flex::block::decompress_into(stored, &mut self.scratch).map_err(|_| {
-                        StatamError::Corrupt {
-                            reason: "fsst subchunk lz4 decompression failed",
-                        }
-                    })?;
-                if written != raw_len {
-                    return Err(StatamError::Corrupt {
-                        reason: "fsst subchunk lz4 decompressed length mismatch",
-                    });
-                }
-                Ok(&self.scratch[..raw_len])
-            }
-            Codec::Zstd => {
-                #[cfg(miri)]
-                {
-                    Err(StatamError::UnsupportedFeature { mask: 0x02 })
-                }
-                #[cfg(not(miri))]
-                {
-                    if self.zstd.is_none() {
-                        let decomp =
-                            zstd::bulk::Decompressor::new().map_err(|_| StatamError::Corrupt {
-                                reason: "fsst subchunk zstd decompressor init failed",
-                            })?;
-                        self.zstd = Some(decomp);
-                    }
-                    let decomp = self.zstd.as_mut().ok_or(StatamError::Corrupt {
-                        reason: "fsst subchunk zstd decompressor missing",
-                    })?;
-                    self.scratch.resize(raw_len, 0);
-                    let written = decomp
-                        .decompress_to_buffer(stored, &mut self.scratch)
-                        .map_err(|_| StatamError::Corrupt {
-                            reason: "fsst subchunk zstd decompression failed",
-                        })?;
-                    if written != raw_len {
-                        return Err(StatamError::Corrupt {
-                            reason: "fsst subchunk zstd decompressed length mismatch",
-                        });
-                    }
-                    Ok(&self.scratch[..raw_len])
-                }
-            }
-        }
+        crate::format::decompress_checked_into(
+            stored,
+            meta.codec,
+            meta.raw_len as usize,
+            MAX_BLOCK_RAW_BYTES,
+            &mut self.scratch,
+        )
     }
 }
 
@@ -2328,9 +2386,7 @@ impl<'a> FsstSubchunkedView<'a> {
                         let raw_chunk = decomp.decompress(task.meta, payload)?;
                         let coded =
                             parse_subchunk_offsets(raw_chunk, task.chunk_rows, chunk_offsets)?;
-                        let initial_cap = ((task.meta.raw_len as usize).saturating_mul(2) + 64)
-                            .min(ctx.max_bytes)
-                            + FSST_DECODE_SLACK;
+                        let initial_cap = ctx.table.estimate_decoded_bytes(coded, ctx.max_bytes);
                         let mut chunk_bytes = vec![0u8; initial_cap];
                         let mut row_lens = Vec::with_capacity(task.chunk_rows);
                         let mut pos = 0usize;
@@ -3669,7 +3725,7 @@ mod tests {
             .unwrap();
         assert!(!small_sub, "row_count <= 512 must not sub-chunk");
 
-        // > 512 rows AND >= 16 KiB coded bytes -> triggers 256-row sub-chunks in both profiles.
+        // > 512 rows AND >= 16 KiB coded bytes -> triggers 512-row sub-chunks in both profiles.
         let row_count = 1_030usize;
         let mut owned = Vec::with_capacity(row_count);
         let mut valid_bits = Vec::with_capacity(row_count);
@@ -4495,9 +4551,9 @@ mod tests {
 
     #[test]
     fn pass25_subchunked_fsst_parallel_decode_parity_all_selected_and_errors() {
-        // 6 sub-chunks of 512 rows = 3,072 rows, structured JSON with varied words (~320 B/row)
+        // 3,072 rows (6 sub-chunks of 512 rows), structured JSON with varied words (~320 B/row)
         // so FSST compresses well while `sum_raw >= 128 KiB`, genuinely exercising WorkerPool fan-out.
-        let row_count = usize::from(FSST_SUBCHUNK_ROWS) * 6;
+        let row_count = 3_072usize;
         let words = [
             "latency",
             "throughput",
@@ -4796,6 +4852,225 @@ mod tests {
                 ),
                 "expected error on corrupt subchunk at {threads}T"
             );
+        }
+    }
+
+    #[test]
+    fn pass27e_fsst_decode_all_expansion_estimate_and_4x_fast_path_parity() {
+        let build_multi_row_block =
+            |sym_count: u8, slens: &[u8], syms: &[u8], rows: &[&[u8]]| -> Vec<u8> {
+                let mut buf = Vec::new();
+                buf.push(sym_count);
+                buf.extend_from_slice(slens);
+                buf.extend_from_slice(syms);
+                let rlens: Vec<u32> = rows.iter().map(|r| r.len() as u32).collect();
+                let bw = min_bits_u32(&rlens);
+                buf.push(bw);
+                pack_u32(&rlens, bw, &mut buf).unwrap();
+                for r in rows {
+                    buf.extend_from_slice(r);
+                }
+                buf
+            };
+
+        // 1. High >4x expansion (8-byte symbols): verify estimate_decoded_bytes predicts >= actual_len + FSST_DECODE_SLACK
+        //    so single-allocation decode_all succeeds without doubling, and 4x fast path matches reference.
+        let sym_8b = b"https://";
+        let coded_16_syms = vec![0u8; 16]; // 16 * 8 = 128 bytes per row (8x expansion)
+        let high_exp_rows: Vec<&[u8]> = vec![coded_16_syms.as_slice(); 40]; // 640 coded bytes > 512 sample
+        let high_exp_block = build_multi_row_block(1, &[8], sym_8b, &high_exp_rows);
+        let high_exp_view = FsstBlockView::parse(&high_exp_block, high_exp_rows.len()).unwrap();
+        let actual_high_exp_len = 40 * 128;
+        let est = high_exp_view
+            .table
+            .estimate_decoded_bytes(high_exp_view.coded, MAX_BLOCK_RAW_BYTES);
+        assert!(
+            est >= actual_high_exp_len + FSST_DECODE_SLACK,
+            "expected estimate ({est}) >= actual + slack ({})",
+            actual_high_exp_len + FSST_DECODE_SLACK
+        );
+        let (hi_offs, hi_bytes) = high_exp_view.decode_all().unwrap();
+        assert_eq!(hi_bytes.len(), actual_high_exp_len);
+        let expected_row = sym_8b.repeat(16);
+        for i in 0..high_exp_rows.len() {
+            assert_eq!(
+                &hi_bytes[hi_offs[i] as usize..hi_offs[i + 1] as usize],
+                expected_row.as_slice()
+            );
+        }
+
+        // 2. 1-byte symbols, empty rows, and mixed escapes at offsets 0/1/2/3/tail,
+        //    plus a >512-byte coded block with an escape starting at byte 511 (incomplete at sample boundary).
+        let mut sym2_hdr = Vec::new();
+        // sym 0: "A" (1 byte), sym 1: "BCDEFGHI" (8 bytes)
+        let row_empty: &[u8] = &[];
+        let row_esc_0: &[u8] = &[FSST_ESCAPE, b'0', 0, 1, 0, 1];
+        let row_esc_1: &[u8] = &[0, FSST_ESCAPE, b'1', 1, 0, 1];
+        let row_esc_2: &[u8] = &[0, 1, FSST_ESCAPE, b'2', 0];
+        let row_esc_3: &[u8] = &[0, 1, 0, FSST_ESCAPE, b'3', 1];
+        let row_esc_tail: &[u8] = &[0, 1, 0, 1, FSST_ESCAPE, b'T', 0];
+        let mut row_511 = vec![0u8; 511];
+        row_511.extend_from_slice(&[FSST_ESCAPE, b'X', 1, 0, 1]);
+        let mixed_rows: Vec<&[u8]> = vec![
+            row_511.as_slice(),
+            row_empty,
+            row_esc_0,
+            row_esc_1,
+            row_esc_2,
+            row_esc_3,
+            row_esc_tail,
+        ];
+        sym2_hdr.extend_from_slice(&[1, 8]);
+        let mixed_syms = b"ABCDEFGHI";
+        let mixed_block = build_multi_row_block(2, &sym2_hdr, mixed_syms, &mixed_rows);
+        let mixed_view = FsstBlockView::parse(&mixed_block, mixed_rows.len()).unwrap();
+        // At byte 511, FSST_ESCAPE cannot fit its literal within the 512-byte sample, so the loop
+        // breaks at i = 511 with sample_decoded = 511 (1-byte sym 0) and scaled = row_511.len().
+        assert_eq!(
+            mixed_view
+                .table
+                .estimate_decoded_bytes(&row_511, MAX_BLOCK_RAW_BYTES),
+            (row_511.len() * 115) / 100 + 64 + FSST_DECODE_SLACK
+        );
+        let (m_offs, m_bytes) = mixed_view.decode_all().unwrap();
+        let mut ref_out = Vec::new();
+        for (idx, r) in mixed_rows.iter().enumerate() {
+            ref_out.clear();
+            mixed_view
+                .table
+                .decode_row_checked(r, &mut ref_out, MAX_BLOCK_RAW_BYTES)
+                .unwrap();
+            assert_eq!(
+                &m_bytes[m_offs[idx] as usize..m_offs[idx + 1] as usize],
+                ref_out.as_slice(),
+                "row {idx} mismatch"
+            );
+        }
+
+        // 3. sym_count = 0 (all escapes)
+        let esc_only_rows: Vec<&[u8]> = vec![
+            &[],
+            &[FSST_ESCAPE, b'a', FSST_ESCAPE, b'b', FSST_ESCAPE, b'c'],
+        ];
+        let esc_only_block = build_multi_row_block(0, &[], &[], &esc_only_rows);
+        let esc_only_view = FsstBlockView::parse(&esc_only_block, esc_only_rows.len()).unwrap();
+        let (eo_offs, eo_bytes) = esc_only_view.decode_all().unwrap();
+        assert_eq!(eo_offs, vec![0, 0, 3]);
+        assert_eq!(eo_bytes, b"abc");
+
+        // 4. sym_count = 255
+        let slens_255 = vec![1u8; 255];
+        let syms_255: Vec<u8> = (0u8..255u8).collect();
+        let coded_255: Vec<u8> = vec![0, 1, 253, 254, FSST_ESCAPE, 0xFF, 42];
+        let block_255 = build_multi_row_block(255, &slens_255, &syms_255, &[&coded_255]);
+        let view_255 = FsstBlockView::parse(&block_255, 1).unwrap();
+        let (o255, b255) = view_255.decode_all().unwrap();
+        assert_eq!(o255, vec![0, 6]);
+        assert_eq!(b255, vec![0, 1, 253, 254, 0xFF, 42]);
+
+        // 5. Corrupt: invalid symbol code, truncated escape at end, and corrupt huge coded block clamp
+        for bad_coded in [
+            vec![0, 1, 2, 0],                     // invalid in 4x loop
+            vec![0, 0, 0, 0, 2],                  // invalid in tail loop
+            vec![FSST_ESCAPE, b'a', 2, 0],        // invalid in 4x slow path
+            vec![0, 0, 0, 0, FSST_ESCAPE],        // truncated escape in tail
+            vec![FSST_ESCAPE, b'a', FSST_ESCAPE], // truncated escape in tail
+        ] {
+            let bad_block = build_multi_row_block(2, &[1, 1], b"ab", &[&bad_coded]);
+            let bad_view = FsstBlockView::parse(&bad_block, 1).unwrap();
+            assert!(
+                matches!(bad_view.decode_all(), Err(StatamError::Corrupt { .. })),
+                "expected Corrupt for bad_coded={bad_coded:?}"
+            );
+        }
+
+        assert_eq!(
+            high_exp_view
+                .table
+                .estimate_decoded_bytes(&[], MAX_BLOCK_RAW_BYTES),
+            FSST_DECODE_SLACK
+        );
+        let corrupt_huge = vec![200u8; 1024];
+        assert_eq!(
+            high_exp_view
+                .table
+                .estimate_decoded_bytes(&corrupt_huge, 128),
+            128 + FSST_DECODE_SLACK
+        );
+
+        // 6. Small-limit decode_row_fast boundary fallback (Miri-safe, max_total_bytes = 64)
+        let (dec_tbl, _) =
+            FsstDecodeTable::parse_header(&[1, 8, b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h'])
+                .unwrap();
+        let mut mixed_fit = vec![0u8; 7]; // 56 bytes
+        mixed_fit.extend_from_slice(&[FSST_ESCAPE, b'Z']); // 57 bytes, max_row = 9 * 8 = 72 > 64
+        let mut fb_buf = Vec::new();
+        let mut fb_pos = 0usize;
+        dec_tbl
+            .decode_row_fast(&mixed_fit, &mut fb_buf, &mut fb_pos, 64, true)
+            .unwrap();
+        assert_eq!(fb_pos, 57);
+        assert_eq!(
+            &fb_buf[..fb_pos],
+            [b"abcdefgh".repeat(7), vec![b'Z']].concat().as_slice()
+        );
+
+        let over_coded = [0u8; 9]; // 72 bytes > 64
+        let mut over_buf = Vec::new();
+        let mut over_pos = 0usize;
+        assert!(matches!(
+            dec_tbl.decode_row_fast(&over_coded, &mut over_buf, &mut over_pos, 64, true),
+            Err(StatamError::BoundsExceeded {
+                reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+            })
+        ));
+
+        // 7. Full MAX_BLOCK_RAW_BYTES (64 MiB) decode_all boundary fallback (non-Miri).
+        #[cfg(not(miri))]
+        {
+            let exact_codes = MAX_BLOCK_RAW_BYTES / 8;
+            let row1 = vec![0u8; exact_codes / 2];
+            let row2 = vec![0u8; exact_codes - exact_codes / 2];
+            let exact_block = build_multi_row_block(1, &[8], b"01234567", &[&row1, &row2]);
+            let exact_view = FsstBlockView::parse(&exact_block, 2).unwrap();
+            let (eo, eb) = exact_view.decode_all().unwrap();
+            assert_eq!(
+                eo,
+                vec![0, row1.len() as u32 * 8, MAX_BLOCK_RAW_BYTES as u32]
+            );
+            assert_eq!(eb.len(), MAX_BLOCK_RAW_BYTES);
+
+            // Replace the final 8-byte symbol in row2 with 8 escaped literals (16 coded bytes -> 8 decoded bytes)
+            // so pos + fb_row2.len() * 8 > MAX_BLOCK_RAW_BYTES while actual decoded bytes == MAX_BLOCK_RAW_BYTES,
+            // forcing decode_row_fast's decode_row_checked fallback.
+            let mut fb_row2 = vec![0u8; row2.len() - 1];
+            fb_row2.extend_from_slice(&[FSST_ESCAPE, b'Z'].repeat(8));
+            let fb_block = build_multi_row_block(1, &[8], b"01234567", &[&row1, &fb_row2]);
+            let fb_view = FsstBlockView::parse(&fb_block, 2).unwrap();
+            let (fb_offs, fb_bytes) = fb_view.decode_all().unwrap();
+            assert_eq!(
+                fb_offs,
+                vec![0, row1.len() as u32 * 8, MAX_BLOCK_RAW_BYTES as u32]
+            );
+            assert_eq!(fb_bytes.len(), MAX_BLOCK_RAW_BYTES);
+            assert!(
+                fb_bytes[..MAX_BLOCK_RAW_BYTES - 8]
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .all(|c| c == b"01234567")
+            );
+            assert_eq!(&fb_bytes[MAX_BLOCK_RAW_BYTES - 8..], b"ZZZZZZZZ");
+
+            let over_row2 = vec![0u8; row2.len() + 1];
+            let over_block = build_multi_row_block(1, &[8], b"01234567", &[&row1, &over_row2]);
+            let over_view = FsstBlockView::parse(&over_block, 2).unwrap();
+            assert!(matches!(
+                over_view.decode_all(),
+                Err(StatamError::BoundsExceeded {
+                    reason: "fsst decoded size exceeds MAX_BLOCK_RAW_BYTES",
+                })
+            ));
         }
     }
 }

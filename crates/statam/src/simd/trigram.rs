@@ -596,6 +596,19 @@ impl TrigramBloom {
         true
     }
 
+    /// Bitwise-ORs `other` into `self` when both blooms share the exact same byte length.
+    ///
+    /// Returns `false` if their lengths differ (leaving `self` unchanged).
+    pub fn merge_same_size(&mut self, other: &Self) -> bool {
+        if self.bits.len() != other.bits.len() {
+            return false;
+        }
+        for (dst, &src) in self.bits.iter_mut().zip(other.bits.iter()) {
+            *dst |= src;
+        }
+        true
+    }
+
     /// Fraction of set bits in `0.0..=1.0`.
     pub fn bit_density(&self) -> f64 {
         let ones: usize = self.bits.iter().map(|b| b.count_ones() as usize).sum();
