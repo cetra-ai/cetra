@@ -119,6 +119,605 @@ fn compare_key_refs_across(
     Ordering::Equal
 }
 
+/// Order-preserving `u64` encoding of `f64` matching `eval::f64_cmp`:
+/// `-inf < negative < -0.0 == +0.0 < positive < +inf < NaN == NaN`.
+#[inline]
+fn f64_to_sortable_u64(v: f64) -> u64 {
+    if v.is_nan() {
+        return u64::MAX;
+    }
+    let norm = if v == 0.0 { 0.0f64 } else { v };
+    let bits = norm.to_bits();
+    if (bits >> 63) != 0 {
+        !bits
+    } else {
+        bits ^ (1u64 << 63)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FlatKeySpec {
+    Fixed16 {
+        descending: bool,
+        nulls_first: bool,
+    },
+    /// Covers `DataType::I64` and `DataType::TimestampNs { .. }`.
+    I64 {
+        descending: bool,
+        nulls_first: bool,
+    },
+    F64 {
+        descending: bool,
+        nulls_first: bool,
+    },
+    Utf8 {
+        descending: bool,
+        nulls_first: bool,
+    },
+}
+
+impl FlatKeySpec {
+    #[inline]
+    fn flags(self) -> (bool, bool) {
+        match self {
+            Self::Fixed16 {
+                descending,
+                nulls_first,
+            }
+            | Self::I64 {
+                descending,
+                nulls_first,
+            }
+            | Self::F64 {
+                descending,
+                nulls_first,
+            }
+            | Self::Utf8 {
+                descending,
+                nulls_first,
+            } => (descending, nulls_first),
+        }
+    }
+}
+
+fn classify_flat_key(key: &SortKey, dt: &DataType) -> Option<FlatKeySpec> {
+    match dt {
+        DataType::FixedBytes16 => Some(FlatKeySpec::Fixed16 {
+            descending: key.descending,
+            nulls_first: key.nulls_first,
+        }),
+        DataType::I64 | DataType::TimestampNs { .. } => Some(FlatKeySpec::I64 {
+            descending: key.descending,
+            nulls_first: key.nulls_first,
+        }),
+        DataType::F64 => Some(FlatKeySpec::F64 {
+            descending: key.descending,
+            nulls_first: key.nulls_first,
+        }),
+        DataType::Utf8 => Some(FlatKeySpec::Utf8 {
+            descending: key.descending,
+            nulls_first: key.nulls_first,
+        }),
+        _ => None,
+    }
+}
+
+#[inline]
+fn cmp_opt_val<T: Ord>(
+    a: Option<T>,
+    b: Option<T>,
+    descending: bool,
+    nulls_first: bool,
+) -> Ordering {
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => {
+            if nulls_first {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        }
+        (Some(_), None) => {
+            if nulls_first {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
+        }
+        (Some(va), Some(vb)) => {
+            if descending {
+                vb.cmp(&va)
+            } else {
+                va.cmp(&vb)
+            }
+        }
+    }
+}
+
+#[inline]
+fn extract_fixed16(col: &Column, r: usize) -> Option<[u8; 16]> {
+    if let Column::Flat(fc) = col {
+        if fc.nulls().is_some_and(|bm| !bm.get(r)) {
+            return None;
+        }
+        return match fc.data() {
+            FlatData::FixedBytes16(v) => v.get(r).copied(),
+            _ => None,
+        };
+    }
+    eval::read_bytes(col, r).and_then(|b| <[u8; 16]>::try_from(b).ok())
+}
+
+#[inline]
+fn extract_fixed16_non_null(col: &Column, r: usize) -> Option<[u8; 16]> {
+    if let Column::Flat(fc) = col {
+        return match fc.data() {
+            FlatData::FixedBytes16(v) => v.get(r).copied(),
+            _ => None,
+        };
+    }
+    eval::read_bytes(col, r).and_then(|b| <[u8; 16]>::try_from(b).ok())
+}
+
+#[inline]
+fn extract_i64(col: &Column, r: usize) -> Option<i64> {
+    if let Column::Flat(fc) = col {
+        if fc.nulls().is_some_and(|bm| !bm.get(r)) {
+            return None;
+        }
+        return match fc.data() {
+            FlatData::I64(v) | FlatData::TimestampNs { values: v, .. } => v.get(r).copied(),
+            _ => None,
+        };
+    }
+    match col.data_type() {
+        DataType::TimestampNs { .. } => eval::read_timestamp(col, r),
+        _ => eval::read_i64(col, r),
+    }
+}
+
+#[inline]
+fn extract_i64_non_null(col: &Column, r: usize) -> Option<i64> {
+    if let Column::Flat(fc) = col {
+        return match fc.data() {
+            FlatData::I64(v) | FlatData::TimestampNs { values: v, .. } => v.get(r).copied(),
+            _ => None,
+        };
+    }
+    match col.data_type() {
+        DataType::TimestampNs { .. } => eval::read_timestamp(col, r),
+        _ => eval::read_i64(col, r),
+    }
+}
+
+#[inline]
+fn extract_f64_key(col: &Column, r: usize) -> Option<u64> {
+    let v = if let Column::Flat(fc) = col {
+        if fc.nulls().is_some_and(|bm| !bm.get(r)) {
+            return None;
+        }
+        match fc.data() {
+            FlatData::F64(vals) => vals.get(r).copied(),
+            _ => None,
+        }
+    } else {
+        eval::read_f64(col, r)
+    }?;
+    Some(f64_to_sortable_u64(v))
+}
+
+#[inline]
+fn extract_f64_key_non_null(col: &Column, r: usize) -> Option<u64> {
+    let v = if let Column::Flat(fc) = col {
+        match fc.data() {
+            FlatData::F64(vals) => vals.get(r).copied(),
+            _ => None,
+        }
+    } else {
+        eval::read_f64(col, r)
+    }?;
+    Some(f64_to_sortable_u64(v))
+}
+
+#[inline]
+fn extract_utf8(col: &Column, r: usize) -> Option<&[u8]> {
+    if let Column::Flat(fc) = col {
+        if fc.nulls().is_some_and(|bm| !bm.get(r)) {
+            return None;
+        }
+        return match fc.data() {
+            FlatData::Utf8(u) => u.get_bytes(r),
+            _ => None,
+        };
+    }
+    eval::read_str_bytes(col, r)
+}
+
+#[inline]
+fn extract_utf8_non_null(col: &Column, r: usize) -> Option<&[u8]> {
+    if let Column::Flat(fc) = col {
+        return match fc.data() {
+            FlatData::Utf8(u) => u.get_bytes(r),
+            _ => None,
+        };
+    }
+    eval::read_str_bytes(col, r)
+}
+
+#[inline]
+fn permute_refs_from_positions<I: Iterator<Item = u32>>(refs: &mut Vec<(u32, u32)>, positions: I) {
+    let orig = std::mem::take(refs);
+    refs.reserve(orig.len());
+    for pos in positions {
+        refs.push(orig[pos as usize]);
+    }
+}
+
+fn collect_1key_non_null<'a, K: 'a, F>(
+    key_refs: &[Vec<&'a Column>],
+    refs: &[(u32, u32)],
+    extract: F,
+) -> Option<Vec<(K, u32)>>
+where
+    F: Fn(&'a Column, usize) -> Option<K>,
+{
+    let mut entries = Vec::with_capacity(refs.len());
+    for (pos, &(ba, ra)) in refs.iter().enumerate() {
+        let col = key_refs.get(ba as usize)?.first().copied()?;
+        entries.push((extract(col, ra as usize)?, pos as u32));
+    }
+    Some(entries)
+}
+
+fn collect_1key_nullable<'a, K: 'a, F>(
+    key_refs: &[Vec<&'a Column>],
+    refs: &[(u32, u32)],
+    extract: F,
+) -> Option<Vec<(Option<K>, u32)>>
+where
+    F: Fn(&'a Column, usize) -> Option<K>,
+{
+    let mut entries = Vec::with_capacity(refs.len());
+    for (pos, &(ba, ra)) in refs.iter().enumerate() {
+        let col = key_refs.get(ba as usize)?.first().copied()?;
+        entries.push((extract(col, ra as usize), pos as u32));
+    }
+    Some(entries)
+}
+
+fn sort_1key_non_null<K: Ord>(
+    mut entries: Vec<(K, u32)>,
+    descending: bool,
+    refs: &mut Vec<(u32, u32)>,
+) {
+    if descending {
+        entries.sort_unstable_by(|(ka, pa), (kb, pb)| kb.cmp(ka).then_with(|| pa.cmp(pb)));
+    } else {
+        entries.sort_unstable_by(|(ka, pa), (kb, pb)| ka.cmp(kb).then_with(|| pa.cmp(pb)));
+    }
+    permute_refs_from_positions(refs, entries.into_iter().map(|(_, pos)| pos));
+}
+
+fn sort_1key_nullable<K: Ord>(
+    mut entries: Vec<(Option<K>, u32)>,
+    descending: bool,
+    nulls_first: bool,
+    refs: &mut Vec<(u32, u32)>,
+) {
+    entries.sort_unstable_by(|(ka, pa), (kb, pb)| {
+        cmp_opt_val(ka.as_ref(), kb.as_ref(), descending, nulls_first).then_with(|| pa.cmp(pb))
+    });
+    permute_refs_from_positions(refs, entries.into_iter().map(|(_, pos)| pos));
+}
+
+fn collect_2key_non_null<'a, K1: 'a, K2: 'a, F1, F2>(
+    key_refs: &[Vec<&'a Column>],
+    refs: &[(u32, u32)],
+    extract1: F1,
+    extract2: F2,
+) -> Option<Vec<(K1, K2, u32)>>
+where
+    F1: Fn(&'a Column, usize) -> Option<K1>,
+    F2: Fn(&'a Column, usize) -> Option<K2>,
+{
+    let mut entries = Vec::with_capacity(refs.len());
+    for (pos, &(ba, ra)) in refs.iter().enumerate() {
+        let cols = key_refs.get(ba as usize)?;
+        let c1 = cols.first().copied()?;
+        let c2 = cols.get(1).copied()?;
+        let r = ra as usize;
+        entries.push((extract1(c1, r)?, extract2(c2, r)?, pos as u32));
+    }
+    Some(entries)
+}
+
+type Nullable2KeyVec<K1, K2> = Vec<(Option<K1>, Option<K2>, u32)>;
+
+fn collect_2key_nullable<'a, K1: 'a, K2: 'a, F1, F2>(
+    key_refs: &[Vec<&'a Column>],
+    refs: &[(u32, u32)],
+    extract1: F1,
+    extract2: F2,
+) -> Option<Nullable2KeyVec<K1, K2>>
+where
+    F1: Fn(&'a Column, usize) -> Option<K1>,
+    F2: Fn(&'a Column, usize) -> Option<K2>,
+{
+    let mut entries = Vec::with_capacity(refs.len());
+    for (pos, &(ba, ra)) in refs.iter().enumerate() {
+        let cols = key_refs.get(ba as usize)?;
+        let c1 = cols.first().copied()?;
+        let c2 = cols.get(1).copied()?;
+        let r = ra as usize;
+        entries.push((extract1(c1, r), extract2(c2, r), pos as u32));
+    }
+    Some(entries)
+}
+
+fn sort_2key_non_null<K1: Ord, K2: Ord>(
+    mut entries: Vec<(K1, K2, u32)>,
+    desc1: bool,
+    desc2: bool,
+    refs: &mut Vec<(u32, u32)>,
+) {
+    entries.sort_unstable_by(|(a1, a2, pa), (b1, b2, pb)| {
+        let o1 = if desc1 { b1.cmp(a1) } else { a1.cmp(b1) };
+        if o1 != Ordering::Equal {
+            return o1;
+        }
+        let o2 = if desc2 { b2.cmp(a2) } else { a2.cmp(b2) };
+        o2.then_with(|| pa.cmp(pb))
+    });
+    permute_refs_from_positions(refs, entries.into_iter().map(|(_, _, pos)| pos));
+}
+
+fn sort_2key_nullable<K1: Ord, K2: Ord>(
+    mut entries: Nullable2KeyVec<K1, K2>,
+    k1: (bool, bool),
+    k2: (bool, bool),
+    refs: &mut Vec<(u32, u32)>,
+) {
+    let (desc1, nf1) = k1;
+    let (desc2, nf2) = k2;
+    entries.sort_unstable_by(|(a1, a2, pa), (b1, b2, pb)| {
+        let o1 = cmp_opt_val(a1.as_ref(), b1.as_ref(), desc1, nf1);
+        if o1 != Ordering::Equal {
+            return o1;
+        }
+        cmp_opt_val(a2.as_ref(), b2.as_ref(), desc2, nf2).then_with(|| pa.cmp(pb))
+    });
+    permute_refs_from_positions(refs, entries.into_iter().map(|(_, _, pos)| pos));
+}
+
+fn try_sort_1key(key_refs: &[Vec<&Column>], key: &SortKey, refs: &mut Vec<(u32, u32)>) -> bool {
+    let Some(dt) = key_refs
+        .first()
+        .and_then(|cols| cols.first())
+        .map(|c| c.data_type())
+    else {
+        return false;
+    };
+    if !key_refs
+        .iter()
+        .all(|cols| !cols.is_empty() && cols[0].data_type() == dt)
+    {
+        return false;
+    }
+    let Some(spec) = classify_flat_key(key, &dt) else {
+        return false;
+    };
+    let any_nulls = key_refs.iter().any(|cols| cols[0].has_nulls());
+    match (spec, any_nulls) {
+        (FlatKeySpec::Fixed16 { descending, .. }, false) => {
+            if let Some(entries) = collect_1key_non_null(key_refs, refs, extract_fixed16_non_null) {
+                sort_1key_non_null(entries, descending, refs);
+                return true;
+            }
+        }
+        (
+            FlatKeySpec::Fixed16 {
+                descending,
+                nulls_first,
+            },
+            true,
+        ) => {
+            if let Some(entries) = collect_1key_nullable(key_refs, refs, extract_fixed16) {
+                sort_1key_nullable(entries, descending, nulls_first, refs);
+                return true;
+            }
+        }
+        (FlatKeySpec::I64 { descending, .. }, false) => {
+            if let Some(entries) = collect_1key_non_null(key_refs, refs, extract_i64_non_null) {
+                sort_1key_non_null(entries, descending, refs);
+                return true;
+            }
+        }
+        (
+            FlatKeySpec::I64 {
+                descending,
+                nulls_first,
+            },
+            true,
+        ) => {
+            if let Some(entries) = collect_1key_nullable(key_refs, refs, extract_i64) {
+                sort_1key_nullable(entries, descending, nulls_first, refs);
+                return true;
+            }
+        }
+        (FlatKeySpec::F64 { descending, .. }, false) => {
+            if let Some(entries) = collect_1key_non_null(key_refs, refs, extract_f64_key_non_null) {
+                sort_1key_non_null(entries, descending, refs);
+                return true;
+            }
+        }
+        (
+            FlatKeySpec::F64 {
+                descending,
+                nulls_first,
+            },
+            true,
+        ) => {
+            if let Some(entries) = collect_1key_nullable(key_refs, refs, extract_f64_key) {
+                sort_1key_nullable(entries, descending, nulls_first, refs);
+                return true;
+            }
+        }
+        (FlatKeySpec::Utf8 { descending, .. }, false) => {
+            if let Some(entries) = collect_1key_non_null(key_refs, refs, extract_utf8_non_null) {
+                sort_1key_non_null(entries, descending, refs);
+                return true;
+            }
+        }
+        (
+            FlatKeySpec::Utf8 {
+                descending,
+                nulls_first,
+            },
+            true,
+        ) => {
+            if let Some(entries) = collect_1key_nullable(key_refs, refs, extract_utf8) {
+                sort_1key_nullable(entries, descending, nulls_first, refs);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn try_sort_2key_typed<'a, K1, K2, F1N, F1C, F2N, F2C>(
+    key_refs: &[Vec<&'a Column>],
+    refs: &mut Vec<(u32, u32)>,
+    both_non_null: bool,
+    flags: ((bool, bool), (bool, bool)),
+    ext1: (F1N, F1C),
+    ext2: (F2N, F2C),
+) -> bool
+where
+    K1: Ord + 'a,
+    K2: Ord + 'a,
+    F1N: Fn(&'a Column, usize) -> Option<K1>,
+    F1C: Fn(&'a Column, usize) -> Option<K1>,
+    F2N: Fn(&'a Column, usize) -> Option<K2>,
+    F2C: Fn(&'a Column, usize) -> Option<K2>,
+{
+    let ((d1, nf1), (d2, nf2)) = flags;
+    if both_non_null {
+        if let Some(entries) = collect_2key_non_null(key_refs, refs, ext1.0, ext2.0) {
+            sort_2key_non_null(entries, d1, d2, refs);
+            return true;
+        }
+        return false;
+    }
+    if let Some(entries) = collect_2key_nullable(key_refs, refs, ext1.1, ext2.1) {
+        sort_2key_nullable(entries, (d1, nf1), (d2, nf2), refs);
+        return true;
+    }
+    false
+}
+
+fn try_sort_2key(key_refs: &[Vec<&Column>], keys: &[SortKey], refs: &mut Vec<(u32, u32)>) -> bool {
+    let Some(first) = key_refs.first() else {
+        return false;
+    };
+    if first.len() < 2 {
+        return false;
+    }
+    let dt0 = first[0].data_type();
+    let dt1 = first[1].data_type();
+    if !key_refs
+        .iter()
+        .all(|cols| cols.len() >= 2 && cols[0].data_type() == dt0 && cols[1].data_type() == dt1)
+    {
+        return false;
+    }
+    let (Some(spec0), Some(spec1)) = (
+        classify_flat_key(&keys[0], &dt0),
+        classify_flat_key(&keys[1], &dt1),
+    ) else {
+        return false;
+    };
+    let both_non_null = !key_refs
+        .iter()
+        .any(|cols| cols[0].has_nulls() || cols[1].has_nulls());
+    let flags = (spec0.flags(), spec1.flags());
+    match (spec0, spec1) {
+        (FlatKeySpec::Utf8 { .. }, FlatKeySpec::I64 { .. }) => try_sort_2key_typed(
+            key_refs,
+            refs,
+            both_non_null,
+            flags,
+            (extract_utf8_non_null, extract_utf8),
+            (extract_i64_non_null, extract_i64),
+        ),
+        (FlatKeySpec::I64 { .. }, FlatKeySpec::Fixed16 { .. }) => try_sort_2key_typed(
+            key_refs,
+            refs,
+            both_non_null,
+            flags,
+            (extract_i64_non_null, extract_i64),
+            (extract_fixed16_non_null, extract_fixed16),
+        ),
+        (FlatKeySpec::Fixed16 { .. }, FlatKeySpec::I64 { .. }) => try_sort_2key_typed(
+            key_refs,
+            refs,
+            both_non_null,
+            flags,
+            (extract_fixed16_non_null, extract_fixed16),
+            (extract_i64_non_null, extract_i64),
+        ),
+        (FlatKeySpec::I64 { .. }, FlatKeySpec::I64 { .. }) => try_sort_2key_typed(
+            key_refs,
+            refs,
+            both_non_null,
+            flags,
+            (extract_i64_non_null, extract_i64),
+            (extract_i64_non_null, extract_i64),
+        ),
+        (FlatKeySpec::Utf8 { .. }, FlatKeySpec::Utf8 { .. }) => try_sort_2key_typed(
+            key_refs,
+            refs,
+            both_non_null,
+            flags,
+            (extract_utf8_non_null, extract_utf8),
+            (extract_utf8_non_null, extract_utf8),
+        ),
+        _ => false,
+    }
+}
+
+/// Sorts `(batch_idx, row_idx)` references using typed key materialization for common
+/// 1-key and 2-key sorts while preserving exact stability across all `Selection` variants
+/// and falling back to generic dynamic comparison for other key counts/types.
+fn sort_row_refs_specialized(
+    key_refs: &[Vec<&Column>],
+    keys: &[SortKey],
+    refs: &mut Vec<(u32, u32)>,
+) {
+    if refs.len() <= 1 || keys.is_empty() {
+        return;
+    }
+    if refs.len() <= u32::MAX as usize {
+        let handled = match keys.len() {
+            1 => try_sort_1key(key_refs, &keys[0], refs),
+            2 => try_sort_2key(key_refs, keys, refs),
+            _ => false,
+        };
+        if handled {
+            return;
+        }
+    }
+    refs.sort_by(|&(ba, ra), &(bb, rb)| {
+        compare_key_refs_across(
+            &key_refs[ba as usize],
+            ra as usize,
+            &key_refs[bb as usize],
+            rb as usize,
+            keys,
+        )
+    });
+}
+
 /// Gathers `(cursor_or_batch_idx, row_idx)` rows from `batches` into a compacted `Batch`.
 fn build_batch_from_refs(
     schema: &Arc<Schema>,
@@ -384,15 +983,7 @@ impl ExternalSort {
             .map(|bb| resolve_key_col_refs(&self.keys, &bb.batch, &bb.extra_keys))
             .collect::<Result<Vec<_>, _>>()?;
 
-        refs.sort_by(|&(ba, ra), &(bb, rb)| {
-            compare_key_refs_across(
-                &key_refs[ba as usize],
-                ra as usize,
-                &key_refs[bb as usize],
-                rb as usize,
-                &self.keys,
-            )
-        });
+        sort_row_refs_specialized(&key_refs, &self.keys, &mut refs);
 
         if let Some(limit) = self.limit {
             refs.truncate(limit);
@@ -490,9 +1081,7 @@ impl ExternalSort {
 
         {
             let key_refs = resolve_key_col_refs(&self.keys, batch, &extra_keys)?;
-            refs.sort_by(|&(_, ra), &(_, rb)| {
-                compare_key_refs_across(&key_refs, ra as usize, &key_refs, rb as usize, &self.keys)
-            });
+            sort_row_refs_specialized(std::slice::from_ref(&key_refs), &self.keys, &mut refs);
         }
         if let Some(limit) = self.limit {
             refs.truncate(limit);
@@ -6295,5 +6884,569 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, QueryError::Cancelled));
         assert_eq!(res.size(), 0);
+    }
+
+    #[test]
+    fn f64_to_sortable_u64_matches_f64_cmp_all_edge_cases() {
+        let vals = [
+            f64::NEG_INFINITY,
+            -1e300,
+            -1.0,
+            -0.0,
+            0.0,
+            1e-300,
+            1.0,
+            f64::INFINITY,
+            f64::NAN,
+            -f64::NAN,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+        ];
+        assert_eq!(f64_to_sortable_u64(-0.0), f64_to_sortable_u64(0.0));
+        assert_eq!(f64_to_sortable_u64(f64::NAN), u64::MAX);
+        assert_eq!(f64_to_sortable_u64(-f64::NAN), u64::MAX);
+        assert_eq!(
+            f64_to_sortable_u64(f64::from_bits(0x7ff8_0000_0000_0001)),
+            u64::MAX
+        );
+
+        for (i, &a) in vals.iter().enumerate() {
+            for (j, &b) in vals.iter().enumerate() {
+                let got = f64_to_sortable_u64(a).cmp(&f64_to_sortable_u64(b));
+                let expected = eval::f64_cmp(a, b);
+                assert_eq!(
+                    got, expected,
+                    "mismatch for pair ({i}: {a:?}, {j}: {b:?}): got {got:?}, expected {expected:?}"
+                );
+            }
+        }
+    }
+
+    fn assert_specialized_matches_generic(
+        key_refs: &[Vec<&Column>],
+        keys: &[SortKey],
+        refs: &[(u32, u32)],
+    ) {
+        let mut expected = refs.to_vec();
+        expected.sort_by(|&(ba, ra), &(bb, rb)| {
+            compare_key_refs_across(
+                &key_refs[ba as usize],
+                ra as usize,
+                &key_refs[bb as usize],
+                rb as usize,
+                keys,
+            )
+        });
+        let mut actual = refs.to_vec();
+        sort_row_refs_specialized(key_refs, keys, &mut actual);
+        assert_eq!(actual, expected);
+    }
+
+    fn all_refs_for(batches: &[Vec<&Column>]) -> Vec<(u32, u32)> {
+        let mut refs = Vec::new();
+        for (b_idx, cols) in batches.iter().enumerate() {
+            let n = cols[0].len();
+            for r_idx in 0..n {
+                refs.push((b_idx as u32, r_idx as u32));
+            }
+        }
+        refs
+    }
+
+    #[test]
+    fn specialized_sort_matches_generic_across_1key_and_2key_types_nulls_and_ties() {
+        use cetra_column::{DictColumn, RleColumn};
+
+        let flag_combos = [(false, false), (false, true), (true, false), (true, true)];
+
+        // --- 1-key: FixedBytes16 (non-null Flat, nullable Flat with non-zero payload under NULLs, mixed encodings) ---
+        let id_a = [0x01u8; 16];
+        let id_b = [0x02u8; 16];
+        let id_c = [0xffu8; 16];
+        let id_zero = [0x00u8; 16];
+        let f16_flat_nn = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::FixedBytes16(vec![id_c, id_a, id_b, id_a, id_zero]),
+                None,
+            )
+            .unwrap(),
+        );
+        // Underlying buffer at null rows (1, 3) is non-zero (`id_zero`, `id_c`) to catch missing null checks.
+        let f16_flat_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::FixedBytes16(vec![id_b, id_zero, id_a, id_c, id_b]),
+                Some(Bitmap::from_bools(&[true, false, true, false, true])),
+            )
+            .unwrap(),
+        );
+        let f16_dict = Column::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(FlatData::FixedBytes16(vec![id_c, id_a]), None).unwrap(),
+                vec![0, 1, 0],
+                Some(Bitmap::from_bools(&[true, false, true])),
+            )
+            .unwrap(),
+        );
+        let f16_const_null =
+            Column::try_new_const(ScalarValue::Null(DataType::FixedBytes16), 2).unwrap();
+
+        // --- 1-key: I64 ---
+        let i64_flat_nn = Column::Flat(
+            FlatColumn::try_new(FlatData::I64(vec![42, -5, 0, 42, i64::MIN, i64::MAX]), None)
+                .unwrap(),
+        );
+        // Underlying values at null rows (0, 2) are `0` and `-100`.
+        let i64_flat_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64(vec![0, 10, -100, 10, 5]),
+                Some(Bitmap::from_bools(&[false, true, false, true, true])),
+            )
+            .unwrap(),
+        );
+        let i64_rle = Column::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::I64(vec![0, 10]),
+                    Some(Bitmap::from_bools(&[false, true])),
+                )
+                .unwrap(),
+                vec![2, 4],
+            )
+            .unwrap(),
+        );
+        let i64_const = Column::try_new_const(ScalarValue::I64(10), 3).unwrap();
+
+        // --- 1-key: TimestampNs ---
+        let ts_flat_nn = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![300, 100, 200, 100],
+                    utc: true,
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let ts_flat_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![0, 200, 999, 100],
+                    utc: true,
+                },
+                Some(Bitmap::from_bools(&[false, true, false, true])),
+            )
+            .unwrap(),
+        );
+        let ts_const = Column::try_new_const(
+            ScalarValue::TimestampNs {
+                value: 200,
+                utc: true,
+            },
+            2,
+        )
+        .unwrap();
+
+        // --- 1-key: F64 ---
+        let f64_flat_nn = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::F64(vec![f64::NAN, 1.0, -0.0, 0.0, f64::NEG_INFINITY, -f64::NAN]),
+                None,
+            )
+            .unwrap(),
+        );
+        let f64_flat_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::F64(vec![0.0, 2.5, -1.0, f64::NAN, 0.0]),
+                Some(Bitmap::from_bools(&[false, true, true, false, true])),
+            )
+            .unwrap(),
+        );
+        let f64_dict = Column::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(FlatData::F64(vec![-0.0, f64::INFINITY]), None).unwrap(),
+                vec![1, 0, 1],
+                Some(Bitmap::from_bools(&[true, true, false])),
+            )
+            .unwrap(),
+        );
+
+        // --- 1-key: Utf8 ---
+        // Include empty string `""` vs NULL (`""` stored in buffer under null bitmap!).
+        let utf8_flat_nn = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(["banana", "", "apple", "banana", "🦀"]).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+        );
+        let utf8_flat_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(["", "banana", "aaa", "", "apple"]).unwrap(),
+                ),
+                Some(Bitmap::from_bools(&[false, true, false, true, true])),
+            )
+            .unwrap(),
+        );
+        let utf8_dict = Column::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(["apple", "cherry"]).unwrap()),
+                    None,
+                )
+                .unwrap(),
+                vec![1, 0, 1],
+                Some(Bitmap::from_bools(&[true, false, true])),
+            )
+            .unwrap(),
+        );
+        let utf8_rle = Column::Rle(
+            RleColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(["", "banana"]).unwrap()),
+                    Some(Bitmap::from_bools(&[false, true])),
+                )
+                .unwrap(),
+                vec![1, 3],
+            )
+            .unwrap(),
+        );
+        let utf8_const = Column::try_new_const(ScalarValue::Utf8("apple".to_owned()), 2).unwrap();
+
+        let one_key_cases: Vec<(DataType, Vec<Vec<&Column>>)> = vec![
+            (DataType::FixedBytes16, vec![vec![&f16_flat_nn]]),
+            (
+                DataType::FixedBytes16,
+                vec![vec![&f16_flat_null], vec![&f16_dict], vec![&f16_const_null]],
+            ),
+            (DataType::I64, vec![vec![&i64_flat_nn]]),
+            (
+                DataType::I64,
+                vec![vec![&i64_flat_null], vec![&i64_rle], vec![&i64_const]],
+            ),
+            (DataType::TimestampNs { utc: true }, vec![vec![&ts_flat_nn]]),
+            (
+                DataType::TimestampNs { utc: true },
+                vec![vec![&ts_flat_null], vec![&ts_const]],
+            ),
+            (DataType::F64, vec![vec![&f64_flat_nn]]),
+            (DataType::F64, vec![vec![&f64_flat_null], vec![&f64_dict]]),
+            (DataType::Utf8, vec![vec![&utf8_flat_nn]]),
+            (
+                DataType::Utf8,
+                vec![
+                    vec![&utf8_flat_null],
+                    vec![&utf8_dict],
+                    vec![&utf8_rle],
+                    vec![&utf8_const],
+                ],
+            ),
+        ];
+
+        for (dt, batches) in &one_key_cases {
+            let refs = all_refs_for(batches);
+            for &(descending, nulls_first) in &flag_combos {
+                let keys = vec![SortKey {
+                    expr: col_expr(0, "k0", dt.clone()),
+                    descending,
+                    nulls_first,
+                }];
+                assert_specialized_matches_generic(batches, &keys, &refs);
+            }
+        }
+
+        // --- 2-key pairs: (Utf8, I64), (I64, FixedBytes16), (FixedBytes16, I64), (I64, I64), (Utf8, Utf8) ---
+        // Each batch has length 5 (non-null and nullable variants + mixed encodings).
+        let u5_nn = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(["gpt-4", "claude", "gpt-4", "", "claude"]).unwrap(),
+                ),
+                None,
+            )
+            .unwrap(),
+        );
+        let u5_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::Utf8(
+                    Utf8Data::try_from_slices(["", "gpt-4", "aaa", "gpt-4", ""]).unwrap(),
+                ),
+                Some(Bitmap::from_bools(&[false, true, false, true, true])),
+            )
+            .unwrap(),
+        );
+        let u5_dict = Column::Dict(
+            DictColumn::try_new(
+                FlatColumn::try_new(
+                    FlatData::Utf8(Utf8Data::try_from_slices(["gpt-4", "claude"]).unwrap()),
+                    None,
+                )
+                .unwrap(),
+                vec![0, 1, 0, 1, 0],
+                Some(Bitmap::from_bools(&[true, false, true, true, true])),
+            )
+            .unwrap(),
+        );
+
+        let i5_nn = Column::Flat(
+            FlatColumn::try_new(FlatData::I64(vec![10, 20, 10, 30, 20]), None).unwrap(),
+        );
+        let i5_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64(vec![0, 20, -1, 20, 10]),
+                Some(Bitmap::from_bools(&[false, true, false, true, true])),
+            )
+            .unwrap(),
+        );
+        let ts5_nn = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![100, 100, 200, 100, 200],
+                    utc: true,
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let ts5_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::TimestampNs {
+                    values: vec![999, 100, 0, 100, 200],
+                    utc: true,
+                },
+                Some(Bitmap::from_bools(&[false, true, false, true, true])),
+            )
+            .unwrap(),
+        );
+        let f5_nn = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::FixedBytes16(vec![id_a, id_b, id_a, id_c, id_b]),
+                None,
+            )
+            .unwrap(),
+        );
+        let f5_null = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::FixedBytes16(vec![id_zero, id_a, id_c, id_a, id_b]),
+                Some(Bitmap::from_bools(&[false, true, false, true, true])),
+            )
+            .unwrap(),
+        );
+
+        let two_key_cases: Vec<(DataType, DataType, Vec<Vec<&Column>>)> = vec![
+            // (Utf8, I64) non-null and nullable + mixed
+            (DataType::Utf8, DataType::I64, vec![vec![&u5_nn, &i5_nn]]),
+            (
+                DataType::Utf8,
+                DataType::I64,
+                vec![vec![&u5_null, &i5_null], vec![&u5_dict, &i5_nn]],
+            ),
+            // (Utf8, TimestampNs)
+            (
+                DataType::Utf8,
+                DataType::TimestampNs { utc: true },
+                vec![vec![&u5_null, &ts5_null], vec![&u5_nn, &ts5_nn]],
+            ),
+            // (I64, FixedBytes16) non-null and nullable
+            (
+                DataType::I64,
+                DataType::FixedBytes16,
+                vec![vec![&i5_nn, &f5_nn]],
+            ),
+            (
+                DataType::I64,
+                DataType::FixedBytes16,
+                vec![vec![&i5_null, &f5_null], vec![&i5_nn, &f5_null]],
+            ),
+            // (FixedBytes16, TimestampNs)
+            (
+                DataType::FixedBytes16,
+                DataType::TimestampNs { utc: true },
+                vec![vec![&f5_nn, &ts5_nn]],
+            ),
+            (
+                DataType::FixedBytes16,
+                DataType::TimestampNs { utc: true },
+                vec![vec![&f5_null, &ts5_null], vec![&f5_nn, &ts5_null]],
+            ),
+            // (I64, I64)
+            (DataType::I64, DataType::I64, vec![vec![&i5_nn, &i5_nn]]),
+            (
+                DataType::I64,
+                DataType::I64,
+                vec![vec![&i5_null, &i5_nn], vec![&i5_nn, &i5_null]],
+            ),
+            // (Utf8, Utf8)
+            (DataType::Utf8, DataType::Utf8, vec![vec![&u5_nn, &u5_nn]]),
+            (
+                DataType::Utf8,
+                DataType::Utf8,
+                vec![vec![&u5_null, &u5_dict], vec![&u5_nn, &u5_null]],
+            ),
+        ];
+
+        for (dt0, dt1, batches) in &two_key_cases {
+            let refs = all_refs_for(batches);
+            for &(d0, nf0) in &flag_combos {
+                for &(d1, nf1) in &flag_combos {
+                    let keys = vec![
+                        SortKey {
+                            expr: col_expr(0, "k0", dt0.clone()),
+                            descending: d0,
+                            nulls_first: nf0,
+                        },
+                        SortKey {
+                            expr: col_expr(1, "k1", dt1.clone()),
+                            descending: d1,
+                            nulls_first: nf1,
+                        },
+                    ];
+                    assert_specialized_matches_generic(batches, &keys, &refs);
+                }
+            }
+        }
+
+        // Empty / single-element / empty-keys / 3-key fallback / unsupported type fallback.
+        let single_ref = vec![(0u32, 0u32)];
+        let one_key = vec![SortKey {
+            expr: col_expr(0, "k0", DataType::I64),
+            descending: false,
+            nulls_first: false,
+        }];
+        assert_specialized_matches_generic(&[vec![&i5_nn]], &one_key, &single_ref);
+        assert_specialized_matches_generic(&[vec![&i5_nn]], &[], &all_refs_for(&[vec![&i5_nn]]));
+
+        let three_keys = vec![
+            SortKey {
+                expr: col_expr(0, "k0", DataType::Utf8),
+                descending: false,
+                nulls_first: false,
+            },
+            SortKey {
+                expr: col_expr(1, "k1", DataType::I64),
+                descending: true,
+                nulls_first: true,
+            },
+            SortKey {
+                expr: col_expr(2, "k2", DataType::FixedBytes16),
+                descending: false,
+                nulls_first: false,
+            },
+        ];
+        assert_specialized_matches_generic(
+            &[vec![&u5_null, &i5_null, &f5_null]],
+            &three_keys,
+            &all_refs_for(&[vec![&u5_null, &i5_null, &f5_null]]),
+        );
+    }
+
+    #[test]
+    fn specialized_sort_preserves_stability_on_unsorted_selection_indices() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path(), 64 * 1024 * 1024, 64 * 1024 * 1024);
+        let schema = Schema::try_new_arc(vec![
+            Field::new("k", DataType::I64, true),
+            Field::new("row_id", DataType::I64, false),
+        ])
+        .unwrap();
+
+        // Physical rows 0..10; Selection::Indices visits [5, 2, 8, 1, 4].
+        // Rows 5, 2, 8 share k = 10; rows 1, 4 share k = 20.
+        // Physical row_id equals physical index * 10 so any physical-order leak is visible.
+        let k_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64(vec![99, 20, 10, 99, 20, 10, 99, 99, 10, 99]),
+                None,
+            )
+            .unwrap(),
+        );
+        let id_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64(vec![0, 10, 20, 30, 40, 50, 60, 70, 80, 90]),
+                None,
+            )
+            .unwrap(),
+        );
+        let sel = Selection::Indices(vec![5, 2, 8, 1, 4]);
+        let batch = Batch::try_new(Arc::clone(&schema), vec![k_col, id_col], 10, sel).unwrap();
+
+        let keys = vec![SortKey {
+            expr: col_expr(0, "k", DataType::I64),
+            descending: false,
+            nulls_first: false,
+        }];
+
+        // 1. Direct sort_row_refs_specialized check with unsorted refs.
+        let key_refs = resolve_key_col_refs(&keys, &batch, &[None]).unwrap();
+        let mut refs = vec![(0, 5), (0, 2), (0, 8), (0, 1), (0, 4)];
+        sort_row_refs_specialized(std::slice::from_ref(&key_refs), &keys, &mut refs);
+        assert_eq!(refs, vec![(0, 5), (0, 2), (0, 8), (0, 1), (0, 4)]);
+
+        // 2. spill_single_batch end-to-end check on unsorted Selection::Indices.
+        let mut sort = ExternalSort::new(Arc::clone(&schema), keys.clone(), None, ctx.clone());
+        let mut dummy_res = ctx.pool.register("spill_sel_in", false);
+        sort.spill_single_batch(&batch, &mut dummy_res).unwrap();
+        assert_eq!(sort.spilled_run_count(), 1);
+        let mut stream = sort.into_stream().unwrap();
+        let out = drain_stream(stream.as_mut(), &ctx).unwrap();
+        drop(stream);
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        let mut got_ids = Vec::new();
+        for b in &out {
+            let col = b.column(1).unwrap();
+            for r in 0..b.num_rows() {
+                got_ids.push(eval::read_i64(col, r).unwrap());
+            }
+        }
+        // Must preserve Selection::Indices order [5, 2, 8] for k=10, then [1, 4] for k=20.
+        assert_eq!(got_ids, vec![50, 20, 80, 10, 40]);
+
+        // 3. Also verify nullable DESC NULLS FIRST on spill_single_batch with unsorted Selection::Indices.
+        let k_null_col = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64(vec![0, 20, 0, 0, 20, 0, 0, 0, 10, 0]),
+                Some(Bitmap::from_bools(&[
+                    true, true, false, true, true, false, true, true, true, true,
+                ])),
+            )
+            .unwrap(),
+        );
+        let id_col2 = Column::Flat(
+            FlatColumn::try_new(
+                FlatData::I64(vec![0, 10, 20, 30, 40, 50, 60, 70, 80, 90]),
+                None,
+            )
+            .unwrap(),
+        );
+        let batch2 = Batch::try_new(
+            Arc::clone(&schema),
+            vec![k_null_col, id_col2],
+            10,
+            Selection::Indices(vec![5, 2, 8, 1, 4]),
+        )
+        .unwrap();
+        let keys_desc_nf = vec![SortKey {
+            expr: col_expr(0, "k", DataType::I64),
+            descending: true,
+            nulls_first: true,
+        }];
+        let mut sort2 = ExternalSort::new(Arc::clone(&schema), keys_desc_nf, None, ctx.clone());
+        sort2.spill_single_batch(&batch2, &mut dummy_res).unwrap();
+        let mut stream2 = sort2.into_stream().unwrap();
+        let out2 = drain_stream(stream2.as_mut(), &ctx).unwrap();
+        drop(stream2);
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        let mut got_ids2 = Vec::new();
+        for b in &out2 {
+            let col = b.column(1).unwrap();
+            for r in 0..b.num_rows() {
+                got_ids2.push(eval::read_i64(col, r).unwrap());
+            }
+        }
+        // NULLs first in original Selection order [50, 20], then k=20 [10, 40], then k=10 [80].
+        assert_eq!(got_ids2, vec![50, 20, 10, 40, 80]);
     }
 }
