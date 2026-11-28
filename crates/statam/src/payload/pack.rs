@@ -94,9 +94,10 @@ pub const TRIGRAM_SECTION_MAGIC: [u8; 4] = *b"TS02";
 const TS02_HEADER_LEN: usize = 20;
 /// `TS02` flag bit: body is Zstd-compressed.
 const TS02_FLAG_ZSTD: u16 = 0x0001;
-/// Number of consecutive `32 KiB` adaptive-prose frames merged into one trigram group
-/// (`1` = per-frame `2 KiB` blooms; `TS02` wire format still supports any `frame_span >= 1`).
-const ADAPTIVE_PROSE_TRIGRAM_GROUP_FRAMES: u16 = 1;
+/// Number of consecutive `16 KiB` adaptive-prose frames merged into one `2 KiB` `TS02`
+/// trigram group (`2 × 16 KiB = 32 KiB` per bloom, keeping `TS02` bloom size and
+/// `FW_substr_absent` S3 bytes identical while halving random-access Zstd frame size).
+const ADAPTIVE_PROSE_TRIGRAM_GROUP_FRAMES: u16 = 2;
 
 /// Minimum compressed frame length required to emit a trigram bloom (`< 1` omitted).
 const MIN_FRAME_FOR_TRIGRAM: usize = 1;
@@ -106,8 +107,8 @@ const MAX_TRIGRAM_DENSITY: f64 = 0.72;
 const HIGH_TRIGRAM_DENSITY_THRESHOLD: f64 = 0.55;
 /// Trigram density threshold for `>= 8 KiB` (`k = 2`) blooms indicating high-entropy prose frames.
 const HIGH_TRIGRAM_MAX_BLOOM_DENSITY: f64 = 0.12;
-/// Adapted target raw bytes per `.stpk` frame for unique high-entropy prose streams (32 KiB).
-const ADAPTIVE_PROSE_FRAME_RAW_BYTES: usize = 32 * 1024;
+/// Adapted target raw bytes per `.stpk` frame for unique high-entropy prose streams (16 KiB).
+const ADAPTIVE_PROSE_FRAME_RAW_BYTES: usize = 16 * 1024;
 /// Minimum compression savings required for binary blob frames before falling back to `Codec::None`.
 const BLOB_MIN_SAVINGS_PCT: u8 = 12;
 /// Unconditional remote `.stpk` coalescing gap (`32 KiB`) bridged regardless of waste ratio.
@@ -1523,11 +1524,12 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
         let raw = std::mem::take(&mut self.cur_raw);
         let chunks = std::mem::take(&mut self.cur_chunks);
         if self.options.write_threads > 1 {
+            let per_thread_frames = if self.adaptive_prose_active { 8 } else { 4 };
             let batch_cap = self
                 .options
                 .write_threads
                 .clamp(1, MAX_PARALLEL_THREADS)
-                .saturating_mul(4);
+                .saturating_mul(per_thread_frames);
             if !self.pending_frames.is_empty()
                 && (self.pending_frames.len() >= batch_cap
                     || self.pending_frame_raw_bytes.saturating_add(raw.len())
@@ -1556,7 +1558,7 @@ impl<W: Write + Seek> ChunkPackBuilder<W> {
 
     /// Deterministically decides once after `DICT_TRAIN_MIN_RAW` (`2 MiB`) of non-bypass frames
     /// whether to adapt `effective_target_frame_raw_bytes` from `256 KiB` to:
-    /// - `32 KiB` (+ auto-dict) for unique high-entropy prose streams (FineWeb),
+    /// - `16 KiB` (+ auto-dict) for unique high-entropy prose streams (FineWeb),
     /// - `512 KiB` for high-dedup streams (`2 * dedup_hits >= unique_chunks`, `>= 33%` dedup ratio, e.g. `W1_agents`),
     /// - `128 KiB` for low-dedup non-prose streams (e.g. `W2` / `JSONBench`).
     ///
@@ -6213,7 +6215,7 @@ pub(crate) mod tests {
     fn upgrade2_adaptive_prose_frame_sizing_1t_eq_4t_and_trigram_pruning() {
         // Generate > 4.5 MiB of unique English-like prose (~1,200 x ~4 KiB chunks from a
         // 1,600-word vocabulary, matching FineWeb's ~3k-5k distinct trigrams per 32 KiB) so
-        // 256 KiB initial frames trigger 32 KiB adaptation at 2 MiB with 2 KiB per-frame blooms.
+        // 256 KiB initial frames trigger 16 KiB adaptation at 2 MiB with 2-frame (32 KiB) 2 KiB blooms.
         const NUM_CHUNKS: usize = 1_200;
         let alpha = b"abcdefghijklmnoprstuvwy";
         let mut rng_state = 0x1234_5678_9abc_def0u64;
@@ -6273,17 +6275,17 @@ pub(crate) mod tests {
         let toc = reader.toc();
         assert!(
             toc.frames.len() >= 80,
-            "expected adapted 32 KiB frames after 2 MiB, got only {} frames",
+            "expected adapted 16 KiB frames after 2 MiB, got only {} frames",
             toc.frames.len()
         );
-        // First ~8 frames (~2 MiB) stay near 256 KiB; subsequent adapted frames are <= 32 KiB.
+        // First ~8 frames (~2 MiB) stay near 256 KiB; subsequent adapted frames are <= 16 KiB.
         assert!(toc.frames[0].raw_len as usize >= 200 * 1024);
         let adapted_frames = &toc.frames[20..toc.frames.len() - 1];
         assert!(!adapted_frames.is_empty());
         for f in adapted_frames {
             assert!(
                 (f.raw_len as usize) <= ADAPTIVE_PROSE_FRAME_RAW_BYTES,
-                "adapted frame raw_len {} exceeded 32 KiB",
+                "adapted frame raw_len {} exceeded 16 KiB",
                 f.raw_len
             );
             assert_eq!(f.filter_off, 0);
@@ -6302,7 +6304,7 @@ pub(crate) mod tests {
         assert!(
             ts.group_frame_spans
                 .contains(&ADAPTIVE_PROSE_TRIGRAM_GROUP_FRAMES),
-            "adapted prose frames must emit per-frame (frame_span=1) 2 KiB trigram blooms"
+            "adapted prose frames must emit 2-frame (frame_span=2) 2 KiB trigram blooms"
         );
         let trigrams = reader.read_trigram_section().unwrap();
         let needle = b"quantum_flux_calibration_sentinel";
@@ -6316,7 +6318,7 @@ pub(crate) mod tests {
                 if fid >= 20 {
                     assert!(
                         bloom.as_bytes().len() <= 2048,
-                        "adapted prose per-frame bloom {} exceeded 2 KiB",
+                        "adapted prose 2-frame bloom {} exceeded 2 KiB",
                         bloom.as_bytes().len()
                     );
                 }
@@ -7487,8 +7489,8 @@ pub(crate) mod tests {
         assert_eq!(def_opts.target_frame_raw_bytes, 256 * 1024);
 
         // 2. Adaptive prose (>= 2 MiB of diverse English-like prose with ~6,000+ distinct trigrams
-        //    per 256 KiB frame, matching FineWeb) triggers 32 KiB prose frames, per-frame 2 KiB
-        //    TS02 blooms (`frame_span == 1`), auto-dict activation (non-Miri), and zero-FN pruning.
+        //    per 256 KiB frame, matching FineWeb) triggers 16 KiB prose frames, 2-frame (32 KiB)
+        //    2 KiB TS02 blooms (`frame_span == 2`), auto-dict activation (non-Miri), and zero-FN pruning.
         let mut rng = 0x2626_cafe_babe_1234u64;
         let alpha = b"abcdefghijklmnoprstuvwy"; // 23 letters (excludes q, x, z so test needles are disjoint)
         let vocab: Vec<String> = (0..2_500)
@@ -7555,15 +7557,21 @@ pub(crate) mod tests {
         assert_ne!(
             reader.postscript().flags & PACK_FLAG_HAS_DICT,
             0,
-            "adaptive 32 KiB prose switch must auto-enable Zstd dictionary training"
+            "adaptive 16 KiB prose switch must auto-enable Zstd dictionary training"
         );
 
         let ts = reader.trigram_section_cached().unwrap();
         assert!(
             ts.group_frame_spans
                 .iter()
-                .all(|&s| s == ADAPTIVE_PROSE_TRIGRAM_GROUP_FRAMES),
-            "expected per-frame TS02 groups (frame_span=1), got {:?}",
+                .all(|&s| (1..=ADAPTIVE_PROSE_TRIGRAM_GROUP_FRAMES).contains(&s)),
+            "expected TS02 groups with frame_span in 1..=2, got {:?}",
+            ts.group_frame_spans
+        );
+        assert!(
+            ts.group_frame_spans
+                .contains(&ADAPTIVE_PROSE_TRIGRAM_GROUP_FRAMES),
+            "expected adapted prose TS02 groups with frame_span=2, got {:?}",
             ts.group_frame_spans
         );
         assert_eq!(
@@ -7573,7 +7581,7 @@ pub(crate) mod tests {
                 .sum::<usize>(),
             reader.toc().frames.len()
         );
-        // Adapted 32 KiB prose frames emit <= 2 KiB per-frame blooms.
+        // Adapted 16 KiB prose frames emit <= 2 KiB 2-frame blooms.
         let frame_blooms = reader.read_trigram_section().unwrap();
         assert!(
             frame_blooms
@@ -7581,7 +7589,7 @@ pub(crate) mod tests {
                 .skip(12)
                 .filter_map(Option::as_ref)
                 .any(|b| b.as_bytes().len() <= 2048),
-            "expected adapted 32 KiB prose frames to use 2 KiB per-frame blooms"
+            "expected adapted 16 KiB prose frames to use 2 KiB 2-frame blooms"
         );
         assert!(
             crate::payload::search::pack_short_circuits_all(
@@ -7942,5 +7950,185 @@ pub(crate) mod tests {
         );
         assert!(ts.group_blooms.first().unwrap().is_some());
         assert!(ts.group_blooms.last().unwrap().is_none());
+    }
+
+    #[test]
+    fn pass27e_adaptive_prose_16k_frames_and_2frame_ts02_superframe_pruning() {
+        // Generate > 4.5 MiB of unique synthetic prose from a 1,800-word vocabulary over
+        // the 23-letter alphabet excluding `q, x, z` (avoiding k=2 bloom saturation while
+        // exceeding 2 MiB so adaptive 16 KiB frames + 2-frame TS02 super-frames activate).
+        const NUM_CHUNKS: usize = 1_200;
+        let alpha = b"abcdefghijklmnoprstuvwy";
+        let mut rng_state = 0x27e2_cafe_babe_9876u64;
+        let mut next_u64 = || {
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            rng_state
+        };
+        let vocab: Vec<Vec<u8>> = (0..1_800usize)
+            .map(|_| {
+                let wlen = 5 + (next_u64() as usize % 3);
+                (0..wlen)
+                    .map(|_| alpha[(next_u64() as usize) % alpha.len()])
+                    .collect()
+            })
+            .collect();
+
+        let present_needle = b"quantum_flux_calibration_sentinel";
+        let absent_needle = b"absent_quartz_zenith_xeno_probe";
+        let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(NUM_CHUNKS);
+        for idx in 0..NUM_CHUNKS {
+            let mut doc = Vec::with_capacity(4_100);
+            doc.extend_from_slice(format!("prose_{idx:05}: ").as_bytes());
+            while doc.len() < 4_000 {
+                doc.extend_from_slice(&vocab[(next_u64() as usize) % vocab.len()]);
+                doc.push(b' ');
+            }
+            if idx == 700 || idx == 1_050 {
+                doc.push(b' ');
+                doc.extend_from_slice(present_needle);
+                doc.push(b' ');
+            }
+            chunks.push(doc);
+        }
+
+        let build_pack = |threads: usize| -> Vec<u8> {
+            let opts = PackWriteOptions {
+                codec: test_codec(),
+                zstd_level: 1,
+                write_threads: threads,
+                ..PackWriteOptions::default()
+            };
+            let mut pb = ChunkPackBuilder::new([0x27u8; 16], opts);
+            for ch in &chunks {
+                pb.intern_chunk(ch).unwrap();
+            }
+            let mut out = Vec::new();
+            pb.finish(&mut out).unwrap();
+            out
+        };
+
+        let bytes_1t = build_pack(1);
+        let bytes_4t = build_pack(4);
+        assert_eq!(
+            bytes_1t, bytes_4t,
+            "1T and 4T adaptive 16 KiB prose packs must be bit-for-bit identical"
+        );
+
+        let reader = ChunkPackReader::open(Arc::new(SliceReader::new(bytes_1t))).unwrap();
+        let toc = reader.toc();
+        assert!(
+            toc.frames.len() >= 140,
+            "expected adapted 16 KiB frames after 2 MiB, got only {} frames",
+            toc.frames.len()
+        );
+        assert!(toc.frames[0].raw_len as usize >= 200 * 1024);
+        let adapted_start = 16usize;
+        let adapted_frames = &toc.frames[adapted_start..];
+        assert!(!adapted_frames.is_empty());
+        for f in adapted_frames {
+            assert!(
+                (f.raw_len as usize) <= ADAPTIVE_PROSE_FRAME_RAW_BYTES,
+                "adapted frame raw_len {} exceeded 16 KiB",
+                f.raw_len
+            );
+            assert_eq!(f.filter_off, 0);
+            assert_eq!(f.filter_len, 0);
+        }
+
+        #[cfg(not(miri))]
+        assert_ne!(
+            toc.postscript.flags & PACK_FLAG_HAS_DICT,
+            0,
+            "adaptive 16 KiB prose pack > 4 MiB must automatically train a Zstd dictionary"
+        );
+
+        let ts = reader.trigram_section_cached().unwrap();
+        assert!(
+            ts.group_frame_spans
+                .contains(&ADAPTIVE_PROSE_TRIGRAM_GROUP_FRAMES),
+            "expected 2-frame TS02 super-frames (frame_span=2), got {:?}",
+            ts.group_frame_spans
+        );
+        assert!(
+            ts.group_frame_spans
+                .iter()
+                .all(|&s| (1..=ADAPTIVE_PROSE_TRIGRAM_GROUP_FRAMES).contains(&s)),
+            "every TS02 group span must be in 1..=2, got {:?}",
+            ts.group_frame_spans
+        );
+        assert_eq!(
+            ts.group_frame_spans
+                .iter()
+                .map(|&s| s as usize)
+                .sum::<usize>(),
+            toc.frames.len()
+        );
+
+        let trigrams = reader.read_trigram_section().unwrap();
+        assert_eq!(trigrams.len(), toc.frames.len());
+        let mut frame_cursor = 0usize;
+        let mut two_frame_groups = 0usize;
+        for &span in &ts.group_frame_spans {
+            let span_usize = span as usize;
+            if span == ADAPTIVE_PROSE_TRIGRAM_GROUP_FRAMES {
+                let b0 = trigrams[frame_cursor]
+                    .as_ref()
+                    .expect("2-frame adaptive prose group must emit a non-saturated bloom");
+                let b1 = trigrams[frame_cursor + 1]
+                    .as_ref()
+                    .expect("second frame in 2-frame group must map to the group bloom");
+                assert!(
+                    b0.as_bytes().len() <= 2048,
+                    "2-frame TS02 bloom {} exceeded 2 KiB",
+                    b0.as_bytes().len()
+                );
+                assert_eq!(
+                    b0.as_bytes(),
+                    b1.as_bytes(),
+                    "both frames in a 2-frame TS02 super-frame must map to equal blooms"
+                );
+                two_frame_groups += 1;
+            }
+            frame_cursor += span_usize;
+        }
+        assert_eq!(frame_cursor, toc.frames.len());
+        assert!(two_frame_groups > 0);
+
+        // Absent needle (contains q/x/z) short-circuits all adapted frames and the whole pack.
+        let mut absent_hashes = Vec::new();
+        crate::simd::trigram::extract_trigram_hashes(absent_needle, false, &mut absent_hashes);
+        for (fid, bloom_opt) in trigrams.iter().enumerate().skip(adapted_start) {
+            let bloom = bloom_opt
+                .as_ref()
+                .expect("adapted prose frames must retain non-saturated blooms");
+            assert!(
+                !bloom.may_contain_hashes(&absent_hashes),
+                "adapted frame {fid} failed to short-circuit absent q/x/z needle"
+            );
+        }
+        assert!(
+            crate::payload::search::pack_short_circuits_all(&reader, absent_needle, false).unwrap(),
+            "absent q/x/z needle must short-circuit the entire pack"
+        );
+
+        // Present rare sentinel is never falsely pruned and finds exact chunk IDs.
+        assert!(
+            !crate::payload::search::pack_short_circuits_all(&reader, present_needle, false)
+                .unwrap(),
+            "present sentinel needle must never be falsely pruned"
+        );
+        let hits =
+            crate::payload::search::search_pack_chunks(&reader, present_needle, false).unwrap();
+        assert_eq!(hits, vec![700, 1_050]);
+
+        // Scattered read_chunks across pre-adaptation and adapted 16 KiB frames matches exact bytes.
+        let sample_ids = [0u32, 350, 700, 1_050, (NUM_CHUNKS - 1) as u32];
+        let got = reader.read_chunks(&sample_ids).unwrap();
+        assert_eq!(got.len(), sample_ids.len());
+        for &cid in &sample_ids {
+            assert_eq!(got[&cid], chunks[cid as usize]);
+        }
     }
 }

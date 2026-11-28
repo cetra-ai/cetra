@@ -223,10 +223,12 @@ impl Utf8Data {
     /// Validates UTF-8, offset monotonicity, exact end byte length, and UTF-8 char boundaries on every offset.
     pub fn try_new(offsets: Vec<u32>, bytes: Vec<u8>) -> Result<Self, ColumnError> {
         validate_offsets(&offsets, bytes.len())?;
-        let s = std::str::from_utf8(&bytes).map_err(|_| ColumnError::InvalidUtf8)?;
-        for &o in &offsets {
-            if !s.is_char_boundary(o as usize) {
-                return Err(ColumnError::InvalidUtf8);
+        if !bytes.is_ascii() {
+            let s = std::str::from_utf8(&bytes).map_err(|_| ColumnError::InvalidUtf8)?;
+            for &o in &offsets {
+                if !s.is_char_boundary(o as usize) {
+                    return Err(ColumnError::InvalidUtf8);
+                }
             }
         }
         Ok(Self { offsets, bytes })
@@ -5055,5 +5057,48 @@ mod tests {
         assert!(Column::try_new_const(ScalarValue::I64(1), u32::MAX as usize).is_ok());
         let err = Column::try_new_const(ScalarValue::I64(1), u32::MAX as usize + 1).unwrap_err();
         assert!(matches!(err, ColumnError::Overflow { .. }));
+    }
+
+    #[test]
+    fn utf8_data_try_new_ascii_fast_path_and_non_ascii_boundary_checks() {
+        // Pure ASCII valid
+        let ascii = Utf8Data::try_new(vec![0, 5, 5, 11], b"hello world".to_vec()).unwrap();
+        assert_eq!(ascii.len(), 3);
+        assert_eq!(ascii.get(0), Some("hello"));
+        assert_eq!(ascii.get(1), Some(""));
+        assert_eq!(ascii.get(2), Some(" world"));
+
+        // Pure ASCII non-monotonic offsets rejected
+        assert!(matches!(
+            Utf8Data::try_new(vec![0, 5, 4, 11], b"hello world".to_vec()),
+            Err(ColumnError::InvalidBatch {
+                reason: "offsets must be monotonic",
+            })
+        ));
+
+        // Pure ASCII mismatched end offset rejected
+        assert!(matches!(
+            Utf8Data::try_new(vec![0, 5, 10], b"hello world".to_vec()),
+            Err(ColumnError::InvalidBatch {
+                reason: "last offset does not match buffer length",
+            })
+        ));
+
+        // Valid multi-byte UTF-8 accepted ("é" is 2 bytes, "🦀" is 4 bytes)
+        let mb = Utf8Data::try_new(vec![0, 2, 6], "é🦀".as_bytes().to_vec()).unwrap();
+        assert_eq!(mb.get(0), Some("é"));
+        assert_eq!(mb.get(1), Some("🦀"));
+
+        // Invalid UTF-8 rejected
+        assert!(matches!(
+            Utf8Data::try_new(vec![0, 2], vec![0xFF, 0xFE]),
+            Err(ColumnError::InvalidUtf8)
+        ));
+
+        // Offset splitting a multi-byte char rejected
+        assert!(matches!(
+            Utf8Data::try_new(vec![0, 1, 6], "é🦀".as_bytes().to_vec()),
+            Err(ColumnError::InvalidUtf8)
+        ));
     }
 }
