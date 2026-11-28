@@ -58,6 +58,8 @@ pub(crate) const ROW_COORD_ROW_COL: &str = "__cetra_row_idx";
 const RG_SPLIT_OPEN_THRESHOLD_BYTES: u64 = 16 * 1024 * 1024;
 /// Maximum rows emitted per 0-column batch on the zero-I/O `COUNT(*)` fast path.
 const ZERO_IO_COUNT_MAX_CHUNK: usize = 65_536;
+/// Matches `cetra_statam::parallel::MAX_PARALLEL_THREADS` (which is `pub(crate)` in `cetra-statam`).
+const MAX_QUERY_READ_THREADS: usize = 32;
 
 /// Native Statam [`ScanSource`].
 #[derive(Clone)]
@@ -195,6 +197,23 @@ impl StatamSource {
             .collect()
     }
 
+    /// Prunes files against `spec` using file-level metadata (day bounds, time range, `around_ns`,
+    /// and empty `id_lookups`), returning `(file_ordinal, file_meta)` pairs in `self.files` order.
+    pub(crate) fn prune_files_for_spec(
+        &self,
+        spec: &ScanSpec,
+    ) -> Result<Vec<(u32, Arc<FileMeta>)>, QueryError> {
+        self.prune_files_indexed(spec)
+    }
+
+    fn row_coord_schema(&self, spec: &ScanSpec) -> Result<Arc<Schema>, QueryError> {
+        let base_schema = self.projected_schema(spec)?;
+        let mut fields = base_schema.fields().to_vec();
+        fields.push(Field::new(ROW_COORD_FILE_COL, DataType::I64, false));
+        fields.push(Field::new(ROW_COORD_ROW_COL, DataType::I64, false));
+        Schema::try_new_arc(fields).map_err(Into::into)
+    }
+
     /// Opens partition streams emitting the projected columns from `spec` PLUS two trailing
     /// `I64` coordinate columns ([`ROW_COORD_FILE_COL`], [`ROW_COORD_ROW_COL`]) suitable for
     /// a subsequent [`Self::take_rows`] Phase-2 fetch.
@@ -203,12 +222,28 @@ impl StatamSource {
         spec: &ScanSpec,
         ctx: &ExecContext,
     ) -> Result<PartitionStreamsWithSchema, QueryError> {
-        let base_schema = self.projected_schema(spec)?;
-        let mut fields = base_schema.fields().to_vec();
-        fields.push(Field::new(ROW_COORD_FILE_COL, DataType::I64, false));
-        fields.push(Field::new(ROW_COORD_ROW_COL, DataType::I64, false));
-        let coord_schema = Schema::try_new_arc(fields)?;
+        let coord_schema = self.row_coord_schema(spec)?;
         let streams = self.open_partitions_inner(spec, ctx, Arc::clone(&coord_schema), true)?;
+        Ok((streams, coord_schema))
+    }
+
+    /// Opens partition streams for a pre-pruned subset of `kept_files` (each preserving its
+    /// original `file_ordinal` into `self.files`), emitting the projected columns from `spec`
+    /// PLUS [`ROW_COORD_FILE_COL`] and [`ROW_COORD_ROW_COL`] for a subsequent [`Self::take_rows`].
+    pub(crate) fn open_with_row_coords_for_files(
+        &self,
+        spec: &ScanSpec,
+        kept_files: Vec<(u32, Arc<FileMeta>)>,
+        ctx: &ExecContext,
+    ) -> Result<PartitionStreamsWithSchema, QueryError> {
+        let coord_schema = self.row_coord_schema(spec)?;
+        let streams = self.open_partitions_for_kept_files(
+            spec,
+            kept_files,
+            ctx,
+            Arc::clone(&coord_schema),
+            true,
+        )?;
         Ok((streams, coord_schema))
     }
 
@@ -279,7 +314,8 @@ impl StatamSource {
         res: &mut Reservation,
         res_before: usize,
     ) -> Result<Vec<Batch>, QueryError> {
-        let (read_threads, executor) = make_query_executor(ctx);
+        let (read_threads, executor) =
+            make_query_executor(ctx, ctx.target_partitions.clamp(1, MAX_QUERY_READ_THREADS));
         let mut out_batches: Vec<Batch> = Vec::new();
 
         for (&file_ord, row_ids) in by_file {
@@ -412,8 +448,34 @@ impl StatamSource {
             return Ok(Vec::new());
         }
         let kept_files = self.prune_files_indexed(spec)?;
-        if kept_files.is_empty() {
+        self.open_partitions_for_kept_files(
+            spec,
+            kept_files,
+            ctx,
+            projected_schema,
+            emit_row_coords,
+        )
+    }
+
+    fn open_partitions_for_kept_files(
+        &self,
+        spec: &ScanSpec,
+        kept_files: Vec<(u32, Arc<FileMeta>)>,
+        ctx: &ExecContext,
+        projected_schema: Arc<Schema>,
+        emit_row_coords: bool,
+    ) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+        if spec.limit == Some(0) || kept_files.is_empty() {
             return Ok(Vec::new());
+        }
+        for (file_ord, file) in &kept_files {
+            if (*file_ord as usize) >= self.files.len()
+                || self.files[*file_ord as usize].id != file.id
+            {
+                return Err(QueryError::internal(
+                    "kept_files entry does not match source file_ordinal",
+                ));
+            }
         }
         let kept_metas: Vec<Arc<FileMeta>> =
             kept_files.iter().map(|(_, f)| Arc::clone(f)).collect();
@@ -452,10 +514,12 @@ impl StatamSource {
             return Ok(Vec::new());
         }
 
-        // M3.5.3: When only 1 partition is produced (1-RG heavy decode / 1-RG `.stpk` search),
-        // dispatch Statam's internal parallel decode/search onto `ctx.workers` via `run_helping`.
-        let (read_threads, executor) = if groups.len() == 1 && !self.chunk_to_batch_size {
-            make_query_executor(ctx)
+        // M3.5.3 / Opt 5: When fewer streams than `target` are produced (e.g. 1-RG heavy decode,
+        // 1-RG `.stpk` search, or wave-1 opening 1-2 files), give each stream `target / groups.len()`
+        // threads via `WorkerPoolExecutor` (`run_helping`).
+        let (read_threads, executor) = if !self.chunk_to_batch_size && groups.len() < target {
+            let per_group = (target / groups.len()).clamp(1, MAX_QUERY_READ_THREADS);
+            make_query_executor(ctx, per_group)
         } else {
             (1, None)
         };
@@ -669,8 +733,14 @@ fn validate_file_schema(
     Ok(full_to_file)
 }
 
-fn make_query_executor(ctx: &ExecContext) -> (usize, Option<Arc<dyn TaskExecutor>>) {
-    let threads = ctx.target_partitions.clamp(1, 4);
+fn make_query_executor(
+    ctx: &ExecContext,
+    max_threads: usize,
+) -> (usize, Option<Arc<dyn TaskExecutor>>) {
+    let threads = max_threads
+        .min(ctx.target_partitions)
+        .min(ctx.workers.num_workers())
+        .clamp(1, MAX_QUERY_READ_THREADS);
     if threads > 1 && ctx.workers.num_workers() > 1 {
         let exec: Arc<dyn TaskExecutor> = Arc::new(WorkerPoolExecutor::new(
             Arc::clone(&ctx.workers),
@@ -4855,5 +4925,347 @@ pub(crate) mod tests {
         };
         assert!(matches!(err, QueryError::CorruptData(_)), "got {err:?}");
         assert_eq!(queue.take(10), vec![file.id]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prune_files_for_spec_and_open_with_row_coords_for_files_preserve_ordinals_and_suspects()
+     {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut s0 = span_row(1, 0, ns(5, 10), ns(5, 11));
+        s0.name = "file0".to_owned();
+        let mut s1a = span_row(2, 0, ns(6, 10), ns(6, 11));
+        s1a.name = "file1-a".to_owned();
+        let mut s1b = span_row(3, 0, ns(6, 20), ns(6, 21));
+        s1b.name = "file1-b".to_owned();
+        let mut s3 = span_row(4, 0, ns(7, 10), ns(7, 11));
+        s3.name = "file3".to_owned();
+
+        let f0 = put_statam_file(&store, FileTable::Spans, 1, day(5), &span_rows(&[s0])).await;
+        let f1 =
+            put_statam_file(&store, FileTable::Spans, 1, day(6), &span_rows(&[s1a, s1b])).await;
+        let empty_f2 = Arc::new(FileMeta {
+            rows: 0,
+            id: crate::catalog::FileId(Uuid::now_v7()),
+            ..(*f1).clone()
+        });
+        let f3 = put_statam_file(&store, FileTable::Spans, 1, day(7), &span_rows(&[s3])).await;
+
+        let schema = FileTable::Spans.column_schema();
+        let start_idx = schema.index_of(spans::START_TIME).unwrap();
+        let name_idx = schema.index_of(spans::NAME).unwrap();
+
+        let queue = Arc::new(VerifyQueue::default());
+        let suspects = Suspects::new(Arc::clone(&queue));
+        let source = StatamSource::new(
+            StorageIo::from_store(store),
+            FileTable::Spans,
+            Arc::clone(&schema),
+            vec![
+                Arc::clone(&f0),
+                Arc::clone(&f1),
+                Arc::clone(&empty_f2),
+                Arc::clone(&f3),
+            ],
+            Arc::from([]),
+            Arc::new(MetadataCache::new(4 * 1024 * 1024)),
+            suspects.clone(),
+            tokio::runtime::Handle::current(),
+        );
+        let ctx = make_exec_ctx(64 * 1024 * 1024, CancelToken::new());
+
+        let full_spec = ScanSpec {
+            projection: Some(vec![start_idx]),
+            ..ScanSpec::default()
+        };
+        let kept_all = source.prune_files_for_spec(&full_spec).unwrap();
+        assert_eq!(
+            kept_all
+                .iter()
+                .map(|(ord, f)| (*ord, f.id))
+                .collect::<Vec<_>>(),
+            vec![(0, f0.id), (1, f1.id), (3, f3.id)]
+        );
+
+        let day6_spec = ScanSpec {
+            projection: Some(vec![start_idx]),
+            time_range: TimeRangeHint {
+                min_ns: Some(ns(6, 0)),
+                max_ns: Some(ns(6, 100)),
+                around_ns: None,
+            },
+            ..ScanSpec::default()
+        };
+        let kept_day6 = source.prune_files_for_spec(&day6_spec).unwrap();
+        assert_eq!(
+            kept_day6
+                .iter()
+                .map(|(ord, f)| (*ord, f.id))
+                .collect::<Vec<_>>(),
+            vec![(1, f1.id)]
+        );
+
+        // Contradicting time range and empty id lookup both prune to empty.
+        let bad_range = ScanSpec {
+            time_range: TimeRangeHint {
+                min_ns: Some(ns(6, 10)),
+                max_ns: Some(ns(6, 5)),
+                around_ns: None,
+            },
+            ..ScanSpec::default()
+        };
+        assert!(source.prune_files_for_spec(&bad_range).unwrap().is_empty());
+        let empty_lookup = ScanSpec {
+            id_lookups: vec![IdLookupHint::Fixed16 {
+                column: spans::TRACE_ID.to_owned(),
+                values: Vec::new(),
+            }],
+            ..ScanSpec::default()
+        };
+        assert!(
+            source
+                .prune_files_for_spec(&empty_lookup)
+                .unwrap()
+                .is_empty()
+        );
+
+        // `open_with_row_coords_for_files` matches `open_with_row_coords` schema, returns empty
+        // on `limit == Some(0)` or empty `kept_files` without recording suspects, rejects
+        // out-of-bounds ordinals, and preserves `file_ordinal == 1` for `take_rows` + `suspects`.
+        let (_, full_schema) = source.open_with_row_coords(&full_spec, &ctx).unwrap();
+        let fresh_queue = Arc::new(VerifyQueue::default());
+        let fresh_suspects = Suspects::new(Arc::clone(&fresh_queue));
+        let subset_source = StatamSource::new(
+            source.io.clone(),
+            FileTable::Spans,
+            Arc::clone(&schema),
+            source.files.clone(),
+            Arc::from([]),
+            Arc::clone(&source.metadata_cache),
+            fresh_suspects.clone(),
+            source.runtime.clone(),
+        );
+
+        let (empty_streams, empty_schema) = subset_source
+            .open_with_row_coords_for_files(&full_spec, Vec::new(), &ctx)
+            .unwrap();
+        assert!(empty_streams.is_empty());
+        assert_eq!(empty_schema, full_schema);
+
+        let limit_zero = ScanSpec {
+            limit: Some(0),
+            ..full_spec.clone()
+        };
+        let (zero_streams, _) = subset_source
+            .open_with_row_coords_for_files(&limit_zero, kept_day6.clone(), &ctx)
+            .unwrap();
+        assert!(zero_streams.is_empty());
+        fresh_suspects.report(&crate::error::EngineError::from_query(
+            &QueryError::CorruptData("empty-check".to_owned()),
+        ));
+        assert!(fresh_queue.take(10).is_empty());
+
+        let oob_err = match subset_source.open_with_row_coords_for_files(
+            &full_spec,
+            vec![(99, Arc::clone(&f1))],
+            &ctx,
+        ) {
+            Ok(_) => panic!("expected Internal error for out-of-bounds file_ordinal"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(oob_err, QueryError::Internal(_)),
+            "got {oob_err:?}"
+        );
+
+        let mismatch_err = match subset_source.open_with_row_coords_for_files(
+            &full_spec,
+            vec![(0, Arc::clone(&f1))],
+            &ctx,
+        ) {
+            Ok(_) => panic!("expected Internal error for mismatched FileMeta.id"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(mismatch_err, QueryError::Internal(_)),
+            "got {mismatch_err:?}"
+        );
+
+        let (streams, subset_schema) = subset_source
+            .open_with_row_coords_for_files(&full_spec, kept_day6, &ctx)
+            .unwrap();
+        assert_eq!(subset_schema, full_schema);
+        assert_eq!(subset_schema.fields()[1].name, ROW_COORD_FILE_COL);
+        assert_eq!(subset_schema.fields()[2].name, ROW_COORD_ROW_COL);
+
+        // Suspects must record ONLY `f1.id` (the opened subset), not `f0.id` or `f3.id`.
+        fresh_suspects.report(&crate::error::EngineError::from_query(
+            &QueryError::CorruptData("probe".to_owned()),
+        ));
+        assert_eq!(fresh_queue.take(10), vec![f1.id]);
+
+        let (coords, names) = tokio::task::spawn_blocking(move || {
+            let mut coords: Vec<(u32, u64)> = Vec::new();
+            let mut res = ctx.pool.register("subset_coords", false);
+            for mut st in streams {
+                while let Some(b) = st.next_batch(&ctx.eval.cancel, Some(&mut res)).unwrap() {
+                    for r in b.selection().to_indices(b.raw_len()).unwrap() {
+                        let ScalarValue::I64(fo) =
+                            b.column(1).unwrap().get_scalar(r as usize).unwrap()
+                        else {
+                            panic!("expected I64 file_ord");
+                        };
+                        let ScalarValue::I64(ri) =
+                            b.column(2).unwrap().get_scalar(r as usize).unwrap()
+                        else {
+                            panic!("expected I64 row_idx");
+                        };
+                        assert_eq!(fo, 1, "original file_ordinal must be preserved");
+                        coords.push((fo as u32, ri as u64));
+                    }
+                }
+                res.free();
+            }
+
+            let mut take_res = ctx.pool.register("subset_take", false);
+            let batches = subset_source
+                .take_rows(&coords, &[name_idx], &ctx, &mut take_res)
+                .unwrap();
+            let mut names = Vec::new();
+            for b in &batches {
+                for r in b.selection().to_indices(b.raw_len()).unwrap() {
+                    let ScalarValue::Utf8(n) = b.column(0).unwrap().get_scalar(r as usize).unwrap()
+                    else {
+                        panic!("expected Utf8");
+                    };
+                    names.push(n);
+                }
+            }
+            drop(batches);
+            take_res.free();
+            (coords, names)
+        })
+        .await
+        .unwrap();
+        assert_eq!(coords.len(), 2);
+        assert_eq!(names, vec!["file1-a".to_owned(), "file1-b".to_owned()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intra_group_parallelism_scales_between_one_and_target_partitions() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let b1: Vec<_> = (0..16_u16)
+            .map(|i| span_row(i + 1, 0, ns(5, 10 + i64::from(i)), ns(5, 11 + i64::from(i))))
+            .collect();
+        let b2: Vec<_> = (16..32_u16)
+            .map(|i| span_row(i + 1, 0, ns(6, 10 + i64::from(i)), ns(6, 11 + i64::from(i))))
+            .collect();
+        let f1 = put_statam_file(&store, FileTable::Spans, 1, day(5), &span_rows(&b1)).await;
+        let f2 = put_statam_file(&store, FileTable::Spans, 1, day(6), &span_rows(&b2)).await;
+
+        let schema = FileTable::Spans.column_schema();
+        let start_idx = schema.index_of(spans::START_TIME).unwrap();
+        let source = StatamSource::new(
+            StorageIo::from_store(store),
+            FileTable::Spans,
+            Arc::clone(&schema),
+            vec![Arc::clone(&f1), Arc::clone(&f2)],
+            Arc::from([]),
+            Arc::new(MetadataCache::new(4 * 1024 * 1024)),
+            Suspects::new(Arc::new(VerifyQueue::default())),
+            tokio::runtime::Handle::current(),
+        );
+
+        let workers = Arc::new(WorkerPool::new(8).unwrap());
+        let ctx_8 = ExecContext {
+            pool: GlobalPool::standalone(64 * 1024 * 1024),
+            eval: EvalContext::new(0, CancelToken::new()),
+            spill: Arc::new(SpillManager::with_fixed_cap(PathBuf::new(), 0)),
+            workers: Arc::clone(&workers),
+            batch_size: 8192,
+            target_partitions: 8,
+            metrics: ExecMetrics::new(),
+        };
+
+        // `make_query_executor` clamps to `1..=MAX_QUERY_READ_THREADS`,
+        // `ctx.target_partitions`, and `ctx.workers.num_workers()`.
+        assert!(make_query_executor(&ctx_8, 1).1.is_none());
+        assert_eq!(make_query_executor(&ctx_8, 1).0, 1);
+
+        let (t4, exec4) = make_query_executor(&ctx_8, 4);
+        assert_eq!(t4, 4);
+        assert_eq!(exec4.expect("executor for 4 threads").max_threads(), 4);
+
+        let (t_clamped, exec_clamped) = make_query_executor(&ctx_8, 64);
+        assert_eq!(t_clamped, 8);
+        assert_eq!(
+            exec_clamped.expect("executor clamped to 8").max_threads(),
+            8
+        );
+
+        let ctx_64 = ExecContext {
+            target_partitions: 64,
+            ..ctx_8.clone()
+        };
+        let (t_cap, exec_cap) = make_query_executor(&ctx_64, 64);
+        assert_eq!(t_cap, 8);
+        assert_eq!(
+            exec_cap
+                .expect("executor clamped by workers.num_workers() == 8")
+                .max_threads(),
+            8
+        );
+
+        let ctx_4 = ExecContext {
+            workers: Arc::new(WorkerPool::new(4).unwrap()),
+            target_partitions: 16,
+            ..ctx_8.clone()
+        };
+        let (t_workers, exec_workers) = make_query_executor(&ctx_4, 16);
+        assert_eq!(t_workers, 4);
+        assert_eq!(
+            exec_workers
+                .expect("executor clamped by workers.num_workers() == 4")
+                .max_threads(),
+            4
+        );
+
+        let ctx_1 = ExecContext {
+            workers: Arc::new(WorkerPool::new(1).unwrap()),
+            target_partitions: 8,
+            ..ctx_8.clone()
+        };
+        let (t_one, exec_one) = make_query_executor(&ctx_1, 8);
+        assert_eq!(t_one, 1);
+        assert!(exec_one.is_none());
+
+        // 2 single-RG files (`1 < groups.len() == 2 < target_partitions == 8`):
+        // produces 2 streams, each configured with `8 / 2 = 4` intra-group threads, and drains cleanly.
+        let spec = ScanSpec {
+            projection: Some(vec![start_idx]),
+            ..ScanSpec::default()
+        };
+        let streams = source.open_partitions(&spec, &ctx_8).unwrap();
+        assert_eq!(streams.len(), 2);
+        drop(streams);
+        let batches = drain_source(&source, &spec, &ctx_8).unwrap();
+        assert_eq!(batches.iter().map(Batch::num_rows).sum::<usize>(), 32);
+
+        let kept = source.prune_files_for_spec(&spec).unwrap();
+        let (coord_streams, _) = source
+            .open_with_row_coords_for_files(&spec, kept, &ctx_8)
+            .unwrap();
+        assert_eq!(coord_streams.len(), 2);
+        let total_coord_rows = tokio::task::spawn_blocking(move || {
+            let mut total = 0usize;
+            for mut st in coord_streams {
+                while let Some(b) = st.next_batch(&ctx_8.eval.cancel, None).unwrap() {
+                    total += b.num_rows();
+                }
+            }
+            total
+        })
+        .await
+        .unwrap();
+        assert_eq!(total_coord_rows, 32);
     }
 }

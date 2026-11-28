@@ -2,12 +2,14 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, VecDeque};
+use std::fmt;
 use std::mem::size_of;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use cetra_column::{
-    Batch, Bitmap, CancelToken, Column, ColumnError, DataType, Field, Reservation, ScalarValue,
-    Schema,
+    Batch, Bitmap, CancelToken, Column, ColumnError, DataType, Field, FlatData, Reservation,
+    ScalarValue, Schema, Selection,
 };
 
 use crate::error::QueryError;
@@ -37,6 +39,7 @@ pub const MAX_JOIN_SPILL_DEPTH: usize = 4;
 
 const CANCEL_CHECK_MASK: usize = 1023;
 const SPILL_FRAME_MIN_BYTES: usize = 4096;
+const PARALLEL_RIGHT_DRAIN_PER_TASK_MIN_BYTES: usize = 256 * 1024;
 
 /// Physical join type executed by [`execute_hash_join`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +163,7 @@ pub fn execute_hash_join(
             buffered_rows: 0,
             max_batch_bytes: 0,
             spilled: false,
+            spill_immediately: false,
             build_writers: new_writer_array(),
             build_res,
         }))
@@ -185,6 +189,1637 @@ pub fn execute_hash_join(
         pending_out: VecDeque::new(),
         phase,
     }))
+}
+
+/// Immutable in-memory probe table shared across parallel [`JoinType::LeftSemi`],
+/// [`JoinType::LeftAnti`], and [`JoinType::LeftAntiNullAware`] probe streams.
+pub struct SharedProbeTable {
+    join_type: JoinType,
+    null_equals_null: bool,
+    right_key_types: Vec<DataType>,
+    inner: ProbeTableInner,
+    _build_res: Reservation,
+}
+
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<SharedProbeTable>();
+};
+
+impl fmt::Debug for SharedProbeTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SharedProbeTable")
+            .field("join_type", &self.join_type)
+            .field("null_equals_null", &self.null_equals_null)
+            .field("key_count", &self.right_key_types.len())
+            .field("reserved_bytes", &self._build_res.size())
+            .finish()
+    }
+}
+
+enum ProbeTableInner {
+    Fixed16(Fixed16HashSet),
+    General(GeneralProbeTable),
+}
+
+struct GeneralProbeTable {
+    table: BuildTable,
+    right_key_evals: Vec<KeyEval>,
+    seed: u64,
+}
+
+/// Outcome of [`try_build_semi_anti_probe_table`].
+#[derive(Debug)]
+pub enum ProbeTableBuildOutcome {
+    /// Build side produced zero non-null rows (and no `NULL` keys for `LeftAntiNullAware`).
+    Empty,
+    /// `LeftAntiNullAware` encountered at least one `NULL` key on the build side, so every
+    /// probe row is rejected.
+    AlwaysEmpty,
+    /// Build side fit in memory; probe table is ready for [`probe_semi_anti_streams`].
+    Ready(Arc<SharedProbeTable>),
+    /// Build side exceeded the query memory share or cap; caller should fall back to spillable
+    /// [`execute_hash_join`].
+    TooLargeForMemory,
+}
+
+#[inline]
+fn hash_fixed16(k: &[u8; 16], seed: u64) -> u64 {
+    let lo = u64::from_le_bytes([k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7]]);
+    let hi = u64::from_le_bytes([k[8], k[9], k[10], k[11], k[12], k[13], k[14], k[15]]);
+    splitmix64(mix_u64(mix_u64(seed, lo), hi))
+}
+
+struct Fixed16HashSet {
+    keys: Vec<[u8; 16]>,
+    hashes: Vec<u64>,
+    buckets: Vec<u32>,
+    next: Vec<u32>,
+    seed: u64,
+}
+
+impl fmt::Debug for Fixed16HashSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Fixed16HashSet")
+            .field("len", &self.keys.len())
+            .field("buckets", &self.buckets.len())
+            .finish()
+    }
+}
+
+enum ProbeResult {
+    None,
+    All,
+    Mask { mask: Bitmap },
+}
+
+#[inline]
+fn try_for_each_selected_row(
+    selection: &Selection,
+    raw_len: usize,
+    cancel: &CancelToken,
+    mut f: impl FnMut(usize) -> Result<bool, QueryError>,
+) -> Result<usize, QueryError> {
+    let mut matched = 0usize;
+    match selection {
+        Selection::All => {
+            for r in 0..raw_len {
+                if (r & CANCEL_CHECK_MASK) == 0 && cancel.is_cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
+                if f(r)? {
+                    matched += 1;
+                }
+            }
+        }
+        Selection::Mask(mask) => {
+            for (step, r) in mask.iter_ones().enumerate() {
+                if (step & CANCEL_CHECK_MASK) == 0 && cancel.is_cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
+                if f(r)? {
+                    matched += 1;
+                }
+            }
+        }
+        Selection::Indices(indices) => {
+            for (step, &idx) in indices.iter().enumerate() {
+                if (step & CANCEL_CHECK_MASK) == 0 && cancel.is_cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
+                if f(idx as usize)? {
+                    matched += 1;
+                }
+            }
+        }
+    }
+    Ok(matched)
+}
+
+impl Fixed16HashSet {
+    fn max_index_bytes(total_rows: usize) -> (usize, usize) {
+        let num_buckets = (total_rows.saturating_mul(2)).next_power_of_two().max(16);
+        let bytes = total_rows
+            .saturating_mul(size_of::<[u8; 16]>() + size_of::<u64>() + 4)
+            .saturating_add(num_buckets.saturating_mul(4));
+        (bytes, num_buckets)
+    }
+
+    fn memory_bytes(&self) -> usize {
+        self.keys.len() * size_of::<[u8; 16]>()
+            + self.hashes.len() * size_of::<u64>()
+            + self.next.len() * 4
+            + self.buckets.len() * 4
+    }
+
+    #[inline]
+    fn insert(&mut self, k: [u8; 16]) {
+        let h = hash_fixed16(&k, self.seed);
+        let mask = self.buckets.len() - 1;
+        let slot = (h as usize) & mask;
+        let mut cur = self.buckets[slot];
+        while cur != 0 {
+            let idx = (cur - 1) as usize;
+            if self.hashes[idx] == h && self.keys[idx] == k {
+                return;
+            }
+            cur = self.next[idx];
+        }
+        let idx = self.keys.len();
+        self.keys.push(k);
+        self.hashes.push(h);
+        self.next.push(self.buckets[slot]);
+        self.buckets[slot] = (idx as u32) + 1;
+    }
+
+    #[inline]
+    fn contains(&self, k: &[u8; 16]) -> bool {
+        let h = hash_fixed16(k, self.seed);
+        let mask = self.buckets.len() - 1;
+        let mut cur = self.buckets[(h as usize) & mask];
+        while cur != 0 {
+            let idx = (cur - 1) as usize;
+            if self.hashes[idx] == h && self.keys[idx] == *k {
+                return true;
+            }
+            cur = self.next[idx];
+        }
+        false
+    }
+
+    fn insert_column(&mut self, col: &Column, cancel: &CancelToken) -> Result<(), QueryError> {
+        match col {
+            Column::Flat(fc) => {
+                if let FlatData::FixedBytes16(vals) = fc.data() {
+                    match fc.nulls() {
+                        Some(nulls) => {
+                            for (r, &k) in vals.iter().enumerate() {
+                                if (r & CANCEL_CHECK_MASK) == 0 && cancel.is_cancelled() {
+                                    return Err(QueryError::Cancelled);
+                                }
+                                if nulls.get(r) {
+                                    self.insert(k);
+                                }
+                            }
+                        }
+                        None => {
+                            for (r, &k) in vals.iter().enumerate() {
+                                if (r & CANCEL_CHECK_MASK) == 0 && cancel.is_cancelled() {
+                                    return Err(QueryError::Cancelled);
+                                }
+                                self.insert(k);
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+            Column::Const { value, len } => {
+                if *len > 0
+                    && let ScalarValue::FixedBytes16(k) = value
+                {
+                    self.insert(*k);
+                }
+                return Ok(());
+            }
+            Column::Dict(d) => {
+                if let FlatData::FixedBytes16(vals) = d.values().data() {
+                    let code_nulls = d.nulls();
+                    let val_nulls = d.values().nulls();
+                    for (r, &code) in d.codes().iter().enumerate() {
+                        if (r & CANCEL_CHECK_MASK) == 0 && cancel.is_cancelled() {
+                            return Err(QueryError::Cancelled);
+                        }
+                        if code_nulls.is_some_and(|bm| !bm.get(r)) {
+                            continue;
+                        }
+                        let c = code as usize;
+                        if val_nulls.is_some_and(|bm| !bm.get(c)) {
+                            continue;
+                        }
+                        self.insert(vals[c]);
+                    }
+                    return Ok(());
+                }
+            }
+            Column::Rle(_) => {}
+        }
+        for r in 0..col.len() {
+            if (r & CANCEL_CHECK_MASK) == 0 && cancel.is_cancelled() {
+                return Err(QueryError::Cancelled);
+            }
+            if col.is_null(r) {
+                continue;
+            }
+            if let Some(bytes) = ElemRef::Col(col, r).read_bytes()
+                && let Ok(k) = <[u8; 16]>::try_from(bytes)
+            {
+                self.insert(k);
+            }
+        }
+        Ok(())
+    }
+
+    fn build_from_batches(
+        batches: &[Batch],
+        computed_keys: &[ComputedKeyCols],
+        right_key_evals: &[KeyEval],
+        total_rows: usize,
+        num_buckets: usize,
+        seed: u64,
+        cancel: &CancelToken,
+    ) -> Result<Self, QueryError> {
+        if total_rows >= u32::MAX as usize {
+            return Err(QueryError::TooLarge);
+        }
+        let init_cap = total_rows.min(4096);
+        let mut set = Self {
+            keys: Vec::with_capacity(init_cap),
+            hashes: Vec::with_capacity(init_cap),
+            buckets: vec![0u32; num_buckets],
+            next: Vec::with_capacity(init_cap),
+            seed,
+        };
+        for (b_idx, batch) in batches.iter().enumerate() {
+            let krefs = resolve_key_refs(right_key_evals, batch, &computed_keys[b_idx])?;
+            set.insert_column(krefs[0], cancel)?;
+        }
+        Ok(set)
+    }
+
+    fn probe_batch(
+        &self,
+        batch: &Batch,
+        key_col: &Column,
+        join_type: JoinType,
+        cancel: &CancelToken,
+    ) -> Result<ProbeResult, QueryError> {
+        let is_semi = matches!(join_type, JoinType::LeftSemi);
+        let keep_null = matches!(join_type, JoinType::LeftAnti);
+
+        if let Column::Const { value, .. } = key_col {
+            let keep_all = match value {
+                ScalarValue::Null(_) => keep_null,
+                ScalarValue::FixedBytes16(k) => {
+                    let hit = self.contains(k);
+                    if is_semi { hit } else { !hit }
+                }
+                ScalarValue::Binary(b) => {
+                    let hit = <[u8; 16]>::try_from(b.as_slice())
+                        .ok()
+                        .is_some_and(|k| self.contains(&k));
+                    if is_semi { hit } else { !hit }
+                }
+                _ => !is_semi,
+            };
+            return Ok(if keep_all {
+                ProbeResult::All
+            } else {
+                ProbeResult::None
+            });
+        }
+
+        let mut keep_mask = Bitmap::new_zeroed(batch.raw_len());
+        let active_len = batch.num_rows();
+        let matched = match key_col {
+            Column::Flat(fc) => match fc.data() {
+                FlatData::FixedBytes16(vals) => match fc.nulls() {
+                    None => try_for_each_selected_row(
+                        batch.selection(),
+                        batch.raw_len(),
+                        cancel,
+                        |r| {
+                            let hit = self.contains(&vals[r]);
+                            let keep = if is_semi { hit } else { !hit };
+                            if keep {
+                                let _ = keep_mask.set(r, true);
+                            }
+                            Ok(keep)
+                        },
+                    )?,
+                    Some(nulls) => try_for_each_selected_row(
+                        batch.selection(),
+                        batch.raw_len(),
+                        cancel,
+                        |r| {
+                            let keep = if !nulls.get(r) {
+                                keep_null
+                            } else {
+                                let hit = self.contains(&vals[r]);
+                                if is_semi { hit } else { !hit }
+                            };
+                            if keep {
+                                let _ = keep_mask.set(r, true);
+                            }
+                            Ok(keep)
+                        },
+                    )?,
+                },
+                _ => self.probe_batch_fallback(
+                    batch,
+                    key_col,
+                    is_semi,
+                    keep_null,
+                    cancel,
+                    &mut keep_mask,
+                )?,
+            },
+            Column::Dict(d) => match d.values().data() {
+                FlatData::FixedBytes16(vals) => {
+                    let code_nulls = d.nulls();
+                    let val_nulls = d.values().nulls();
+                    let codes = d.codes();
+                    try_for_each_selected_row(batch.selection(), batch.raw_len(), cancel, |r| {
+                        let keep = if code_nulls.is_some_and(|bm| !bm.get(r)) {
+                            keep_null
+                        } else {
+                            let c = codes[r] as usize;
+                            if val_nulls.is_some_and(|bm| !bm.get(c)) {
+                                keep_null
+                            } else {
+                                let hit = self.contains(&vals[c]);
+                                if is_semi { hit } else { !hit }
+                            }
+                        };
+                        if keep {
+                            let _ = keep_mask.set(r, true);
+                        }
+                        Ok(keep)
+                    })?
+                }
+                _ => self.probe_batch_fallback(
+                    batch,
+                    key_col,
+                    is_semi,
+                    keep_null,
+                    cancel,
+                    &mut keep_mask,
+                )?,
+            },
+            _ => self.probe_batch_fallback(
+                batch,
+                key_col,
+                is_semi,
+                keep_null,
+                cancel,
+                &mut keep_mask,
+            )?,
+        };
+
+        if matched == 0 {
+            Ok(ProbeResult::None)
+        } else if matched == active_len {
+            Ok(ProbeResult::All)
+        } else {
+            Ok(ProbeResult::Mask { mask: keep_mask })
+        }
+    }
+
+    fn probe_batch_fallback(
+        &self,
+        batch: &Batch,
+        key_col: &Column,
+        is_semi: bool,
+        keep_null: bool,
+        cancel: &CancelToken,
+        keep_mask: &mut Bitmap,
+    ) -> Result<usize, QueryError> {
+        try_for_each_selected_row(batch.selection(), batch.raw_len(), cancel, |r| {
+            let keep = if key_col.is_null(r) {
+                keep_null
+            } else if let Some(bytes) = ElemRef::Col(key_col, r).read_bytes() {
+                let hit = <[u8; 16]>::try_from(bytes)
+                    .ok()
+                    .is_some_and(|k| self.contains(&k));
+                if is_semi { hit } else { !hit }
+            } else {
+                !is_semi
+            };
+            if keep {
+                let _ = keep_mask.set(r, true);
+            }
+            Ok(keep)
+        })
+    }
+}
+
+struct SharedBuildState {
+    res: Reservation,
+    total_rows: usize,
+    max_batch_bytes: usize,
+}
+
+struct RightDrainChunk {
+    buffered_batches: Vec<Batch>,
+    buffered_keys: Vec<ComputedKeyCols>,
+    overflow_batch: Option<Batch>,
+    remaining_stream: Option<Box<dyn PartitionStream>>,
+}
+
+impl RightDrainChunk {
+    fn empty() -> Self {
+        Self {
+            buffered_batches: Vec::new(),
+            buffered_keys: Vec::new(),
+            overflow_batch: None,
+            remaining_stream: None,
+        }
+    }
+}
+
+struct RightDrainResult {
+    chunks: Vec<RightDrainChunk>,
+    build_res: Reservation,
+    total_rows: usize,
+    max_batch_bytes: usize,
+    frame_budget: usize,
+    hit_mem_limit: bool,
+    rhs_saw_null: bool,
+}
+
+fn can_spill_on_oom(shared_build: &Mutex<SharedBuildState>, batch: &Batch) -> bool {
+    batch.num_rows() > 1
+        || shared_build
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .total_rows
+            > 0
+}
+
+struct RightDrainCtx<'a> {
+    right_key_evals: &'a [KeyEval],
+    join_type: JoinType,
+    null_equals_null: bool,
+    ctx: &'a ExecContext,
+    child_cancel: &'a CancelToken,
+    shared_build: &'a Mutex<SharedBuildState>,
+    hit_mem_limit: &'a AtomicBool,
+    rhs_saw_null: &'a AtomicBool,
+    frame_budget: usize,
+    num_tasks: usize,
+}
+
+fn drain_one_right_stream(
+    mut stream: Box<dyn PartitionStream>,
+    dctx: &RightDrainCtx<'_>,
+) -> Result<RightDrainChunk, QueryError> {
+    let right_key_evals = dctx.right_key_evals;
+    let join_type = dctx.join_type;
+    let null_equals_null = dctx.null_equals_null;
+    let ctx = dctx.ctx;
+    let child_cancel = dctx.child_cancel;
+    let shared_build = dctx.shared_build;
+    let hit_mem_limit = dctx.hit_mem_limit;
+    let rhs_saw_null = dctx.rhs_saw_null;
+    let frame_budget = dctx.frame_budget;
+    let num_tasks = dctx.num_tasks;
+    let mut pull_res = ctx.pool.register("hash_join_right_pull", false);
+    let mut scratch_res = ctx.pool.register("hash_join_right_scratch", false);
+    let eval_ctx = ctx.eval.with_cancel(child_cancel.clone());
+    let mut buffered_batches = Vec::new();
+    let mut buffered_keys = Vec::new();
+
+    loop {
+        if child_cancel.is_cancelled() || hit_mem_limit.load(AtomicOrdering::Acquire) {
+            pull_res.free();
+            scratch_res.free();
+            return Ok(RightDrainChunk {
+                buffered_batches,
+                buffered_keys,
+                overflow_batch: None,
+                remaining_stream: Some(stream),
+            });
+        }
+
+        let next = match stream.next_batch(child_cancel, Some(&mut pull_res)) {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                pull_res.free();
+                scratch_res.free();
+                return Ok(RightDrainChunk {
+                    buffered_batches,
+                    buffered_keys,
+                    overflow_batch: None,
+                    remaining_stream: None,
+                });
+            }
+            Err(QueryError::Cancelled) if child_cancel.is_cancelled() => {
+                pull_res.free();
+                scratch_res.free();
+                return Ok(RightDrainChunk {
+                    buffered_batches,
+                    buffered_keys,
+                    overflow_batch: None,
+                    remaining_stream: Some(stream),
+                });
+            }
+            Err(err) => {
+                pull_res.free();
+                scratch_res.free();
+                return Err(err);
+            }
+        };
+
+        if next.is_empty() {
+            drop(next);
+            pull_res.free();
+            continue;
+        }
+
+        if hit_mem_limit.load(AtomicOrdering::Acquire) {
+            pull_res.free();
+            scratch_res.free();
+            return Ok(RightDrainChunk {
+                buffered_batches,
+                buffered_keys,
+                overflow_batch: Some(next),
+                remaining_stream: Some(stream),
+            });
+        }
+
+        let batch = if next.selection().is_all(next.raw_len()) {
+            next
+        } else {
+            match next.compact(Some(&mut pull_res)) {
+                Ok(c) => {
+                    drop(next);
+                    let c_bytes = c.memory_bytes();
+                    if pull_res.size() > c_bytes {
+                        pull_res.shrink(pull_res.size() - c_bytes);
+                    }
+                    c
+                }
+                Err(ColumnError::MemoryLimit { .. }) if can_spill_on_oom(shared_build, &next) => {
+                    pull_res.free();
+                    scratch_res.free();
+                    hit_mem_limit.store(true, AtomicOrdering::Release);
+                    return Ok(RightDrainChunk {
+                        buffered_batches,
+                        buffered_keys,
+                        overflow_batch: Some(next),
+                        remaining_stream: Some(stream),
+                    });
+                }
+                Err(err) => {
+                    pull_res.free();
+                    scratch_res.free();
+                    return Err(err.into());
+                }
+            }
+        };
+
+        let key_cols_eval =
+            match evaluate_owned_keys(right_key_evals, &batch, &eval_ctx, Some(&mut scratch_res)) {
+                Ok(k) => k,
+                Err(QueryError::TooLarge) if can_spill_on_oom(shared_build, &batch) => {
+                    pull_res.free();
+                    scratch_res.free();
+                    hit_mem_limit.store(true, AtomicOrdering::Release);
+                    return Ok(RightDrainChunk {
+                        buffered_batches,
+                        buffered_keys,
+                        overflow_batch: Some(batch),
+                        remaining_stream: Some(stream),
+                    });
+                }
+                Err(err) => {
+                    pull_res.free();
+                    scratch_res.free();
+                    return Err(err);
+                }
+            };
+
+        let (non_null_batch, non_null_keys) = if !null_equals_null {
+            let mut null_count = 0usize;
+            let mut non_null_idx = Vec::new();
+            {
+                let krefs = resolve_key_refs(right_key_evals, &batch, &key_cols_eval)?;
+                if krefs.iter().any(|c| c.has_nulls()) {
+                    for r in 0..batch.num_rows() {
+                        if row_has_null_key(&krefs, r) {
+                            null_count += 1;
+                        } else {
+                            non_null_idx.push(r as u32);
+                        }
+                    }
+                }
+            }
+
+            if null_count > 0 {
+                rhs_saw_null.store(true, AtomicOrdering::Release);
+                if join_type == JoinType::LeftAntiNullAware {
+                    child_cancel.cancel();
+                    drop(key_cols_eval);
+                    drop(batch);
+                    pull_res.free();
+                    scratch_res.free();
+                    return Ok(RightDrainChunk::empty());
+                }
+                if non_null_idx.is_empty() {
+                    drop(key_cols_eval);
+                    drop(batch);
+                    scratch_res.free();
+                    pull_res.free();
+                    continue;
+                }
+                drop(key_cols_eval);
+                scratch_res.free();
+                let sub_b = match take_batch_rows(&batch, &non_null_idx, Some(&mut scratch_res)) {
+                    Ok(b) => b,
+                    Err(QueryError::TooLarge) if can_spill_on_oom(shared_build, &batch) => {
+                        pull_res.free();
+                        scratch_res.free();
+                        hit_mem_limit.store(true, AtomicOrdering::Release);
+                        return Ok(RightDrainChunk {
+                            buffered_batches,
+                            buffered_keys,
+                            overflow_batch: Some(batch),
+                            remaining_stream: Some(stream),
+                        });
+                    }
+                    Err(err) => {
+                        pull_res.free();
+                        scratch_res.free();
+                        return Err(err);
+                    }
+                };
+                drop(batch);
+                pull_res.free();
+                let sub_keys = match evaluate_owned_keys(
+                    right_key_evals,
+                    &sub_b,
+                    &eval_ctx,
+                    Some(&mut scratch_res),
+                ) {
+                    Ok(k) => k,
+                    Err(QueryError::TooLarge) if can_spill_on_oom(shared_build, &sub_b) => {
+                        scratch_res.free();
+                        hit_mem_limit.store(true, AtomicOrdering::Release);
+                        return Ok(RightDrainChunk {
+                            buffered_batches,
+                            buffered_keys,
+                            overflow_batch: Some(sub_b),
+                            remaining_stream: Some(stream),
+                        });
+                    }
+                    Err(err) => {
+                        scratch_res.free();
+                        return Err(err);
+                    }
+                };
+                (sub_b, sub_keys)
+            } else {
+                (batch, key_cols_eval)
+            }
+        } else {
+            (batch, key_cols_eval)
+        };
+
+        let batch_bytes = non_null_batch.memory_bytes();
+        let key_bytes: usize = non_null_keys
+            .iter()
+            .filter_map(Option::as_ref)
+            .map(|c| c.memory_bytes())
+            .sum();
+        let needed = batch_bytes.saturating_add(key_bytes);
+
+        scratch_res.free();
+        pull_res.free();
+
+        let mut guard = shared_build.lock().unwrap_or_else(PoisonError::into_inner);
+        if hit_mem_limit.load(AtomicOrdering::Acquire) {
+            drop(guard);
+            return Ok(RightDrainChunk {
+                buffered_batches,
+                buffered_keys,
+                overflow_batch: Some(non_null_batch),
+                remaining_stream: Some(stream),
+            });
+        }
+        if join_type == JoinType::LeftAntiNullAware && rhs_saw_null.load(AtomicOrdering::Acquire) {
+            drop(guard);
+            return Ok(RightDrainChunk::empty());
+        }
+        let next_max = guard.max_batch_bytes.max(batch_bytes);
+        let headroom = if guard.total_rows > 0 || num_tasks > 1 {
+            HashJoinStream::pull_headroom(next_max, frame_budget)
+        } else {
+            0
+        };
+        let mut reserved_headroom = headroom;
+        let grow_res = match guard.res.try_grow(needed.saturating_add(headroom)) {
+            Ok(()) => Ok(()),
+            Err(ColumnError::MemoryLimit { .. }) if guard.total_rows == 0 && headroom > 0 => {
+                reserved_headroom = 0;
+                guard.res.try_grow(needed)
+            }
+            Err(err) => Err(err),
+        };
+        match grow_res {
+            Ok(()) => {
+                if reserved_headroom > 0 {
+                    guard.res.shrink(reserved_headroom);
+                }
+                guard.total_rows = guard.total_rows.saturating_add(non_null_batch.num_rows());
+                guard.max_batch_bytes = next_max;
+                drop(guard);
+                buffered_batches.push(non_null_batch);
+                buffered_keys.push(non_null_keys);
+            }
+            Err(ColumnError::MemoryLimit { .. })
+                if guard.total_rows > 0 || non_null_batch.num_rows() > 1 =>
+            {
+                hit_mem_limit.store(true, AtomicOrdering::Release);
+                drop(guard);
+                return Ok(RightDrainChunk {
+                    buffered_batches,
+                    buffered_keys,
+                    overflow_batch: Some(non_null_batch),
+                    remaining_stream: Some(stream),
+                });
+            }
+            Err(err) => {
+                drop(guard);
+                return Err(err.into());
+            }
+        }
+    }
+}
+
+fn drain_right_streams_parallel(
+    right: Vec<Box<dyn PartitionStream>>,
+    right_key_evals: &[KeyEval],
+    join_type: JoinType,
+    null_equals_null: bool,
+    ctx: &ExecContext,
+) -> Result<RightDrainResult, QueryError> {
+    let build_res = ctx.pool.register("hash_join_build", true);
+    let frame_budget = (ctx.pool.spill_share() / 8).max(SPILL_FRAME_MIN_BYTES);
+    if right.is_empty() {
+        if ctx.eval.cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        return Ok(RightDrainResult {
+            chunks: Vec::new(),
+            build_res,
+            total_rows: 0,
+            max_batch_bytes: 0,
+            frame_budget,
+            hit_mem_limit: false,
+            rhs_saw_null: false,
+        });
+    }
+
+    let child_cancel = CancelToken::new();
+    let _link = ctx.eval.cancel.register_waker({
+        let c = child_cancel.clone();
+        move || c.cancel()
+    });
+    let shared_build = Arc::new(Mutex::new(SharedBuildState {
+        res: build_res,
+        total_rows: 0,
+        max_batch_bytes: 0,
+    }));
+    let hit_mem_limit = Arc::new(AtomicBool::new(false));
+    let rhs_saw_null = Arc::new(AtomicBool::new(false));
+    let num_tasks = right.len();
+    let run_parallel = num_tasks > 1
+        && ctx.pool.spill_share()
+            >= (num_tasks + 1).saturating_mul(PARALLEL_RIGHT_DRAIN_PER_TASK_MIN_BYTES);
+
+    let chunks_res = if !run_parallel {
+        let dctx = RightDrainCtx {
+            right_key_evals,
+            join_type,
+            null_equals_null,
+            ctx,
+            child_cancel: &child_cancel,
+            shared_build: &shared_build,
+            hit_mem_limit: &hit_mem_limit,
+            rhs_saw_null: &rhs_saw_null,
+            frame_budget,
+            num_tasks: 1,
+        };
+        let mut chunks = Vec::with_capacity(num_tasks);
+        let mut seq_res = Ok(());
+        for stream in right {
+            match drain_one_right_stream(stream, &dctx) {
+                Ok(chunk) => chunks.push(chunk),
+                Err(err) => {
+                    seq_res = Err(err);
+                    break;
+                }
+            }
+        }
+        seq_res.map(|()| chunks)
+    } else {
+        let key_evals_arc: Arc<[KeyEval]> = Arc::from(right_key_evals.to_vec());
+        let tasks = right
+            .into_iter()
+            .map(|stream| {
+                let evals_c = Arc::clone(&key_evals_arc);
+                let ctx_c = ctx.clone();
+                let cancel_c = child_cancel.clone();
+                let build_c = Arc::clone(&shared_build);
+                let mem_c = Arc::clone(&hit_mem_limit);
+                let null_c = Arc::clone(&rhs_saw_null);
+                move |_| {
+                    let dctx = RightDrainCtx {
+                        right_key_evals: &evals_c,
+                        join_type,
+                        null_equals_null,
+                        ctx: &ctx_c,
+                        child_cancel: &cancel_c,
+                        shared_build: &build_c,
+                        hit_mem_limit: &mem_c,
+                        rhs_saw_null: &null_c,
+                        frame_budget,
+                        num_tasks,
+                    };
+                    drain_one_right_stream(stream, &dctx)
+                }
+            })
+            .collect();
+        ctx.workers.run_scoped(&child_cancel, tasks)
+    };
+
+    if ctx.eval.cancel.is_cancelled() {
+        drop(chunks_res);
+        drop(shared_build);
+        return Err(QueryError::Cancelled);
+    }
+
+    let saw_null = rhs_saw_null.load(AtomicOrdering::Acquire);
+    let chunks = match chunks_res {
+        Ok(c) => c,
+        Err(QueryError::Cancelled) if join_type == JoinType::LeftAntiNullAware && saw_null => {
+            Vec::new()
+        }
+        Err(err) => {
+            drop(shared_build);
+            return Err(err);
+        }
+    };
+
+    let state = match Arc::try_unwrap(shared_build) {
+        Ok(mutex) => mutex.into_inner().unwrap_or_else(PoisonError::into_inner),
+        Err(arc) => {
+            // Invariant: `run_scoped` has joined every worker task before returning.
+            let mut guard = arc.lock().unwrap_or_else(PoisonError::into_inner);
+            SharedBuildState {
+                res: std::mem::replace(&mut guard.res, ctx.pool.register("hash_join_empty", true)),
+                total_rows: guard.total_rows,
+                max_batch_bytes: guard.max_batch_bytes,
+            }
+        }
+    };
+
+    Ok(RightDrainResult {
+        chunks,
+        build_res: state.res,
+        total_rows: state.total_rows,
+        max_batch_bytes: state.max_batch_bytes,
+        frame_budget,
+        hit_mem_limit: hit_mem_limit.load(AtomicOrdering::Acquire),
+        rhs_saw_null: saw_null,
+    })
+}
+
+struct ReplayRightStream {
+    first: Option<Batch>,
+    rest: Option<Box<dyn PartitionStream>>,
+}
+
+impl PartitionStream for ReplayRightStream {
+    fn next_batch(
+        &mut self,
+        cancel: &CancelToken,
+        mut res: Option<&mut Reservation>,
+    ) -> Result<Option<Batch>, QueryError> {
+        if cancel.is_cancelled() {
+            return Err(QueryError::Cancelled);
+        }
+        if let Some(batch) = self.first.take() {
+            if let Some(r) = res.as_deref_mut() {
+                let before = r.size();
+                reconcile_res(Some(r), before, batch.memory_bytes())?;
+            }
+            return Ok(Some(batch));
+        }
+        if let Some(stream) = self.rest.as_mut() {
+            let next = stream.next_batch(cancel, res)?;
+            if next.is_none() {
+                self.rest = None;
+            }
+            return Ok(next);
+        }
+        Ok(None)
+    }
+}
+
+struct ParallelSemiAntiStream {
+    left_stream: Box<dyn PartitionStream>,
+    left_key_evals: Vec<KeyEval>,
+    table: Arc<SharedProbeTable>,
+    ctx: ExecContext,
+    pull_res: Reservation,
+    scratch_res: Reservation,
+    done: bool,
+}
+
+impl ParallelSemiAntiStream {
+    fn cleanup(&mut self) {
+        self.pull_res.free();
+        self.scratch_res.free();
+        self.done = true;
+    }
+
+    fn eval_ctx(&self, cancel: &CancelToken) -> EvalContext {
+        if self.ctx.eval.cancel.is_cancelled() {
+            self.ctx.eval.clone()
+        } else {
+            self.ctx.eval.with_cancel(cancel.clone())
+        }
+    }
+
+    fn probe_general(
+        &mut self,
+        left_batch: &Batch,
+        gen_tbl: &GeneralProbeTable,
+        cancel: &CancelToken,
+        eval_ctx: &EvalContext,
+    ) -> Result<ProbeResult, QueryError> {
+        let left_computed = evaluate_owned_keys(
+            &self.left_key_evals,
+            left_batch,
+            eval_ctx,
+            Some(&mut self.scratch_res),
+        )?;
+        let l_krefs = resolve_key_refs(&self.left_key_evals, left_batch, &left_computed)?;
+        let mut rhs_krefs = Vec::with_capacity(gen_tbl.table.batches.len());
+        for b_idx in 0..gen_tbl.table.batches.len() {
+            rhs_krefs.push(
+                gen_tbl
+                    .table
+                    .key_cols_for_batch(b_idx, &gen_tbl.right_key_evals)?,
+            );
+        }
+
+        let is_semi = matches!(self.table.join_type, JoinType::LeftSemi);
+        let keep_null = matches!(self.table.join_type, JoinType::LeftAnti);
+        let null_equals_null = self.table.null_equals_null;
+        let bucket_mask = gen_tbl.table.buckets.len() - 1;
+        let mut keep_mask = Bitmap::new_zeroed(left_batch.raw_len());
+        let active_len = left_batch.num_rows();
+
+        let matched = try_for_each_selected_row(
+            left_batch.selection(),
+            left_batch.raw_len(),
+            cancel,
+            |lr| {
+                let keep = if !null_equals_null && row_has_null_key(&l_krefs, lr) {
+                    keep_null
+                } else {
+                    let h = hash_key_row(&l_krefs, lr, gen_tbl.seed);
+                    let mut cur = gen_tbl.table.buckets[(h as usize) & bucket_mask];
+                    let mut hit = false;
+                    while cur != 0 {
+                        let bid = (cur - 1) as usize;
+                        cur = gen_tbl.table.next[bid];
+                        if gen_tbl.table.row_hashes[bid] != h {
+                            continue;
+                        }
+                        let (b_idx, r_idx) = gen_tbl.table.row_locs[bid];
+                        if keys_equal(
+                            &l_krefs,
+                            lr,
+                            &rhs_krefs[b_idx as usize],
+                            r_idx as usize,
+                            null_equals_null,
+                        )? {
+                            hit = true;
+                            break;
+                        }
+                    }
+                    if is_semi { hit } else { !hit }
+                };
+                if keep {
+                    let _ = keep_mask.set(lr, true);
+                }
+                Ok(keep)
+            },
+        )?;
+
+        drop(rhs_krefs);
+        drop(l_krefs);
+        drop(left_computed);
+        self.scratch_res.free();
+
+        if matched == 0 {
+            Ok(ProbeResult::None)
+        } else if matched == active_len {
+            Ok(ProbeResult::All)
+        } else {
+            Ok(ProbeResult::Mask { mask: keep_mask })
+        }
+    }
+
+    fn next_batch_inner(
+        &mut self,
+        cancel: &CancelToken,
+        mut res: Option<&mut Reservation>,
+    ) -> Result<Option<Batch>, QueryError> {
+        loop {
+            if cancel.is_cancelled() || self.ctx.eval.cancel.is_cancelled() {
+                return Err(QueryError::Cancelled);
+            }
+            if self.done {
+                return Ok(None);
+            }
+
+            let Some(left_batch) = self
+                .left_stream
+                .next_batch(cancel, Some(&mut self.pull_res))?
+            else {
+                self.pull_res.free();
+                self.done = true;
+                return Ok(None);
+            };
+            if left_batch.is_empty() {
+                drop(left_batch);
+                self.pull_res.free();
+                continue;
+            }
+
+            let eval_ctx = self.eval_ctx(cancel);
+            let table = Arc::clone(&self.table);
+            let probe_res = match &table.inner {
+                ProbeTableInner::Fixed16(set) => match &self.left_key_evals[0] {
+                    KeyEval::Column { index, .. } => {
+                        let key_col =
+                            left_batch.column(*index).ok_or(ColumnError::InvalidBatch {
+                                reason: "join key column index out of bounds",
+                            })?;
+                        set.probe_batch(&left_batch, key_col, table.join_type, cancel)?
+                    }
+                    KeyEval::Computed(expr) => {
+                        let key_col =
+                            eval_expr(expr, &left_batch, &eval_ctx, Some(&mut self.scratch_res))?;
+                        let res =
+                            set.probe_batch(&left_batch, &key_col, table.join_type, cancel)?;
+                        drop(key_col);
+                        self.scratch_res.free();
+                        res
+                    }
+                },
+                ProbeTableInner::General(gen_tbl) => {
+                    self.probe_general(&left_batch, gen_tbl, cancel, &eval_ctx)?
+                }
+            };
+
+            match probe_res {
+                ProbeResult::None => {
+                    drop(left_batch);
+                    self.pull_res.free();
+                    continue;
+                }
+                ProbeResult::All => {
+                    let bytes = left_batch.memory_bytes();
+                    if let Some(cr) = res.as_deref_mut() {
+                        transfer_or_grow(&mut self.pull_res, cr, bytes)?;
+                    }
+                    self.pull_res.free();
+                    return Ok(Some(left_batch));
+                }
+                ProbeResult::Mask { mask } => {
+                    let filtered = left_batch.into_filter_mask(&mask)?;
+                    drop(mask);
+                    reconcile_res(Some(&mut self.pull_res), 0, filtered.memory_bytes())?;
+                    let active = filtered.num_rows();
+                    let out = if active.saturating_mul(4) < filtered.raw_len() {
+                        let compacted = filtered.compact(Some(&mut self.pull_res))?;
+                        drop(filtered);
+                        reconcile_res(Some(&mut self.pull_res), 0, compacted.memory_bytes())?;
+                        compacted
+                    } else {
+                        filtered
+                    };
+                    let bytes = out.memory_bytes();
+                    if let Some(cr) = res.as_deref_mut() {
+                        transfer_or_grow(&mut self.pull_res, cr, bytes)?;
+                    }
+                    self.pull_res.free();
+                    return Ok(Some(out));
+                }
+            }
+        }
+    }
+}
+
+impl PartitionStream for ParallelSemiAntiStream {
+    fn next_batch(
+        &mut self,
+        cancel: &CancelToken,
+        mut res: Option<&mut Reservation>,
+    ) -> Result<Option<Batch>, QueryError> {
+        let before = res.as_ref().map_or(0, |r| r.size());
+        match self.next_batch_inner(cancel, res.as_deref_mut()) {
+            Ok(Some(batch)) => Ok(Some(batch)),
+            Ok(None) => {
+                rollback_res(res, before);
+                Ok(None)
+            }
+            Err(err) => {
+                rollback_res(res, before);
+                self.cleanup();
+                Err(err)
+            }
+        }
+    }
+}
+
+struct ProbeTableBuildInput {
+    batches: Vec<Batch>,
+    computed_keys: Vec<ComputedKeyCols>,
+    right_key_evals: Vec<KeyEval>,
+    null_equals_null: bool,
+    total_rows: usize,
+    max_batch_bytes: usize,
+    frame_budget: usize,
+    use_fixed16: bool,
+}
+
+fn try_build_probe_table_inner(
+    input: ProbeTableBuildInput,
+    build_res: &mut Reservation,
+    cancel: &CancelToken,
+) -> Result<ProbeTableInner, QueryError> {
+    let table_seed = table_hash_seed(0);
+    let headroom = HashJoinStream::pull_headroom(input.max_batch_bytes, input.frame_budget);
+    if input.use_fixed16 {
+        let (max_bytes, num_buckets) = Fixed16HashSet::max_index_bytes(input.total_rows);
+        build_res.try_grow(max_bytes.saturating_add(headroom))?;
+        if headroom > 0 {
+            build_res.shrink(headroom);
+        }
+        let set = Fixed16HashSet::build_from_batches(
+            &input.batches,
+            &input.computed_keys,
+            &input.right_key_evals,
+            input.total_rows,
+            num_buckets,
+            table_seed,
+            cancel,
+        )?;
+        drop(input.computed_keys);
+        drop(input.batches);
+        reconcile_res(Some(build_res), 0, set.memory_bytes())?;
+        Ok(ProbeTableInner::Fixed16(set))
+    } else {
+        let (_, num_buckets) = BuildTable::index_bytes(input.total_rows, false);
+        BuildTable::try_reserve_index(input.total_rows, false, headroom, build_res)?;
+        let cfg = BuildTableConfig {
+            total_rows: input.total_rows,
+            num_buckets,
+            key_evals: &input.right_key_evals,
+            null_equals_null: input.null_equals_null,
+            track_matched: false,
+            seed: table_seed,
+        };
+        let table =
+            BuildTable::populate_from_buffers(input.batches, input.computed_keys, &cfg, cancel)?;
+        Ok(ProbeTableInner::General(GeneralProbeTable {
+            table,
+            right_key_evals: input.right_key_evals,
+            seed: table_seed,
+        }))
+    }
+}
+
+/// Drains `right` in parallel and builds a reusable immutable [`SharedProbeTable`] for
+/// [`JoinType::LeftSemi`], [`JoinType::LeftAnti`], or [`JoinType::LeftAntiNullAware`]
+/// without cancelling `ctx.eval.cancel` if the build side exceeds memory.
+pub fn try_build_semi_anti_probe_table(
+    right: Vec<Box<dyn PartitionStream>>,
+    right_schema: &Schema,
+    right_keys: &[Expr],
+    join_type: JoinType,
+    null_equals_null: bool,
+    ctx: &ExecContext,
+) -> Result<ProbeTableBuildOutcome, QueryError> {
+    if !matches!(
+        join_type,
+        JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftAntiNullAware
+    ) {
+        return Err(QueryError::failed(
+            "try_build_semi_anti_probe_table requires LeftSemi, LeftAnti, or LeftAntiNullAware",
+        ));
+    }
+    if right_keys.is_empty() {
+        return Err(QueryError::failed(
+            "hash join requires non-empty right key list",
+        ));
+    }
+    if join_type == JoinType::LeftAntiNullAware {
+        if right_keys.len() != 1 {
+            return Err(QueryError::failed(
+                "LeftAntiNullAware join requires a single equi-join key",
+            ));
+        }
+        if null_equals_null {
+            return Err(QueryError::failed(
+                "LeftAntiNullAware join cannot have null_equals_null = true",
+            ));
+        }
+    }
+
+    let right_key_evals = compile_key_evals(right_keys, right_schema)?;
+    let right_key_types: Vec<DataType> = right_keys.iter().map(Expr::data_type).collect();
+
+    let mut drain = match drain_right_streams_parallel(
+        right,
+        &right_key_evals,
+        join_type,
+        null_equals_null,
+        ctx,
+    ) {
+        Ok(d) => d,
+        Err(QueryError::TooLarge) if !ctx.eval.cancel.is_cancelled() => {
+            return Ok(ProbeTableBuildOutcome::TooLargeForMemory);
+        }
+        Err(err) => return Err(err),
+    };
+
+    if join_type == JoinType::LeftAntiNullAware && drain.rhs_saw_null {
+        drain.build_res.free();
+        return Ok(ProbeTableBuildOutcome::AlwaysEmpty);
+    }
+    if drain.hit_mem_limit {
+        drain.build_res.free();
+        return Ok(ProbeTableBuildOutcome::TooLargeForMemory);
+    }
+    if drain.total_rows == 0 {
+        drain.build_res.free();
+        return Ok(ProbeTableBuildOutcome::Empty);
+    }
+
+    let mut buffered_batches = Vec::new();
+    let mut buffered_keys = Vec::new();
+    for chunk in drain.chunks {
+        buffered_batches.extend(chunk.buffered_batches);
+        buffered_keys.extend(chunk.buffered_keys);
+    }
+
+    let use_fixed16 = right_key_evals.len() == 1
+        && !null_equals_null
+        && matches!(
+            right_key_evals[0],
+            KeyEval::Column {
+                data_type: DataType::FixedBytes16,
+                ..
+            }
+        );
+
+    match try_build_probe_table_inner(
+        ProbeTableBuildInput {
+            batches: buffered_batches,
+            computed_keys: buffered_keys,
+            right_key_evals,
+            null_equals_null,
+            total_rows: drain.total_rows,
+            max_batch_bytes: drain.max_batch_bytes,
+            frame_budget: drain.frame_budget,
+            use_fixed16,
+        },
+        &mut drain.build_res,
+        &ctx.eval.cancel,
+    ) {
+        Ok(inner) => Ok(ProbeTableBuildOutcome::Ready(Arc::new(SharedProbeTable {
+            join_type,
+            null_equals_null,
+            right_key_types,
+            inner,
+            _build_res: drain.build_res,
+        }))),
+        Err(QueryError::TooLarge) if !ctx.eval.cancel.is_cancelled() => {
+            drain.build_res.free();
+            Ok(ProbeTableBuildOutcome::TooLargeForMemory)
+        }
+        Err(_) if ctx.eval.cancel.is_cancelled() => {
+            drain.build_res.free();
+            Err(QueryError::Cancelled)
+        }
+        Err(err) => {
+            drain.build_res.free();
+            Err(err)
+        }
+    }
+}
+
+/// Probes `left` partition streams in parallel against an immutable [`SharedProbeTable`],
+/// preserving `left` partition count, `left_schema`, and row order within each partition.
+pub fn probe_semi_anti_streams(
+    left: Vec<Box<dyn PartitionStream>>,
+    left_schema: &Schema,
+    left_keys: &[Expr],
+    table: &Arc<SharedProbeTable>,
+    ctx: &ExecContext,
+) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+    if left_keys.len() != table.right_key_types.len() {
+        return Err(QueryError::failed(
+            "hash join requires equal non-empty left and right key lists",
+        ));
+    }
+    for (lk, rk_dt) in left_keys.iter().zip(&table.right_key_types) {
+        if !keys_type_compatible(&lk.data_type(), rk_dt) {
+            return Err(QueryError::failed(
+                "incompatible join key types between left and right",
+            ));
+        }
+    }
+    let left_key_evals = compile_key_evals(left_keys, left_schema)?;
+    Ok(left
+        .into_iter()
+        .map(|left_stream| {
+            Box::new(ParallelSemiAntiStream {
+                left_stream,
+                left_key_evals: left_key_evals.clone(),
+                table: Arc::clone(table),
+                ctx: ctx.clone(),
+                pull_res: ctx.pool.register("hash_join_probe_pull", false),
+                scratch_res: ctx.pool.register("hash_join_probe_scratch", false),
+                done: false,
+            }) as Box<dyn PartitionStream>
+        })
+        .collect())
+}
+
+/// Executes a join between `left` (probe) and `right` (build) partition streams, returning
+/// parallel [`PartitionStream`]s for eligible in-memory [`JoinType::LeftSemi`],
+/// [`JoinType::LeftAnti`], and [`JoinType::LeftAntiNullAware`] joins (with `residual_filter: None`
+/// and `left.len() > 1`), and falling back to [`execute_hash_join`] otherwise or on memory spill.
+pub fn execute_hash_join_parallel(
+    left: Vec<Box<dyn PartitionStream>>,
+    left_schema: Arc<Schema>,
+    right: Vec<Box<dyn PartitionStream>>,
+    right_schema: Arc<Schema>,
+    spec: HashJoinSpec,
+    ctx: &ExecContext,
+) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+    if !(matches!(
+        spec.join_type,
+        JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftAntiNullAware
+    ) && spec.residual_filter.is_none()
+        && left.len() > 1)
+    {
+        return Ok(vec![execute_hash_join(
+            left,
+            left_schema,
+            right,
+            right_schema,
+            spec,
+            ctx,
+        )?]);
+    }
+
+    validate_spec(&spec, &left_schema, &right_schema)?;
+    let left_key_evals = compile_key_evals(&spec.left_keys, &left_schema)?;
+    let right_key_evals = compile_key_evals(&spec.right_keys, &right_schema)?;
+
+    let mut drain = drain_right_streams_parallel(
+        right,
+        &right_key_evals,
+        spec.join_type,
+        spec.null_equals_null,
+        ctx,
+    )?;
+
+    if spec.join_type == JoinType::LeftAntiNullAware && drain.rhs_saw_null {
+        drain.build_res.free();
+        return Ok(Vec::new());
+    }
+
+    let mut buffered_batches = Vec::new();
+    let mut buffered_keys = Vec::new();
+    let mut replay_right_streams: VecDeque<Box<dyn PartitionStream>> = VecDeque::new();
+    for chunk in drain.chunks {
+        buffered_batches.extend(chunk.buffered_batches);
+        buffered_keys.extend(chunk.buffered_keys);
+        if chunk.overflow_batch.is_some() || chunk.remaining_stream.is_some() {
+            replay_right_streams.push_back(Box::new(ReplayRightStream {
+                first: chunk.overflow_batch,
+                rest: chunk.remaining_stream,
+            }));
+        }
+    }
+
+    if !drain.hit_mem_limit {
+        if !replay_right_streams.is_empty() {
+            drain.build_res.free();
+            return Err(QueryError::internal(
+                "unexpected remaining RHS streams without spill",
+            ));
+        }
+        if drain.total_rows == 0 {
+            drain.build_res.free();
+            return match spec.join_type {
+                JoinType::LeftSemi => Ok(Vec::new()),
+                JoinType::LeftAnti | JoinType::LeftAntiNullAware => Ok(left),
+                _ => Ok(Vec::new()),
+            };
+        }
+
+        let right_key_types: Vec<DataType> = spec.right_keys.iter().map(Expr::data_type).collect();
+        let use_fixed16 = spec.left_keys.len() == 1
+            && !spec.null_equals_null
+            && matches!(
+                left_key_evals[0],
+                KeyEval::Column {
+                    data_type: DataType::FixedBytes16,
+                    ..
+                }
+            )
+            && matches!(
+                right_key_evals[0],
+                KeyEval::Column {
+                    data_type: DataType::FixedBytes16,
+                    ..
+                }
+            );
+
+        if use_fixed16 {
+            let (max_bytes, num_buckets) = Fixed16HashSet::max_index_bytes(drain.total_rows);
+            let headroom = HashJoinStream::pull_headroom(drain.max_batch_bytes, drain.frame_budget);
+            match drain.build_res.try_grow(max_bytes.saturating_add(headroom)) {
+                Ok(()) => {
+                    if headroom > 0 {
+                        drain.build_res.shrink(headroom);
+                    }
+                    let set = Fixed16HashSet::build_from_batches(
+                        &buffered_batches,
+                        &buffered_keys,
+                        &right_key_evals,
+                        drain.total_rows,
+                        num_buckets,
+                        table_hash_seed(0),
+                        &ctx.eval.cancel,
+                    )?;
+                    drop(buffered_keys);
+                    drop(buffered_batches);
+                    reconcile_res(Some(&mut drain.build_res), 0, set.memory_bytes())?;
+                    let table = Arc::new(SharedProbeTable {
+                        join_type: spec.join_type,
+                        null_equals_null: spec.null_equals_null,
+                        right_key_types,
+                        inner: ProbeTableInner::Fixed16(set),
+                        _build_res: drain.build_res,
+                    });
+                    return Ok(left
+                        .into_iter()
+                        .map(|left_stream| {
+                            Box::new(ParallelSemiAntiStream {
+                                left_stream,
+                                left_key_evals: left_key_evals.clone(),
+                                table: Arc::clone(&table),
+                                ctx: ctx.clone(),
+                                pull_res: ctx.pool.register("hash_join_probe_pull", false),
+                                scratch_res: ctx.pool.register("hash_join_probe_scratch", false),
+                                done: false,
+                            }) as Box<dyn PartitionStream>
+                        })
+                        .collect());
+                }
+                Err(ColumnError::MemoryLimit { .. }) if !ctx.eval.cancel.is_cancelled() => {}
+                Err(_) if ctx.eval.cancel.is_cancelled() => {
+                    drain.build_res.free();
+                    return Err(QueryError::Cancelled);
+                }
+                Err(err) => {
+                    drain.build_res.free();
+                    return Err(err.into());
+                }
+            }
+        } else {
+            let table_seed = table_hash_seed(0);
+            let headroom = HashJoinStream::pull_headroom(drain.max_batch_bytes, drain.frame_budget);
+            let (_, num_buckets) = BuildTable::index_bytes(drain.total_rows, false);
+            match BuildTable::try_reserve_index(
+                drain.total_rows,
+                false,
+                headroom,
+                &mut drain.build_res,
+            ) {
+                Ok(_) => {
+                    let cfg = BuildTableConfig {
+                        total_rows: drain.total_rows,
+                        num_buckets,
+                        key_evals: &right_key_evals,
+                        null_equals_null: spec.null_equals_null,
+                        track_matched: false,
+                        seed: table_seed,
+                    };
+                    let table = BuildTable::populate_from_buffers(
+                        buffered_batches,
+                        buffered_keys,
+                        &cfg,
+                        &ctx.eval.cancel,
+                    )?;
+                    let shared = Arc::new(SharedProbeTable {
+                        join_type: spec.join_type,
+                        null_equals_null: spec.null_equals_null,
+                        right_key_types,
+                        inner: ProbeTableInner::General(GeneralProbeTable {
+                            table,
+                            right_key_evals,
+                            seed: table_seed,
+                        }),
+                        _build_res: drain.build_res,
+                    });
+                    return Ok(left
+                        .into_iter()
+                        .map(|left_stream| {
+                            Box::new(ParallelSemiAntiStream {
+                                left_stream,
+                                left_key_evals: left_key_evals.clone(),
+                                table: Arc::clone(&shared),
+                                ctx: ctx.clone(),
+                                pull_res: ctx.pool.register("hash_join_probe_pull", false),
+                                scratch_res: ctx.pool.register("hash_join_probe_scratch", false),
+                                done: false,
+                            }) as Box<dyn PartitionStream>
+                        })
+                        .collect());
+                }
+                Err(ColumnError::MemoryLimit { .. }) if !ctx.eval.cancel.is_cancelled() => {}
+                Err(_) if ctx.eval.cancel.is_cancelled() => {
+                    drain.build_res.free();
+                    return Err(QueryError::Cancelled);
+                }
+                Err(err) => {
+                    drain.build_res.free();
+                    return Err(err.into());
+                }
+            }
+        }
+    }
+
+    // Spill fallback: seed a single spillable `HashJoinStream` with already-buffered batches,
+    // any overflow batch, and any remaining right streams without re-reading `right`.
+    let output_schema = join_output_schema(spec.join_type, &left_schema, &right_schema);
+    let combined_schema = join_output_schema(JoinType::Inner, &left_schema, &right_schema);
+    let batch_size = ctx.batch_size.max(1);
+    let pull_res = ctx.pool.register("hash_join_pull", false);
+    let scratch_res = ctx.pool.register("hash_join_scratch", false);
+    let pending_res = ctx.pool.register("hash_join_pending", false);
+    let spill_immediately = drain.total_rows > 0;
+
+    Ok(vec![Box::new(HashJoinStream {
+        spec,
+        left_schema,
+        right_schema,
+        output_schema,
+        combined_schema,
+        left_key_evals,
+        right_key_evals,
+        ctx: ctx.clone(),
+        batch_size,
+        pull_res,
+        scratch_res,
+        pending_res,
+        pending_out: VecDeque::new(),
+        phase: Phase::BuildRight(Box::new(BuildRightState {
+            right_streams: replay_right_streams,
+            left_streams: Some(left.into()),
+            buffered_batches,
+            buffered_computed_keys: buffered_keys,
+            buffered_rows: drain.total_rows,
+            max_batch_bytes: drain.max_batch_bytes,
+            spilled: false,
+            spill_immediately,
+            build_writers: new_writer_array(),
+            build_res: drain.build_res,
+        })),
+    })])
 }
 
 fn validate_spec(
@@ -1285,6 +2920,7 @@ struct BuildRightState {
     buffered_rows: usize,
     max_batch_bytes: usize,
     spilled: bool,
+    spill_immediately: bool,
     build_writers: [Option<SpillAppender>; NUM_JOIN_PARTITIONS],
     build_res: Reservation,
 }
@@ -1645,6 +3281,21 @@ impl HashJoinStream {
         let table_seed = table_hash_seed(0);
         let frame_budget = self.frame_budget();
         let emit_null_build = matches!(self.spec.join_type, JoinType::Right | JoinType::Full);
+
+        if st.spill_immediately && !st.spilled {
+            st.spill_immediately = false;
+            if st.buffered_rows > 0 {
+                Self::spill_build_right_state(
+                    &mut st,
+                    &self.right_key_evals,
+                    self.spec.null_equals_null,
+                    part_seed,
+                    &self.ctx.spill,
+                    frame_budget,
+                    &mut self.scratch_res,
+                )?;
+            }
+        }
 
         while let Some(batch) =
             pull_next_non_empty(&mut st.right_streams, cancel, &mut self.pull_res)?
@@ -3761,7 +5412,7 @@ mod tests {
                     Arc::clone(&right_schema),
                     vec![Arc::new(k), Arc::clone(&b.columns()[1])],
                     n,
-                    cetra_column::Selection::All,
+                    Selection::All,
                 )
                 .unwrap()
             })
@@ -4700,5 +6351,999 @@ mod tests {
         assert!(!ctx.eval.cancel.is_cancelled());
         drop(stream2);
         assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    fn drain_parallel(
+        streams: Vec<Box<dyn PartitionStream>>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<Batch>, QueryError> {
+        let mut out = Vec::new();
+        for s in streams {
+            out.extend(drain_stream(s, cancel)?);
+        }
+        Ok(out)
+    }
+
+    fn extract_i64_payload_rows(batches: &[Batch]) -> Vec<(Option<i64>, String)> {
+        let mut rows = Vec::new();
+        for b in batches {
+            let indices = b.selection().to_indices(b.raw_len()).unwrap();
+            for r_u32 in indices {
+                let r = r_u32 as usize;
+                let k = (!b.column(0).unwrap().is_null(r))
+                    .then(|| read_i64(b.column(0).unwrap(), r).unwrap());
+                let p = read_str(b.column(1).unwrap(), r).unwrap().to_owned();
+                rows.push((k, p));
+            }
+        }
+        rows.sort();
+        rows
+    }
+
+    fn extract_fixed16_rows(batches: &[Batch]) -> Vec<(Option<[u8; 16]>, i64)> {
+        use crate::eval::read_bytes;
+        let mut rows = Vec::new();
+        for b in batches {
+            let indices = b.selection().to_indices(b.raw_len()).unwrap();
+            for r_u32 in indices {
+                let r = r_u32 as usize;
+                let k = (!b.column(0).unwrap().is_null(r)).then(|| {
+                    let slice = read_bytes(b.column(0).unwrap(), r).unwrap();
+                    <[u8; 16]>::try_from(slice).unwrap()
+                });
+                let v = read_i64(b.column(1).unwrap(), r).unwrap();
+                rows.push((k, v));
+            }
+        }
+        rows.sort();
+        rows
+    }
+
+    fn f16(v: u8) -> [u8; 16] {
+        [v; 16]
+    }
+
+    #[test]
+    fn parallel_semi_anti_parity_general_and_null_aware() {
+        let (ctx, _dir) = make_ctx(8 * 1024 * 1024, 8 * 1024 * 1024);
+        let schema = Schema::try_new_arc(vec![
+            Field::new("k", DataType::I64, true),
+            Field::new("v", DataType::Utf8, false),
+        ])
+        .unwrap();
+
+        let make_i64_batch = |rows: &[(Option<i64>, &str)]| -> Batch {
+            let mut ks = Vec::with_capacity(rows.len());
+            let mut valid = Bitmap::new_ones(rows.len());
+            let mut vs = Vec::with_capacity(rows.len());
+            for (i, (k, v)) in rows.iter().enumerate() {
+                match k {
+                    Some(x) => ks.push(*x),
+                    None => {
+                        ks.push(0);
+                        valid.set(i, false).unwrap();
+                    }
+                }
+                vs.push(*v);
+            }
+            let nulls = if valid.all_ones() { None } else { Some(valid) };
+            Batch::try_new_all(
+                Arc::clone(&schema),
+                vec![
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(ks), nulls).unwrap()),
+                    Column::Flat(
+                        FlatColumn::try_new(
+                            FlatData::Utf8(Utf8Data::try_from_slices(vs).unwrap()),
+                            None,
+                        )
+                        .unwrap(),
+                    ),
+                ],
+                rows.len(),
+            )
+            .unwrap()
+        };
+
+        // 3 left batches (3 partitions), including Selection::Mask and Selection::Indices.
+        let lb0 = make_i64_batch(&[(Some(1), "l0"), (Some(2), "l1"), (None, "l2")]);
+        let lb1 = make_i64_batch(&[(Some(3), "l3"), (Some(4), "l4"), (Some(1), "l5")])
+            .filter_mask(&Bitmap::from_bools(&[true, false, true]))
+            .unwrap();
+        let lb2 = make_i64_batch(&[(Some(5), "l6"), (None, "l7"), (Some(2), "l8")])
+            .into_with_selection(Selection::Indices(vec![0, 2, 0]))
+            .unwrap();
+
+        let l_batches = vec![lb0, lb1, lb2];
+        let l_src = BatchSource::new(Arc::clone(&schema), l_batches).unwrap();
+
+        let rb_mixed = vec![
+            make_i64_batch(&[(Some(1), "r0"), (Some(5), "r1")]),
+            make_i64_batch(&[(None, "r2"), (Some(99), "r3")]),
+        ];
+        let rb_no_null = vec![
+            make_i64_batch(&[(Some(1), "r0")]),
+            make_i64_batch(&[(Some(5), "r1"), (Some(99), "r2")]),
+        ];
+        let rb_only_null = vec![
+            make_i64_batch(&[(None, "r0")]),
+            make_i64_batch(&[(None, "r1")]),
+        ];
+        let rb_empty: Vec<Batch> = Vec::new();
+
+        let right_cases = [rb_mixed, rb_no_null, rb_only_null, rb_empty];
+
+        let multi_ctx = ExecContext {
+            target_partitions: 3,
+            ..ctx
+        };
+
+        for r_batches in &right_cases {
+            let r_src = BatchSource::new(Arc::clone(&schema), r_batches.clone()).unwrap();
+            for (jt, null_eq) in [
+                (JoinType::LeftSemi, false),
+                (JoinType::LeftSemi, true),
+                (JoinType::LeftAnti, false),
+                (JoinType::LeftAnti, true),
+                (JoinType::LeftAntiNullAware, false),
+            ] {
+                let spec = HashJoinSpec {
+                    join_type: jt,
+                    left_keys: vec![col_expr(0, "k", DataType::I64)],
+                    right_keys: vec![col_expr(0, "k", DataType::I64)],
+                    null_equals_null: null_eq,
+                    residual_filter: None,
+                };
+                let expected = extract_i64_payload_rows(
+                    &drain_stream(
+                        execute_hash_join(
+                            l_src
+                                .open_partitions(&ScanSpec::default(), &multi_ctx)
+                                .unwrap(),
+                            Arc::clone(&schema),
+                            r_src
+                                .open_partitions(&ScanSpec::default(), &multi_ctx)
+                                .unwrap(),
+                            Arc::clone(&schema),
+                            spec.clone(),
+                            &multi_ctx,
+                        )
+                        .unwrap(),
+                        &multi_ctx.eval.cancel,
+                    )
+                    .unwrap(),
+                );
+                let par_streams = execute_hash_join_parallel(
+                    l_src
+                        .open_partitions(&ScanSpec::default(), &multi_ctx)
+                        .unwrap(),
+                    Arc::clone(&schema),
+                    r_src
+                        .open_partitions(&ScanSpec::default(), &multi_ctx)
+                        .unwrap(),
+                    Arc::clone(&schema),
+                    spec,
+                    &multi_ctx,
+                )
+                .unwrap();
+                let actual = extract_i64_payload_rows(
+                    &drain_parallel(par_streams, &multi_ctx.eval.cancel).unwrap(),
+                );
+                assert_eq!(
+                    actual, expected,
+                    "parity mismatch for {jt:?} null_eq={null_eq}"
+                );
+                assert_eq!(multi_ctx.pool.reserved(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_semi_anti_fixed16_fast_path_encodings_and_reservations() {
+        use cetra_column::DictColumn;
+
+        let (ctx, _dir) = make_ctx(8 * 1024 * 1024, 8 * 1024 * 1024);
+        let multi_ctx = ExecContext {
+            target_partitions: 4,
+            ..ctx
+        };
+        let schema = Schema::try_new_arc(vec![
+            Field::new("tid", DataType::FixedBytes16, true),
+            Field::new("id", DataType::I64, false),
+        ])
+        .unwrap();
+
+        // LHS batches covering:
+        // 1. Flat + nulls + Selection::Mask (selective enough to trigger compaction < 25%)
+        let l_flat_vals = vec![
+            f16(1),
+            f16(2),
+            f16(3),
+            f16(4),
+            f16(5),
+            f16(6),
+            f16(7),
+            f16(8),
+        ];
+        let l_flat_nulls = Bitmap::from_bools(&[true, false, true, true, true, true, true, true]);
+        let lb_flat = Batch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::FixedBytes16(l_flat_vals), Some(l_flat_nulls))
+                        .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::I64(vec![0, 1, 2, 3, 4, 5, 6, 7]), None).unwrap(),
+                ),
+            ],
+            8,
+            Selection::Mask(Bitmap::from_bools(&[
+                true, true, true, false, true, true, true, true,
+            ])),
+        )
+        .unwrap();
+
+        // 2. Const non-null hit + Const Null + Selection::Indices with duplicate
+        let lb_const_hit = Batch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Column::try_new_const(ScalarValue::FixedBytes16(f16(1)), 3).unwrap(),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![10, 11, 12]), None).unwrap()),
+            ],
+            3,
+            Selection::Indices(vec![0, 2, 0]),
+        )
+        .unwrap();
+        let lb_const_null = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::try_new_const(ScalarValue::Null(DataType::FixedBytes16), 2).unwrap(),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![20, 21]), None).unwrap()),
+            ],
+            2,
+        )
+        .unwrap();
+
+        // 3. Dict checking BOTH dict.nulls() (row 1) AND dict.values().nulls() (dict entry 1 -> row 2)
+        let dict_vals = FlatColumn::try_new(
+            FlatData::FixedBytes16(vec![f16(1), f16(99), f16(42)]),
+            Some(Bitmap::from_bools(&[true, false, true])),
+        )
+        .unwrap();
+        let l_dict = Column::Dict(
+            DictColumn::try_new(
+                dict_vals,
+                vec![0, 2, 1, 2],
+                Some(Bitmap::from_bools(&[true, false, true, true])),
+            )
+            .unwrap(),
+        );
+        let lb_dict = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                l_dict,
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::I64(vec![30, 31, 32, 33]), None).unwrap(),
+                ),
+            ],
+            4,
+        )
+        .unwrap();
+
+        let l_src = BatchSource::new(
+            Arc::clone(&schema),
+            vec![lb_flat, lb_const_hit, lb_const_null, lb_dict],
+        )
+        .unwrap();
+
+        // RHS covering Flat+nulls, Const, and Dict (with both code null and value null!)
+        let rb_flat = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Flat(
+                    FlatColumn::try_new(
+                        FlatData::FixedBytes16(vec![f16(1), f16(99)]),
+                        Some(Bitmap::from_bools(&[true, false])),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![100, 101]), None).unwrap()),
+            ],
+            2,
+        )
+        .unwrap();
+        let rb_const = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::try_new_const(ScalarValue::FixedBytes16(f16(42)), 2).unwrap(),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![200, 201]), None).unwrap()),
+            ],
+            2,
+        )
+        .unwrap();
+        let rb_dict = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::Dict(
+                    DictColumn::try_new(
+                        FlatColumn::try_new(
+                            FlatData::FixedBytes16(vec![f16(7), f16(88)]),
+                            Some(Bitmap::from_bools(&[true, false])),
+                        )
+                        .unwrap(),
+                        vec![0, 1, 0],
+                        Some(Bitmap::from_bools(&[false, true, true])),
+                    )
+                    .unwrap(),
+                ),
+                Column::Flat(
+                    FlatColumn::try_new(FlatData::I64(vec![300, 301, 302]), None).unwrap(),
+                ),
+            ],
+            3,
+        )
+        .unwrap();
+
+        let r_no_null_const =
+            BatchSource::new(Arc::clone(&schema), vec![rb_const.clone()]).unwrap();
+        let r_with_nulls =
+            BatchSource::new(Arc::clone(&schema), vec![rb_flat, rb_const, rb_dict]).unwrap();
+
+        for (r_src, label) in [
+            (&r_no_null_const, "const_no_null"),
+            (&r_with_nulls, "mixed_with_nulls"),
+        ] {
+            for jt in [
+                JoinType::LeftSemi,
+                JoinType::LeftAnti,
+                JoinType::LeftAntiNullAware,
+            ] {
+                let spec = HashJoinSpec {
+                    join_type: jt,
+                    left_keys: vec![col_expr(0, "tid", DataType::FixedBytes16)],
+                    right_keys: vec![col_expr(0, "tid", DataType::FixedBytes16)],
+                    null_equals_null: false,
+                    residual_filter: None,
+                };
+                let expected = extract_fixed16_rows(
+                    &drain_stream(
+                        execute_hash_join(
+                            l_src
+                                .open_partitions(&ScanSpec::default(), &multi_ctx)
+                                .unwrap(),
+                            Arc::clone(&schema),
+                            r_src
+                                .open_partitions(&ScanSpec::default(), &multi_ctx)
+                                .unwrap(),
+                            Arc::clone(&schema),
+                            spec.clone(),
+                            &multi_ctx,
+                        )
+                        .unwrap(),
+                        &multi_ctx.eval.cancel,
+                    )
+                    .unwrap(),
+                );
+                let par_streams = execute_hash_join_parallel(
+                    l_src
+                        .open_partitions(&ScanSpec::default(), &multi_ctx)
+                        .unwrap(),
+                    Arc::clone(&schema),
+                    r_src
+                        .open_partitions(&ScanSpec::default(), &multi_ctx)
+                        .unwrap(),
+                    Arc::clone(&schema),
+                    spec,
+                    &multi_ctx,
+                )
+                .unwrap();
+
+                // Verify Reservation accounting with pre-existing caller bytes.
+                let mut caller_res = multi_ctx.pool.register("caller_existing", false);
+                caller_res.try_grow(1234).unwrap();
+                let mut actual_batches = Vec::new();
+                for mut s in par_streams {
+                    while let Some(b) = s
+                        .next_batch(&multi_ctx.eval.cancel, Some(&mut caller_res))
+                        .unwrap()
+                    {
+                        assert_eq!(caller_res.size(), 1234 + b.memory_bytes());
+                        caller_res.shrink(b.memory_bytes());
+                        assert_eq!(caller_res.size(), 1234);
+                        actual_batches.push(b);
+                    }
+                    assert_eq!(caller_res.size(), 1234);
+                }
+                drop(caller_res);
+                assert_eq!(
+                    extract_fixed16_rows(&actual_batches),
+                    expected,
+                    "Fixed16 parity mismatch for {jt:?} ({label})"
+                );
+                assert_eq!(multi_ctx.pool.reserved(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_semi_anti_spill_fallback_preserves_cancel_and_all_rhs_rows() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("tid", DataType::FixedBytes16, true),
+            Field::new("pad", DataType::Utf8, false),
+        ])
+        .unwrap();
+
+        let make_batches = |num_batches: usize,
+                            rows_per_batch: usize,
+                            offset: usize|
+         -> Vec<Batch> {
+            let mut out = Vec::with_capacity(num_batches);
+            for b in 0..num_batches {
+                let mut tids = Vec::with_capacity(rows_per_batch);
+                let mut pads = Vec::with_capacity(rows_per_batch);
+                for r in 0..rows_per_batch {
+                    let g = offset + b * rows_per_batch + r;
+                    let mut bytes = [0u8; 16];
+                    bytes[..8].copy_from_slice(&(g as u64).to_le_bytes());
+                    tids.push(bytes);
+                    pads.push(format!("pad-{g:05}-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"));
+                }
+                out.push(
+                    Batch::try_new_all(
+                        Arc::clone(&schema),
+                        vec![
+                            Column::Flat(
+                                FlatColumn::try_new(FlatData::FixedBytes16(tids), None).unwrap(),
+                            ),
+                            Column::Flat(
+                                FlatColumn::try_new(
+                                    FlatData::Utf8(
+                                        Utf8Data::try_from_slices(pads.iter().map(String::as_str))
+                                            .unwrap(),
+                                    ),
+                                    None,
+                                )
+                                .unwrap(),
+                            ),
+                        ],
+                        rows_per_batch,
+                    )
+                    .unwrap(),
+                );
+            }
+            out
+        };
+
+        // 1800 right rows across 18 batches (~90 KiB), 2000 left rows across 20 batches.
+        let l_src = BatchSource::new(Arc::clone(&schema), make_batches(20, 100, 0)).unwrap();
+        let r_src = BatchSource::new(Arc::clone(&schema), make_batches(18, 100, 500)).unwrap();
+
+        let (big_ctx, _big_dir) = make_ctx(16 * 1024 * 1024, 32 * 1024 * 1024);
+        let big_ctx = ExecContext {
+            target_partitions: 3,
+            ..big_ctx
+        };
+        // Tight pool: 48 KiB forces spill during parallel RHS drain across 3 right partitions.
+        let (tight_ctx, _tight_dir) = make_ctx(48 * 1024, 32 * 1024 * 1024);
+        let tight_ctx = ExecContext {
+            target_partitions: 3,
+            ..tight_ctx
+        };
+
+        for jt in [
+            JoinType::LeftSemi,
+            JoinType::LeftAnti,
+            JoinType::LeftAntiNullAware,
+        ] {
+            let spec = HashJoinSpec {
+                join_type: jt,
+                left_keys: vec![col_expr(0, "tid", DataType::FixedBytes16)],
+                right_keys: vec![col_expr(0, "tid", DataType::FixedBytes16)],
+                null_equals_null: false,
+                residual_filter: None,
+            };
+            let expected = {
+                let s = execute_hash_join(
+                    l_src
+                        .open_partitions(&ScanSpec::default(), &big_ctx)
+                        .unwrap(),
+                    Arc::clone(&schema),
+                    r_src
+                        .open_partitions(&ScanSpec::default(), &big_ctx)
+                        .unwrap(),
+                    Arc::clone(&schema),
+                    spec.clone(),
+                    &big_ctx,
+                )
+                .unwrap();
+                let mut rows = Vec::new();
+                for b in drain_stream(s, &big_ctx.eval.cancel).unwrap() {
+                    for r in 0..b.num_rows() {
+                        rows.push(read_str(b.column(1).unwrap(), r).unwrap().to_owned());
+                    }
+                }
+                rows.sort();
+                rows
+            };
+
+            let par_streams = execute_hash_join_parallel(
+                l_src
+                    .open_partitions(&ScanSpec::default(), &tight_ctx)
+                    .unwrap(),
+                Arc::clone(&schema),
+                r_src
+                    .open_partitions(&ScanSpec::default(), &tight_ctx)
+                    .unwrap(),
+                Arc::clone(&schema),
+                spec,
+                &tight_ctx,
+            )
+            .unwrap();
+            assert!(
+                !tight_ctx.eval.cancel.is_cancelled(),
+                "spill fallback must NEVER poison ctx.eval.cancel"
+            );
+
+            let mut actual = Vec::new();
+            for b in drain_parallel(par_streams, &tight_ctx.eval.cancel).unwrap() {
+                for r in 0..b.num_rows() {
+                    actual.push(read_str(b.column(1).unwrap(), r).unwrap().to_owned());
+                }
+            }
+            actual.sort();
+            assert_eq!(
+                actual, expected,
+                "spill fallback parity mismatch for {jt:?}"
+            );
+            assert_eq!(tight_ctx.pool.reserved(), 0);
+            assert_eq!(tight_ctx.spill.spilled_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn parallel_semi_anti_cancellation_and_shared_probe_table_api() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("tid", DataType::FixedBytes16, true),
+            Field::new("v", DataType::I64, false),
+        ])
+        .unwrap();
+        let make_b = |rows: &[([u8; 16], i64)]| -> Batch {
+            let tids: Vec<[u8; 16]> = rows.iter().map(|(k, _)| *k).collect();
+            let vs: Vec<i64> = rows.iter().map(|(_, v)| *v).collect();
+            Batch::try_new_all(
+                Arc::clone(&schema),
+                vec![
+                    Column::Flat(FlatColumn::try_new(FlatData::FixedBytes16(tids), None).unwrap()),
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(vs), None).unwrap()),
+                ],
+                rows.len(),
+            )
+            .unwrap()
+        };
+
+        let l_src = BatchSource::new(
+            Arc::clone(&schema),
+            vec![
+                make_b(&[(f16(1), 10), (f16(2), 20)]),
+                make_b(&[(f16(3), 30), (f16(1), 40)]),
+            ],
+        )
+        .unwrap();
+        let r_src = BatchSource::new(
+            Arc::clone(&schema),
+            vec![make_b(&[(f16(1), 1)]), make_b(&[(f16(3), 2)])],
+        )
+        .unwrap();
+
+        // 1. Pre-cancelled ctx.eval.cancel during RHS drain -> Err(Cancelled).
+        let (c_ctx, _c_dir) = make_ctx(1024 * 1024, 1024 * 1024);
+        let c_ctx = ExecContext {
+            target_partitions: 2,
+            ..c_ctx
+        };
+        c_ctx.eval.cancel.cancel();
+        let err = execute_hash_join_parallel(
+            l_src.open_partitions(&ScanSpec::default(), &c_ctx).unwrap(),
+            Arc::clone(&schema),
+            r_src.open_partitions(&ScanSpec::default(), &c_ctx).unwrap(),
+            Arc::clone(&schema),
+            HashJoinSpec {
+                join_type: JoinType::LeftSemi,
+                left_keys: vec![col_expr(0, "tid", DataType::FixedBytes16)],
+                right_keys: vec![col_expr(0, "tid", DataType::FixedBytes16)],
+                null_equals_null: false,
+                residual_filter: None,
+            },
+            &c_ctx,
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(err, QueryError::Cancelled));
+        assert_eq!(c_ctx.pool.reserved(), 0);
+
+        // 2. Per-stream stop_cancel during probe does not poison ctx.eval.cancel.
+        let (ctx, _dir) = make_ctx(4 * 1024 * 1024, 4 * 1024 * 1024);
+        let ctx = ExecContext {
+            target_partitions: 2,
+            ..ctx
+        };
+        let streams = execute_hash_join_parallel(
+            l_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            Arc::clone(&schema),
+            r_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            Arc::clone(&schema),
+            HashJoinSpec {
+                join_type: JoinType::LeftAnti,
+                left_keys: vec![col_expr(0, "tid", DataType::FixedBytes16)],
+                right_keys: vec![col_expr(0, "tid", DataType::FixedBytes16)],
+                null_equals_null: false,
+                residual_filter: None,
+            },
+            &ctx,
+        )
+        .unwrap();
+        let stop = CancelToken::new();
+        stop.cancel();
+        let err = drain_parallel(streams, &stop).unwrap_err();
+        assert!(matches!(err, QueryError::Cancelled));
+        assert!(!ctx.eval.cancel.is_cancelled());
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        // 3. try_build_semi_anti_probe_table + probe_semi_anti_streams:
+        //    Empty, AlwaysEmpty, Ready, TooLargeForMemory.
+        let empty_r = BatchSource::empty(Arc::clone(&schema));
+        let key_tid = [col_expr(0, "tid", DataType::FixedBytes16)];
+        assert!(matches!(
+            try_build_semi_anti_probe_table(
+                empty_r.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+                &schema,
+                &key_tid,
+                JoinType::LeftAnti,
+                false,
+                &ctx,
+            )
+            .unwrap(),
+            ProbeTableBuildOutcome::Empty
+        ));
+
+        let null_r_batch = Batch::try_new_all(
+            Arc::clone(&schema),
+            vec![
+                Column::try_new_const(ScalarValue::Null(DataType::FixedBytes16), 1).unwrap(),
+                Column::Flat(FlatColumn::try_new(FlatData::I64(vec![1]), None).unwrap()),
+            ],
+            1,
+        )
+        .unwrap();
+        let null_r = BatchSource::new(Arc::clone(&schema), vec![null_r_batch]).unwrap();
+        assert!(matches!(
+            try_build_semi_anti_probe_table(
+                null_r.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+                &schema,
+                &key_tid,
+                JoinType::LeftAntiNullAware,
+                false,
+                &ctx,
+            )
+            .unwrap(),
+            ProbeTableBuildOutcome::AlwaysEmpty
+        ));
+
+        let ProbeTableBuildOutcome::Ready(tbl) = try_build_semi_anti_probe_table(
+            r_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            &schema,
+            &key_tid,
+            JoinType::LeftAnti,
+            false,
+            &ctx,
+        )
+        .unwrap() else {
+            panic!("expected Ready probe table");
+        };
+        assert!(ctx.pool.reserved() > 0);
+        let probed = probe_semi_anti_streams(
+            l_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            &schema,
+            &key_tid,
+            &tbl,
+            &ctx,
+        )
+        .unwrap();
+        let kept = extract_fixed16_rows(&drain_parallel(probed, &ctx.eval.cancel).unwrap());
+        assert_eq!(kept, vec![(Some(f16(2)), 20)]);
+        drop(tbl);
+        assert_eq!(ctx.pool.reserved(), 0);
+
+        // TooLargeForMemory on tiny pool without poisoning ctx.eval.cancel.
+        let (tiny_ctx, _t_dir) = make_ctx(64, 1024 * 1024);
+        let big_r = make_b(&(0..20).map(|i| (f16(i), i64::from(i))).collect::<Vec<_>>());
+        let big_r_src = BatchSource::new(Arc::clone(&schema), vec![big_r]).unwrap();
+        assert!(matches!(
+            try_build_semi_anti_probe_table(
+                big_r_src
+                    .open_partitions(&ScanSpec::default(), &tiny_ctx)
+                    .unwrap(),
+                &schema,
+                &key_tid,
+                JoinType::LeftAnti,
+                false,
+                &tiny_ctx,
+            )
+            .unwrap(),
+            ProbeTableBuildOutcome::TooLargeForMemory
+        ));
+        assert!(!tiny_ctx.eval.cancel.is_cancelled());
+        assert_eq!(tiny_ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn parallel_semi_anti_8_right_partitions_with_sibling_spillable_stays_in_memory() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("tid", DataType::FixedBytes16, true),
+            Field::new("v", DataType::I64, false),
+        ])
+        .unwrap();
+        let make_b = |rows: &[([u8; 16], i64)]| -> Batch {
+            let tids: Vec<[u8; 16]> = rows.iter().map(|(k, _)| *k).collect();
+            let vs: Vec<i64> = rows.iter().map(|(_, v)| *v).collect();
+            Batch::try_new_all(
+                Arc::clone(&schema),
+                vec![
+                    Column::Flat(FlatColumn::try_new(FlatData::FixedBytes16(tids), None).unwrap()),
+                    Column::Flat(FlatColumn::try_new(FlatData::I64(vs), None).unwrap()),
+                ],
+                rows.len(),
+            )
+            .unwrap()
+        };
+
+        // 16 RHS batches across 8 partitions (2 batches per partition) + 4 LHS partitions.
+        let r_batches: Vec<Batch> = (0..16_u8)
+            .map(|i| make_b(&[(f16(i), i64::from(i)), (f16(i + 100), i64::from(i + 100))]))
+            .collect();
+        let l_batches: Vec<Batch> = (0..4_u8)
+            .map(|p| {
+                make_b(&[
+                    (f16(p * 4), 10 + i64::from(p)),
+                    (f16(200 + p), 20 + i64::from(p)),
+                ])
+            })
+            .collect();
+        let l_src = BatchSource::new(Arc::clone(&schema), l_batches).unwrap();
+        let r_src = BatchSource::new(Arc::clone(&schema), r_batches).unwrap();
+
+        let (ctx, _dir) = make_ctx(32 * 1024 * 1024, 32 * 1024 * 1024);
+        let ctx = ExecContext {
+            workers: Arc::new(WorkerPool::new(8).unwrap()),
+            target_partitions: 8,
+            ..ctx
+        };
+        let sibling_res = ctx.pool.register("sibling_spillable", true);
+
+        let key_tid = [col_expr(0, "tid", DataType::FixedBytes16)];
+        let mut semi_expected = Vec::new();
+        for jt in [
+            JoinType::LeftSemi,
+            JoinType::LeftAnti,
+            JoinType::LeftAntiNullAware,
+        ] {
+            let spec = HashJoinSpec {
+                join_type: jt,
+                left_keys: key_tid.to_vec(),
+                right_keys: key_tid.to_vec(),
+                null_equals_null: false,
+                residual_filter: None,
+            };
+            let expected = extract_fixed16_rows(
+                &drain_stream(
+                    execute_hash_join(
+                        l_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+                        Arc::clone(&schema),
+                        r_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+                        Arc::clone(&schema),
+                        spec.clone(),
+                        &ctx,
+                    )
+                    .unwrap(),
+                    &ctx.eval.cancel,
+                )
+                .unwrap(),
+            );
+            if jt == JoinType::LeftSemi {
+                semi_expected = expected.clone();
+            }
+
+            let l_streams = l_src.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+            let r_streams = r_src.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+            assert_eq!(l_streams.len(), 4);
+            assert_eq!(r_streams.len(), 8);
+
+            let par_streams = execute_hash_join_parallel(
+                l_streams,
+                Arc::clone(&schema),
+                r_streams,
+                Arc::clone(&schema),
+                spec,
+                &ctx,
+            )
+            .unwrap();
+            assert_eq!(
+                par_streams.len(),
+                4,
+                "8 RHS partitions with sibling spillable must stay in memory for {jt:?}"
+            );
+            let actual =
+                extract_fixed16_rows(&drain_parallel(par_streams, &ctx.eval.cancel).unwrap());
+            assert_eq!(actual, expected);
+            assert_eq!(ctx.spill.spilled_bytes(), 0);
+        }
+
+        let r_streams = r_src.open_partitions(&ScanSpec::default(), &ctx).unwrap();
+        assert_eq!(r_streams.len(), 8);
+        let ProbeTableBuildOutcome::Ready(tbl) = try_build_semi_anti_probe_table(
+            r_streams,
+            &schema,
+            &key_tid,
+            JoinType::LeftSemi,
+            false,
+            &ctx,
+        )
+        .unwrap() else {
+            panic!("expected Ready probe table with 8 RHS partitions and sibling spillable");
+        };
+        let probed = probe_semi_anti_streams(
+            l_src.open_partitions(&ScanSpec::default(), &ctx).unwrap(),
+            &schema,
+            &key_tid,
+            &tbl,
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_fixed16_rows(&drain_parallel(probed, &ctx.eval.cancel).unwrap()),
+            semi_expected
+        );
+        drop(tbl);
+        drop(sibling_res);
+        assert_eq!(ctx.pool.reserved(), 0);
+    }
+
+    #[test]
+    fn parallel_semi_anti_tight_64k_pool_4_right_partitions_spills_cleanly() {
+        let schema = Schema::try_new_arc(vec![
+            Field::new("tid", DataType::FixedBytes16, true),
+            Field::new("pad", DataType::Utf8, false),
+        ])
+        .unwrap();
+
+        let make_batches = |num_batches: usize,
+                            rows_per_batch: usize,
+                            offset: usize|
+         -> Vec<Batch> {
+            let mut out = Vec::with_capacity(num_batches);
+            for b in 0..num_batches {
+                let mut tids = Vec::with_capacity(rows_per_batch);
+                let mut pads = Vec::with_capacity(rows_per_batch);
+                for r in 0..rows_per_batch {
+                    let g = offset + b * rows_per_batch + r;
+                    let mut bytes = [0u8; 16];
+                    bytes[..8].copy_from_slice(&(g as u64).to_le_bytes());
+                    tids.push(bytes);
+                    pads.push(format!(
+                        "pad-{g:05}-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                    ));
+                }
+                out.push(
+                    Batch::try_new_all(
+                        Arc::clone(&schema),
+                        vec![
+                            Column::Flat(
+                                FlatColumn::try_new(FlatData::FixedBytes16(tids), None).unwrap(),
+                            ),
+                            Column::Flat(
+                                FlatColumn::try_new(
+                                    FlatData::Utf8(
+                                        Utf8Data::try_from_slices(pads.iter().map(String::as_str))
+                                            .unwrap(),
+                                    ),
+                                    None,
+                                )
+                                .unwrap(),
+                            ),
+                        ],
+                        rows_per_batch,
+                    )
+                    .unwrap(),
+                );
+            }
+            out
+        };
+
+        // 4 RHS batches of 300 rows (~21 KiB each): 4 concurrent pulls (~84 KiB) would exceed
+        // the 64 KiB pool, while sequential drain + spill fallback completes cleanly.
+        let l_src = BatchSource::new(Arc::clone(&schema), make_batches(4, 100, 0)).unwrap();
+        let r_src = BatchSource::new(Arc::clone(&schema), make_batches(4, 300, 150)).unwrap();
+
+        let (big_ctx, _big_dir) = make_ctx(16 * 1024 * 1024, 32 * 1024 * 1024);
+        let big_ctx = ExecContext {
+            workers: Arc::new(WorkerPool::new(4).unwrap()),
+            target_partitions: 4,
+            ..big_ctx
+        };
+        let (tight_ctx, _tight_dir) = make_ctx(64 * 1024, 32 * 1024 * 1024);
+        let tight_ctx = ExecContext {
+            workers: Arc::new(WorkerPool::new(4).unwrap()),
+            target_partitions: 4,
+            ..tight_ctx
+        };
+
+        for jt in [
+            JoinType::LeftSemi,
+            JoinType::LeftAnti,
+            JoinType::LeftAntiNullAware,
+        ] {
+            let spec = HashJoinSpec {
+                join_type: jt,
+                left_keys: vec![col_expr(0, "tid", DataType::FixedBytes16)],
+                right_keys: vec![col_expr(0, "tid", DataType::FixedBytes16)],
+                null_equals_null: false,
+                residual_filter: None,
+            };
+            let expected = {
+                let s = execute_hash_join(
+                    l_src
+                        .open_partitions(&ScanSpec::default(), &big_ctx)
+                        .unwrap(),
+                    Arc::clone(&schema),
+                    r_src
+                        .open_partitions(&ScanSpec::default(), &big_ctx)
+                        .unwrap(),
+                    Arc::clone(&schema),
+                    spec.clone(),
+                    &big_ctx,
+                )
+                .unwrap();
+                let mut rows = Vec::new();
+                for b in drain_stream(s, &big_ctx.eval.cancel).unwrap() {
+                    for r in 0..b.num_rows() {
+                        rows.push(read_str(b.column(1).unwrap(), r).unwrap().to_owned());
+                    }
+                }
+                rows.sort();
+                rows
+            };
+
+            let r_streams = r_src
+                .open_partitions(&ScanSpec::default(), &tight_ctx)
+                .unwrap();
+            assert_eq!(r_streams.len(), 4);
+            let par_streams = execute_hash_join_parallel(
+                l_src
+                    .open_partitions(&ScanSpec::default(), &tight_ctx)
+                    .unwrap(),
+                Arc::clone(&schema),
+                r_streams,
+                Arc::clone(&schema),
+                spec,
+                &tight_ctx,
+            )
+            .unwrap();
+            assert_eq!(par_streams.len(), 1);
+            assert!(!tight_ctx.eval.cancel.is_cancelled());
+
+            let mut actual = Vec::new();
+            for b in drain_parallel(par_streams, &tight_ctx.eval.cancel).unwrap() {
+                for r in 0..b.num_rows() {
+                    actual.push(read_str(b.column(1).unwrap(), r).unwrap().to_owned());
+                }
+            }
+            actual.sort();
+            assert_eq!(
+                actual, expected,
+                "64 KiB tight pool parity mismatch for {jt:?}"
+            );
+            assert_eq!(tight_ctx.pool.reserved(), 0);
+            assert_eq!(tight_ctx.spill.spilled_bytes(), 0);
+        }
     }
 }

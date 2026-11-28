@@ -4784,6 +4784,24 @@ fn i64_to_decimal(v: i64, precision: u8, scale: i8) -> Result<i128, QueryError> 
     check_decimal_bounds(scaled, precision)
 }
 
+struct StackFmtBuf {
+    buf: [u8; 128],
+    len: usize,
+}
+
+impl std::fmt::Write for StackFmtBuf {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let bytes = s.as_bytes();
+        let end = self.len.checked_add(bytes.len()).ok_or(std::fmt::Error)?;
+        if end > self.buf.len() {
+            return Err(std::fmt::Error);
+        }
+        self.buf[self.len..end].copy_from_slice(bytes);
+        self.len = end;
+        Ok(())
+    }
+}
+
 pub(crate) fn f64_to_decimal(v: f64, precision: u8, scale: i8) -> Result<i128, QueryError> {
     if !v.is_finite() {
         return Err(QueryError::failed(
@@ -4803,6 +4821,15 @@ pub(crate) fn f64_to_decimal(v: f64, precision: u8, scale: i8) -> Result<i128, Q
     let min_exp = -i32::from(scale) - 2;
     if v.abs() < 10f64.powi(min_exp) {
         return Ok(0);
+    }
+    let mut buf = StackFmtBuf {
+        buf: [0u8; 128],
+        len: 0,
+    };
+    if std::fmt::write(&mut buf, format_args!("{v}")).is_ok()
+        && let Ok(s) = std::str::from_utf8(&buf.buf[..buf.len])
+    {
+        return parse_decimal_str(s, precision, scale);
     }
     let s = format!("{v}");
     parse_decimal_str(&s, precision, scale)
@@ -6579,6 +6606,68 @@ mod tests {
             f64_to_decimal(f64::INFINITY, 10, 2),
             Err(QueryError::Failed(_))
         ));
+    }
+
+    #[test]
+    fn f64_to_decimal_stack_fmt_bit_exact_parity() {
+        let cases: &[(f64, u8, i8)] = &[
+            (0.0, 38, 18),
+            (-0.0, 38, 18),
+            (f64::MIN_POSITIVE, 38, 38),
+            (f64::MIN_POSITIVE / 2.0, 38, 38),
+            (5e-324, 38, 38),
+            (-5e-324, 38, 38),
+            (1e-38, 38, 38),
+            (-1e-38, 38, 38),
+            (1e-18, 38, 18),
+            (0.00012345678901234567, 38, 18),
+            (-123456789.01234567, 38, 18),
+            (-1e76, 38, -38),
+            (9.999999999999999e75, 38, -38),
+            (1e76, 38, -38),
+            (12345.6789, 10, 4),
+            (-12345.6789, 10, 4),
+            (1e37, 38, 0),
+            (-1e37, 38, 0),
+        ];
+
+        for &(v, p, s) in cases {
+            let expected = {
+                if !v.is_finite() {
+                    Err(QueryError::failed(
+                        "cannot cast non-finite float to decimal",
+                    ))
+                } else if p == 0 || p > 38 {
+                    Err(QueryError::failed("decimal precision out of range"))
+                } else if v == 0.0 {
+                    Ok(0)
+                } else {
+                    let max_exp = i32::from(p) - i32::from(s) + 1;
+                    if v.abs() >= 10f64.powi(max_exp) {
+                        Err(QueryError::failed("float out of range for decimal"))
+                    } else if v.abs() < 10f64.powi(-i32::from(s) - 2) {
+                        Ok(0)
+                    } else {
+                        let txt = format!("{v}");
+                        parse_decimal_str(&txt, p, s)
+                    }
+                }
+            };
+            let actual = f64_to_decimal(v, p, s);
+            match (actual, expected) {
+                (Ok(a), Ok(e)) => assert_eq!(a, e, "mismatch for v={v}, p={p}, s={s}"),
+                (Err(QueryError::Failed(_)), Err(QueryError::Failed(_))) => {}
+                (a, e) => panic!("result kind mismatch for v={v}, p={p}, s={s}: {a:?} vs {e:?}"),
+            }
+        }
+
+        // Verify StackFmtBuf returns Err on overflow without panicking.
+        let mut small = StackFmtBuf {
+            buf: [0u8; 128],
+            len: 0,
+        };
+        assert!(std::fmt::Write::write_str(&mut small, &"x".repeat(128)).is_ok());
+        assert!(std::fmt::Write::write_str(&mut small, "y").is_err());
     }
 
     #[test]

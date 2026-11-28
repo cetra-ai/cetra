@@ -50,7 +50,8 @@ fn gamma() -> f64 {
 }
 
 fn ln_gamma() -> f64 {
-    gamma().ln()
+    static LN_GAMMA: std::sync::LazyLock<f64> = std::sync::LazyLock::new(|| gamma().ln());
+    *LN_GAMMA
 }
 
 /// Bounded-memory logarithmic quantile sketch (`alpha = 0.005`, `<= 0.5%` relative error,
@@ -7375,6 +7376,41 @@ mod tests {
         let mut bad_ver = bytes1;
         bad_ver[0] = 99;
         assert!(DdSketch::from_bytes(&bad_ver).is_err());
+    }
+
+    #[test]
+    fn ddsketch_cached_ln_gamma_bit_exact_parity() {
+        let direct_lg = gamma().ln();
+        assert_eq!(ln_gamma().to_bits(), direct_lg.to_bits());
+
+        let samples = [
+            -1e12, -42.5, -1.0, -1e-6, -0.0, 0.0, 1e-6, 0.123, 1.0, 42.5, 1e12,
+        ];
+        let mut sketch = DdSketch::new();
+        let mut expected_pos: Vec<(i32, u64)> = Vec::new();
+        let mut expected_neg: Vec<(i32, u64)> = Vec::new();
+        for &v in &samples {
+            sketch.add(v);
+            if v > 0.0 {
+                let k = (v.ln() / direct_lg).floor() as i32;
+                insert_bucket(&mut expected_pos, k, 1);
+            } else if v < 0.0 {
+                let k = ((-v).ln() / direct_lg).floor() as i32;
+                insert_bucket(&mut expected_neg, k, 1);
+            }
+        }
+        assert_eq!(sketch.pos, expected_pos);
+        assert_eq!(sketch.neg, expected_neg);
+        assert_eq!(sketch.zero_count, 2);
+
+        let g = gamma();
+        let factor = (2.0 * g) / (g + 1.0);
+        let q50 = sketch.quantile(0.5).unwrap().unwrap();
+        let q95 = sketch.quantile(0.95).unwrap().unwrap();
+        let expected_q95 = ((f64::from(expected_pos.last().unwrap().0) * direct_lg).exp() * factor)
+            .clamp(-1e12, 1e12);
+        assert_eq!(q50.to_bits(), 0.0f64.to_bits());
+        assert_eq!(q95.to_bits(), expected_q95.to_bits());
     }
 
     #[test]

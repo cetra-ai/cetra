@@ -7,7 +7,10 @@ use std::sync::Arc;
 use cetra_column::{DataType, Field, ScalarValue, Schema};
 use cetra_core::names::{environment, metadata_key};
 use cetra_core::schema::{spans, traces};
-use cetra_query::exec::hash_join::{HashJoinSpec, JoinType, execute_hash_join};
+use cetra_query::exec::hash_join::{
+    HashJoinSpec, JoinType, ProbeTableBuildOutcome, SharedProbeTable, execute_hash_join_parallel,
+    probe_semi_anti_streams, try_build_semi_anti_probe_table,
+};
 use cetra_query::exec::streaming::{FilterOp, ProjectOp};
 use cetra_query::exec::{
     AggExpr, AggFunc, ExecContext, HashAgg, HashAggSpec, IdLookupHint, MapProjection,
@@ -186,25 +189,10 @@ pub(crate) fn strict_traces_exclusions(traces_schema: &Schema) -> Result<Vec<Exp
     )
 }
 
-/// Applies strict exclusions (D-I-9) to `streams` of `view` (`Traces` or `Spans`).
-/// Anti-joins `spans` streams against `TracesSource` for non-clean traces (reserved environments
-/// or experiments), restricting the `TracesSource` scan to `trace_ids` when `Some(...)`.
-pub(crate) fn strict_exclusions_spans(
+fn bad_traces_spec(
     ctx: &EngineContext,
-    exec_ctx: &ExecContext,
-    spans_streams: Vec<Box<dyn PartitionStream>>,
-    spans_schema: Arc<Schema>,
     trace_ids: Option<&[[u8; 16]]>,
-) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
-    if spans_streams.is_empty() {
-        return Ok(Vec::new());
-    }
-    if let Some(ids) = trace_ids
-        && ids.is_empty()
-    {
-        return Ok(spans_streams);
-    }
-
+) -> Result<ScanSpec, QueryError> {
     let traces_raw = traces_raw_schema().map_err(run_err_to_query)?;
     let trace_id_idx = traces_raw
         .index_of(traces::TRACE_ID)
@@ -246,7 +234,7 @@ pub(crate) fn strict_exclusions_spans(
         traces::METADATA.to_owned(),
         MapProjection::Keys(BTreeSet::from([metadata_key::EXPERIMENT_ID.to_owned()])),
     );
-    let spec = ScanSpec {
+    Ok(ScanSpec {
         projection: Some(vec![trace_id_idx]),
         map_projections,
         time_range: TimeRangeHint {
@@ -259,8 +247,109 @@ pub(crate) fn strict_exclusions_spans(
         substrings: Vec::new(),
         sort_hints: Vec::new(),
         limit: None,
-    };
+    })
+}
 
+/// Pre-built strict exclusions filter (D-I-9) reusable across multiple scan waves.
+pub(crate) enum StrictExclusionsFilter {
+    /// No non-clean traces exist; filtering is a no-op.
+    None,
+    /// Non-clean trace IDs fit in memory; probe each wave via [`probe_semi_anti_streams`].
+    InMemory {
+        table: Arc<SharedProbeTable>,
+        key_type: DataType,
+    },
+    /// Non-clean trace IDs exceeded memory; fall back to [`strict_exclusions_spans`].
+    SpillFallback,
+}
+
+/// Scans `ctx.traces` once for non-clean traces (reserved environments or experiments) and
+/// builds a reusable [`StrictExclusionsFilter`] for `spans` waves.
+pub(crate) fn prepare_strict_exclusions_spans(
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
+) -> Result<StrictExclusionsFilter, QueryError> {
+    let spec = bad_traces_spec(ctx, None)?;
+    let bad_traces = ctx.traces.open_partitions(&spec, exec_ctx)?;
+    if bad_traces.is_empty() {
+        return Ok(StrictExclusionsFilter::None);
+    }
+
+    let spans_schema = ctx.spans.schema();
+    let key_type = col_expr(&spans_schema, spans::TRACE_ID)?.data_type();
+    let right = harmonize_trace_id_side(bad_traces, &key_type, exec_ctx)?;
+    let right_trace_col = col_expr(&right.schema, traces::TRACE_ID)?;
+
+    match try_build_semi_anti_probe_table(
+        right.streams,
+        &right.schema,
+        &[right_trace_col],
+        JoinType::LeftAnti,
+        false,
+        exec_ctx,
+    )? {
+        ProbeTableBuildOutcome::Empty | ProbeTableBuildOutcome::AlwaysEmpty => {
+            Ok(StrictExclusionsFilter::None)
+        }
+        ProbeTableBuildOutcome::Ready(table) => {
+            Ok(StrictExclusionsFilter::InMemory { table, key_type })
+        }
+        ProbeTableBuildOutcome::TooLargeForMemory => Ok(StrictExclusionsFilter::SpillFallback),
+    }
+}
+
+/// Applies a pre-built [`StrictExclusionsFilter`] to `spans_streams`.
+pub(crate) fn apply_strict_exclusions_spans(
+    filter: &StrictExclusionsFilter,
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
+    spans_streams: Vec<Box<dyn PartitionStream>>,
+    spans_schema: Arc<Schema>,
+) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+    if spans_streams.is_empty() {
+        return Ok(Vec::new());
+    }
+    match filter {
+        StrictExclusionsFilter::None => Ok(spans_streams),
+        StrictExclusionsFilter::InMemory { table, key_type } => {
+            let left_trace_col = col_expr(&spans_schema, spans::TRACE_ID)?;
+            if left_trace_col.data_type() != *key_type {
+                return strict_exclusions_spans(ctx, exec_ctx, spans_streams, spans_schema, None);
+            }
+            probe_semi_anti_streams(
+                spans_streams,
+                &spans_schema,
+                &[left_trace_col],
+                table,
+                exec_ctx,
+            )
+        }
+        StrictExclusionsFilter::SpillFallback => {
+            strict_exclusions_spans(ctx, exec_ctx, spans_streams, spans_schema, None)
+        }
+    }
+}
+
+/// Applies strict exclusions (D-I-9) to `streams` of `view` (`Traces` or `Spans`).
+/// Anti-joins `spans` streams against `TracesSource` for non-clean traces (reserved environments
+/// or experiments), restricting the `TracesSource` scan to `trace_ids` when `Some(...)`.
+pub(crate) fn strict_exclusions_spans(
+    ctx: &EngineContext,
+    exec_ctx: &ExecContext,
+    spans_streams: Vec<Box<dyn PartitionStream>>,
+    spans_schema: Arc<Schema>,
+    trace_ids: Option<&[[u8; 16]]>,
+) -> Result<Vec<Box<dyn PartitionStream>>, QueryError> {
+    if spans_streams.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let Some(ids) = trace_ids
+        && ids.is_empty()
+    {
+        return Ok(spans_streams);
+    }
+
+    let spec = bad_traces_spec(ctx, trace_ids)?;
     let bad_traces = ctx.traces.open_partitions(&spec, exec_ctx)?;
     if bad_traces.is_empty() {
         return Ok(spans_streams);
@@ -270,7 +359,7 @@ pub(crate) fn strict_exclusions_spans(
     let right = harmonize_trace_id_side(bad_traces, &left_trace_col.data_type(), exec_ctx)?;
     let right_trace_col = col_expr(&right.schema, traces::TRACE_ID)?;
 
-    let joined = execute_hash_join(
+    execute_hash_join_parallel(
         spans_streams,
         spans_schema,
         right.streams,
@@ -283,8 +372,7 @@ pub(crate) fn strict_exclusions_spans(
             residual_filter: None,
         },
         exec_ctx,
-    )?;
-    Ok(vec![joined])
+    )
 }
 
 /// Shared `trace_id` semi-join source for `widgets`, `alerts`, and `prompts`:
@@ -499,7 +587,7 @@ pub(crate) fn apply_trace_id_semi_join(
             (rhs.streams, rhs.schema, rk)
         };
 
-    let joined = execute_hash_join(
+    execute_hash_join_parallel(
         left.streams,
         left.schema,
         right_streams,
@@ -513,8 +601,7 @@ pub(crate) fn apply_trace_id_semi_join(
         },
         exec_ctx,
     )
-    .map_err(crate::reads::context::query_err_to_run)?;
-    Ok(vec![joined])
+    .map_err(crate::reads::context::query_err_to_run)
 }
 
 /// Builds the full-text search predicate for `Spans` (`spec.filters` + `spec.substrings`) or
@@ -1414,6 +1501,139 @@ mod tests {
             assert_eq!(specs[0].substrings.len(), 1);
             assert_eq!(specs[0].substrings[0].len(), 4);
         }
+
+        let _ = storage.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn prepare_and_apply_strict_exclusions_filter_modes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = crate::Storage::open(test_config(dir.path()))
+            .await
+            .expect("open");
+        let project: ProjectId = "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().expect("pid");
+
+        // 1. Clean project -> `StrictExclusionsFilter::None` when no bad traces exist.
+        let s1: Span = span_row(1, 1, 1_000_000, 2_000_000);
+        storage
+            .append_spans(project, span_rows(&[s1]))
+            .await
+            .expect("append clean span");
+
+        let ctx = EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+            .expect("ctx");
+        let ctx_c = ctx.clone();
+        let (clean_kept, _) = ctx
+            .run_with_ctx(Duration::from_secs(5), move |exec_ctx| {
+                let filter = prepare_strict_exclusions_spans(&ctx_c, exec_ctx)?;
+                assert!(matches!(filter, StrictExclusionsFilter::None));
+                let raw = spans_raw_schema().map_err(run_err_to_query)?;
+                let streams = ctx_c
+                    .spans
+                    .open_partitions(&ScanSpec::default(), exec_ctx)?;
+                let kept = apply_strict_exclusions_spans(&filter, &ctx_c, exec_ctx, streams, raw)?;
+                let pool = Arc::clone(&exec_ctx.pool);
+                let sinks = run_pipeline(
+                    exec_ctx,
+                    kept,
+                    |_| Ok(Vec::new()),
+                    move |_| Ok(CollectSink::new(&pool)),
+                )?;
+                Ok(sinks
+                    .into_iter()
+                    .flat_map(CollectSink::into_batches)
+                    .map(|b| b.num_rows())
+                    .sum::<usize>())
+            })
+            .await
+            .expect("clean filter");
+        assert_eq!(clean_kept, 1);
+
+        // 2. Append an eval trace with a child span whose own environment is None ->
+        //    `prepare_strict_exclusions_spans` builds `InMemory` and drops both eval spans.
+        let mut s2_root: Span = span_row(2, 1, 1_000_000, 2_000_000);
+        s2_root.environment = Some(environment::EVAL.to_owned());
+        let mut s2_child: Span = span_row(2, 2, 1_500_000, 2_500_000);
+        s2_child.parent_span_id = Some(s2_root.span_id);
+        s2_child.environment = None;
+        storage
+            .append_spans(project, span_rows(&[s2_root, s2_child]))
+            .await
+            .expect("append eval spans");
+
+        let ctx = EngineContext::from_storage(&storage, project, &QueryOptions::new(None, None))
+            .expect("ctx");
+        let ctx_c = ctx.clone();
+        let (in_mem_kept, _) = ctx
+            .run_with_ctx(Duration::from_secs(5), move |exec_ctx| {
+                let filter = prepare_strict_exclusions_spans(&ctx_c, exec_ctx)?;
+                assert!(matches!(filter, StrictExclusionsFilter::InMemory { .. }));
+
+                let raw = spans_raw_schema().map_err(run_err_to_query)?;
+                // Empty streams short-circuits cleanly.
+                let empty_out = apply_strict_exclusions_spans(
+                    &filter,
+                    &ctx_c,
+                    exec_ctx,
+                    Vec::new(),
+                    Arc::clone(&raw),
+                )?;
+                assert!(empty_out.is_empty());
+
+                // Apply across a normal spans scan.
+                let streams = ctx_c
+                    .spans
+                    .open_partitions(&ScanSpec::default(), exec_ctx)?;
+                let filtered = apply_strict_exclusions_spans(
+                    &filter,
+                    &ctx_c,
+                    exec_ctx,
+                    streams,
+                    Arc::clone(&raw),
+                )?;
+                let pool = Arc::clone(&exec_ctx.pool);
+                let sinks = run_pipeline(
+                    exec_ctx,
+                    filtered,
+                    |_| Ok(Vec::new()),
+                    move |_| Ok(CollectSink::new(&pool)),
+                )?;
+                let in_mem_count: usize = sinks
+                    .into_iter()
+                    .flat_map(CollectSink::into_batches)
+                    .map(|b| b.num_rows())
+                    .sum();
+
+                // Verify `SpillFallback` path matches `InMemory`.
+                let streams2 = ctx_c
+                    .spans
+                    .open_partitions(&ScanSpec::default(), exec_ctx)?;
+                let fallback_filtered = apply_strict_exclusions_spans(
+                    &StrictExclusionsFilter::SpillFallback,
+                    &ctx_c,
+                    exec_ctx,
+                    streams2,
+                    raw,
+                )?;
+                let pool2 = Arc::clone(&exec_ctx.pool);
+                let sinks2 = run_pipeline(
+                    exec_ctx,
+                    fallback_filtered,
+                    |_| Ok(Vec::new()),
+                    move |_| Ok(CollectSink::new(&pool2)),
+                )?;
+                let fallback_count: usize = sinks2
+                    .into_iter()
+                    .flat_map(CollectSink::into_batches)
+                    .map(|b| b.num_rows())
+                    .sum();
+                assert_eq!(in_mem_count, fallback_count);
+
+                Ok(in_mem_count)
+            })
+            .await
+            .expect("strict filter modes");
+        assert_eq!(in_mem_kept, 1);
 
         let _ = storage.shutdown().await;
     }
